@@ -339,6 +339,57 @@ impl Runtime {
                 ),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            SessionRequest::AddRootTab {
+                request_id,
+                session_id,
+                title,
+                buffer_id,
+                child_node_id,
+            } => {
+                let result = match (buffer_id, child_node_id) {
+                    (Some(buffer_id), None) => {
+                        state.add_root_tab_from_buffer(session_id, title, buffer_id)
+                    }
+                    (None, Some(child_node_id)) => {
+                        state.add_root_tab_from_subtree(session_id, title, child_node_id)
+                    }
+                    (Some(_), Some(_)) => Err(MuxError::invalid_input(
+                        "add-root-tab requires either buffer_id or child_node_id, not both",
+                    )),
+                    (None, None) => Err(MuxError::invalid_input(
+                        "add-root-tab requires either buffer_id or child_node_id",
+                    )),
+                };
+                match result {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            SessionRequest::SelectRootTab {
+                request_id,
+                session_id,
+                index,
+            } => match state.select_root_tab(session_id, index) {
+                Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            SessionRequest::RenameRootTab {
+                request_id,
+                session_id,
+                index,
+                title,
+            } => match state.rename_root_tab(session_id, index, title) {
+                Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            SessionRequest::CloseRootTab {
+                request_id,
+                session_id,
+                index,
+            } => match state.close_root_tab(session_id, index) {
+                Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
         }
     }
 
@@ -1221,6 +1272,29 @@ fn focus_changed_event(
             focused_leaf_id: session.focused_leaf,
             focused_floating_id: session.focused_floating,
         })
+}
+
+fn layout_snapshot_response(
+    state: &ServerState,
+    request_id: RequestId,
+    session_id: mux_core::SessionId,
+) -> (ServerResponse, Vec<ServerEvent>) {
+    match session_snapshot(state, session_id) {
+        Ok(snapshot) => {
+            let mut events = vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+            if let Some(focus_event) = focus_changed_event(state, session_id) {
+                events.push(ServerEvent::FocusChanged(focus_event));
+            }
+            (
+                ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                    request_id,
+                    snapshot,
+                }),
+                events,
+            )
+        }
+        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+    }
 }
 
 fn error_response(

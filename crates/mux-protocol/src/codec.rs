@@ -87,27 +87,110 @@ fn encode_session_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &SessionRequest,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
-    let (op, session_id, name_str, force) = match req {
-        SessionRequest::Create { name, .. } => {
-            (fb::SessionOp::Create, 0, Some(name.as_str()), false)
-        }
-        SessionRequest::List { .. } => (fb::SessionOp::List, 0, None, false),
-        SessionRequest::Get { session_id, .. } => {
-            (fb::SessionOp::Get, (*session_id).into(), None, false)
-        }
+    let (op, session_id, buffer_id, child_node_id, name_str, title_str, force, index) = match req {
+        SessionRequest::Create { name, .. } => (
+            fb::SessionOp::Create,
+            0,
+            0,
+            0,
+            Some(name.as_str()),
+            None,
+            false,
+            0,
+        ),
+        SessionRequest::List { .. } => (fb::SessionOp::List, 0, 0, 0, None, None, false, 0),
+        SessionRequest::Get { session_id, .. } => (
+            fb::SessionOp::Get,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
         SessionRequest::Close {
             session_id, force, ..
-        } => (fb::SessionOp::Close, (*session_id).into(), None, *force),
+        } => (
+            fb::SessionOp::Close,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            *force,
+            0,
+        ),
+        SessionRequest::AddRootTab {
+            session_id,
+            title,
+            buffer_id,
+            child_node_id,
+            ..
+        } => (
+            fb::SessionOp::AddRootTab,
+            (*session_id).into(),
+            buffer_id.map_or(0, u64::from),
+            child_node_id.map_or(0, u64::from),
+            None,
+            Some(title.as_str()),
+            false,
+            0,
+        ),
+        SessionRequest::SelectRootTab {
+            session_id, index, ..
+        } => (
+            fb::SessionOp::SelectRootTab,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            *index as u32,
+        ),
+        SessionRequest::RenameRootTab {
+            session_id,
+            index,
+            title,
+            ..
+        } => (
+            fb::SessionOp::RenameRootTab,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            Some(title.as_str()),
+            false,
+            *index as u32,
+        ),
+        SessionRequest::CloseRootTab {
+            session_id, index, ..
+        } => (
+            fb::SessionOp::CloseRootTab,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            *index as u32,
+        ),
     };
 
     let name = name_str.map(|s| builder.create_string(s));
+    let title = title_str.map(|s| builder.create_string(s));
     let session_req = fb::SessionRequest::create(
         builder,
         &fb::SessionRequestArgs {
             op,
             session_id,
+            buffer_id,
+            child_node_id,
             name,
+            title,
             force,
+            index,
         },
     );
 
@@ -1231,6 +1314,29 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     request_id,
                     session_id: SessionId(req.session_id()),
                     force: req.force(),
+                },
+                fb::SessionOp::AddRootTab => SessionRequest::AddRootTab {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                    title: required(req.title(), "session_request.title")?.to_owned(),
+                    buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
+                    child_node_id: (req.child_node_id() != 0).then(|| NodeId(req.child_node_id())),
+                },
+                fb::SessionOp::SelectRootTab => SessionRequest::SelectRootTab {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                    index: req.index() as usize,
+                },
+                fb::SessionOp::RenameRootTab => SessionRequest::RenameRootTab {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                    index: req.index() as usize,
+                    title: required(req.title(), "session_request.title")?.to_owned(),
+                },
+                fb::SessionOp::CloseRootTab => SessionRequest::CloseRootTab {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                    index: req.index() as usize,
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };

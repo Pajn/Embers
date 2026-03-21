@@ -33,6 +33,29 @@ pub enum SessionRequest {
         session_id: SessionId,
         force: bool,
     },
+    AddRootTab {
+        request_id: RequestId,
+        session_id: SessionId,
+        title: String,
+        buffer_id: Option<BufferId>,
+        child_node_id: Option<NodeId>,
+    },
+    SelectRootTab {
+        request_id: RequestId,
+        session_id: SessionId,
+        index: usize,
+    },
+    RenameRootTab {
+        request_id: RequestId,
+        session_id: SessionId,
+        index: usize,
+        title: String,
+    },
+    CloseRootTab {
+        request_id: RequestId,
+        session_id: SessionId,
+        index: usize,
+    },
 }
 
 impl SessionRequest {
@@ -41,7 +64,11 @@ impl SessionRequest {
             Self::Create { request_id, .. }
             | Self::List { request_id }
             | Self::Get { request_id, .. }
-            | Self::Close { request_id, .. } => *request_id,
+            | Self::Close { request_id, .. }
+            | Self::AddRootTab { request_id, .. }
+            | Self::SelectRootTab { request_id, .. }
+            | Self::RenameRootTab { request_id, .. }
+            | Self::CloseRootTab { request_id, .. } => *request_id,
         }
     }
 }
