@@ -8,7 +8,7 @@ mod server;
 mod terminal_backend;
 
 pub use buffer_runtime::{BufferRuntimeCallbacks, BufferRuntimeHandle};
-pub use config::ServerConfig;
+pub use config::{SOCKET_ENV_VAR, ServerConfig};
 pub use model::{
     Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
     FloatingWindow, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,

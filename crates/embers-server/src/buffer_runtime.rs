@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -43,6 +44,7 @@ impl BufferRuntimeHandle {
         buffer_id: BufferId,
         command: &[String],
         cwd: Option<&Path>,
+        env: &BTreeMap<String, String>,
         size: PtySize,
         callbacks: BufferRuntimeCallbacks,
     ) -> Result<Self> {
@@ -59,6 +61,9 @@ impl BufferRuntimeHandle {
         command_builder.args(&command[1..]);
         if let Some(cwd) = cwd {
             command_builder.cwd(cwd);
+        }
+        for (key, value) in env {
+            command_builder.env(key, value);
         }
 
         let child = pair

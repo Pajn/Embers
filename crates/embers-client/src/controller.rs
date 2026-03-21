@@ -8,6 +8,7 @@ pub enum KeyEvent {
     Char(char),
     Bytes(Vec<u8>),
     Enter,
+    Tab,
     Backspace,
     Escape,
     Ctrl(char),
@@ -79,6 +80,7 @@ impl Controller {
             KeyEvent::Bytes(bytes) if !bytes.is_empty() => {
                 input_request(presentation, request_id, bytes)
             }
+            KeyEvent::Tab => input_request(presentation, request_id, b"\t".to_vec()),
             KeyEvent::Enter => input_request(presentation, request_id, b"\r".to_vec()),
             KeyEvent::Backspace => input_request(presentation, request_id, vec![0x7f]),
             KeyEvent::Alt(_) | KeyEvent::Bytes(_) => None,

@@ -476,6 +476,7 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
     match key {
         KeyEvent::Char(ch) => Ok(KeyToken::Char(ch)),
         KeyEvent::Enter => Ok(KeyToken::Enter),
+        KeyEvent::Tab => Ok(KeyToken::Tab),
         KeyEvent::Backspace => Ok(KeyToken::Backspace),
         KeyEvent::Escape => Ok(KeyToken::Escape),
         KeyEvent::Ctrl(ch) => Ok(KeyToken::Ctrl(ch.to_ascii_lowercase())),
