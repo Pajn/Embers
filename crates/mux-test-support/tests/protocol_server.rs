@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use mux_core::{BufferId, ErrorCode, MuxError, RequestId, SessionId, new_request_id};
+use mux_core::{ErrorCode, MuxError, RequestId, SessionId, new_request_id};
 use mux_protocol::{
-    ClientMessage, FrameType, InputRequest, NodeRequest, PingRequest, RawFrame, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionRequest, decode_server_envelope, encode_client_message,
-    read_frame, write_frame,
+    ClientMessage, FrameType, NodeRequest, PingRequest, RawFrame, ServerEnvelope, ServerEvent,
+    ServerResponse, SessionRequest, decode_server_envelope, encode_client_message, read_frame,
+    write_frame,
 };
 use mux_test_support::{TestConnection, TestServer};
 use tokio::io::AsyncWriteExt;
@@ -246,11 +246,10 @@ async fn typed_errors_cover_invalid_ids_impossible_mutations_and_unsupported_req
 
     let unsupported_request_id = RequestId(73);
     let unsupported_response = connection
-        .request(&ClientMessage::Input(InputRequest::Resize {
+        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
             request_id: unsupported_request_id,
-            buffer_id: BufferId(1),
-            cols: 80,
-            rows: 24,
+            node_id: session.snapshot.session.root_node_id,
+            title: "wrapped".to_owned(),
         }))
         .await
         .expect("unsupported request returns response");
