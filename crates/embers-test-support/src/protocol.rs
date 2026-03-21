@@ -4,8 +4,8 @@ use std::time::Duration;
 use embers_core::{BufferId, MuxError, Result, SessionId, new_request_id};
 use embers_protocol::{
     BufferRequest, ClientMessage, PingRequest, ProtocolClient, ServerEnvelope, ServerEvent,
-    ServerResponse, SessionRequest, SessionSnapshot, SnapshotResponse, SubscribeRequest,
-    UnsubscribeRequest,
+    ScrollbackSliceResponse, ServerResponse, SessionRequest, SessionSnapshot, SnapshotResponse,
+    SubscribeRequest, UnsubscribeRequest, VisibleSnapshotResponse,
 };
 
 #[derive(Debug)]
@@ -155,6 +155,50 @@ impl TestConnection {
             ServerResponse::Error(error) => Err(error.error.into()),
             other => Err(MuxError::protocol(format!(
                 "unexpected response to capture request: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn capture_visible_buffer(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<VisibleSnapshotResponse> {
+        let response = self
+            .request(&ClientMessage::Buffer(BufferRequest::CaptureVisible {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await?;
+
+        match response {
+            ServerResponse::VisibleSnapshot(snapshot) => Ok(snapshot),
+            ServerResponse::Error(error) => Err(error.error.into()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to visible capture request: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn capture_scrollback_slice(
+        &mut self,
+        buffer_id: BufferId,
+        start_line: u64,
+        line_count: u32,
+    ) -> Result<ScrollbackSliceResponse> {
+        let response = self
+            .request(&ClientMessage::Buffer(BufferRequest::ScrollbackSlice {
+                request_id: new_request_id(),
+                buffer_id,
+                start_line,
+                line_count,
+            }))
+            .await?;
+
+        match response {
+            ServerResponse::ScrollbackSlice(snapshot) => Ok(snapshot),
+            ServerResponse::Error(error) => Err(error.error.into()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to scrollback slice request: {other:?}"
             ))),
         }
     }

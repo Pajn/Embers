@@ -95,19 +95,19 @@ where
     pub async fn refresh_buffer_snapshot(&mut self, buffer_id: BufferId) -> Result<()> {
         let response = self
             .transport
-            .request(ClientMessage::Buffer(BufferRequest::Capture {
+            .request(ClientMessage::Buffer(BufferRequest::CaptureVisible {
                 request_id: self.next_request_id(),
                 buffer_id,
             }))
             .await?;
 
         match expect_response(response)? {
-            ServerResponse::Snapshot(snapshot) => {
+            ServerResponse::VisibleSnapshot(snapshot) => {
                 self.state.apply_buffer_snapshot(snapshot);
                 Ok(())
             }
             other => Err(MuxError::protocol(format!(
-                "expected snapshot response, got {other:?}"
+                "expected visible snapshot response, got {other:?}"
             ))),
         }
     }

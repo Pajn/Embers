@@ -8,6 +8,27 @@ pub struct CursorPosition {
     pub col: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Beam,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorState {
+    pub position: CursorPosition,
+    pub shape: CursorShape,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalModes {
+    pub alternate_screen: bool,
+    pub mouse_reporting: bool,
+    pub focus_reporting: bool,
+    pub bracketed_paste: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotLine {
     pub text: String,
@@ -25,10 +46,13 @@ impl From<&str> for SnapshotLine {
 pub struct TerminalSnapshot {
     pub sequence: u64,
     pub size: PtySize,
-    pub cursor: Option<CursorPosition>,
+    pub cursor: Option<CursorState>,
     pub lines: Vec<SnapshotLine>,
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub viewport_top_line: u64,
+    pub total_lines: u64,
+    pub modes: TerminalModes,
 }
 
 impl TerminalSnapshot {
@@ -47,6 +71,9 @@ impl TerminalSnapshot {
                 .collect(),
             title: None,
             cwd: None,
+            viewport_top_line: 0,
+            total_lines: u64::from(size.rows),
+            modes: TerminalModes::default(),
         }
     }
 

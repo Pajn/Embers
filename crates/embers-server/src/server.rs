@@ -15,9 +15,10 @@ use embers_protocol::{
     ClientMessage, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
     FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
     ProtocolError, RawFrame, RenderInvalidatedEvent, ServerEnvelope, ServerEvent, ServerResponse,
-    SessionClosedEvent, SessionCreatedEvent, SessionRequest, SessionSnapshotResponse,
-    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame_no_flush,
+    ScrollbackSliceResponse, SessionClosedEvent, SessionCreatedEvent, SessionRequest,
+    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -204,16 +205,28 @@ impl BufferSurface {
         self.backend.capture_scrollback()
     }
 
+    fn capture_visible_snapshot(
+        &self,
+        sequence: u64,
+        cwd: Option<PathBuf>,
+    ) -> embers_core::TerminalSnapshot {
+        self.backend.visible_snapshot(sequence, self.size, cwd)
+    }
+
+    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> crate::BackendScrollbackSlice {
+        self.backend.capture_scrollback_slice(start_line, line_count)
+    }
+
+    fn metadata(&self) -> crate::BackendMetadata {
+        self.backend.metadata()
+    }
+
+    fn take_activity(&mut self) -> embers_core::ActivityState {
+        self.backend.take_activity()
+    }
+
     fn damage(&mut self) -> BackendDamage {
         self.backend.take_damage()
-    }
-
-    fn title(&self) -> Option<String> {
-        self.backend.metadata().title
-    }
-
-    fn activity(&self) -> embers_core::ActivityState {
-        self.backend.metadata().activity
     }
 }
 
@@ -595,6 +608,25 @@ impl Runtime {
                 buffer_id,
             } => match self.capture_snapshot(request_id, buffer_id).await {
                 Ok(snapshot) => (ServerResponse::Snapshot(snapshot), Vec::new()),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::CaptureVisible {
+                request_id,
+                buffer_id,
+            } => match self.capture_visible_snapshot(request_id, buffer_id).await {
+                Ok(snapshot) => (ServerResponse::VisibleSnapshot(snapshot), Vec::new()),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::ScrollbackSlice {
+                request_id,
+                buffer_id,
+                start_line,
+                line_count,
+            } => match self
+                .capture_scrollback_slice(request_id, buffer_id, start_line, line_count)
+                .await
+            {
+                Ok(snapshot) => (ServerResponse::ScrollbackSlice(snapshot), Vec::new()),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
         }
@@ -1228,6 +1260,69 @@ impl Runtime {
         })
     }
 
+    async fn capture_visible_snapshot(
+        &self,
+        request_id: RequestId,
+        buffer_id: BufferId,
+    ) -> Result<VisibleSnapshotResponse> {
+        let buffer = {
+            let state = self.state.lock().await;
+            state.buffer(buffer_id)?.clone()
+        };
+        let snapshot = {
+            let mut surfaces = self.buffer_surfaces.lock().await;
+            surfaces
+                .entry(buffer_id)
+                .or_insert_with(|| BufferSurface::new(buffer.pty_size))
+                .capture_visible_snapshot(buffer.last_snapshot_seq, buffer.cwd.clone())
+        };
+
+        Ok(VisibleSnapshotResponse {
+            request_id,
+            buffer_id,
+            sequence: snapshot.sequence,
+            size: snapshot.size,
+            lines: snapshot.lines.into_iter().map(|line| line.text).collect(),
+            title: snapshot.title,
+            cwd: snapshot.cwd.map(|path| path.display().to_string()),
+            viewport_top_line: snapshot.viewport_top_line,
+            total_lines: snapshot.total_lines,
+            alternate_screen: snapshot.modes.alternate_screen,
+            mouse_reporting: snapshot.modes.mouse_reporting,
+            focus_reporting: snapshot.modes.focus_reporting,
+            bracketed_paste: snapshot.modes.bracketed_paste,
+            cursor: snapshot.cursor,
+        })
+    }
+
+    async fn capture_scrollback_slice(
+        &self,
+        request_id: RequestId,
+        buffer_id: BufferId,
+        start_line: u64,
+        line_count: u32,
+    ) -> Result<ScrollbackSliceResponse> {
+        let buffer = {
+            let state = self.state.lock().await;
+            state.buffer(buffer_id)?.clone()
+        };
+        let slice = {
+            let mut surfaces = self.buffer_surfaces.lock().await;
+            surfaces
+                .entry(buffer_id)
+                .or_insert_with(|| BufferSurface::new(buffer.pty_size))
+                .capture_scrollback_slice(start_line, line_count)
+        };
+
+        Ok(ScrollbackSliceResponse {
+            request_id,
+            buffer_id,
+            start_line: slice.start_line,
+            total_lines: slice.total_lines,
+            lines: slice.lines,
+        })
+    }
+
     async fn route_input_bytes(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Vec<u8> {
         match self.buffer_surfaces.lock().await.get_mut(&buffer_id) {
             Some(surface) => surface.route_input(bytes),
@@ -1260,19 +1355,19 @@ impl Runtime {
             }
         };
 
-        let (title, activity, damage) = {
+        let (metadata, activity, damage) = {
             let mut surfaces = self.buffer_surfaces.lock().await;
             let surface = surfaces
                 .entry(buffer_id)
                 .or_insert_with(|| BufferSurface::new(size));
             surface.resize(size);
             surface.route_output(&bytes);
-            (surface.title(), surface.activity(), surface.damage())
+            (surface.metadata(), surface.take_activity(), surface.damage())
         };
 
         {
             let mut state = self.state.lock().await;
-            if let Some(title) = title
+            if let Some(title) = metadata.title
                 && let Err(error) = state.set_buffer_title(buffer_id, title)
             {
                 debug!(%buffer_id, %error, "failed to apply terminal title update");

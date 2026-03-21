@@ -1,6 +1,6 @@
 use embers_core::{
-    ActivityState, BufferId, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
-    SessionId, SplitDirection, WireError,
+    ActivityState, BufferId, CursorPosition, CursorShape, CursorState, ErrorCode, FloatGeometry,
+    FloatingId, NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
 };
 use embers_protocol::*;
 
@@ -79,6 +79,16 @@ fn client_message_families_round_trip() {
         ClientMessage::Buffer(BufferRequest::Capture {
             request_id: RequestId(15),
             buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::CaptureVisible {
+            request_id: RequestId(151),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::ScrollbackSlice {
+            request_id: RequestId(152),
+            buffer_id: BufferId(20),
+            start_line: 4,
+            line_count: 8,
         }),
         ClientMessage::Node(NodeRequest::GetTree {
             request_id: RequestId(16),
@@ -263,6 +273,32 @@ fn server_envelope_families_round_trip() {
             lines: vec!["alpha".to_owned(), "beta".to_owned()],
             title: Some("shell".to_owned()),
             cwd: Some("/tmp".to_owned()),
+        })),
+        ServerEnvelope::Response(ServerResponse::VisibleSnapshot(VisibleSnapshotResponse {
+            request_id: RequestId(401),
+            buffer_id: BufferId(11),
+            sequence: 10,
+            size: PtySize::new(120, 40),
+            lines: vec!["alpha".to_owned(), "beta".to_owned(), "".to_owned()],
+            title: Some("shell".to_owned()),
+            cwd: Some("/tmp".to_owned()),
+            viewport_top_line: 17,
+            total_lines: 43,
+            alternate_screen: true,
+            mouse_reporting: true,
+            focus_reporting: true,
+            bracketed_paste: true,
+            cursor: Some(CursorState {
+                position: CursorPosition { row: 1, col: 2 },
+                shape: CursorShape::Beam,
+            }),
+        })),
+        ServerEnvelope::Response(ServerResponse::ScrollbackSlice(ScrollbackSliceResponse {
+            request_id: RequestId(402),
+            buffer_id: BufferId(11),
+            start_line: 12,
+            total_lines: 43,
+            lines: vec!["gamma".to_owned(), "delta".to_owned()],
         })),
         ServerEnvelope::Event(ServerEvent::SessionCreated(SessionCreatedEvent {
             session: session.clone(),

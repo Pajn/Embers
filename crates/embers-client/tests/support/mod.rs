@@ -6,7 +6,7 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferRecord, BufferRecordState, BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind,
-    SessionRecord, SessionSnapshot, SnapshotResponse, SplitRecord, TabRecord, TabsRecord,
+    SessionRecord, SessionSnapshot, SplitRecord, TabRecord, TabsRecord, VisibleSnapshotResponse,
 };
 
 pub const SESSION_ID: SessionId = SessionId(1);
@@ -318,7 +318,7 @@ fn buffer(
     }
 }
 
-fn demo_snapshots() -> Vec<SnapshotResponse> {
+fn demo_snapshots() -> Vec<VisibleSnapshotResponse> {
     vec![
         snapshot(2, ["left pane", "line two", "line three"]),
         snapshot(4, ["logs visible", "second row", "third row"]),
@@ -327,8 +327,8 @@ fn demo_snapshots() -> Vec<SnapshotResponse> {
     ]
 }
 
-fn snapshot<const N: usize>(buffer_id: u64, lines: [&str; N]) -> SnapshotResponse {
-    SnapshotResponse {
+fn snapshot<const N: usize>(buffer_id: u64, lines: [&str; N]) -> VisibleSnapshotResponse {
+    VisibleSnapshotResponse {
         request_id: embers_core::RequestId(0),
         buffer_id: BufferId(buffer_id),
         sequence: 1,
@@ -336,5 +336,12 @@ fn snapshot<const N: usize>(buffer_id: u64, lines: [&str; N]) -> SnapshotRespons
         lines: lines.into_iter().map(str::to_owned).collect(),
         title: None,
         cwd: None,
+        viewport_top_line: 0,
+        total_lines: 24,
+        alternate_screen: false,
+        mouse_reporting: false,
+        focus_reporting: false,
+        bracketed_paste: false,
+        cursor: None,
     }
 }

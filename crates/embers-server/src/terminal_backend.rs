@@ -4,15 +4,31 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage};
-use alacritty_terminal::vte::ansi;
-use embers_core::{ActivityState, CursorPosition, PtySize, SnapshotLine, TerminalSnapshot};
+use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage, TermMode};
+use alacritty_terminal::vte::ansi::{self, CursorShape as AlacrittyCursorShape};
+use embers_core::{
+    ActivityState, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine,
+    TerminalModes, TerminalSnapshot,
+};
 use tracing::error;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackendMetadata {
     pub title: Option<String>,
-    pub activity: ActivityState,
+    pub viewport_top_line: u64,
+    pub total_lines: u64,
+    pub alternate_screen: bool,
+    pub mouse_reporting: bool,
+    pub focus_reporting: bool,
+    pub bracketed_paste: bool,
+    pub cursor: Option<CursorState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackendScrollbackSlice {
+    pub start_line: u64,
+    pub total_lines: u64,
+    pub lines: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +48,9 @@ pub trait TerminalBackend: Send {
         cwd: Option<PathBuf>,
     ) -> TerminalSnapshot;
     fn capture_scrollback(&self) -> Vec<String>;
+    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> BackendScrollbackSlice;
     fn metadata(&self) -> BackendMetadata;
+    fn take_activity(&mut self) -> ActivityState;
     fn take_damage(&mut self) -> BackendDamage;
 }
 
@@ -141,10 +159,17 @@ impl AlacrittyTerminalBackend {
         let display_offset = grid.display_offset() as i32;
         let top = Line(-display_offset);
         let bottom = Line(grid.screen_lines() as i32 - display_offset - 1);
-        self.collect_lines(top, bottom)
+        self.collect_lines(top, bottom, false)
     }
 
-    fn collect_lines(&self, start: Line, end: Line) -> Vec<String> {
+    fn all_lines(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        let top = Line(-(grid.history_size() as i32));
+        let bottom = Line(grid.screen_lines() as i32 - 1);
+        self.collect_lines(top, bottom, false)
+    }
+
+    fn collect_lines(&self, start: Line, end: Line, trim_trailing_empty: bool) -> Vec<String> {
         let grid = self.term.grid();
         if grid.columns() == 0 || end < start {
             return Vec::new();
@@ -161,18 +186,55 @@ impl AlacrittyTerminalBackend {
             line += 1;
         }
 
-        while matches!(lines.last(), Some(last) if last.is_empty()) {
-            lines.pop();
+        if trim_trailing_empty {
+            while matches!(lines.last(), Some(last) if last.is_empty()) {
+                lines.pop();
+            }
         }
 
         lines
     }
 
-    fn cursor_position(&self) -> Option<CursorPosition> {
-        let cursor = self.term.grid().cursor.point;
-        let row = u16::try_from(cursor.line.0).ok()?;
-        let col = u16::try_from(cursor.column.0).ok()?;
-        Some(CursorPosition { row, col })
+    fn cursor_state(&self) -> Option<CursorState> {
+        let cursor = self.term.renderable_content().cursor;
+        let shape = match cursor.shape {
+            AlacrittyCursorShape::Hidden => return None,
+            AlacrittyCursorShape::Block | AlacrittyCursorShape::HollowBlock => CursorShape::Block,
+            AlacrittyCursorShape::Underline => CursorShape::Underline,
+            AlacrittyCursorShape::Beam => CursorShape::Beam,
+        };
+        let row = u16::try_from(cursor.point.line.0).ok()?;
+        let col = u16::try_from(cursor.point.column.0).ok()?;
+        Some(CursorState {
+            position: CursorPosition { row, col },
+            shape,
+        })
+    }
+
+    fn terminal_modes(&self) -> TerminalModes {
+        let mode = *self.term.mode();
+        TerminalModes {
+            alternate_screen: mode.contains(TermMode::ALT_SCREEN),
+            mouse_reporting: mode.intersects(
+                TermMode::MOUSE_REPORT_CLICK
+                    | TermMode::MOUSE_DRAG
+                    | TermMode::MOUSE_MOTION
+                    | TermMode::SGR_MOUSE
+                    | TermMode::UTF8_MOUSE,
+            ),
+            focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+        }
+    }
+
+    fn viewport_top_line(&self) -> u64 {
+        let grid = self.term.grid();
+        grid.history_size().saturating_sub(grid.display_offset()) as u64
+    }
+
+    fn total_lines(&self) -> u64 {
+        let grid = self.term.grid();
+        (grid.history_size() + grid.screen_lines()) as u64
     }
 }
 
@@ -194,38 +256,72 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         size: PtySize,
         cwd: Option<PathBuf>,
     ) -> TerminalSnapshot {
+        let metadata = self.metadata();
         TerminalSnapshot {
             sequence,
             size,
-            cursor: self.cursor_position(),
+            cursor: metadata.cursor,
             lines: self
                 .visible_lines()
                 .into_iter()
                 .map(|text| SnapshotLine { text })
                 .collect(),
-            title: self.metadata().title,
+            title: metadata.title,
             cwd,
+            viewport_top_line: metadata.viewport_top_line,
+            total_lines: metadata.total_lines,
+            modes: TerminalModes {
+                alternate_screen: metadata.alternate_screen,
+                mouse_reporting: metadata.mouse_reporting,
+                focus_reporting: metadata.focus_reporting,
+                bracketed_paste: metadata.bracketed_paste,
+            },
         }
     }
 
     fn capture_scrollback(&self) -> Vec<String> {
-        let grid = self.term.grid();
-        let top = Line(-(grid.history_size() as i32));
-        let bottom = Line(grid.screen_lines() as i32 - 1);
-        self.collect_lines(top, bottom)
+        let mut lines = self.all_lines();
+        while matches!(lines.last(), Some(last) if last.is_empty()) {
+            lines.pop();
+        }
+        lines
+    }
+
+    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> BackendScrollbackSlice {
+        let lines = self.all_lines();
+        let total_lines = lines.len() as u64;
+        let start_line = start_line.min(total_lines);
+        let end_line = start_line.saturating_add(u64::from(line_count)).min(total_lines);
+        let lines = lines[start_line as usize..end_line as usize].to_vec();
+
+        BackendScrollbackSlice {
+            start_line,
+            total_lines,
+            lines,
+        }
     }
 
     fn metadata(&self) -> BackendMetadata {
-        let mut state = self.events.lock().expect("backend event lock");
-        let bell_pending = state.bell_pending;
-        state.bell_pending = false;
+        let state = self.events.lock().expect("backend event lock");
+        let modes = self.terminal_modes();
         BackendMetadata {
             title: state.title.clone(),
-            activity: if bell_pending {
-                ActivityState::Bell
-            } else {
-                ActivityState::Activity
-            },
+            viewport_top_line: self.viewport_top_line(),
+            total_lines: self.total_lines(),
+            alternate_screen: modes.alternate_screen,
+            mouse_reporting: modes.mouse_reporting,
+            focus_reporting: modes.focus_reporting,
+            bracketed_paste: modes.bracketed_paste,
+            cursor: self.cursor_state(),
+        }
+    }
+
+    fn take_activity(&mut self) -> ActivityState {
+        let mut state = self.events.lock().expect("backend event lock");
+        if std::mem::take(&mut state.bell_pending) {
+            ActivityState::Bell
+        } else {
+            ActivityState::Activity
         }
     }
 
@@ -249,7 +345,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
 #[cfg(test)]
 mod tests {
     use super::{AlacrittyTerminalBackend, BackendDamage, TerminalBackend};
-    use embers_core::{ActivityState, PtySize};
+    use embers_core::{ActivityState, CursorShape, PtySize};
 
     #[test]
     fn visible_snapshot_extracts_plain_text_lines() {
@@ -260,8 +356,15 @@ mod tests {
         let snapshot = backend.visible_snapshot(3, PtySize::new(8, 3), None);
 
         let lines: Vec<_> = snapshot.lines.into_iter().map(|line| line.text).collect();
-        assert_eq!(lines, vec!["hello", "world"]);
-        assert!(snapshot.cursor.is_some());
+        assert_eq!(lines, vec!["hello", "world", ""]);
+        assert_eq!(snapshot.total_lines, 3);
+        assert_eq!(snapshot.viewport_top_line, 0);
+        assert!(matches!(
+            snapshot.cursor.as_ref().map(|cursor| cursor.shape),
+            Some(CursorShape::Block)
+                | Some(CursorShape::Underline)
+                | Some(CursorShape::Beam)
+        ));
     }
 
     #[test]
@@ -274,10 +377,25 @@ mod tests {
         let visible = backend.visible_snapshot(4, PtySize::new(6, 2), None);
         let visible_lines: Vec<_> = visible.lines.into_iter().map(|line| line.text).collect();
         assert_eq!(visible_lines, vec!["three", "four"]);
+        assert_eq!(visible.viewport_top_line, 2);
+        assert_eq!(visible.total_lines, 4);
 
         let history = backend.capture_scrollback();
         assert!(history.iter().any(|line| line == "one"));
         assert!(history.iter().any(|line| line == "four"));
+    }
+
+    #[test]
+    fn scrollback_slice_returns_requested_window() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"one\r\ntwo\r\nthree\r\nfour");
+
+        let slice = backend.capture_scrollback_slice(1, 2);
+        assert_eq!(slice.start_line, 1);
+        assert_eq!(slice.total_lines, 4);
+        assert_eq!(slice.lines, vec!["two", "three"]);
     }
 
     #[test]
@@ -293,7 +411,22 @@ mod tests {
     }
 
     #[test]
-    fn title_and_bell_events_update_metadata() {
+    fn metadata_surfaces_terminal_modes_and_title() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b]0;embers\x07\x1b[?1049h\x1b[?1000h\x1b[?1004h\x1b[?2004h");
+
+        let metadata = backend.metadata();
+        assert_eq!(metadata.title.as_deref(), Some("embers"));
+        assert!(metadata.alternate_screen);
+        assert!(metadata.mouse_reporting);
+        assert!(metadata.focus_reporting);
+        assert!(metadata.bracketed_paste);
+    }
+
+    #[test]
+    fn bell_activity_is_consumed_separately_from_metadata() {
         let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
         let _ = backend.take_damage();
 
@@ -301,10 +434,10 @@ mod tests {
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(metadata.activity, ActivityState::Bell);
+        assert_eq!(backend.take_activity(), ActivityState::Bell);
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(metadata.activity, ActivityState::Activity);
+        assert_eq!(backend.take_activity(), ActivityState::Activity);
     }
 }

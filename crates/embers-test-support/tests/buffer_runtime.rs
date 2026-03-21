@@ -267,3 +267,83 @@ async fn capture_preserves_scrollback_for_long_output() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn visible_snapshot_surfaces_terminal_modes_and_cursor_metadata() {
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            "printf '\\033]0;embers\\007\\033[?1049h\\033[?1000h\\033[?1004h\\033[?2004hhello'",
+        ],
+    )
+    .await;
+    wait_for_capture_contains(&mut connection, buffer.id, "hello").await;
+
+    let snapshot = connection
+        .capture_visible_buffer(buffer.id)
+        .await
+        .expect("visible capture succeeds");
+    let text = snapshot.lines.join("\n");
+    assert!(text.contains("hello"));
+    assert_eq!(snapshot.title.as_deref(), Some("embers"));
+    assert!(snapshot.alternate_screen);
+    assert!(snapshot.mouse_reporting);
+    assert!(snapshot.focus_reporting);
+    assert!(snapshot.bracketed_paste);
+    assert!(snapshot.total_lines >= u64::from(snapshot.size.rows));
+    assert!(snapshot.cursor.is_some());
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scrollback_slice_returns_history_while_full_capture_stays_available() {
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            "i=1; while [ $i -le 40 ]; do printf 'line-%02d\\n' \"$i\"; i=$((i+1)); done",
+        ],
+    )
+    .await;
+
+    let captured = wait_for_capture_contains(&mut connection, buffer.id, "line-40").await;
+    let visible = connection
+        .capture_visible_buffer(buffer.id)
+        .await
+        .expect("visible capture succeeds");
+    let slice = connection
+        .capture_scrollback_slice(buffer.id, 0, 3)
+        .await
+        .expect("scrollback slice succeeds");
+
+    assert!(captured.lines.join("\n").contains("line-01"));
+    assert!(captured.lines.join("\n").contains("line-40"));
+    assert!(visible.total_lines >= 40);
+    assert!(visible.viewport_top_line > 0);
+    assert_eq!(
+        slice.lines,
+        vec![
+            "line-01".to_owned(),
+            "line-02".to_owned(),
+            "line-03".to_owned()
+        ]
+    );
+    assert_eq!(slice.start_line, 0);
+    assert_eq!(slice.total_lines, visible.total_lines);
+
+    server.shutdown().await.expect("shutdown server");
+}

@@ -22,6 +22,8 @@ enum MessageKind : ubyte {
   FloatingResponse = 28,
   SubscriptionAckResponse = 29,
   SnapshotResponse = 30,
+  VisibleSnapshotResponse = 31,
+  ScrollbackSliceResponse = 32,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -63,6 +65,8 @@ enum BufferOp : ubyte {
   Detach = 3,
   Kill = 4,
   Capture = 5,
+  CaptureVisible = 6,
+  ScrollbackSlice = 7,
 }
 
 enum NodeOp : ubyte {
@@ -116,6 +120,12 @@ enum NodeRecordKindWire : ubyte {
   Tabs = 2,
 }
 
+enum CursorShapeWire : ubyte {
+  Block = 0,
+  Underline = 1,
+  Beam = 2,
+}
+
 table PingRequest {
   payload:string;
 }
@@ -138,6 +148,8 @@ table BufferRequest {
   attached_only:bool = false;
   detached_only:bool = false;
   force:bool = false;
+  start_line:ulong = 0;
+  line_count:uint = 0;
   title:string;
   command:[string];
   cwd:string;
@@ -319,6 +331,12 @@ table SubscriptionAckResponse {
   subscription_id:ulong;
 }
 
+table CursorState {
+  row:ushort = 0;
+  col:ushort = 0;
+  shape:CursorShapeWire = Block;
+}
+
 table SnapshotResponse {
   buffer_id:ulong;
   sequence:ulong = 0;
@@ -327,6 +345,30 @@ table SnapshotResponse {
   lines:[string];
   title:string;
   cwd:string;
+}
+
+table VisibleSnapshotResponse {
+  buffer_id:ulong;
+  sequence:ulong = 0;
+  cols:ushort = 0;
+  rows:ushort = 0;
+  lines:[string];
+  title:string;
+  cwd:string;
+  viewport_top_line:ulong = 0;
+  total_lines:ulong = 0;
+  alternate_screen:bool = false;
+  mouse_reporting:bool = false;
+  focus_reporting:bool = false;
+  bracketed_paste:bool = false;
+  cursor:CursorState;
+}
+
+table ScrollbackSliceResponse {
+  buffer_id:ulong;
+  start_line:ulong = 0;
+  total_lines:ulong = 0;
+  lines:[string];
 }
 
 table SessionCreatedEvent {
@@ -387,6 +429,8 @@ table Envelope {
   floating_response:FloatingResponse;
   subscription_ack_response:SubscriptionAckResponse;
   snapshot_response:SnapshotResponse;
+  visible_snapshot_response:VisibleSnapshotResponse;
+  scrollback_slice_response:ScrollbackSliceResponse;
 
   session_created_event:SessionCreatedEvent;
   session_closed_event:SessionClosedEvent;
