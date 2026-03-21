@@ -7,9 +7,10 @@ use std::time::Duration;
 use embers_client::{
     ConfigManager, ConfiguredClient, KeyEvent, MuxClient, RenderGrid, SocketTransport,
 };
-use embers_core::{MuxError, Result, SessionId, Size};
+use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_SESSION_NAME: &str = "main";
 const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
@@ -465,7 +466,7 @@ impl TerminalGuard {
     fn render(&self, grid: &RenderGrid, terminal_size: Size, status: Option<&str>) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.lines() {
+        for line in grid.ansi_lines() {
             write!(stdout, "{line}\x1b[K\r\n")?;
         }
 
@@ -475,6 +476,17 @@ impl TerminalGuard {
         }
 
         write!(stdout, "\x1b[J")?;
+        if let Some(cursor) = grid.cursor() {
+            write!(
+                stdout,
+                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+                cursor_shape_code(cursor.shape),
+                cursor.y.saturating_add(1),
+                cursor.x.saturating_add(1)
+            )?;
+        } else {
+            write!(stdout, "\x1b[?25l")?;
+        }
         stdout.flush()?;
         Ok(())
     }
@@ -484,7 +496,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = set_terminal_mode(self.input_fd, &self.original_mode);
         let mut stdout = io::stdout();
-        let _ = write!(stdout, "\x1b[0m\x1b[?25h\x1b[?1049l");
+        let _ = write!(stdout, "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?1049l");
         let _ = stdout.flush();
     }
 }
@@ -534,15 +546,32 @@ fn terminal_size(fd: libc::c_int) -> Result<Size> {
 }
 
 fn fit_width(text: &str, width: u16) -> String {
-    let width = usize::from(width);
     if width == 0 {
         return String::new();
     }
 
-    let mut fitted = text.chars().take(width).collect::<String>();
-    let current = fitted.chars().count();
+    let width = usize::from(width);
+    let mut fitted = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4])).max(1);
+        if used + ch_width > width {
+            break;
+        }
+        fitted.push(ch);
+        used += ch_width;
+    }
+    let current = UnicodeWidthStr::width(fitted.as_str());
     if current < width {
         fitted.push_str(&" ".repeat(width - current));
     }
     fitted
+}
+
+fn cursor_shape_code(shape: CursorShape) -> u8 {
+    match shape {
+        CursorShape::Block => 2,
+        CursorShape::Underline => 4,
+        CursorShape::Beam => 6,
+    }
 }

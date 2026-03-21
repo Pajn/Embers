@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
 use embers_core::{ActivityState, Point, Rect, Size};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-use crate::grid::{BorderStyle, RenderGrid};
+use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
 use crate::scripting::{BarSegment, BarSpec};
 use crate::state::ClientState;
@@ -100,7 +102,7 @@ impl Renderer {
             let right_width = bar
                 .right
                 .iter()
-                .map(|segment| clamp_usize_to_u16(segment.text.chars().count()))
+                .map(|segment| display_width(&segment.text))
                 .sum::<u16>();
             let right_x = end_x.saturating_sub(right_width.min(width));
             render_bar_segments(grid, right_x, y, end_x, &bar.right);
@@ -108,7 +110,7 @@ impl Renderer {
             let center_width = bar
                 .center
                 .iter()
-                .map(|segment| clamp_usize_to_u16(segment.text.chars().count()))
+                .map(|segment| display_width(&segment.text))
                 .sum::<u16>();
             let center_x = x.saturating_add(width.saturating_sub(center_width.min(width)) / 2);
             render_bar_segments(grid, center_x, y, end_x, &bar.center);
@@ -126,8 +128,8 @@ impl Renderer {
             }
 
             let label = format_tab_label(tab, available);
-            grid.put_str(x, y, &label);
-            x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
+            grid.put_str_styled(x, y, &label, tab_style(tab.active));
+            x = x.saturating_add(display_width(&label));
 
             if x < end_x {
                 grid.put_char(x, y, ' ');
@@ -160,7 +162,7 @@ impl Renderer {
             ),
             width,
         );
-        grid.put_str(x, y, &title);
+        grid.put_str_styled(x, y, &title, leaf_title_style(leaf.focused));
 
         if height <= 1 {
             return;
@@ -178,6 +180,20 @@ impl Renderer {
                 };
                 grid.put_str(x, y + 1 + row, &truncate(line, width));
             }
+
+            if leaf.focused
+                && let Some(cursor) = snapshot.cursor
+                && cursor.position.col < width
+            {
+                let cursor_y = y + 1 + cursor.position.row;
+                if cursor_y < y.saturating_add(height) {
+                    grid.set_cursor(Some(GridCursor {
+                        x: x + cursor.position.col,
+                        y: cursor_y,
+                        shape: cursor.shape,
+                    }));
+                }
+            }
         }
     }
 
@@ -190,10 +206,22 @@ impl Renderer {
         let y = clamp_i32_to_u16(divider.rect.origin.y);
         match divider.direction {
             embers_core::SplitDirection::Horizontal => {
-                grid.draw_hline(x, y, divider.rect.size.width, '-');
+                grid.draw_hline_styled(
+                    x,
+                    y,
+                    divider.rect.size.width,
+                    '-',
+                    divider_style(),
+                );
             }
             embers_core::SplitDirection::Vertical => {
-                grid.draw_vline(x, y, divider.rect.size.height, '|');
+                grid.draw_vline_styled(
+                    x,
+                    y,
+                    divider.rect.size.height,
+                    '|',
+                    divider_style(),
+                );
             }
         }
     }
@@ -211,7 +239,7 @@ impl Renderer {
         } else {
             BorderStyle::ASCII
         };
-        grid.draw_box(floating.rect, border);
+        grid.draw_box_styled(floating.rect, border, floating_border_style(floating.focused));
 
         if let Some(title) = &floating.title {
             let title_rect = Rect {
@@ -225,10 +253,11 @@ impl Renderer {
                 },
             };
             if title_rect.size.width > 0 {
-                grid.put_str(
+                grid.put_str_styled(
                     clamp_i32_to_u16(title_rect.origin.x),
                     clamp_i32_to_u16(title_rect.origin.y),
                     &truncate(title, title_rect.size.width),
+                    floating_title_style(floating.focused),
                 );
             }
         }
@@ -274,27 +303,35 @@ fn render_bar_segments(
             break;
         }
         let label = truncate(&segment.text, available);
-        grid.put_str(x, y, &label);
-        x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
+        grid.put_str_styled(x, y, &label, CellStyle::from(&segment.style));
+        x = x.saturating_add(display_width(&label));
     }
 }
 
 fn truncate(text: &str, width: u16) -> String {
-    let width = usize::from(width);
     if width == 0 {
         return String::new();
     }
 
-    let len = text.chars().count();
-    if len <= width {
-        return text.chars().collect();
+    let width = usize::from(width);
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_owned();
     }
 
     if width == 1 {
         return "~".to_owned();
     }
 
-    let mut output = text.chars().take(width - 1).collect::<String>();
+    let mut output = String::new();
+    let mut used = 0;
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme).max(1);
+        if used + grapheme_width > width - 1 {
+            break;
+        }
+        output.push_str(grapheme);
+        used += grapheme_width;
+    }
     output.push('~');
     output
 }
@@ -305,4 +342,56 @@ fn clamp_i32_to_u16(value: i32) -> u16 {
 
 fn clamp_usize_to_u16(value: usize) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn display_width(text: &str) -> u16 {
+    clamp_usize_to_u16(UnicodeWidthStr::width(text))
+}
+
+fn tab_style(active: bool) -> CellStyle {
+    if active {
+        CellStyle::default().with_reverse().with_bold()
+    } else {
+        CellStyle {
+            dim: true,
+            ..CellStyle::default()
+        }
+    }
+}
+
+fn leaf_title_style(focused: bool) -> CellStyle {
+    if focused {
+        CellStyle::default().with_bold()
+    } else {
+        CellStyle::default()
+    }
+}
+
+fn divider_style() -> CellStyle {
+    CellStyle {
+        dim: true,
+        ..CellStyle::default()
+    }
+}
+
+fn floating_border_style(focused: bool) -> CellStyle {
+    if focused {
+        CellStyle::default().with_bold().with_reverse()
+    } else {
+        CellStyle {
+            dim: true,
+            ..CellStyle::default()
+        }
+    }
+}
+
+fn floating_title_style(focused: bool) -> CellStyle {
+    if focused {
+        CellStyle::default().with_bold()
+    } else {
+        CellStyle {
+            dim: true,
+            ..CellStyle::default()
+        }
+    }
 }

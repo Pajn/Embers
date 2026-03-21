@@ -20,7 +20,7 @@ pub use config::{
 };
 pub use configured_client::ConfiguredClient;
 pub use controller::{Controller, KeyEvent};
-pub use grid::{BorderStyle, RenderGrid};
+pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, InputResolution, InputState,
     KeyParseError, KeySequence, KeyToken, ModeSpec, NORMAL_MODE, SELECT_MODE, expand_leader,
@@ -39,6 +39,8 @@ pub use scripting::{
     TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
-pub use state::ClientState;
+pub use state::{
+    BufferViewState, ClientState, SearchState, SelectionKind, SelectionPoint, SelectionState,
+};
 pub use testing::{FakeTransport, ScriptedTransport, TestGrid};
 pub use transport::Transport;
