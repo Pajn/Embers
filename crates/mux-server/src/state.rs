@@ -785,6 +785,32 @@ impl ServerState {
         Ok(())
     }
 
+    pub fn move_buffer_to_leaf(&mut self, buffer_id: BufferId, target_leaf: NodeId) -> Result<()> {
+        self.ensure_leaf(target_leaf)?;
+        let target_session = self.node_session_id(target_leaf)?;
+        let source_view = match self.buffer(buffer_id)?.attachment {
+            BufferAttachment::Attached(node_id) => Some(node_id),
+            BufferAttachment::Detached => None,
+        };
+
+        if source_view == Some(target_leaf) {
+            return self.focus_leaf(target_session, target_leaf);
+        }
+
+        if let Some(source_view) = source_view {
+            let source_session = self.node_session_id(source_view)?;
+            if source_session != target_session {
+                return Err(MuxError::conflict(
+                    "attached buffers must be detached before moving across sessions".to_owned(),
+                ));
+            }
+            self.close_node(source_view)?;
+        }
+
+        self.attach_buffer(buffer_id, target_leaf)?;
+        self.focus_leaf(target_session, target_leaf)
+    }
+
     pub fn detach_buffer(&mut self, buffer_id: BufferId) -> Result<()> {
         self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Detached;
         Ok(())

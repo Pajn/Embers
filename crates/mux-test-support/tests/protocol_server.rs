@@ -207,7 +207,7 @@ async fn malformed_payloads_return_protocol_violation_errors() {
 }
 
 #[tokio::test]
-async fn typed_errors_cover_invalid_ids_impossible_mutations_and_unsupported_requests() {
+async fn typed_errors_cover_invalid_ids_and_impossible_mutations() {
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -244,19 +244,19 @@ async fn typed_errors_cover_invalid_ids_impossible_mutations_and_unsupported_req
     );
     assert!(message.contains("no focusable leaf"));
 
-    let unsupported_request_id = RequestId(73);
-    let unsupported_response = connection
+    let invalid_move_request_id = RequestId(73);
+    let invalid_move_response = connection
         .request(&ClientMessage::Node(NodeRequest::MoveBufferToNode {
-            request_id: unsupported_request_id,
+            request_id: invalid_move_request_id,
             buffer_id: mux_core::BufferId(1),
             target_leaf_node_id: session.snapshot.session.root_node_id,
         }))
         .await
-        .expect("unsupported request returns response");
+        .expect("invalid move request returns response");
     expect_error(
-        unsupported_response,
-        Some(unsupported_request_id),
-        ErrorCode::Unsupported,
+        invalid_move_response,
+        Some(invalid_move_request_id),
+        ErrorCode::InvalidRequest,
     );
 
     server.shutdown().await.expect("shutdown server");

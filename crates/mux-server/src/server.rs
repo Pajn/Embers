@@ -854,10 +854,20 @@ impl Runtime {
                 }
                 layout_snapshot_response(&state, request_id, session_id)
             }
-            mux_protocol::NodeRequest::MoveBufferToNode { request_id, .. } => (
-                unsupported_response(request_id, "move-buffer-to-node is not available yet"),
-                Vec::new(),
-            ),
+            mux_protocol::NodeRequest::MoveBufferToNode {
+                request_id,
+                buffer_id,
+                target_leaf_node_id,
+            } => {
+                let session_id = match state.node(target_leaf_node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                if let Err(error) = state.move_buffer_to_leaf(buffer_id, target_leaf_node_id) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                layout_snapshot_response(&state, request_id, session_id)
+            }
         }
     }
 
@@ -1343,10 +1353,6 @@ fn error_response(
         request_id,
         error: WireError::new(code, message),
     })
-}
-
-fn unsupported_response(request_id: RequestId, message: impl Into<String>) -> ServerResponse {
-    error_response(Some(request_id), ErrorCode::Unsupported, message)
 }
 
 fn protocol_error_response(request_id: Option<RequestId>, error: ProtocolError) -> ServerResponse {
