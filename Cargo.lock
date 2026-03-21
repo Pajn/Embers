@@ -519,6 +519,7 @@ dependencies = [
 name = "mux-cli"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "clap",
  "mux-core",
  "mux-protocol",
