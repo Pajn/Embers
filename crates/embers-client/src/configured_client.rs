@@ -5,7 +5,7 @@ use tracing::warn;
 use embers_core::{BufferId, MuxError, Result, SessionId, Size};
 use embers_protocol::{
     BufferRequest, BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest,
-    ServerEvent, ServerResponse, SessionRequest,
+    ServerEvent, ServerResponse,
 };
 
 use crate::RenderGrid;
@@ -283,7 +283,7 @@ where
             Action::SelectTab { index } => {
                 let tabs = presentation
                     .focused_tabs()
-                    .unwrap_or(&presentation.root_tabs);
+                    .ok_or_else(|| MuxError::invalid_input("no focused tabs to select from"))?;
                 if index >= tabs.tabs.len() {
                     return Err(MuxError::invalid_input(format!(
                         "tab index {index} is out of range for {} tabs",
@@ -293,23 +293,13 @@ where
                 let index = u32::try_from(index).map_err(|_| {
                     MuxError::invalid_input(format!("tab index {index} exceeds protocol limits"))
                 })?;
-                if tabs.is_root {
-                    self.client
-                        .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
-                            request_id: self.client.next_request_id(),
-                            session_id,
-                            index,
-                        }))
-                        .await?;
-                } else {
-                    self.client
-                        .request_message(ClientMessage::Node(NodeRequest::SelectTab {
-                            request_id: self.client.next_request_id(),
-                            tabs_node_id: tabs.node_id,
-                            index,
-                        }))
-                        .await?;
-                }
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::SelectTab {
+                        request_id: self.client.next_request_id(),
+                        tabs_node_id: tabs.node_id,
+                        index,
+                    }))
+                    .await?;
                 self.client.resync_session(session_id).await
             }
             Action::Split { direction, tree } => {

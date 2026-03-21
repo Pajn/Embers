@@ -2,11 +2,11 @@ mod support;
 
 use embers_client::{Controller, KeyEvent, PresentationModel};
 use embers_core::{RequestId, Size};
-use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest, SessionRequest};
+use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest};
 
 use support::{
-    FLOATING_ID, LEFT_LEAF_ID, NESTED_TABS_ID, SESSION_ID, demo_state, floating_focused_state,
-    root_focus_state,
+    FLOATING_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
+    floating_focused_state, root_focus_state, root_split_state,
 };
 
 const TEST_SIZE: Size = Size {
@@ -55,7 +55,7 @@ fn alt_digit_targets_deepest_visible_tabs_group() {
 }
 
 #[test]
-fn alt_digit_falls_back_to_root_tabs_when_focus_is_not_nested() {
+fn alt_digit_targets_root_tabs_when_focus_is_not_nested() {
     let state = root_focus_state();
     let presentation =
         PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
@@ -66,9 +66,9 @@ fn alt_digit_falls_back_to_root_tabs_when_focus_is_not_nested() {
 
     assert_eq!(
         request,
-        ClientMessage::Session(SessionRequest::SelectRootTab {
+        ClientMessage::Node(NodeRequest::SelectTab {
             request_id: RequestId(9),
-            session_id: SESSION_ID,
+            tabs_node_id: ROOT_TABS_ID,
             index: 1,
         })
     );
@@ -110,5 +110,17 @@ fn plain_input_routes_to_focused_buffer() {
             buffer_id: embers_core::BufferId(4),
             bytes: vec![b'x'],
         })
+    );
+}
+
+#[test]
+fn alt_digit_is_ignored_without_focused_tabs_context() {
+    let state = root_split_state();
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
+
+    assert_eq!(
+        Controller.map_key(&presentation, RequestId(12), KeyEvent::Alt('1')),
+        None
     );
 }

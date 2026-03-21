@@ -1,13 +1,4 @@
-use embers_core::SessionId;
-use embers_server::{BufferAttachment, Node, ServerState, TabsNode};
-
-fn root_tabs(state: &ServerState, session_id: SessionId) -> TabsNode {
-    let root_id = state.root_tabs(session_id).expect("session has root tabs");
-    match state.node(root_id).expect("root node exists") {
-        Node::Tabs(tabs) => tabs.clone(),
-        other => panic!("expected root tabs node, got {other:?}"),
-    }
-}
+use embers_server::{BufferAttachment, Node, ServerState};
 
 #[test]
 fn moving_buffer_between_leaves_replaces_target_and_closes_source_view() {
@@ -42,9 +33,11 @@ fn moving_buffer_between_leaves_replaces_target_and_closes_source_view() {
         .move_buffer_to_leaf(first_buffer, second_leaf)
         .expect("move buffer into target leaf");
 
-    let tabs = root_tabs(&state, session_id);
-    assert_eq!(tabs.tabs.len(), 1);
-    assert_eq!(tabs.tabs[0].child, second_leaf);
+    assert_eq!(
+        state.session(session_id).expect("session exists").root_node,
+        second_leaf
+    );
+    assert_eq!(state.node_parent(second_leaf).expect("target parent"), None);
     match state.node(second_leaf).expect("target leaf exists") {
         Node::BufferView(view) => assert_eq!(view.buffer_id, first_buffer),
         other => panic!("expected target buffer view, got {other:?}"),

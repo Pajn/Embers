@@ -35,6 +35,10 @@ fn attached_view(state: &ServerState, buffer_id: BufferId) -> NodeId {
     }
 }
 
+fn session_root(state: &ServerState, session_id: SessionId) -> NodeId {
+    state.session(session_id).expect("session exists").root_node
+}
+
 fn root_tab_child(state: &ServerState, session_id: SessionId, index: usize) -> NodeId {
     let root = state.root_tabs(session_id).expect("root tabs");
     match state.node(root).expect("root node") {
@@ -66,16 +70,20 @@ fn reachable_nodes(state: &ServerState, session_id: SessionId) -> BTreeSet<NodeI
 }
 
 fn apply_random_op(state: &mut ServerState, session_id: SessionId, selector: u8, arg: u8) {
-    let root = state.root_tabs(session_id).expect("root tabs");
-    let tab_count = match state.node(root).expect("root node") {
-        Node::Tabs(tabs) => tabs.tabs.len(),
-        _ => 0,
-    };
+    let root_tabs = state.root_tabs(session_id).ok();
+    let tab_count = root_tabs
+        .and_then(|root| match state.node(root).expect("root node") {
+            Node::Tabs(tabs) => Some(tabs.tabs.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
 
     match selector % 5 {
         0 => {
-            let (_, leaf_id) = new_leaf(state, session_id, &format!("tab-{arg}"));
-            let _ = state.add_root_tab(session_id, format!("tab-{arg}"), leaf_id);
+            if state.root_tabs(session_id).is_ok() {
+                let (_, leaf_id) = new_leaf(state, session_id, &format!("tab-{arg}"));
+                let _ = state.add_root_tab(session_id, format!("tab-{arg}"), leaf_id);
+            }
         }
         1 => {
             if let Some(focused_leaf) = state.session(session_id).expect("session").focused_leaf {
@@ -94,12 +102,12 @@ fn apply_random_op(state: &mut ServerState, session_id: SessionId, selector: u8,
             }
         }
         3 => {
-            if tab_count > 0 {
+            if let Some(root) = root_tabs && tab_count > 0 {
                 let _ = state.switch_tab(root, usize::from(arg) % tab_count);
             }
         }
         4 => {
-            if tab_count > 0 {
+            if let Some(root) = root_tabs && tab_count > 0 {
                 let _ = state.close_tab(root, usize::from(arg) % tab_count);
             }
         }
@@ -143,7 +151,8 @@ fn split_normalization_collapses_single_child_split() {
     state.close_node(new_leaf).expect("close new leaf");
 
     assert!(!state.nodes.contains_key(&split_id));
-    assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+    assert_eq!(session_root(&state, session_id), leaf_id);
+    assert_eq!(state.node_parent(leaf_id).expect("leaf parent"), None);
     state.validate().expect("state should validate");
 }
 
@@ -160,7 +169,8 @@ fn tabs_normalization_collapses_nested_singleton_tabs() {
         .expect("normalize wrapped tabs");
 
     assert!(!state.nodes.contains_key(&wrapped));
-    assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+    assert_eq!(session_root(&state, session_id), leaf_id);
+    assert_eq!(state.node_parent(leaf_id).expect("leaf parent"), None);
     state.validate().expect("state should validate");
 }
 
@@ -431,6 +441,6 @@ proptest! {
 
         state.normalize_upwards(current).expect("normalize wrappers");
         prop_assert!(state.validate().is_ok());
-        prop_assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+        prop_assert_eq!(session_root(&state, session_id), leaf_id);
     }
 }

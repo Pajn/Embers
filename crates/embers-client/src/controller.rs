@@ -1,5 +1,5 @@
 use embers_core::RequestId;
-use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest, SessionRequest};
+use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest};
 
 use crate::presentation::{NavigationDirection, PresentationModel};
 
@@ -44,26 +44,16 @@ impl Controller {
             KeyEvent::Alt(ch) if ('1'..='9').contains(&ch) => {
                 let index = ch.to_digit(10)?.saturating_sub(1);
                 let index_usize = usize::try_from(index).ok()?;
-                let tabs = presentation
-                    .focused_tabs()
-                    .unwrap_or(&presentation.root_tabs);
+                let tabs = presentation.focused_tabs()?;
                 if index_usize >= tabs.tabs.len() {
                     return None;
                 }
 
-                if tabs.is_root {
-                    Some(ClientMessage::Session(SessionRequest::SelectRootTab {
-                        request_id,
-                        session_id: presentation.session_id,
-                        index,
-                    }))
-                } else {
-                    Some(ClientMessage::Node(NodeRequest::SelectTab {
-                        request_id,
-                        tabs_node_id: tabs.node_id,
-                        index,
-                    }))
-                }
+                Some(ClientMessage::Node(NodeRequest::SelectTab {
+                    request_id,
+                    tabs_node_id: tabs.node_id,
+                    index,
+                }))
             }
             KeyEvent::Escape => {
                 if let Some(floating_id) = presentation.focused_floating_id() {
