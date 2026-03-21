@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use embers_core::{BufferId, IdAllocator, MuxError, RequestId, Result, SessionId};
-use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
+use embers_protocol::{
+    BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest, SubscribeRequest,
+};
 
 use crate::socket_transport::SocketTransport;
 use crate::state::ClientState;
@@ -46,6 +48,21 @@ where
     pub async fn request_message(&self, message: ClientMessage) -> Result<ServerResponse> {
         let response = self.transport.request(message).await?;
         expect_response(response)
+    }
+
+    pub async fn subscribe(&self, session_id: Option<SessionId>) -> Result<u64> {
+        let response = self
+            .request_message(ClientMessage::Subscribe(SubscribeRequest {
+                request_id: self.next_request_id(),
+                session_id,
+            }))
+            .await?;
+        match response {
+            ServerResponse::SubscriptionAck(response) => Ok(response.subscription_id),
+            other => Err(MuxError::protocol(format!(
+                "expected subscription ack response, got {other:?}"
+            ))),
+        }
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {

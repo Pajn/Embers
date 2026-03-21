@@ -1,4 +1,7 @@
+mod interactive;
+
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
 use clap::{Parser, Subcommand};
 use embers_core::{
@@ -10,21 +13,31 @@ use embers_protocol::{
     FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
     SessionRequest, SessionSnapshot, SnapshotResponse,
 };
+use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "embers-cli",
-    about = "tmux-inspired control surface for embers"
+    name = "embers",
+    about = "headless terminal multiplexer for embers"
 )]
 pub struct Cli {
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Attach {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "__serve", hide = true)]
+    Serve,
     Ping {
         #[arg(default_value = "phase0")]
         payload: String,
@@ -145,14 +158,13 @@ pub enum Command {
     },
 }
 
-pub async fn execute(cli: Cli) -> Result<String> {
-    let socket = cli
-        .socket
-        .as_ref()
-        .ok_or_else(|| MuxError::invalid_input("--socket is required"))?;
+async fn execute(socket: &Path, command: Command) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
 
-    match cli.command {
+    match command {
+        Command::Attach { .. } | Command::Serve => Err(MuxError::internal(
+            "interactive commands must be dispatched through run()",
+        )),
         Command::Ping { payload } => {
             let response = connection
                 .request(ClientMessage::Ping(PingRequest {
@@ -423,11 +435,155 @@ pub async fn execute(cli: Cli) -> Result<String> {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
-    let output = execute(cli).await?;
-    if !output.is_empty() {
-        println!("{output}");
+    let socket = resolve_socket_path(cli.socket.as_deref());
+
+    match cli.command {
+        None => {
+            ensure_server_process(&socket).await?;
+            interactive::run(socket, None, cli.config).await
+        }
+        Some(Command::Attach { target }) => {
+            if !server_is_available(&socket).await {
+                return Err(MuxError::not_found(format!(
+                    "no embers server is listening on {}",
+                    socket.display()
+                )));
+            }
+            interactive::run(socket, target, cli.config).await
+        }
+        Some(Command::Serve) => run_server(socket).await,
+        Some(command) => {
+            let output = execute(&socket, command).await?;
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            Ok(())
+        }
     }
+}
+
+fn resolve_socket_path(explicit: Option<&Path>) -> PathBuf {
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os(SOCKET_ENV_VAR).map(PathBuf::from))
+        .unwrap_or_else(default_socket_path)
+}
+
+fn default_socket_path() -> PathBuf {
+    PathBuf::from("/tmp").join(format!("embers-{}.sock", current_user_label()))
+}
+
+fn current_user_label() -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "user".to_owned())
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn pid_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("pid")
+}
+
+async fn server_is_available(socket_path: &Path) -> bool {
+    CliConnection::connect(socket_path).await.is_ok()
+}
+
+async fn ensure_server_process(socket_path: &Path) -> Result<()> {
+    if server_is_available(socket_path).await {
+        return Ok(());
+    }
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let current_exe = std::env::current_exe()?;
+    let mut child = ProcessCommand::new(current_exe)
+        .arg("__serve")
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if server_is_available(socket_path).await {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(MuxError::transport(format!(
+                "embers server exited before becoming ready with status {status}"
+            )));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MuxError::timeout(format!(
+                "timed out waiting for embers server at {}",
+                socket_path.display()
+            )));
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn run_server(socket_path: PathBuf) -> Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _pid = ServerPidFile::create(&pid_path(&socket_path))?;
+    let handle = Server::new(ServerConfig::new(socket_path)).start().await?;
+    wait_for_shutdown_signal().await?;
+    handle.shutdown().await
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<()> {
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::select! {
+        _ = interrupt.recv() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<()> {
+    tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+struct ServerPidFile {
+    path: PathBuf,
+}
+
+impl ServerPidFile {
+    fn create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, std::process::id().to_string())?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for ServerPidFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[derive(Debug)]
@@ -915,7 +1071,7 @@ mod tests {
     #[test]
     fn parser_accepts_global_socket_after_subcommand() {
         let cli = Cli::try_parse_from([
-            "embers-cli",
+            "embers",
             "new-window",
             "--socket",
             "/tmp/mux.sock",
@@ -927,7 +1083,7 @@ mod tests {
         .expect("cli parses");
 
         match cli.command {
-            super::Command::NewWindow { title, command, .. } => {
+            Some(super::Command::NewWindow { title, command, .. }) => {
                 assert_eq!(title.as_deref(), Some("logs"));
                 assert_eq!(command, vec!["/bin/sh"]);
             }

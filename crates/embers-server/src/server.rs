@@ -44,7 +44,7 @@ impl Server {
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
         let socket_path = self.config.socket_path.clone();
-        let runtime = Arc::new(Runtime::default());
+        let runtime = Arc::new(Runtime::new(self.config.buffer_env.clone()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let join = tokio::spawn(async move {
@@ -138,6 +138,7 @@ struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
+    buffer_env: BTreeMap<String, String>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
@@ -197,12 +198,13 @@ impl BufferSurface {
     }
 }
 
-impl Default for Runtime {
-    fn default() -> Self {
+impl Runtime {
+    fn new(buffer_env: BTreeMap<String, String>) -> Self {
         Self {
             state: Mutex::new(ServerState::new()),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
             buffer_surfaces: Mutex::new(BTreeMap::new()),
+            buffer_env,
             subscriptions: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -1012,10 +1014,12 @@ impl Runtime {
         let exit_handle = output_handle.clone();
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
+        let buffer_env = self.buffer_env.clone();
         let runtime = BufferRuntimeHandle::spawn(
             buffer_id,
             &command,
             cwd.as_deref(),
+            &buffer_env,
             size,
             BufferRuntimeCallbacks {
                 on_output: Arc::new(move |buffer_id, bytes| {

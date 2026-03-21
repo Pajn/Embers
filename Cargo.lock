@@ -353,10 +353,14 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "embers-client",
  "embers-core",
  "embers-protocol",
+ "embers-server",
  "embers-test-support",
+ "libc",
  "predicates",
+ "tempfile",
  "tokio",
 ]
 
