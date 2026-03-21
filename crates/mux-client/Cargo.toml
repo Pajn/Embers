@@ -9,6 +9,8 @@ version.workspace = true
 async-trait.workspace = true
 mux-core = { path = "../mux-core" }
 mux-protocol = { path = "../mux-protocol" }
+tokio.workspace = true
 
 [dev-dependencies]
+mux-test-support = { path = "../mux-test-support" }
 tokio.workspace = true

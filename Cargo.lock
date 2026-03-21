@@ -534,6 +534,7 @@ dependencies = [
  "async-trait",
  "mux-core",
  "mux-protocol",
+ "mux-test-support",
  "tokio",
 ]
 
