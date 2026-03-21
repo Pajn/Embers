@@ -2,6 +2,7 @@ pub mod model;
 pub mod state;
 
 mod config;
+mod protocol;
 mod server;
 
 pub use config::ServerConfig;

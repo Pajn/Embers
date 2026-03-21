@@ -71,6 +71,16 @@ impl ServerState {
         Ok(self.session(session_id)?.root_node)
     }
 
+    pub fn close_session(&mut self, session_id: SessionId) -> Result<()> {
+        let session = self.session(session_id)?.clone();
+        for floating_id in session.floating.clone() {
+            self.close_floating(floating_id)?;
+        }
+        self.clear_session_root(session_id)?;
+        self.sessions.remove(&session_id);
+        Ok(())
+    }
+
     pub fn create_session(&mut self, name: impl Into<String>) -> SessionId {
         let session_id = self.session_ids.next();
         let root_node = self.node_ids.next();
@@ -256,6 +266,33 @@ impl ServerState {
         );
         self.session_mut(session_id)?.floating.push(floating_id);
         Ok(floating_id)
+    }
+
+    pub fn close_floating(&mut self, floating_id: FloatingId) -> Result<()> {
+        let floating = self.remove_floating_window(floating_id)?;
+        let session_id = floating.session_id;
+        self.remove_subtree_nodes(floating.root_node)?;
+        self.heal_focus(session_id)
+    }
+
+    pub fn focus_floating(&mut self, floating_id: FloatingId) -> Result<()> {
+        let floating = self.floating_window(floating_id)?.clone();
+        if let Some(leaf) = self.resolve_floating_focus(floating_id)? {
+            self.focus_leaf(floating.session_id, leaf)
+        } else {
+            Err(MuxError::not_found(format!(
+                "floating window {floating_id} has no focusable leaf"
+            )))
+        }
+    }
+
+    pub fn move_floating(
+        &mut self,
+        floating_id: FloatingId,
+        geometry: FloatGeometry,
+    ) -> Result<()> {
+        self.floating_mut(floating_id)?.geometry = geometry;
+        Ok(())
     }
 
     pub fn add_root_tab(
@@ -509,6 +546,27 @@ impl ServerState {
 
     pub fn find_last_focused_descendant(&self, node_id: NodeId) -> Result<Option<NodeId>> {
         Ok(self.node(node_id)?.last_focused_descendant())
+    }
+
+    pub fn session_node_ids(&self, session_id: SessionId) -> Result<Vec<NodeId>> {
+        let session = self.session(session_id)?;
+        let mut seen = BTreeSet::new();
+        self.collect_subtree_nodes(session.root_node, &mut seen)?;
+        for floating_id in &session.floating {
+            let floating = self.floating_window(*floating_id)?;
+            self.collect_subtree_nodes(floating.root_node, &mut seen)?;
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    pub fn session_buffer_ids(&self, session_id: SessionId) -> Result<Vec<BufferId>> {
+        let mut buffers = BTreeSet::new();
+        for node_id in self.session_node_ids(session_id)? {
+            if let Node::BufferView(leaf) = self.node(node_id)? {
+                buffers.insert(leaf.buffer_id);
+            }
+        }
+        Ok(buffers.into_iter().collect())
     }
 
     pub fn attach_buffer(&mut self, buffer_id: BufferId, node_id: NodeId) -> Result<()> {
@@ -1027,6 +1085,18 @@ impl ServerState {
         }
 
         Ok(false)
+    }
+
+    fn collect_subtree_nodes(&self, root_id: NodeId, seen: &mut BTreeSet<NodeId>) -> Result<()> {
+        if !seen.insert(root_id) {
+            return Ok(());
+        }
+
+        for child in self.node(root_id)?.child_ids() {
+            self.collect_subtree_nodes(child, seen)?;
+        }
+
+        Ok(())
     }
 
     fn repoint_owner_reference(

@@ -1,0 +1,389 @@
+use mux_core::{
+    ActivityState, BufferId, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
+    SessionId, SplitDirection, WireError,
+};
+use mux_protocol::*;
+
+#[test]
+fn client_message_families_round_trip() {
+    let messages = vec![
+        ClientMessage::Ping(PingRequest {
+            request_id: RequestId(1),
+            payload: "hello".to_owned(),
+        }),
+        ClientMessage::Session(SessionRequest::Create {
+            request_id: RequestId(2),
+            name: "main".to_owned(),
+        }),
+        ClientMessage::Session(SessionRequest::List {
+            request_id: RequestId(3),
+        }),
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(4),
+            session_id: SessionId(10),
+        }),
+        ClientMessage::Session(SessionRequest::Close {
+            request_id: RequestId(5),
+            session_id: SessionId(10),
+            force: true,
+        }),
+        ClientMessage::Buffer(BufferRequest::Create {
+            request_id: RequestId(6),
+            title: Some("shell".to_owned()),
+            command: vec!["bash".to_owned(), "-lc".to_owned(), "pwd".to_owned()],
+            cwd: Some("/tmp".to_owned()),
+        }),
+        ClientMessage::Buffer(BufferRequest::List {
+            request_id: RequestId(7),
+            session_id: Some(SessionId(10)),
+            attached_only: true,
+            detached_only: false,
+        }),
+        ClientMessage::Buffer(BufferRequest::Get {
+            request_id: RequestId(8),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::Detach {
+            request_id: RequestId(9),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::Kill {
+            request_id: RequestId(10),
+            buffer_id: BufferId(20),
+            force: true,
+        }),
+        ClientMessage::Buffer(BufferRequest::Capture {
+            request_id: RequestId(11),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Node(NodeRequest::GetTree {
+            request_id: RequestId(12),
+            session_id: SessionId(10),
+        }),
+        ClientMessage::Node(NodeRequest::Split {
+            request_id: RequestId(13),
+            leaf_node_id: NodeId(30),
+            direction: SplitDirection::Vertical,
+            new_buffer_id: BufferId(21),
+        }),
+        ClientMessage::Node(NodeRequest::WrapInTabs {
+            request_id: RequestId(14),
+            node_id: NodeId(31),
+            title: "editor".to_owned(),
+        }),
+        ClientMessage::Node(NodeRequest::AddTab {
+            request_id: RequestId(15),
+            tabs_node_id: NodeId(32),
+            title: "logs".to_owned(),
+            child_node_id: NodeId(33),
+        }),
+        ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: RequestId(16),
+            tabs_node_id: NodeId(32),
+            index: 1,
+        }),
+        ClientMessage::Node(NodeRequest::Focus {
+            request_id: RequestId(17),
+            session_id: SessionId(10),
+            node_id: NodeId(30),
+        }),
+        ClientMessage::Node(NodeRequest::Close {
+            request_id: RequestId(18),
+            node_id: NodeId(33),
+        }),
+        ClientMessage::Node(NodeRequest::MoveBufferToNode {
+            request_id: RequestId(19),
+            buffer_id: BufferId(22),
+            target_leaf_node_id: NodeId(34),
+        }),
+        ClientMessage::Floating(FloatingRequest::Create {
+            request_id: RequestId(20),
+            session_id: SessionId(10),
+            root_node_id: NodeId(35),
+            geometry: FloatGeometry::new(4, 2, 60, 18),
+            title: Some("inspector".to_owned()),
+        }),
+        ClientMessage::Floating(FloatingRequest::Close {
+            request_id: RequestId(21),
+            floating_id: FloatingId(40),
+        }),
+        ClientMessage::Floating(FloatingRequest::Move {
+            request_id: RequestId(22),
+            floating_id: FloatingId(40),
+            geometry: FloatGeometry::new(8, 6, 50, 14),
+        }),
+        ClientMessage::Floating(FloatingRequest::Focus {
+            request_id: RequestId(23),
+            floating_id: FloatingId(40),
+        }),
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(24),
+            buffer_id: BufferId(22),
+            bytes: vec![0x1b, b'[', b'A'],
+        }),
+        ClientMessage::Input(InputRequest::Resize {
+            request_id: RequestId(25),
+            buffer_id: BufferId(22),
+            cols: 132,
+            rows: 42,
+        }),
+        ClientMessage::Subscribe(SubscribeRequest {
+            request_id: RequestId(26),
+            session_id: Some(SessionId(10)),
+        }),
+        ClientMessage::Unsubscribe(UnsubscribeRequest {
+            request_id: RequestId(27),
+            subscription_id: 99,
+        }),
+    ];
+
+    for message in messages {
+        let encoded = encode_client_message(&message).expect("encode client message");
+        let decoded = decode_client_message(&encoded).expect("decode client message");
+        assert_eq!(decoded, message);
+    }
+}
+
+#[test]
+fn server_envelope_families_round_trip() {
+    let snapshot = sample_snapshot();
+    let session = snapshot.session.clone();
+    let buffers = snapshot.buffers.clone();
+    let floating = snapshot.floating.clone();
+
+    let envelopes = vec![
+        ServerEnvelope::Response(ServerResponse::Pong(PingResponse {
+            request_id: RequestId(30),
+            payload: "pong".to_owned(),
+        })),
+        ServerEnvelope::Response(ServerResponse::Ok(OkResponse {
+            request_id: RequestId(31),
+        })),
+        ServerEnvelope::Response(ServerResponse::Error(ErrorResponse {
+            request_id: None,
+            error: WireError::new(ErrorCode::ProtocolViolation, "bad frame"),
+        })),
+        ServerEnvelope::Response(ServerResponse::Error(ErrorResponse {
+            request_id: Some(RequestId(32)),
+            error: WireError::new(ErrorCode::NotFound, "missing"),
+        })),
+        ServerEnvelope::Response(ServerResponse::Sessions(SessionsResponse {
+            request_id: RequestId(33),
+            sessions: vec![session.clone()],
+        })),
+        ServerEnvelope::Response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(34),
+            snapshot: snapshot.clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(35),
+            buffers: buffers.clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::Buffer(BufferResponse {
+            request_id: RequestId(36),
+            buffer: buffers[0].clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::FloatingList(FloatingListResponse {
+            request_id: RequestId(37),
+            floating: floating.clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::Floating(FloatingResponse {
+            request_id: RequestId(38),
+            floating: floating[0].clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::SubscriptionAck(SubscriptionAckResponse {
+            request_id: RequestId(39),
+            subscription_id: 700,
+        })),
+        ServerEnvelope::Response(ServerResponse::Snapshot(SnapshotResponse {
+            request_id: RequestId(40),
+            buffer_id: BufferId(11),
+            sequence: 9,
+            size: PtySize::new(120, 40),
+            lines: vec!["alpha".to_owned(), "beta".to_owned()],
+            title: Some("shell".to_owned()),
+            cwd: Some("/tmp".to_owned()),
+        })),
+        ServerEnvelope::Event(ServerEvent::SessionCreated(SessionCreatedEvent {
+            session: session.clone(),
+        })),
+        ServerEnvelope::Event(ServerEvent::SessionClosed(SessionClosedEvent {
+            session_id: SessionId(10),
+        })),
+        ServerEnvelope::Event(ServerEvent::BufferCreated(BufferCreatedEvent {
+            buffer: buffers[0].clone(),
+        })),
+        ServerEnvelope::Event(ServerEvent::BufferDetached(BufferDetachedEvent {
+            buffer_id: BufferId(11),
+        })),
+        ServerEnvelope::Event(ServerEvent::NodeChanged(NodeChangedEvent {
+            session_id: SessionId(10),
+        })),
+        ServerEnvelope::Event(ServerEvent::FloatingChanged(FloatingChangedEvent {
+            session_id: SessionId(10),
+            floating_id: Some(FloatingId(30)),
+        })),
+        ServerEnvelope::Event(ServerEvent::FocusChanged(FocusChangedEvent {
+            session_id: SessionId(10),
+            focused_leaf_id: Some(NodeId(21)),
+            focused_floating_id: Some(FloatingId(30)),
+        })),
+        ServerEnvelope::Event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+            buffer_id: BufferId(11),
+        })),
+    ];
+
+    for envelope in envelopes {
+        let encoded = encode_server_envelope(&envelope).expect("encode server envelope");
+        let decoded = decode_server_envelope(&encoded).expect("decode server envelope");
+        assert_eq!(decoded, envelope);
+    }
+}
+
+fn sample_snapshot() -> SessionSnapshot {
+    SessionSnapshot {
+        session: SessionRecord {
+            id: SessionId(10),
+            name: "main".to_owned(),
+            root_node_id: NodeId(20),
+            floating_ids: vec![FloatingId(30)],
+            focused_leaf_id: Some(NodeId(21)),
+            focused_floating_id: Some(FloatingId(30)),
+        },
+        nodes: vec![
+            NodeRecord {
+                id: NodeId(20),
+                session_id: SessionId(10),
+                parent_id: None,
+                kind: NodeRecordKind::Split,
+                buffer_view: None,
+                split: Some(SplitRecord {
+                    direction: SplitDirection::Horizontal,
+                    child_ids: vec![NodeId(21), NodeId(22)],
+                    sizes: vec![70, 50],
+                }),
+                tabs: None,
+            },
+            NodeRecord {
+                id: NodeId(21),
+                session_id: SessionId(10),
+                parent_id: Some(NodeId(20)),
+                kind: NodeRecordKind::BufferView,
+                buffer_view: Some(BufferViewRecord {
+                    buffer_id: BufferId(11),
+                    focused: true,
+                    zoomed: false,
+                    follow_output: true,
+                    last_render_size: PtySize::new(120, 40),
+                }),
+                split: None,
+                tabs: None,
+            },
+            NodeRecord {
+                id: NodeId(22),
+                session_id: SessionId(10),
+                parent_id: Some(NodeId(20)),
+                kind: NodeRecordKind::Tabs,
+                buffer_view: None,
+                split: None,
+                tabs: Some(TabsRecord {
+                    active: 1,
+                    tabs: vec![
+                        TabRecord {
+                            title: "logs".to_owned(),
+                            child_id: NodeId(23),
+                        },
+                        TabRecord {
+                            title: "shell".to_owned(),
+                            child_id: NodeId(24),
+                        },
+                    ],
+                }),
+            },
+            NodeRecord {
+                id: NodeId(23),
+                session_id: SessionId(10),
+                parent_id: Some(NodeId(22)),
+                kind: NodeRecordKind::BufferView,
+                buffer_view: Some(BufferViewRecord {
+                    buffer_id: BufferId(12),
+                    focused: false,
+                    zoomed: false,
+                    follow_output: false,
+                    last_render_size: PtySize::new(80, 24),
+                }),
+                split: None,
+                tabs: None,
+            },
+            NodeRecord {
+                id: NodeId(24),
+                session_id: SessionId(10),
+                parent_id: Some(NodeId(22)),
+                kind: NodeRecordKind::BufferView,
+                buffer_view: Some(BufferViewRecord {
+                    buffer_id: BufferId(13),
+                    focused: false,
+                    zoomed: true,
+                    follow_output: true,
+                    last_render_size: PtySize::new(100, 30),
+                }),
+                split: None,
+                tabs: None,
+            },
+        ],
+        buffers: vec![
+            sample_buffer_record(
+                BufferId(11),
+                Some(NodeId(21)),
+                BufferRecordState::Running,
+                ActivityState::Activity,
+                None,
+            ),
+            sample_buffer_record(
+                BufferId(12),
+                Some(NodeId(23)),
+                BufferRecordState::Exited,
+                ActivityState::Bell,
+                Some(0),
+            ),
+            sample_buffer_record(
+                BufferId(13),
+                Some(NodeId(24)),
+                BufferRecordState::Created,
+                ActivityState::Idle,
+                None,
+            ),
+        ],
+        floating: vec![FloatingRecord {
+            id: FloatingId(30),
+            session_id: SessionId(10),
+            root_node_id: NodeId(24),
+            title: Some("inspector".to_owned()),
+            geometry: FloatGeometry::new(4, 2, 60, 18),
+            focused: true,
+            visible: true,
+            close_on_empty: false,
+        }],
+    }
+}
+
+fn sample_buffer_record(
+    id: BufferId,
+    attachment_node_id: Option<NodeId>,
+    state: BufferRecordState,
+    activity: ActivityState,
+    exit_code: Option<i32>,
+) -> BufferRecord {
+    BufferRecord {
+        id,
+        title: format!("buffer-{id}"),
+        command: vec!["bash".to_owned(), "-lc".to_owned(), "echo mux".to_owned()],
+        cwd: Some("/tmp".to_owned()),
+        state,
+        attachment_node_id,
+        pty_size: PtySize::new(120, 40),
+        activity,
+        last_snapshot_seq: 9,
+        exit_code,
+    }
+}

@@ -52,5 +52,8 @@ async fn ping(socket: PathBuf, payload: String) -> Result<String> {
     {
         ServerResponse::Pong(response) => Ok(format!("pong {}", response.payload)),
         ServerResponse::Error(response) => Err(response.error.into()),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to ping request: {other:?}"
+        ))),
     }
 }

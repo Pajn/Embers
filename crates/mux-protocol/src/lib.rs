@@ -20,8 +20,5 @@ pub use codec::{
     ProtocolError, decode_client_message, decode_server_envelope, encode_client_message,
     encode_server_envelope,
 };
-pub use framing::{MAX_FRAME_LEN, read_frame, write_frame};
-pub use types::{
-    ClientMessage, ErrorResponse, HeartbeatEvent, PingRequest, PingResponse, ServerEnvelope,
-    ServerEvent, ServerResponse,
-};
+pub use framing::{FrameType, MAX_FRAME_LEN, RawFrame, read_frame, write_frame};
+pub use types::*;
