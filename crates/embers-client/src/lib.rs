@@ -30,8 +30,9 @@ pub use presentation::{
 };
 pub use renderer::Renderer;
 pub use scripting::{
-    LoadedConfig, PaletteError, RgbColor, ScriptEngine, ScriptError, ScriptFunctionRef,
-    ScriptHarness, ThemeSpec,
+    Action, BufferRef, BufferSpawnSpec, BufferTarget, Context, FloatingOptions, FloatingRef,
+    LoadedConfig, NodeRef, NodeTarget, PaletteError, RgbColor, ScriptEngine, ScriptError,
+    ScriptFunctionRef, ScriptHarness, SessionRef, TabSpec, ThemeSpec, TreeSpec, WeightedTreeSpec,
 };
 pub use socket_transport::SocketTransport;
 pub use state::ClientState;
