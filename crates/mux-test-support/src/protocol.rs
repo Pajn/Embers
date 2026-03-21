@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::time::Duration;
 
-use mux_core::{MuxError, Result, SessionId, new_request_id};
+use mux_core::{BufferId, MuxError, Result, SessionId, new_request_id};
 use mux_protocol::{
-    ClientMessage, PingRequest, ProtocolClient, ServerEnvelope, ServerEvent, ServerResponse,
-    SubscribeRequest, UnsubscribeRequest,
+    BufferRequest, ClientMessage, PingRequest, ProtocolClient, ServerEnvelope, ServerEvent,
+    ServerResponse, SessionRequest, SessionSnapshot, SnapshotResponse, SubscribeRequest,
+    UnsubscribeRequest,
 };
 
 #[derive(Debug)]
@@ -121,6 +122,66 @@ impl TestConnection {
             other => Err(MuxError::protocol(format!(
                 "unexpected response to ping request: {other:?}"
             ))),
+        }
+    }
+
+    pub async fn session_snapshot(&mut self, session_id: SessionId) -> Result<SessionSnapshot> {
+        let response = self
+            .request(&ClientMessage::Session(SessionRequest::Get {
+                request_id: new_request_id(),
+                session_id,
+            }))
+            .await?;
+
+        match response {
+            ServerResponse::SessionSnapshot(response) => Ok(response.snapshot),
+            ServerResponse::Error(error) => Err(error.error.into()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to session snapshot request: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn capture_buffer(&mut self, buffer_id: BufferId) -> Result<SnapshotResponse> {
+        let response = self
+            .request(&ClientMessage::Buffer(BufferRequest::Capture {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await?;
+
+        match response {
+            ServerResponse::Snapshot(snapshot) => Ok(snapshot),
+            ServerResponse::Error(error) => Err(error.error.into()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to capture request: {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn wait_for_capture_contains(
+        &mut self,
+        buffer_id: BufferId,
+        needle: &str,
+        timeout: Duration,
+    ) -> Result<SnapshotResponse> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let snapshot = self.capture_buffer(buffer_id).await?;
+            let capture = snapshot.lines.join("\n");
+            if capture.contains(needle) {
+                return Ok(snapshot);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MuxError::timeout(format!(
+                    "timed out waiting for buffer {buffer_id} to contain {needle:?}; last capture: {:?}",
+                    capture
+                )));
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
