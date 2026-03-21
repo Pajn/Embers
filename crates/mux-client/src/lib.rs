@@ -1,5 +1,11 @@
+pub mod client;
+pub mod socket_transport;
+pub mod state;
 pub mod testing;
 pub mod transport;
 
+pub use client::MuxClient;
+pub use socket_transport::SocketTransport;
+pub use state::ClientState;
 pub use testing::{FakeTransport, ScriptedTransport, TestGrid};
 pub use transport::Transport;
