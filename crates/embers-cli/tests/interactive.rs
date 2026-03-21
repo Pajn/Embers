@@ -54,6 +54,17 @@ async fn shutdown_spawned_server(socket_path: &Path) {
     );
 }
 
+async fn wait_for_socket(socket_path: &Path) {
+    for _ in 0..50 {
+        if socket_path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("timed out waiting for socket {}", socket_path.display());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
     let tempdir = tempdir().expect("tempdir");
@@ -75,6 +86,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
 
     harness.write_all("\x11").expect("quit client");
     harness.wait().expect("client exits");
+    wait_for_socket(&socket_path).await;
 
     let output = cargo_bin("embers")
         .arg("list-sessions")
