@@ -7,6 +7,7 @@ use embers_protocol::{
     ClientMessage, FloatingChangedEvent, FloatingRecord, FocusChangedEvent, NodeChangedEvent,
     NodeRecord, NodeRecordKind, RenderInvalidatedEvent, ServerEvent, ServerResponse, SessionRecord,
     SessionRequest, SessionSnapshot, SessionSnapshotResponse, SplitRecord, TabRecord, TabsRecord,
+    VisibleSnapshotResponse,
 };
 
 fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord {
@@ -142,6 +143,30 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
     }
 }
 
+fn visible_snapshot(
+    buffer_id: u64,
+    total_lines: u64,
+    viewport_top_line: u64,
+    alternate_screen: bool,
+) -> VisibleSnapshotResponse {
+    VisibleSnapshotResponse {
+        request_id: RequestId(0),
+        buffer_id: BufferId(buffer_id),
+        sequence: 1,
+        size: PtySize::new(80, 24),
+        lines: vec!["line-a".to_owned(), "line-b".to_owned()],
+        title: None,
+        cwd: None,
+        viewport_top_line,
+        total_lines,
+        alternate_screen,
+        mouse_reporting: false,
+        focus_reporting: false,
+        bracketed_paste: false,
+        cursor: None,
+    }
+}
+
 #[test]
 fn initial_session_snapshot_apply_populates_cache() {
     let snapshot = session_snapshot(0, 0);
@@ -237,6 +262,58 @@ fn hidden_nested_subtree_state_updates_on_snapshot_refresh() {
             .map(|tabs| tabs.active),
         Some(1)
     );
+}
+
+#[test]
+fn session_snapshot_initializes_view_state_for_each_buffer_view() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+
+    assert_eq!(state.view_state.len(), 5);
+    let root = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert_eq!(root.buffer_id, BufferId(1));
+    assert!(root.follow_output);
+    assert_eq!(root.scroll_top_line, 0);
+    assert_eq!(root.visible_line_count, 24);
+    assert_eq!(root.total_line_count, 24);
+}
+
+#[test]
+fn visible_snapshot_updates_following_views_to_live_bottom() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+
+    state.apply_buffer_snapshot(visible_snapshot(1, 40, 16, false));
+
+    let root = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert_eq!(root.total_line_count, 40);
+    assert_eq!(root.scroll_top_line, 16);
+    assert_eq!(root.visible_line_count, 24);
+    assert!(!root.alternate_screen);
+}
+
+#[test]
+fn scrolled_view_preserves_position_and_alternate_screen_keeps_state() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+    let view = state
+        .view_state
+        .get_mut(&NodeId(11))
+        .expect("root leaf view state");
+    view.follow_output = false;
+    view.scroll_top_line = 5;
+
+    state.apply_buffer_snapshot(visible_snapshot(1, 50, 26, true));
+    let root = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert_eq!(root.scroll_top_line, 5);
+    assert!(root.alternate_screen);
+    assert_eq!(root.total_line_count, 50);
+
+    state.apply_buffer_snapshot(visible_snapshot(1, 60, 36, false));
+    let root = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert_eq!(root.scroll_top_line, 5);
+    assert!(!root.alternate_screen);
+    assert_eq!(root.total_line_count, 60);
 }
 
 #[tokio::test]
