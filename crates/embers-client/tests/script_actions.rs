@@ -63,13 +63,17 @@ fn action_helpers_roundtrip_to_typed_actions() {
     let context = demo_context();
 
     assert_eq!(
-        engine.run_named_action("enter-copy", context.clone()).unwrap(),
+        engine
+            .run_named_action("enter-copy", context.clone())
+            .unwrap(),
         vec![Action::EnterMode {
             mode: "copy".to_owned(),
         }]
     );
     assert_eq!(
-        engine.run_named_action("focus-left", context.clone()).unwrap(),
+        engine
+            .run_named_action("focus-left", context.clone())
+            .unwrap(),
         vec![Action::Focus {
             direction: embers_client::NavigationDirection::Left,
         }]
@@ -84,11 +88,15 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine.run_named_action("select-tab", context.clone()).unwrap(),
+        engine
+            .run_named_action("select-tab", context.clone())
+            .unwrap(),
         vec![Action::SelectTab { index: 2 }]
     );
     assert_eq!(
-        engine.run_named_action("split-tree", context.clone()).unwrap(),
+        engine
+            .run_named_action("split-tree", context.clone())
+            .unwrap(),
         vec![Action::Split {
             direction: SplitDirection::Horizontal,
             tree: TreeSpec::BufferCurrent,
@@ -105,21 +113,27 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine.run_named_action("replace-node", context.clone()).unwrap(),
+        engine
+            .run_named_action("replace-node", context.clone())
+            .unwrap(),
         vec![Action::ReplaceNode {
             target: NodeTarget::Node(NodeId(7)),
             tree: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
-        engine.run_named_action("wrap-split", context.clone()).unwrap(),
+        engine
+            .run_named_action("wrap-split", context.clone())
+            .unwrap(),
         vec![Action::WrapCurrentInSplit {
             direction: SplitDirection::Vertical,
             tree: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
-        engine.run_named_action("wrap-tabs", context.clone()).unwrap(),
+        engine
+            .run_named_action("wrap-tabs", context.clone())
+            .unwrap(),
         vec![Action::WrapCurrentInTabs {
             tabs: vec![
                 TabSpec {
@@ -135,14 +149,18 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine.run_named_action("insert-tab", context.clone()).unwrap(),
+        engine
+            .run_named_action("insert-tab", context.clone())
+            .unwrap(),
         vec![Action::InsertTabAfterCurrent {
             title: "logs".to_owned(),
             tree: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
-        engine.run_named_action("open-popup", context.clone()).unwrap(),
+        engine
+            .run_named_action("open-popup", context.clone())
+            .unwrap(),
         vec![Action::OpenFloating {
             tree: TreeSpec::BufferCurrent,
             options: FloatingOptions {
@@ -169,21 +187,27 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine.run_named_action("send-keys", context.clone()).unwrap(),
+        engine
+            .run_named_action("send-keys", context.clone())
+            .unwrap(),
         vec![Action::SendBytes {
             target: BufferTarget::Current,
             bytes: b"abc".to_vec(),
         }]
     );
     assert_eq!(
-        engine.run_named_action("send-bytes", context.clone()).unwrap(),
+        engine
+            .run_named_action("send-bytes", context.clone())
+            .unwrap(),
         vec![Action::SendBytes {
             target: BufferTarget::Current,
             bytes: vec![65, 66],
         }]
     );
     assert_eq!(
-        engine.run_named_action("notify-user", context.clone()).unwrap(),
+        engine
+            .run_named_action("notify-user", context.clone())
+            .unwrap(),
         vec![Action::Notify {
             message: "hello".to_owned(),
         }]
@@ -238,7 +262,11 @@ fn invalid_action_shapes_fail_cleanly() {
         .run_named_action("bad-bytes", demo_context())
         .expect_err("invalid action arguments should fail");
 
-    assert!(error.to_string().contains("send_bytes expects an array of integers"));
+    assert!(
+        error
+            .to_string()
+            .contains("send_bytes expects an array of integers")
+    );
 }
 
 #[test]
@@ -264,7 +292,9 @@ fn query_api_supports_smart_nav_style_scripts() {
     );
 
     assert_eq!(
-        engine.run_named_action("smart-nav-left", demo_context()).unwrap(),
+        engine
+            .run_named_action("smart-nav-left", demo_context())
+            .unwrap(),
         vec![Action::SendBytes {
             target: BufferTarget::Current,
             bytes: b"h".to_vec(),
@@ -343,7 +373,9 @@ fn tree_builders_roundtrip_nested_specs() {
     );
 
     assert_eq!(
-        engine.run_named_action("build-tree", demo_context()).unwrap(),
+        engine
+            .run_named_action("build-tree", demo_context())
+            .unwrap(),
         vec![Action::ReplaceCurrentWith {
             tree: TreeSpec::Tabs {
                 tabs: vec![

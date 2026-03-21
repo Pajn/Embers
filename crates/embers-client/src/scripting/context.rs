@@ -75,7 +75,10 @@ impl Context {
                     .as_ref()
                     .map(|tabs| tabs.tabs.iter().map(|tab| tab.title.clone()).collect())
                     .unwrap_or_default();
-                let buffer_id = node.buffer_view.as_ref().map(|buffer_view| buffer_view.buffer_id);
+                let buffer_id = node
+                    .buffer_view
+                    .as_ref()
+                    .map(|buffer_view| buffer_view.buffer_id);
                 (
                     node.id,
                     NodeRef {
@@ -226,13 +229,9 @@ pub struct BufferRef {
 
 impl BufferRef {
     pub fn process_name(&self) -> Option<String> {
-        self.command.first().map(|command| {
-            command
-                .rsplit('/')
-                .next()
-                .unwrap_or(command)
-                .to_owned()
-        })
+        self.command
+            .first()
+            .map(|command| command.rsplit('/').next().unwrap_or(command).to_owned())
     }
 }
 

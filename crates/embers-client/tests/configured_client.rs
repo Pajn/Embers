@@ -23,7 +23,10 @@ fn manager_from_source(source: &str) -> ConfigManager {
         .unwrap()
 }
 
-fn session_snapshot_from_state(state: &embers_client::ClientState, session_id: SessionId) -> SessionSnapshot {
+fn session_snapshot_from_state(
+    state: &embers_client::ClientState,
+    session_id: SessionId,
+) -> SessionSnapshot {
     let session = state.sessions.get(&session_id).unwrap().clone();
     let nodes = state.nodes.values().cloned().collect::<Vec<_>>();
     let buffers = state.buffers.values().cloned().collect::<Vec<_>>();

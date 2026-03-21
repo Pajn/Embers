@@ -4,21 +4,60 @@ use crate::presentation::NavigationDirection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    EnterMode { mode: String },
-    Focus { direction: NavigationDirection },
-    Resize { direction: NavigationDirection, amount: u16 },
-    SelectTab { index: usize },
-    Split { direction: SplitDirection, tree: TreeSpec },
-    ReplaceCurrentWith { tree: TreeSpec },
-    ReplaceNode { target: NodeTarget, tree: TreeSpec },
-    WrapCurrentInSplit { direction: SplitDirection, tree: TreeSpec },
-    WrapCurrentInTabs { tabs: Vec<TabSpec>, active: usize },
-    InsertTabAfterCurrent { title: String, tree: TreeSpec },
-    OpenFloating { tree: TreeSpec, options: FloatingOptions },
-    DetachBuffer { target: BufferTarget },
-    KillBuffer { target: BufferTarget, force: bool },
-    SendBytes { target: BufferTarget, bytes: Vec<u8> },
-    Notify { message: String },
+    EnterMode {
+        mode: String,
+    },
+    Focus {
+        direction: NavigationDirection,
+    },
+    Resize {
+        direction: NavigationDirection,
+        amount: u16,
+    },
+    SelectTab {
+        index: usize,
+    },
+    Split {
+        direction: SplitDirection,
+        tree: TreeSpec,
+    },
+    ReplaceCurrentWith {
+        tree: TreeSpec,
+    },
+    ReplaceNode {
+        target: NodeTarget,
+        tree: TreeSpec,
+    },
+    WrapCurrentInSplit {
+        direction: SplitDirection,
+        tree: TreeSpec,
+    },
+    WrapCurrentInTabs {
+        tabs: Vec<TabSpec>,
+        active: usize,
+    },
+    InsertTabAfterCurrent {
+        title: String,
+        tree: TreeSpec,
+    },
+    OpenFloating {
+        tree: TreeSpec,
+        options: FloatingOptions,
+    },
+    DetachBuffer {
+        target: BufferTarget,
+    },
+    KillBuffer {
+        target: BufferTarget,
+        force: bool,
+    },
+    SendBytes {
+        target: BufferTarget,
+        bytes: Vec<u8>,
+    },
+    Notify {
+        message: String,
+    },
     ReloadConfig,
 }
 
@@ -62,7 +101,9 @@ pub struct TabSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeSpec {
     BufferSpawn(BufferSpawnSpec),
-    BufferAttach { buffer_id: BufferId },
+    BufferAttach {
+        buffer_id: BufferId,
+    },
     BufferCurrent,
     CurrentNode,
     BufferEmpty,
