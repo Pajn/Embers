@@ -1,0 +1,14 @@
+[package]
+name = "mux-client"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+mux-core = { path = "../mux-core" }
+mux-protocol = { path = "../mux-protocol" }
+
+[dev-dependencies]
+tokio.workspace = true

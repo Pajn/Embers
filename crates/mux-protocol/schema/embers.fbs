@@ -1,0 +1,50 @@
+namespace mux.protocol;
+
+enum MessageKind : ubyte {
+  None = 0,
+  PingRequest = 1,
+  PingResponse = 2,
+  ErrorResponse = 3,
+  HeartbeatEvent = 4,
+}
+
+enum ErrorCodeWire : ubyte {
+  Unknown = 0,
+  InvalidRequest = 1,
+  ProtocolViolation = 2,
+  Transport = 3,
+  NotFound = 4,
+  Conflict = 5,
+  Unsupported = 6,
+  Timeout = 7,
+  Internal = 8,
+}
+
+table PingRequest {
+  payload:string;
+}
+
+table PingResponse {
+  payload:string;
+}
+
+table ErrorResponse {
+  code:ErrorCodeWire = Unknown;
+  message:string;
+}
+
+table HeartbeatEvent {
+  message:string;
+}
+
+table Envelope {
+  request_id:ulong = 0;
+  kind:MessageKind = None;
+  ping_request:PingRequest;
+  ping_response:PingResponse;
+  error_response:ErrorResponse;
+  heartbeat_event:HeartbeatEvent;
+}
+
+root_type Envelope;
+file_identifier "EMBR";

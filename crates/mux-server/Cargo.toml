@@ -1,0 +1,15 @@
+[package]
+name = "mux-server"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+mux-core = { path = "../mux-core" }
+mux-protocol = { path = "../mux-protocol" }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
