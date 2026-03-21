@@ -116,51 +116,7 @@ impl Transport for ScriptedTransport {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TestGrid {
-    width: u16,
-    height: u16,
-    cells: Vec<char>,
-}
-
-impl TestGrid {
-    pub fn new(width: u16, height: u16) -> Self {
-        let len = usize::from(width) * usize::from(height);
-        Self {
-            width,
-            height,
-            cells: vec![' '; len],
-        }
-    }
-
-    pub fn put_str(&mut self, x: u16, y: u16, text: &str) {
-        if y >= self.height {
-            return;
-        }
-
-        for (offset, ch) in text.chars().enumerate() {
-            let Some(x_pos) = x.checked_add(offset as u16) else {
-                break;
-            };
-            if x_pos >= self.width {
-                break;
-            }
-            let idx = usize::from(y) * usize::from(self.width) + usize::from(x_pos);
-            self.cells[idx] = ch;
-        }
-    }
-
-    pub fn lines(&self) -> Vec<String> {
-        self.cells
-            .chunks(usize::from(self.width))
-            .map(|row| row.iter().collect::<String>())
-            .collect()
-    }
-
-    pub fn render(&self) -> String {
-        self.lines().join("\n")
-    }
-}
+pub type TestGrid = crate::grid::RenderGrid;
 
 #[cfg(test)]
 mod tests {
