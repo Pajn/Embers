@@ -6,26 +6,17 @@ on:
 
 env:
   FLATBUFFERS_VERSION: 25.12.19
+  FLATBUFFERS_SHA256: 9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039
 
 jobs:
   fmt-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatc
-        run: |
-          mkdir -p flatbuffers-bin
-          asset=""
-          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
-            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
-              asset="${candidate}"
-              break
-            fi
-          done
-          test -n "${asset}"
-          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
-          chmod +x flatbuffers-bin/flatc
-          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
+      - uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -39,20 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatc
-        run: |
-          mkdir -p flatbuffers-bin
-          asset=""
-          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
-            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
-              asset="${candidate}"
-              break
-            fi
-          done
-          test -n "${asset}"
-          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
-          chmod +x flatbuffers-bin/flatc
-          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
+      - uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run unit and integration tests
@@ -62,20 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatc
-        run: |
-          mkdir -p flatbuffers-bin
-          asset=""
-          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
-            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
-              asset="${candidate}"
-              break
-            fi
-          done
-          test -n "${asset}"
-          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
-          chmod +x flatbuffers-bin/flatc
-          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
+      - uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
