@@ -1,11 +1,11 @@
 [workspace]
 members = [
-  "crates/mux-core",
-  "crates/mux-protocol",
-  "crates/mux-server",
-  "crates/mux-client",
-  "crates/mux-cli",
-  "crates/mux-test-support",
+  "crates/embers-core",
+  "crates/embers-protocol",
+  "crates/embers-server",
+  "crates/embers-client",
+  "crates/embers-cli",
+  "crates/embers-test-support",
 ]
 resolver = "2"
 

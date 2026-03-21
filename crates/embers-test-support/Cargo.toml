@@ -1,0 +1,15 @@
+[package]
+name = "embers-test-support"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+assert_cmd.workspace = true
+embers-core = { path = "../embers-core" }
+embers-protocol = { path = "../embers-protocol" }
+embers-server = { path = "../embers-server" }
+portable-pty.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

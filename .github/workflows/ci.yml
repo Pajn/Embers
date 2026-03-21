@@ -46,4 +46,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
-        run: cargo test -p mux-test-support pty_round_trips_input -- --ignored
+        run: cargo test -p embers-test-support pty_round_trips_input -- --ignored
