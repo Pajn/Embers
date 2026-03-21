@@ -1,7 +1,13 @@
+mod support;
+
 use embers_client::{
-    InputResolution, KeyToken, ScriptEngine, ScriptHarness,
+    Context, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
+    TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
+use embers_core::Size;
+
+use support::{SESSION_ID, demo_state};
 
 #[test]
 fn loaded_config_debug_snapshot_is_stable() {
@@ -175,4 +181,73 @@ fn same_sequence_can_resolve_differently_by_mode() {
             target: "copy-a".to_owned(),
         })
     );
+}
+
+#[test]
+fn formatter_functions_build_bar_specs_from_runtime_context() {
+    let source = LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: Some("formatters.rhai".into()),
+        source: r##"
+            fn root_bar() {
+                let tabs = bar.tabs();
+                let active = tabs[bar.active_index()];
+                ui.bar([
+                    ui.segment("ROOT ", theme.color("active"), theme.color("inactive")),
+                    ui.segment(active.title())
+                ])
+            }
+
+            fn nested_bar() {
+                let tabs = bar.tabs();
+                let active = tabs[bar.active_index()];
+                ui.bar([
+                    ui.segment("NESTED "),
+                    ui.segment(active.title(), theme.color("active"))
+                ])
+            }
+
+            tabbar.set_root_formatter(root_bar);
+            tabbar.set_nested_formatter(nested_bar);
+            theme.set_palette(#{ active: "#00ff00", inactive: "#102030" });
+        "##
+        .trim()
+        .to_owned(),
+        source_hash: 0,
+    };
+    let engine = ScriptEngine::load(&source).unwrap();
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+    let context = Context::from_state(&state, Some(&presentation));
+
+    let root = engine
+        .format_root_tabbar(context.clone(), TabBarContext::from_frame(&presentation.root_tabs))
+        .unwrap()
+        .unwrap();
+    let nested = engine
+        .format_nested_tabbar(
+            context,
+            TabBarContext::from_frame(presentation.focused_tabs().unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(root.segments.len(), 2);
+    assert_eq!(root.segments[0].text, "ROOT ");
+    assert_eq!(root.segments[1].text, "workspace");
+    assert_eq!(root.segments[0].foreground.unwrap().green, 255);
+    assert_eq!(root.segments[0].background.unwrap().blue, 48);
+
+    assert_eq!(nested.segments.len(), 2);
+    assert_eq!(nested.segments[0].text, "NESTED ");
+    assert_eq!(nested.segments[1].text, "logs-long-title");
+    assert_eq!(nested.segments[1].foreground.unwrap().green, 255);
 }
