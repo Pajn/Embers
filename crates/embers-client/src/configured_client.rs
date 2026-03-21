@@ -93,7 +93,8 @@ where
                             .run_named_action(&binding.target, context)
                         {
                             Ok(actions) => {
-                                self.execute_actions(session_id, viewport, actions).await
+                                self.execute_actions(Some(session_id), Some(viewport), actions)
+                                    .await
                             }
                             Err(error) => {
                                 self.record_notification(error.to_string());
@@ -140,9 +141,8 @@ where
                     .active_session_id
                     .or_else(|| event.session_id())
                     .or_else(|| self.client.state().sessions.keys().next().copied());
-                if let (Some(session_id), Some(viewport)) = (session_id, self.viewport) {
-                    self.execute_actions(session_id, viewport, actions).await?;
-                }
+                self.execute_actions(session_id, self.viewport, actions)
+                    .await?;
             }
             Ok(_) => {}
             Err(error) => self.record_notification(error.to_string()),
@@ -206,29 +206,32 @@ where
 
     async fn execute_actions(
         &mut self,
-        session_id: SessionId,
-        viewport: Size,
+        session_id: Option<SessionId>,
+        viewport: Option<Size>,
         actions: Vec<Action>,
     ) -> Result<()> {
         for action in actions {
-            let presentation = self.prepare_presentation(session_id, viewport).await?;
-            if let Err(error) = self
-                .execute_action(session_id, viewport, &presentation, action)
-                .await
-            {
+            let result = match action {
+                action @ (Action::EnterMode { .. }
+                | Action::Notify { .. }
+                | Action::ReloadConfig) => self.execute_stateless_action(action),
+                action => {
+                    let Some((session_id, viewport)) = session_id.zip(viewport) else {
+                        continue;
+                    };
+                    let presentation = self.prepare_presentation(session_id, viewport).await?;
+                    self.execute_action(session_id, viewport, &presentation, action)
+                        .await
+                }
+            };
+            if let Err(error) = result {
                 self.record_notification(error.to_string());
             }
         }
         Ok(())
     }
 
-    async fn execute_action(
-        &mut self,
-        session_id: SessionId,
-        _viewport: Size,
-        presentation: &PresentationModel,
-        action: Action,
-    ) -> Result<()> {
+    fn execute_stateless_action(&mut self, action: Action) -> Result<()> {
         match action {
             Action::EnterMode { mode } => {
                 if self
@@ -244,6 +247,26 @@ where
                     Err(MuxError::invalid_input(format!("unknown mode '{mode}'")))
                 }
             }
+            Action::Notify { message } => {
+                self.record_notification(message);
+                Ok(())
+            }
+            Action::ReloadConfig => self.reload_config(),
+            other => Err(MuxError::invalid_input(format!(
+                "action '{other:?}' requires a live presentation"
+            ))),
+        }
+    }
+
+    async fn execute_action(
+        &mut self,
+        session_id: SessionId,
+        _viewport: Size,
+        presentation: &PresentationModel,
+        action: Action,
+    ) -> Result<()> {
+        match action {
+            Action::EnterMode { mode } => self.execute_stateless_action(Action::EnterMode { mode }),
             Action::Focus { direction } => {
                 let Some(node_id) = presentation.focus_target(direction) else {
                     return Ok(());
@@ -344,11 +367,8 @@ where
                 self.send_bytes(target, session_id, presentation, bytes)
                     .await
             }
-            Action::Notify { message } => {
-                self.record_notification(message);
-                Ok(())
-            }
-            Action::ReloadConfig => self.reload_config(),
+            Action::Notify { message } => self.execute_stateless_action(Action::Notify { message }),
+            Action::ReloadConfig => self.execute_stateless_action(Action::ReloadConfig),
             other => Err(MuxError::invalid_input(format!(
                 "action '{other:?}' is not supported by the live executor yet"
             ))),

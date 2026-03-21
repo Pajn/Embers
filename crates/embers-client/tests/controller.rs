@@ -9,18 +9,16 @@ use support::{
     root_focus_state,
 };
 
+const TEST_SIZE: Size = Size {
+    width: 40,
+    height: 14,
+};
+
 #[test]
 fn ctrl_h_focuses_neighboring_leaf() {
     let state = demo_state();
-    let presentation = PresentationModel::project(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-    )
-    .expect("projection succeeds");
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
 
     let request = Controller
         .map_key(&presentation, RequestId(7), KeyEvent::Ctrl('h'))
@@ -39,15 +37,8 @@ fn ctrl_h_focuses_neighboring_leaf() {
 #[test]
 fn alt_digit_targets_deepest_visible_tabs_group() {
     let state = demo_state();
-    let presentation = PresentationModel::project(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-    )
-    .expect("projection succeeds");
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
 
     let request = Controller
         .map_key(&presentation, RequestId(8), KeyEvent::Alt('1'))
@@ -66,15 +57,8 @@ fn alt_digit_targets_deepest_visible_tabs_group() {
 #[test]
 fn alt_digit_falls_back_to_root_tabs_when_focus_is_not_nested() {
     let state = root_focus_state();
-    let presentation = PresentationModel::project(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-    )
-    .expect("projection succeeds");
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
 
     let request = Controller
         .map_key(&presentation, RequestId(9), KeyEvent::Alt('2'))
@@ -93,15 +77,8 @@ fn alt_digit_falls_back_to_root_tabs_when_focus_is_not_nested() {
 #[test]
 fn escape_closes_focused_popup() {
     let state = floating_focused_state();
-    let presentation = PresentationModel::project(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-    )
-    .expect("projection succeeds");
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
 
     let request = Controller
         .map_key(&presentation, RequestId(10), KeyEvent::Escape)
@@ -119,15 +96,8 @@ fn escape_closes_focused_popup() {
 #[test]
 fn plain_input_routes_to_focused_buffer() {
     let state = demo_state();
-    let presentation = PresentationModel::project(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-    )
-    .expect("projection succeeds");
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
 
     let request = Controller
         .map_key(&presentation, RequestId(11), KeyEvent::Char('x'))

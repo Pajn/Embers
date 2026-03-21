@@ -89,8 +89,8 @@ impl Renderer {
             return;
         }
 
-        let mut x = tabs.rect.origin.x.max(0) as u16;
-        let y = tabs.rect.origin.y.max(0) as u16;
+        let mut x = clamp_i32_to_u16(tabs.rect.origin.x);
+        let y = clamp_i32_to_u16(tabs.rect.origin.y);
         let end_x = x.saturating_add(tabs.rect.size.width);
         grid.put_str(x, y, &" ".repeat(usize::from(tabs.rect.size.width)));
 
@@ -105,7 +105,7 @@ impl Renderer {
                 }
                 let label = truncate(&segment.text, available);
                 grid.put_str(x, y, &label);
-                x = x.saturating_add(label.chars().count() as u16);
+                x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
             }
             return;
         }
@@ -122,7 +122,7 @@ impl Renderer {
 
             let label = format_tab_label(tab, available);
             grid.put_str(x, y, &label);
-            x = x.saturating_add(label.chars().count() as u16);
+            x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
 
             if x < end_x {
                 grid.put_char(x, y, ' ');
@@ -136,8 +136,8 @@ impl Renderer {
             return;
         }
 
-        let x = leaf.rect.origin.x.max(0) as u16;
-        let y = leaf.rect.origin.y.max(0) as u16;
+        let x = clamp_i32_to_u16(leaf.rect.origin.x);
+        let y = clamp_i32_to_u16(leaf.rect.origin.y);
         let width = leaf.rect.size.width;
         let height = leaf.rect.size.height;
         let blank_line = " ".repeat(usize::from(width));
@@ -168,7 +168,10 @@ impl Renderer {
                 .take(usize::from(height.saturating_sub(1)))
                 .enumerate()
             {
-                grid.put_str(x, y + 1 + row as u16, &truncate(line, width));
+                let Some(row) = u16::try_from(row).ok() else {
+                    break;
+                };
+                grid.put_str(x, y + 1 + row, &truncate(line, width));
             }
         }
     }
@@ -178,8 +181,8 @@ impl Renderer {
             return;
         }
 
-        let x = divider.rect.origin.x.max(0) as u16;
-        let y = divider.rect.origin.y.max(0) as u16;
+        let x = clamp_i32_to_u16(divider.rect.origin.x);
+        let y = clamp_i32_to_u16(divider.rect.origin.y);
         match divider.direction {
             embers_core::SplitDirection::Horizontal => {
                 grid.draw_hline(x, y, divider.rect.size.width, '-');
@@ -192,8 +195,8 @@ impl Renderer {
 
     fn render_floating_frame(&self, grid: &mut RenderGrid, floating: &FloatingFrame) {
         let blank_line = " ".repeat(usize::from(floating.rect.size.width));
-        let x = floating.rect.origin.x.max(0) as u16;
-        let y = floating.rect.origin.y.max(0) as u16;
+        let x = clamp_i32_to_u16(floating.rect.origin.x);
+        let y = clamp_i32_to_u16(floating.rect.origin.y);
         for row in 0..floating.rect.size.height {
             grid.put_str(x, y + row, &blank_line);
         }
@@ -218,8 +221,8 @@ impl Renderer {
             };
             if title_rect.size.width > 0 {
                 grid.put_str(
-                    title_rect.origin.x.max(0) as u16,
-                    title_rect.origin.y.max(0) as u16,
+                    clamp_i32_to_u16(title_rect.origin.x),
+                    clamp_i32_to_u16(title_rect.origin.y),
                     &truncate(title, title_rect.size.width),
                 );
             }
@@ -268,4 +271,12 @@ fn truncate(text: &str, width: u16) -> String {
     let mut output = text.chars().take(width - 1).collect::<String>();
     output.push('~');
     output
+}
+
+fn clamp_i32_to_u16(value: i32) -> u16 {
+    value.clamp(0, i32::from(u16::MAX)) as u16
+}
+
+fn clamp_usize_to_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }

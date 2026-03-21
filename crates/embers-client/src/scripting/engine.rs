@@ -29,6 +29,7 @@ impl ScriptEngine {
         let registration = Arc::new(Mutex::new(RegistrationState::default()));
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 256);
+        engine.set_max_operations(1_000_000);
         register_api(&mut engine, registration.clone());
         register_runtime_api(&mut engine);
 
@@ -300,7 +301,11 @@ impl TabbarApi {
                 position,
             ));
         }
-        registration.root_tab_formatter = Some(function_ref(formatter));
+        registration.root_tab_formatter = Some(checked_function_ref(
+            formatter,
+            "root tab formatter",
+            position,
+        )?);
         Ok(())
     }
 
@@ -312,7 +317,11 @@ impl TabbarApi {
                 position,
             ));
         }
-        registration.nested_tab_formatter = Some(function_ref(formatter));
+        registration.nested_tab_formatter = Some(checked_function_ref(
+            formatter,
+            "nested tab formatter",
+            position,
+        )?);
         Ok(())
     }
 }
@@ -432,9 +441,10 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
                     context.call_position(),
                 ));
             }
-            registration
-                .named_actions
-                .insert(name.into_owned(), function_ref(callback));
+            registration.named_actions.insert(
+                name.into_owned(),
+                checked_function_ref(callback, "named action", context.call_position())?,
+            );
             Ok(())
         },
     );
@@ -442,7 +452,7 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     let handler_registration = registration.clone();
     engine.register_fn(
         "on",
-        move |_context: NativeCallContext,
+        move |context: NativeCallContext,
               event_name: ImmutableString,
               callback: FnPtr|
               -> RhaiResult<()> {
@@ -452,7 +462,11 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
                 .event_handlers
                 .entry(event_name.into_owned())
                 .or_default()
-                .push(function_ref(callback));
+                .push(checked_function_ref(
+                    callback,
+                    "event handler",
+                    context.call_position(),
+                )?);
             Ok(())
         },
     );
@@ -479,6 +493,20 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
 
 fn function_ref(callback: FnPtr) -> ScriptFunctionRef {
     ScriptFunctionRef::new(callback.fn_name().to_owned())
+}
+
+fn checked_function_ref(
+    callback: FnPtr,
+    role: &str,
+    position: Position,
+) -> RhaiResult<ScriptFunctionRef> {
+    if callback.is_curried() {
+        return Err(runtime_error(
+            format!("{role} callbacks cannot capture curried arguments"),
+            position,
+        ));
+    }
+    Ok(function_ref(callback))
 }
 
 fn runtime_error(message: impl Into<String>, position: Position) -> Box<EvalAltResult> {

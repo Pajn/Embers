@@ -9,7 +9,7 @@ use tempfile::tempdir;
 fn config_manager_loads_standard_config_file() {
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("config.rhai");
-    fs::write(&config_path, "set_leader(\"C-a\")").unwrap();
+    fs::write(&config_path, "set_leader(\"<C-a>\")").unwrap();
     let options = ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path());
 
     let manager = ConfigManager::load(options).unwrap();
@@ -19,7 +19,7 @@ fn config_manager_loads_standard_config_file() {
         manager.active_source().path,
         Some(config_path.canonicalize().unwrap())
     );
-    assert_eq!(manager.active_source().source, "set_leader(\"C-a\")");
+    assert_eq!(manager.active_source().source, "set_leader(\"<C-a>\")");
 }
 
 #[test]
@@ -27,8 +27,8 @@ fn explicit_override_wins_when_starting_manager() {
     let tempdir = tempdir().unwrap();
     let explicit_path = tempdir.path().join("explicit.rhai");
     let standard_path = tempdir.path().join("config.rhai");
-    fs::write(&explicit_path, "set_leader(\"C-b\")").unwrap();
-    fs::write(&standard_path, "set_leader(\"C-c\")").unwrap();
+    fs::write(&explicit_path, "set_leader(\"<C-b>\")").unwrap();
+    fs::write(&standard_path, "set_leader(\"<C-c>\")").unwrap();
     let options = ConfigDiscoveryOptions {
         explicit_path: Some(explicit_path.clone()),
         env_path: Some(standard_path.clone()),
@@ -42,7 +42,7 @@ fn explicit_override_wins_when_starting_manager() {
         manager.active_source().path,
         Some(explicit_path.canonicalize().unwrap())
     );
-    assert_eq!(manager.active_source().source, "set_leader(\"C-b\")");
+    assert_eq!(manager.active_source().source, "set_leader(\"<C-b>\")");
 }
 
 #[test]

@@ -12,6 +12,8 @@ pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 pub enum ConfigError {
     #[error("{origin} config path '{path}' does not exist")]
     MissingConfig { origin: ConfigOrigin, path: PathBuf },
+    #[error("{origin} config is missing a canonical path")]
+    MissingPath { origin: ConfigOrigin },
     #[error("failed to inspect {origin} config path '{path}': {source}")]
     PathCheck {
         origin: ConfigOrigin,

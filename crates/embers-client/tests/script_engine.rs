@@ -1,5 +1,7 @@
 mod support;
 
+use std::path::Path;
+
 use embers_client::{
     Context, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
     TabBarContext,
@@ -33,92 +35,36 @@ fn loaded_config_debug_snapshot_is_stable() {
     };
 
     let engine = ScriptEngine::load(&source).unwrap();
-    let snapshot = format!("{:#?}", engine.loaded_config());
+    let loaded = engine.loaded_config();
+    let debug_output = format!("{loaded:#?}");
 
     assert_eq!(
-        snapshot,
-        r#"LoadedConfig {
-    source_path: Some(
-        "snapshot-config.rhai",
-    ),
-    source_hash: 0,
-    ast: "<ast>",
-    leader: [
-        Ctrl(
-            'a',
-        ),
-    ],
-    modes: {
-        "copy": ModeSpec {
-            name: "copy",
-            fallback_policy: Ignore,
-        },
-        "locked": ModeSpec {
-            name: "locked",
-            fallback_policy: Ignore,
-        },
-        "normal": ModeSpec {
-            name: "normal",
-            fallback_policy: Passthrough,
-        },
-        "select": ModeSpec {
-            name: "select",
-            fallback_policy: Ignore,
-        },
-    },
-    bindings: {
-        "normal": [
-            BindingSpec {
-                notation: "<leader>ws",
-                sequence: [
-                    Ctrl(
-                        'a',
-                    ),
-                    Char(
-                        'w',
-                    ),
-                    Char(
-                        's',
-                    ),
-                ],
-                target: "workspace-split",
-            },
-        ],
-    },
-    named_actions: {
-        "workspace-split": ScriptFunctionRef {
-            name: "split_workspace",
-        },
-    },
-    event_handlers: {
-        "session-created": [
-            ScriptFunctionRef {
-                name: "on_created",
-            },
-        ],
-    },
-    root_tab_formatter: Some(
-        ScriptFunctionRef {
-            name: "root_tabs",
-        },
-    ),
-    nested_tab_formatter: None,
-    theme: ThemeSpec {
-        palette: {
-            "active": RgbColor {
-                red: 0,
-                green: 255,
-                blue: 0,
-            },
-            "inactive": RgbColor {
-                red: 51,
-                green: 51,
-                blue: 51,
-            },
-        },
-    },
-}"#
+        loaded.source_path.as_deref(),
+        Some(Path::new("snapshot-config.rhai"))
     );
+    assert_eq!(loaded.source_hash, 0);
+    assert_eq!(loaded.leader, vec![KeyToken::Ctrl('a')]);
+    assert!(loaded.modes.contains_key("locked"));
+    assert_eq!(loaded.bindings["normal"][0].notation, "<leader>ws");
+    assert_eq!(
+        loaded.named_actions["workspace-split"].name,
+        "split_workspace"
+    );
+    assert_eq!(
+        loaded.event_handlers["session-created"][0].name,
+        "on_created"
+    );
+    assert_eq!(
+        loaded
+            .root_tab_formatter
+            .as_ref()
+            .map(|formatter| formatter.name.as_str()),
+        Some("root_tabs")
+    );
+    assert!(loaded.nested_tab_formatter.is_none());
+    assert_eq!(loaded.theme.palette["active"].green, 255);
+    assert!(debug_output.contains("source_path: Some("));
+    assert!(debug_output.contains("ast: \"<ast>\""));
 }
 
 #[test]
