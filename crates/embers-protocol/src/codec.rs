@@ -1,6 +1,6 @@
 use embers_core::{
-    ActivityState, BufferId, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
-    SessionId, SplitDirection, WireError,
+    ActivityState, BufferId, CursorShape, CursorState, ErrorCode, FloatGeometry, FloatingId,
+    NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -72,6 +72,41 @@ fn decode_string_map(
         .zip(values.iter())
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect())
+}
+
+fn encode_cursor_state<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    cursor: &CursorState,
+) -> flatbuffers::WIPOffset<fb::CursorState<'a>> {
+    let shape = match cursor.shape {
+        CursorShape::Block => fb::CursorShapeWire::Block,
+        CursorShape::Underline => fb::CursorShapeWire::Underline,
+        CursorShape::Beam => fb::CursorShapeWire::Beam,
+    };
+    fb::CursorState::create(
+        builder,
+        &fb::CursorStateArgs {
+            row: cursor.position.row,
+            col: cursor.position.col,
+            shape,
+        },
+    )
+}
+
+fn decode_cursor_state(cursor: fb::CursorState<'_>) -> Result<CursorState, ProtocolError> {
+    let shape = match cursor.shape() {
+        fb::CursorShapeWire::Block => CursorShape::Block,
+        fb::CursorShapeWire::Underline => CursorShape::Underline,
+        fb::CursorShapeWire::Beam => CursorShape::Beam,
+        _ => return Err(ProtocolError::InvalidMessage("unknown cursor shape")),
+    };
+    Ok(CursorState {
+        position: embers_core::CursorPosition {
+            row: cursor.row(),
+            col: cursor.col(),
+        },
+        shape,
+    })
 }
 
 // ==================== ENCODING ====================
@@ -249,6 +284,8 @@ fn encode_buffer_request<'a>(
         attached_only,
         detached_only,
         force,
+        start_line,
+        line_count,
         title_str,
         command_vec,
         cwd_str,
@@ -267,6 +304,8 @@ fn encode_buffer_request<'a>(
             false,
             false,
             false,
+            0,
+            0,
             title.as_deref(),
             Some(command),
             cwd.as_deref(),
@@ -284,6 +323,8 @@ fn encode_buffer_request<'a>(
             *attached_only,
             *detached_only,
             false,
+            0,
+            0,
             None,
             None,
             None,
@@ -296,6 +337,8 @@ fn encode_buffer_request<'a>(
             false,
             false,
             false,
+            0,
+            0,
             None,
             None,
             None,
@@ -308,6 +351,8 @@ fn encode_buffer_request<'a>(
             false,
             false,
             false,
+            0,
+            0,
             None,
             None,
             None,
@@ -322,6 +367,8 @@ fn encode_buffer_request<'a>(
             false,
             false,
             *force,
+            0,
+            0,
             None,
             None,
             None,
@@ -334,6 +381,41 @@ fn encode_buffer_request<'a>(
             false,
             false,
             false,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::CaptureVisible { buffer_id, .. } => (
+            fb::BufferOp::CaptureVisible,
+            (*buffer_id).into(),
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::ScrollbackSlice {
+            buffer_id,
+            start_line,
+            line_count,
+            ..
+        } => (
+            fb::BufferOp::ScrollbackSlice,
+            (*buffer_id).into(),
+            0,
+            false,
+            false,
+            false,
+            *start_line,
+            *line_count,
             None,
             None,
             None,
@@ -365,6 +447,8 @@ fn encode_buffer_request<'a>(
             attached_only,
             detached_only,
             force,
+            start_line,
+            line_count,
             title,
             command,
             cwd,
@@ -1200,6 +1284,63 @@ fn encode_server_response<'a>(
                 },
             )
         }
+        ServerResponse::VisibleSnapshot(r) => {
+            let title = r.title.as_ref().map(|t| builder.create_string(t));
+            let cwd = r.cwd.as_ref().map(|c| builder.create_string(c));
+            let lines_vec: Vec<_> = r.lines.iter().map(|l| builder.create_string(l)).collect();
+            let lines = builder.create_vector(&lines_vec);
+            let cursor = r.cursor.as_ref().map(|cursor| encode_cursor_state(builder, cursor));
+            let snapshot = fb::VisibleSnapshotResponse::create(
+                builder,
+                &fb::VisibleSnapshotResponseArgs {
+                    buffer_id: r.buffer_id.into(),
+                    sequence: r.sequence,
+                    cols: r.size.cols,
+                    rows: r.size.rows,
+                    lines: Some(lines),
+                    title,
+                    cwd,
+                    viewport_top_line: r.viewport_top_line,
+                    total_lines: r.total_lines,
+                    alternate_screen: r.alternate_screen,
+                    mouse_reporting: r.mouse_reporting,
+                    focus_reporting: r.focus_reporting,
+                    bracketed_paste: r.bracketed_paste,
+                    cursor,
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::VisibleSnapshotResponse,
+                    visible_snapshot_response: Some(snapshot),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerResponse::ScrollbackSlice(r) => {
+            let lines_vec: Vec<_> = r.lines.iter().map(|l| builder.create_string(l)).collect();
+            let lines = builder.create_vector(&lines_vec);
+            let snapshot = fb::ScrollbackSliceResponse::create(
+                builder,
+                &fb::ScrollbackSliceResponseArgs {
+                    buffer_id: r.buffer_id.into(),
+                    start_line: r.start_line,
+                    total_lines: r.total_lines,
+                    lines: Some(lines),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::ScrollbackSliceResponse,
+                    scrollback_slice_response: Some(snapshot),
+                    ..Default::default()
+                },
+            )
+        }
     }
 }
 
@@ -1677,6 +1818,16 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     request_id,
                     buffer_id: BufferId(req.buffer_id()),
                 },
+                fb::BufferOp::CaptureVisible => BufferRequest::CaptureVisible {
+                    request_id,
+                    buffer_id: BufferId(req.buffer_id()),
+                },
+                fb::BufferOp::ScrollbackSlice => BufferRequest::ScrollbackSlice {
+                    request_id,
+                    buffer_id: BufferId(req.buffer_id()),
+                    start_line: req.start_line(),
+                    line_count: req.line_count(),
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown buffer op")),
             };
             Ok(ClientMessage::Buffer(buffer_request))
@@ -2033,6 +2184,58 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                     lines: lines_vec,
                     title: resp.title().map(|t| t.to_owned()),
                     cwd: resp.cwd().map(|c| c.to_owned()),
+                },
+            )))
+        }
+        fb::MessageKind::VisibleSnapshotResponse => {
+            let resp = required(
+                envelope.visible_snapshot_response(),
+                "visible_snapshot_response",
+            )?;
+            let lines = required(resp.lines(), "visible_snapshot_response.lines")?;
+            let lines_vec: Vec<String> = lines.iter().map(|l| l.to_owned()).collect();
+            let cursor = resp
+                .cursor()
+                .map(decode_cursor_state)
+                .transpose()?;
+            Ok(ServerEnvelope::Response(ServerResponse::VisibleSnapshot(
+                VisibleSnapshotResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    buffer_id: BufferId(resp.buffer_id()),
+                    sequence: resp.sequence(),
+                    size: PtySize {
+                        cols: resp.cols(),
+                        rows: resp.rows(),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                    lines: lines_vec,
+                    title: resp.title().map(|t| t.to_owned()),
+                    cwd: resp.cwd().map(|c| c.to_owned()),
+                    viewport_top_line: resp.viewport_top_line(),
+                    total_lines: resp.total_lines(),
+                    alternate_screen: resp.alternate_screen(),
+                    mouse_reporting: resp.mouse_reporting(),
+                    focus_reporting: resp.focus_reporting(),
+                    bracketed_paste: resp.bracketed_paste(),
+                    cursor,
+                },
+            )))
+        }
+        fb::MessageKind::ScrollbackSliceResponse => {
+            let resp = required(
+                envelope.scrollback_slice_response(),
+                "scrollback_slice_response",
+            )?;
+            let lines = required(resp.lines(), "scrollback_slice_response.lines")?;
+            let lines_vec: Vec<String> = lines.iter().map(|l| l.to_owned()).collect();
+            Ok(ServerEnvelope::Response(ServerResponse::ScrollbackSlice(
+                ScrollbackSliceResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    buffer_id: BufferId(resp.buffer_id()),
+                    start_line: resp.start_line(),
+                    total_lines: resp.total_lines(),
+                    lines: lines_vec,
                 },
             )))
         }

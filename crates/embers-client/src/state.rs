@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use embers_core::{BufferId, NodeId, SessionId};
 use embers_protocol::{
-    BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, SnapshotResponse,
+    BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, VisibleSnapshotResponse,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub struct ClientState {
     pub buffers: BTreeMap<BufferId, BufferRecord>,
     pub nodes: BTreeMap<NodeId, embers_protocol::NodeRecord>,
     pub floating: BTreeMap<embers_core::FloatingId, embers_protocol::FloatingRecord>,
-    pub snapshots: BTreeMap<BufferId, SnapshotResponse>,
+    pub snapshots: BTreeMap<BufferId, VisibleSnapshotResponse>,
     pub dirty_sessions: BTreeSet<SessionId>,
     pub invalidated_buffers: BTreeSet<BufferId>,
 }
@@ -89,7 +89,7 @@ impl ClientState {
         }
     }
 
-    pub fn apply_buffer_snapshot(&mut self, snapshot: SnapshotResponse) {
+    pub fn apply_buffer_snapshot(&mut self, snapshot: VisibleSnapshotResponse) {
         if let Some(buffer) = self.buffers.get_mut(&snapshot.buffer_id) {
             buffer.last_snapshot_seq = snapshot.sequence;
             buffer.pty_size = snapshot.size;

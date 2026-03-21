@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId,
-    SplitDirection, WireError,
+    ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize,
+    RequestId, SessionId, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +107,16 @@ pub enum BufferRequest {
         request_id: RequestId,
         buffer_id: BufferId,
     },
+    CaptureVisible {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    ScrollbackSlice {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        start_line: u64,
+        line_count: u32,
+    },
 }
 
 impl BufferRequest {
@@ -117,7 +127,9 @@ impl BufferRequest {
             | Self::Get { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Kill { request_id, .. }
-            | Self::Capture { request_id, .. } => *request_id,
+            | Self::Capture { request_id, .. }
+            | Self::CaptureVisible { request_id, .. }
+            | Self::ScrollbackSlice { request_id, .. } => *request_id,
         }
     }
 }
@@ -483,6 +495,33 @@ pub struct SnapshotResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisibleSnapshotResponse {
+    pub request_id: RequestId,
+    pub buffer_id: BufferId,
+    pub sequence: u64,
+    pub size: PtySize,
+    pub lines: Vec<String>,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub viewport_top_line: u64,
+    pub total_lines: u64,
+    pub alternate_screen: bool,
+    pub mouse_reporting: bool,
+    pub focus_reporting: bool,
+    pub bracketed_paste: bool,
+    pub cursor: Option<CursorState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScrollbackSliceResponse {
+    pub request_id: RequestId,
+    pub buffer_id: BufferId,
+    pub start_line: u64,
+    pub total_lines: u64,
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerResponse {
     Pong(PingResponse),
     Ok(OkResponse),
@@ -495,6 +534,8 @@ pub enum ServerResponse {
     Floating(FloatingResponse),
     SubscriptionAck(SubscriptionAckResponse),
     Snapshot(SnapshotResponse),
+    VisibleSnapshot(VisibleSnapshotResponse),
+    ScrollbackSlice(ScrollbackSliceResponse),
 }
 
 impl ServerResponse {
@@ -511,6 +552,8 @@ impl ServerResponse {
             Self::Floating(response) => Some(response.request_id),
             Self::SubscriptionAck(response) => Some(response.request_id),
             Self::Snapshot(response) => Some(response.request_id),
+            Self::VisibleSnapshot(response) => Some(response.request_id),
+            Self::ScrollbackSlice(response) => Some(response.request_id),
         }
     }
 }

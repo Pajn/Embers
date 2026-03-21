@@ -13,4 +13,6 @@ pub use error::{ErrorCode, MuxError, Result, WireError};
 pub use geometry::{FloatGeometry, Point, PtySize, Rect, Size, SplitDirection};
 pub use ids::{BufferId, ClientId, FloatingId, IdAllocator, NodeId, RequestId, SessionId};
 pub use metadata::{ActivityState, EntityMetadata, Timestamp};
-pub use snapshot::{CursorPosition, SnapshotLine, TerminalSnapshot};
+pub use snapshot::{
+    CursorPosition, CursorShape, CursorState, SnapshotLine, TerminalModes, TerminalSnapshot,
+};

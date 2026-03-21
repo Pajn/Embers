@@ -29,7 +29,8 @@ pub use types::{
     FloatingChangedEvent, FloatingListResponse, FloatingRecord, FloatingRequest, FloatingResponse,
     FocusChangedEvent, InputRequest, NodeChangedEvent, NodeRecord, NodeRecordKind, NodeRequest,
     OkResponse, PingRequest, PingResponse, RenderInvalidatedEvent, ServerEnvelope, ServerEvent,
-    ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRecord, SessionRequest,
-    SessionSnapshot, SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SplitRecord,
-    SubscribeRequest, SubscriptionAckResponse, TabRecord, TabsRecord, UnsubscribeRequest,
+    ScrollbackSliceResponse, ServerResponse, SessionClosedEvent, SessionCreatedEvent,
+    SessionRecord, SessionRequest, SessionSnapshot, SessionSnapshotResponse, SessionsResponse,
+    SnapshotResponse, SplitRecord, SubscribeRequest, SubscriptionAckResponse, TabRecord,
+    TabsRecord, UnsubscribeRequest, VisibleSnapshotResponse,
 };

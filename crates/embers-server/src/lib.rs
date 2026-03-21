@@ -16,5 +16,6 @@ pub use model::{
 pub use server::{Server, ServerHandle};
 pub use state::ServerState;
 pub use terminal_backend::{
-    AlacrittyTerminalBackend, BackendDamage, BackendMetadata, RawByteRouter, TerminalBackend,
+    AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
+    RawByteRouter, TerminalBackend,
 };
