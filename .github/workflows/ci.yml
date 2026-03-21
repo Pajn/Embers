@@ -4,15 +4,28 @@ on:
   push:
   pull_request:
 
+env:
+  FLATBUFFERS_VERSION: 25.12.19
+
 jobs:
   fmt-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatbuffers compiler
+      - name: Install flatc
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatbuffers-compiler
+          mkdir -p flatbuffers-bin
+          asset=""
+          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
+            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
+              asset="${candidate}"
+              break
+            fi
+          done
+          test -n "${asset}"
+          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
+          chmod +x flatbuffers-bin/flatc
+          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -26,10 +39,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatbuffers compiler
+      - name: Install flatc
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatbuffers-compiler
+          mkdir -p flatbuffers-bin
+          asset=""
+          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
+            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
+              asset="${candidate}"
+              break
+            fi
+          done
+          test -n "${asset}"
+          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
+          chmod +x flatbuffers-bin/flatc
+          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run unit and integration tests
@@ -39,10 +62,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatbuffers compiler
+      - name: Install flatc
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatbuffers-compiler
+          mkdir -p flatbuffers-bin
+          asset=""
+          for candidate in Linux.flatc.binary.g++-13.zip Linux.flatc.binary.clang++-18.zip; do
+            if curl -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${FLATBUFFERS_VERSION}/${candidate}"; then
+              asset="${candidate}"
+              break
+            fi
+          done
+          test -n "${asset}"
+          unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
+          chmod +x flatbuffers-bin/flatc
+          sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
