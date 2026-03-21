@@ -6,7 +6,7 @@ mod model;
 mod runtime;
 mod types;
 
-pub use context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef};
+pub use context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef};
 pub use engine::ScriptEngine;
 pub use error::ScriptError;
 pub use harness::ScriptHarness;
@@ -14,4 +14,6 @@ pub use model::{
     Action, BufferSpawnSpec, BufferTarget, FloatingOptions, NodeTarget, TabSpec, TreeSpec,
     WeightedTreeSpec,
 };
-pub use types::{LoadedConfig, PaletteError, RgbColor, ScriptFunctionRef, ThemeSpec};
+pub use types::{
+    BarSpec, LoadedConfig, PaletteError, RgbColor, ScriptFunctionRef, SegmentSpec, ThemeSpec,
+};

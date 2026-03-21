@@ -12,9 +12,8 @@ use crate::input::{
 };
 
 use super::error::ScriptError;
-use super::runtime::{normalize_actions, register_runtime_api, runtime_scope};
-use super::Context;
-use super::Action;
+use super::runtime::{normalize_actions, normalize_bar, register_runtime_api, runtime_scope};
+use super::{Action, BarSpec, Context, TabBarContext};
 use super::types::{LoadedConfig, RgbColor, ScriptFunctionRef, ThemeSpec};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
@@ -109,12 +108,36 @@ impl ScriptEngine {
         Ok(actions)
     }
 
+    pub fn format_root_tabbar(
+        &self,
+        context: Context,
+        bar_context: TabBarContext,
+    ) -> Result<Option<BarSpec>, ScriptError> {
+        let Some(formatter) = &self.loaded.root_tab_formatter else {
+            return Ok(None);
+        };
+        self.invoke_bar_function(&formatter.name, context, bar_context)
+            .map(Some)
+    }
+
+    pub fn format_nested_tabbar(
+        &self,
+        context: Context,
+        bar_context: TabBarContext,
+    ) -> Result<Option<BarSpec>, ScriptError> {
+        let Some(formatter) = &self.loaded.nested_tab_formatter else {
+            return Ok(None);
+        };
+        self.invoke_bar_function(&formatter.name, context, bar_context)
+            .map(Some)
+    }
+
     fn invoke_action_function(
         &self,
         function_name: &str,
         context: Context,
     ) -> Result<Vec<Action>, ScriptError> {
-        let mut scope = runtime_scope(context);
+        let mut scope = runtime_scope(context, self.loaded.theme.clone(), None);
         let result = self
             .engine
             .call_fn_with_options::<Dynamic>(
@@ -126,6 +149,28 @@ impl ScriptEngine {
             )
             .map_err(|error| ScriptError::runtime_path(self.loaded.source_path.as_deref(), error))?;
         normalize_actions(result).map_err(|message| {
+            ScriptError::validation_path(self.loaded.source_path.as_deref(), Position::NONE, message)
+        })
+    }
+
+    fn invoke_bar_function(
+        &self,
+        function_name: &str,
+        context: Context,
+        bar_context: TabBarContext,
+    ) -> Result<BarSpec, ScriptError> {
+        let mut scope = runtime_scope(context, self.loaded.theme.clone(), Some(bar_context));
+        let result = self
+            .engine
+            .call_fn_with_options::<Dynamic>(
+                CallFnOptions::new().eval_ast(false),
+                &mut scope,
+                &self.loaded.ast,
+                function_name,
+                (),
+            )
+            .map_err(|error| ScriptError::runtime_path(self.loaded.source_path.as_deref(), error))?;
+        normalize_bar(result).map_err(|message| {
             ScriptError::validation_path(self.loaded.source_path.as_deref(), Position::NONE, message)
         })
     }

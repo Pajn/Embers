@@ -43,6 +43,11 @@ where
         &self.transport
     }
 
+    pub async fn request_message(&self, message: ClientMessage) -> Result<ServerResponse> {
+        let response = self.transport.request(message).await?;
+        expect_response(response)
+    }
+
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
         let event = self.transport.next_event().await?;
         self.state.apply_event(&event);

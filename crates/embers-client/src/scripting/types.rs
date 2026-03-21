@@ -57,6 +57,18 @@ pub struct ThemeSpec {
     pub palette: BTreeMap<String, RgbColor>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SegmentSpec {
+    pub text: String,
+    pub foreground: Option<RgbColor>,
+    pub background: Option<RgbColor>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BarSpec {
+    pub segments: Vec<SegmentSpec>,
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,

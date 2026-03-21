@@ -13,6 +13,7 @@ embers-protocol = { path = "../embers-protocol" }
 rhai.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 embers-test-support = { path = "../embers-test-support" }
