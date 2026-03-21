@@ -307,6 +307,8 @@ fn buffer(
         title: title.to_owned(),
         command: vec!["/bin/sh".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        pid: None,
+        env: Default::default(),
         state: BufferRecordState::Running,
         attachment_node_id,
         pty_size: PtySize::new(80, 24),

@@ -4,7 +4,7 @@ use embers_core::{ActivityState, Point, Rect, Size};
 
 use crate::grid::{BorderStyle, RenderGrid};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
-use crate::scripting::BarSpec;
+use crate::scripting::{BarSegment, BarSpec};
 use crate::state::ClientState;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -95,18 +95,23 @@ impl Renderer {
         grid.put_str(x, y, &" ".repeat(usize::from(tabs.rect.size.width)));
 
         if let Some(bar) = custom {
-            for segment in &bar.segments {
-                if x >= end_x {
-                    break;
-                }
-                let available = end_x.saturating_sub(x);
-                if available == 0 {
-                    break;
-                }
-                let label = truncate(&segment.text, available);
-                grid.put_str(x, y, &label);
-                x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
-            }
+            let width = tabs.rect.size.width;
+            render_bar_segments(grid, x, y, end_x, &bar.left);
+            let right_width = bar
+                .right
+                .iter()
+                .map(|segment| clamp_usize_to_u16(segment.text.chars().count()))
+                .sum::<u16>();
+            let right_x = end_x.saturating_sub(right_width.min(width));
+            render_bar_segments(grid, right_x, y, end_x, &bar.right);
+
+            let center_width = bar
+                .center
+                .iter()
+                .map(|segment| clamp_usize_to_u16(segment.text.chars().count()))
+                .sum::<u16>();
+            let center_x = x.saturating_add(width.saturating_sub(center_width.min(width)) / 2);
+            render_bar_segments(grid, center_x, y, end_x, &bar.center);
             return;
         }
 
@@ -250,6 +255,27 @@ fn activity_marker(activity: ActivityState) -> char {
         ActivityState::Idle => ' ',
         ActivityState::Activity => '+',
         ActivityState::Bell => '!',
+    }
+}
+
+fn render_bar_segments(
+    grid: &mut RenderGrid,
+    mut x: u16,
+    y: u16,
+    end_x: u16,
+    segments: &[BarSegment],
+) {
+    for segment in segments {
+        if x >= end_x {
+            break;
+        }
+        let available = end_x.saturating_sub(x);
+        if available == 0 {
+            break;
+        }
+        let label = truncate(&segment.text, available);
+        grid.put_str(x, y, &label);
+        x = x.saturating_add(clamp_usize_to_u16(label.chars().count()));
     }
 }
 

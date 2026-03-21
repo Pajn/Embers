@@ -82,13 +82,28 @@ impl ServerState {
         }
     }
 
+    fn root_tabs_node(&self, session_id: SessionId) -> Result<Option<NodeId>> {
+        let root_node = self.root_node(session_id)?;
+        Ok(matches!(self.node(root_node)?, Node::Tabs(_)).then_some(root_node))
+    }
+
+    fn ensure_root_tabs_container(&mut self, session_id: SessionId) -> Result<NodeId> {
+        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            return Ok(root_tabs);
+        }
+
+        let root_node = self.root_node(session_id)?;
+        let title = self.default_tab_title(root_node)?;
+        self.wrap_node_in_tabs(root_node, title)
+    }
+
     pub fn add_root_tab_from_buffer(
         &mut self,
         session_id: SessionId,
         title: impl Into<String>,
         buffer_id: BufferId,
     ) -> Result<usize> {
-        let root_tabs = self.root_tabs(session_id)?;
+        let root_tabs = self.ensure_root_tabs_container(session_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
         self.add_tab_sibling(root_tabs, title, child)
     }
@@ -99,13 +114,22 @@ impl ServerState {
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
-        let root_tabs = self.root_tabs(session_id)?;
+        let root_tabs = self.ensure_root_tabs_container(session_id)?;
         self.add_tab_sibling(root_tabs, title, child)
     }
 
     pub fn select_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
-        let root_tabs = self.root_tabs(session_id)?;
-        self.switch_tab(root_tabs, index)
+        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            return self.switch_tab(root_tabs, index);
+        }
+
+        if index == 0 {
+            Ok(())
+        } else {
+            Err(MuxError::not_found(format!(
+                "tab index {index} is out of range for session {session_id}"
+            )))
+        }
     }
 
     pub fn rename_root_tab(
@@ -114,13 +138,31 @@ impl ServerState {
         index: usize,
         title: impl Into<String>,
     ) -> Result<()> {
-        let root_tabs = self.root_tabs(session_id)?;
+        let root_tabs = if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            root_tabs
+        } else {
+            if index != 0 {
+                return Err(MuxError::not_found(format!(
+                    "tab index {index} is out of range for session {session_id}"
+                )));
+            }
+            self.ensure_root_tabs_container(session_id)?
+        };
         self.rename_tab(root_tabs, index, title)
     }
 
     pub fn close_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
-        let root_tabs = self.root_tabs(session_id)?;
-        self.close_tab(root_tabs, index)
+        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            return self.close_tab(root_tabs, index);
+        }
+
+        if index == 0 {
+            self.clear_session_root(session_id)
+        } else {
+            Err(MuxError::not_found(format!(
+                "tab index {index} is out of range for session {session_id}"
+            )))
+        }
     }
 
     pub fn close_session(&mut self, session_id: SessionId) -> Result<()> {
@@ -168,6 +210,16 @@ impl ServerState {
         command: Vec<String>,
         cwd: Option<PathBuf>,
     ) -> BufferId {
+        self.create_buffer_with_env(title, command, cwd, BTreeMap::new())
+    }
+
+    pub fn create_buffer_with_env(
+        &mut self,
+        title: impl Into<String>,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> BufferId {
         let buffer_id = self.buffer_ids.next();
         self.buffers.insert(
             buffer_id,
@@ -176,6 +228,7 @@ impl ServerState {
                 title: title.into(),
                 command,
                 cwd,
+                env,
                 state: BufferState::Created,
                 attachment: BufferAttachment::Detached,
                 pty_size: PtySize::new(80, 24),
@@ -382,6 +435,25 @@ impl ServerState {
         geometry: FloatGeometry,
         title: Option<String>,
     ) -> Result<FloatingId> {
+        self.create_floating_window_with_options(
+            session_id,
+            root_node,
+            geometry,
+            title,
+            true,
+            true,
+        )
+    }
+
+    pub fn create_floating_window_with_options(
+        &mut self,
+        session_id: SessionId,
+        root_node: NodeId,
+        geometry: FloatGeometry,
+        title: Option<String>,
+        focus: bool,
+        close_on_empty: bool,
+    ) -> Result<FloatingId> {
         self.ensure_session_exists(session_id)?;
         self.ensure_node_belongs_to(root_node, session_id)?;
         if self.node_parent(root_node)?.is_some() {
@@ -411,11 +483,14 @@ impl ServerState {
                 geometry,
                 focused: false,
                 visible: true,
-                close_on_empty: true,
+                close_on_empty,
                 last_focused_leaf: None,
             },
         );
         self.session_mut(session_id)?.floating.push(floating_id);
+        if focus {
+            self.focus_floating(floating_id)?;
+        }
         Ok(floating_id)
     }
 
@@ -426,8 +501,34 @@ impl ServerState {
         geometry: FloatGeometry,
         title: Option<String>,
     ) -> Result<FloatingId> {
+        self.create_floating_from_buffer_with_options(
+            session_id,
+            buffer_id,
+            geometry,
+            title,
+            true,
+            true,
+        )
+    }
+
+    pub fn create_floating_from_buffer_with_options(
+        &mut self,
+        session_id: SessionId,
+        buffer_id: BufferId,
+        geometry: FloatGeometry,
+        title: Option<String>,
+        focus: bool,
+        close_on_empty: bool,
+    ) -> Result<FloatingId> {
         let root_node = self.create_buffer_view(session_id, buffer_id)?;
-        self.create_floating_window(session_id, root_node, geometry, title)
+        self.create_floating_window_with_options(
+            session_id,
+            root_node,
+            geometry,
+            title,
+            focus,
+            close_on_empty,
+        )
     }
 
     pub fn close_floating(&mut self, floating_id: FloatingId) -> Result<()> {
@@ -463,13 +564,27 @@ impl ServerState {
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
-        let root_tabs = self.root_tabs(session_id)?;
+        let root_tabs = self.ensure_root_tabs_container(session_id)?;
         self.add_tab_sibling(root_tabs, title, child)
     }
 
     pub fn add_tab_sibling(
         &mut self,
         tabs_id: NodeId,
+        title: impl Into<String>,
+        child: NodeId,
+    ) -> Result<usize> {
+        let append_index = match self.node(tabs_id)? {
+            Node::Tabs(tabs) => tabs.tabs.len(),
+            _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+        };
+        self.add_tab_sibling_at(tabs_id, append_index, title, child)
+    }
+
+    pub fn add_tab_sibling_at(
+        &mut self,
+        tabs_id: NodeId,
+        index: usize,
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
@@ -499,15 +614,25 @@ impl ServerState {
             ));
         }
 
+        let tab_len = match self.node(tabs_id)? {
+            Node::Tabs(tabs) => tabs.tabs.len(),
+            _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+        };
+        if index > tab_len {
+            return Err(MuxError::not_found(format!(
+                "tab insertion index {index} is out of range for node {tabs_id}"
+            )));
+        }
+
         self.set_parent(child, Some(tabs_id))?;
         let index = {
             let tabs = match self.node_mut(tabs_id)? {
                 Node::Tabs(tabs) => tabs,
                 _ => return Err(MuxError::invalid_input("node is not a tabs container")),
             };
-            tabs.tabs.push(TabEntry::new(title, child));
-            tabs.active = tabs.tabs.len().saturating_sub(1);
-            tabs.tabs.len() - 1
+            tabs.tabs.insert(index, TabEntry::new(title, child));
+            tabs.active = index;
+            index
         };
 
         if let Some(leaf) = self.resolve_focus_candidate(child)? {
@@ -525,12 +650,26 @@ impl ServerState {
         title: impl Into<String>,
         buffer_id: BufferId,
     ) -> Result<usize> {
+        let append_index = match self.node(tabs_id)? {
+            Node::Tabs(tabs) => tabs.tabs.len(),
+            _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+        };
+        self.add_tab_from_buffer_at(tabs_id, append_index, title, buffer_id)
+    }
+
+    pub fn add_tab_from_buffer_at(
+        &mut self,
+        tabs_id: NodeId,
+        index: usize,
+        title: impl Into<String>,
+        buffer_id: BufferId,
+    ) -> Result<usize> {
         if !matches!(self.node(tabs_id)?, Node::Tabs(_)) {
             return Err(MuxError::invalid_input("node is not a tabs container"));
         }
         let session_id = self.node_session_id(tabs_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
-        self.add_tab_sibling(tabs_id, title, child)
+        self.add_tab_sibling_at(tabs_id, index, title, child)
     }
 
     pub fn rename_tab(
@@ -577,6 +716,66 @@ impl ServerState {
         self.repoint_owner_reference(session_id, old_parent, node_id, tabs_id)?;
 
         Ok(tabs_id)
+    }
+
+    pub fn wrap_node_in_split(
+        &mut self,
+        node_id: NodeId,
+        direction: SplitDirection,
+        sibling: NodeId,
+        insert_before: bool,
+    ) -> Result<NodeId> {
+        let session_id = self.node_session_id(node_id)?;
+        self.ensure_node_belongs_to(sibling, session_id)?;
+        if node_id == sibling {
+            return Err(MuxError::invalid_input(
+                "split sibling cannot be the same node".to_owned(),
+            ));
+        }
+        if self.node_parent(sibling)?.is_some() {
+            return Err(MuxError::invalid_input(
+                "split sibling must not already have a parent".to_owned(),
+            ));
+        }
+        if self.is_session_root(sibling) {
+            return Err(MuxError::conflict(
+                "session root cannot become a split child".to_owned(),
+            ));
+        }
+        if self.floating_id_by_root(sibling).is_some() {
+            return Err(MuxError::conflict(
+                "floating root cannot become a split child".to_owned(),
+            ));
+        }
+
+        let old_parent = self.node_parent(node_id)?;
+        let split_id = self.node_ids.next();
+        let children = if insert_before {
+            vec![sibling, node_id]
+        } else {
+            vec![node_id, sibling]
+        };
+        self.nodes.insert(
+            split_id,
+            Node::Split(SplitNode {
+                id: split_id,
+                session_id,
+                parent: old_parent,
+                direction,
+                children: children.clone(),
+                sizes: vec![1; children.len()],
+                last_focused_descendant: self.resolve_focus_candidate(sibling)?,
+            }),
+        );
+        self.set_parent(node_id, Some(split_id))?;
+        self.set_parent(sibling, Some(split_id))?;
+        self.repoint_owner_reference(session_id, old_parent, node_id, split_id)?;
+        if let Some(leaf) = self.resolve_focus_candidate(sibling)? {
+            self.focus_leaf(session_id, leaf)?;
+        } else {
+            self.heal_focus(session_id)?;
+        }
+        Ok(split_id)
     }
 
     pub fn split_leaf_with_new_buffer(
@@ -997,6 +1196,38 @@ impl ServerState {
         self.heal_focus(session_id)
     }
 
+    pub fn replace_node(&mut self, node_id: NodeId, replacement: NodeId) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        self.ensure_node_belongs_to(replacement, session_id)?;
+        if node_id == replacement {
+            return Ok(());
+        }
+        if self.node_parent(replacement)?.is_some() {
+            return Err(MuxError::invalid_input(
+                "replacement node must not already have a parent".to_owned(),
+            ));
+        }
+        if self.is_session_root(replacement) {
+            return Err(MuxError::conflict(
+                "session root cannot become a replacement child".to_owned(),
+            ));
+        }
+        if self.floating_id_by_root(replacement).is_some() {
+            return Err(MuxError::conflict(
+                "floating root cannot become a replacement child".to_owned(),
+            ));
+        }
+
+        self.replace_node_in_owner(node_id, replacement)?;
+        self.remove_subtree_nodes(node_id)?;
+        if let Some(leaf) = self.resolve_focus_candidate(replacement)? {
+            self.focus_leaf(session_id, leaf)?;
+        } else {
+            self.heal_focus(session_id)?;
+        }
+        Ok(())
+    }
+
     pub fn normalize_upwards(&mut self, start: NodeId) -> Result<()> {
         let mut current = Some(start);
         while let Some(node_id) = current {
@@ -1213,6 +1444,15 @@ impl ServerState {
                 }
             }
         }
+    }
+
+    fn default_tab_title(&self, node_id: NodeId) -> Result<String> {
+        if let Some(leaf_id) = self.resolve_focus_candidate(node_id)? {
+            let buffer_id = self.buffer_view_buffer_id(leaf_id)?;
+            return Ok(self.buffer(buffer_id)?.title.clone());
+        }
+
+        Ok("window".to_owned())
     }
 
     fn set_leaf_focus(&mut self, leaf_id: NodeId, focused: bool) -> Result<()> {

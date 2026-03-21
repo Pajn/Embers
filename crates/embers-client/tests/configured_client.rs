@@ -73,7 +73,7 @@ async fn configured_keybinding_executes_live_focus_action() {
     *client.state_mut() = demo_state();
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn move_left() { action.focus_left() }
+            fn move_left(ctx) { action.focus_left() }
             define_action("move-left", move_left);
             bind("normal", "<C-h>", "move-left");
         "#,
@@ -110,20 +110,17 @@ async fn configured_render_uses_scripted_tab_bars() {
     let client = MuxClient::new(FakeTransport::default());
     let (config, _tempdir) = manager_from_source(
         r##"
-            fn root_bar() {
-                let tabs = bar.tabs();
-                let active = tabs[bar.active_index()];
-                ui.bar([ui.segment("ROOT " + active.title())])
+            fn format_tabs(ctx) {
+                let tabs = ctx.tabs();
+                let active = tabs[ctx.active_index()];
+                if ctx.is_root() {
+                    ui.bar([ui.segment("ROOT " + active.title())], [], [])
+                } else {
+                    ui.bar([ui.segment("NESTED " + active.title())], [], [])
+                }
             }
 
-            fn nested_bar() {
-                let tabs = bar.tabs();
-                let active = tabs[bar.active_index()];
-                ui.bar([ui.segment("NESTED " + active.title())])
-            }
-
-            tabbar.set_root_formatter(root_bar);
-            tabbar.set_nested_formatter(nested_bar);
+            tabbar.set_formatter(format_tabs);
         "##,
     );
     let mut configured = ConfiguredClient::new(client, config);
@@ -152,11 +149,8 @@ async fn reload_updates_live_bindings() {
     fs::write(
         &config_path,
         r#"
-            fn reload_now() { action.reload_config() }
-            fn notify_left() { action.notify("left") }
-            define_action("reload-now", reload_now);
+            fn notify_left(ctx) { action.notify("info", "left") }
             define_action("notify-left", notify_left);
-            bind("normal", "<C-r>", "reload-now");
             bind("normal", "<C-h>", "notify-left");
         "#,
     )
@@ -172,26 +166,13 @@ async fn reload_updates_live_bindings() {
     fs::write(
         &config_path,
         r#"
-            fn reload_now() { action.reload_config() }
-            fn notify_right() { action.notify("right") }
-            define_action("reload-now", reload_now);
+            fn notify_right(ctx) { action.notify("info", "right") }
             define_action("notify-right", notify_right);
-            bind("normal", "<C-r>", "reload-now");
             bind("normal", "<C-h>", "notify-right");
         "#,
     )
     .unwrap();
-    configured
-        .handle_key(
-            SESSION_ID,
-            Size {
-                width: 80,
-                height: 20,
-            },
-            KeyEvent::Ctrl('r'),
-        )
-        .await
-        .unwrap();
+    configured.reload_config().unwrap();
     configured
         .handle_key(
             SESSION_ID,
@@ -241,8 +222,8 @@ async fn event_hook_executes_real_actions() {
     *client.state_mut() = demo_state();
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn on_focus() { action.focus_left() }
-            on("focus-changed", on_focus);
+            fn on_focus(ctx) { action.focus_left() }
+            on("focus_changed", on_focus);
         "#,
     );
     let mut configured = ConfiguredClient::new(client, config);
@@ -277,7 +258,7 @@ async fn keybinding_runtime_errors_become_notifications() {
     let client = MuxClient::new(FakeTransport::default());
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn broken() {
+            fn broken(ctx) {
                 let xs = [];
                 xs[1]
             }
@@ -315,12 +296,12 @@ async fn event_handler_runtime_errors_do_not_crash_client() {
     let client = MuxClient::new(transport);
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn broken() {
+            fn broken(ctx) {
                 let xs = [];
                 xs[1]
             }
 
-            on("focus-changed", broken);
+            on("focus_changed", broken);
         "#,
     );
     let mut configured = ConfiguredClient::new(client, config);
@@ -337,8 +318,8 @@ async fn formatter_failures_fall_back_to_default_rendering() {
     let client = MuxClient::new(FakeTransport::default());
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn root_bar() { 1 }
-            tabbar.set_root_formatter(root_bar);
+            fn broken_bar(ctx) { 1 }
+            tabbar.set_formatter(broken_bar);
         "#,
     );
     let mut configured = ConfiguredClient::new(client, config);
@@ -371,8 +352,8 @@ async fn event_hooks_can_notify_without_an_active_view() {
     let client = MuxClient::new(transport);
     let (config, _tempdir) = manager_from_source(
         r#"
-            fn on_focus() { action.notify("focus hook") }
-            on("focus-changed", on_focus);
+            fn on_focus(ctx) { action.notify("info", "focus hook") }
+            on("focus_changed", on_focus);
         "#,
     );
     let mut configured = ConfiguredClient::new(client, config);

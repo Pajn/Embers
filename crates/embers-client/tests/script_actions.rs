@@ -1,11 +1,14 @@
 mod support;
 
+use std::collections::BTreeMap;
+
 use embers_client::{
-    Action, BufferSpawnSpec, BufferTarget, Context, FloatingOptions, NodeTarget, PresentationModel,
-    ScriptEngine, TabSpec, TreeSpec, WeightedTreeSpec,
+    Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
+    FloatingSpec, KeyToken, NavigationDirection, NotifyLevel, PresentationModel, ScriptEngine,
+    TabSpec, TabsSpec, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
 };
-use embers_core::{BufferId, FloatGeometry, NodeId, Size, SplitDirection};
+use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
 
 use support::{SESSION_ID, demo_state};
 
@@ -13,33 +16,36 @@ use support::{SESSION_ID, demo_state};
 fn action_helpers_roundtrip_to_typed_actions() {
     let engine = load_engine(
         r#"
-            fn enter_copy_action() { action.enter_mode("copy") }
-            fn focus_left_action() { action.focus_left() }
-            fn resize_right_action() { action.resize_right(2) }
-            fn select_tab_action() { action.select_tab(2) }
-            fn split_tree_action() { action.split_h(tree.buffer_current()) }
-            fn replace_current_action() { action.replace_current_with(tree.buffer_attach(9)) }
-            fn replace_node_action() { action.replace_node(7, tree.buffer_current()) }
-            fn wrap_split_action() { action.wrap_current_in_split_v(tree.buffer_current()) }
-            fn wrap_tabs_action() {
-                action.wrap_current_in_tabs([
+            fn enter_copy_action(ctx) { action.enter_mode("copy") }
+            fn focus_left_action(ctx) { action.focus_left() }
+            fn resize_right_action(ctx) { action.resize_right(2) }
+            fn select_tab_action(ctx) { action.select_current_tabs(2) }
+            fn split_tree_action(ctx) { action.split_with("horizontal", tree.buffer_current()) }
+            fn replace_current_action(ctx) { action.replace_current_with(tree.buffer_attach(9)) }
+            fn replace_node_action(ctx) { action.replace_node(7, tree.buffer_current()) }
+            fn wrap_split_action(ctx) {
+                action.wrap_current_in_split("vertical", tree.buffer_current())
+            }
+            fn wrap_tabs_action(ctx) {
+                action.wrap_current_in_tabs(tree.tabs_with_active([
                     tree.tab("main", tree.current_node()),
                     tree.tab("scratch", tree.buffer_empty())
-                ], 1)
+                ], 1))
             }
-            fn insert_tab_action() { action.insert_tab_after_current("logs", tree.buffer_current()) }
-            fn open_popup_action() {
+            fn insert_tab_action(ctx) {
+                action.insert_tab_after_current("logs", tree.buffer_current())
+            }
+            fn open_popup_action(ctx) {
                 action.open_floating(
                     tree.buffer_current(),
                     #{ x: 1, y: 2, width: 30, height: 10, title: "popup" }
                 )
             }
-            fn detach_buffer_action() { action.detach_current_buffer() }
-            fn kill_buffer_action() { action.kill_current_buffer() }
-            fn send_keys_action() { action.send_keys("abc") }
-            fn send_bytes_action() { action.send_bytes([65, 66]) }
-            fn notify_user_action() { action.notify("hello") }
-            fn reload_cfg_action() { action.reload_config() }
+            fn detach_buffer_action(ctx) { action.detach_buffer() }
+            fn kill_buffer_action(ctx) { action.kill_buffer() }
+            fn send_keys_action(ctx) { action.send_keys_current("abc") }
+            fn send_bytes_action(ctx) { action.send_bytes_current([65, 66]) }
+            fn notify_user_action(ctx) { action.notify("info", "hello") }
 
             define_action("enter-copy", enter_copy_action);
             define_action("focus-left", focus_left_action);
@@ -57,7 +63,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("send-keys", send_keys_action);
             define_action("send-bytes", send_bytes_action);
             define_action("notify-user", notify_user_action);
-            define_action("reload-cfg", reload_cfg_action);
         "#,
     );
     let context = demo_context();
@@ -74,16 +79,16 @@ fn action_helpers_roundtrip_to_typed_actions() {
         engine
             .run_named_action("focus-left", context.clone())
             .unwrap(),
-        vec![Action::Focus {
-            direction: embers_client::NavigationDirection::Left,
+        vec![Action::FocusDirection {
+            direction: NavigationDirection::Left,
         }]
     );
     assert_eq!(
         engine
             .run_named_action("resize-right", context.clone())
             .unwrap(),
-        vec![Action::Resize {
-            direction: embers_client::NavigationDirection::Right,
+        vec![Action::ResizeDirection {
+            direction: NavigationDirection::Right,
             amount: 2,
         }]
     );
@@ -91,22 +96,26 @@ fn action_helpers_roundtrip_to_typed_actions() {
         engine
             .run_named_action("select-tab", context.clone())
             .unwrap(),
-        vec![Action::SelectTab { index: 2 }]
+        vec![Action::SelectTab {
+            tabs_node_id: None,
+            index: 2,
+        }]
     );
     assert_eq!(
         engine
             .run_named_action("split-tree", context.clone())
             .unwrap(),
-        vec![Action::Split {
+        vec![Action::SplitCurrent {
             direction: SplitDirection::Horizontal,
-            tree: TreeSpec::BufferCurrent,
+            new_child: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
         engine
             .run_named_action("replace-current", context.clone())
             .unwrap(),
-        vec![Action::ReplaceCurrentWith {
+        vec![Action::ReplaceNode {
+            node_id: None,
             tree: TreeSpec::BufferAttach {
                 buffer_id: BufferId(9),
             },
@@ -117,7 +126,7 @@ fn action_helpers_roundtrip_to_typed_actions() {
             .run_named_action("replace-node", context.clone())
             .unwrap(),
         vec![Action::ReplaceNode {
-            target: NodeTarget::Node(NodeId(7)),
+            node_id: Some(NodeId(7)),
             tree: TreeSpec::BufferCurrent,
         }]
     );
@@ -125,36 +134,41 @@ fn action_helpers_roundtrip_to_typed_actions() {
         engine
             .run_named_action("wrap-split", context.clone())
             .unwrap(),
-        vec![Action::WrapCurrentInSplit {
+        vec![Action::WrapNodeInSplit {
+            node_id: None,
             direction: SplitDirection::Vertical,
-            tree: TreeSpec::BufferCurrent,
+            sibling: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
         engine
             .run_named_action("wrap-tabs", context.clone())
             .unwrap(),
-        vec![Action::WrapCurrentInTabs {
-            tabs: vec![
-                TabSpec {
-                    title: "main".to_owned(),
-                    tree: Box::new(TreeSpec::CurrentNode),
-                },
-                TabSpec {
-                    title: "scratch".to_owned(),
-                    tree: Box::new(TreeSpec::BufferEmpty),
-                },
-            ],
-            active: 1,
+        vec![Action::WrapNodeInTabs {
+            node_id: None,
+            tabs: TabsSpec {
+                tabs: vec![
+                    TabSpec {
+                        title: "main".to_owned(),
+                        tree: Box::new(TreeSpec::CurrentNode),
+                    },
+                    TabSpec {
+                        title: "scratch".to_owned(),
+                        tree: Box::new(TreeSpec::BufferEmpty),
+                    },
+                ],
+                active: 1,
+            },
         }]
     );
     assert_eq!(
         engine
             .run_named_action("insert-tab", context.clone())
             .unwrap(),
-        vec![Action::InsertTabAfterCurrent {
-            title: "logs".to_owned(),
-            tree: TreeSpec::BufferCurrent,
+        vec![Action::InsertTabAfter {
+            tabs_node_id: None,
+            title: Some("logs".to_owned()),
+            child: TreeSpec::BufferCurrent,
         }]
     );
     assert_eq!(
@@ -162,10 +176,18 @@ fn action_helpers_roundtrip_to_typed_actions() {
             .run_named_action("open-popup", context.clone())
             .unwrap(),
         vec![Action::OpenFloating {
-            tree: TreeSpec::BufferCurrent,
-            options: FloatingOptions {
-                geometry: FloatGeometry::new(1, 2, 30, 10),
+            spec: FloatingSpec {
+                tree: TreeSpec::BufferCurrent,
+                geometry: FloatingGeometrySpec {
+                    width: FloatingSize::Cells(30),
+                    height: FloatingSize::Cells(10),
+                    anchor: FloatingAnchor::Center,
+                    offset_x: 1,
+                    offset_y: 2,
+                },
                 title: Some("popup".to_owned()),
+                focus: true,
+                close_on_empty: true,
             },
         }]
     );
@@ -173,26 +195,25 @@ fn action_helpers_roundtrip_to_typed_actions() {
         engine
             .run_named_action("detach-buffer", context.clone())
             .unwrap(),
-        vec![Action::DetachBuffer {
-            target: BufferTarget::Current,
-        }]
+        vec![Action::DetachBuffer { buffer_id: None }]
     );
     assert_eq!(
         engine
             .run_named_action("kill-buffer", context.clone())
             .unwrap(),
-        vec![Action::KillBuffer {
-            target: BufferTarget::Current,
-            force: false,
-        }]
+        vec![Action::KillBuffer { buffer_id: None }]
     );
     assert_eq!(
         engine
             .run_named_action("send-keys", context.clone())
             .unwrap(),
-        vec![Action::SendBytes {
-            target: BufferTarget::Current,
-            bytes: b"abc".to_vec(),
+        vec![Action::SendKeys {
+            buffer_id: None,
+            keys: vec![
+                KeyToken::Char('a'),
+                KeyToken::Char('b'),
+                KeyToken::Char('c'),
+            ],
         }]
     );
     assert_eq!(
@@ -200,21 +221,16 @@ fn action_helpers_roundtrip_to_typed_actions() {
             .run_named_action("send-bytes", context.clone())
             .unwrap(),
         vec![Action::SendBytes {
-            target: BufferTarget::Current,
+            buffer_id: None,
             bytes: vec![65, 66],
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("notify-user", context.clone())
-            .unwrap(),
+        engine.run_named_action("notify-user", context).unwrap(),
         vec![Action::Notify {
+            level: NotifyLevel::Info,
             message: "hello".to_owned(),
         }]
-    );
-    assert_eq!(
-        engine.run_named_action("reload-cfg", context).unwrap(),
-        vec![Action::ReloadConfig]
     );
 }
 
@@ -222,10 +238,10 @@ fn action_helpers_roundtrip_to_typed_actions() {
 fn action_arrays_preserve_order_and_unit_is_noop() {
     let engine = load_engine(
         r#"
-            fn chained() {
-                action.chain([action.focus_left(), action.focus_right(), action.focus_up()])
+            fn chained(ctx) {
+                [action.focus_left(), action.focus_right(), action.focus_up()]
             }
-            fn noop() { () }
+            fn noop(ctx) { () }
             define_action("chained", chained);
             define_action("noop", noop);
         "#,
@@ -235,14 +251,14 @@ fn action_arrays_preserve_order_and_unit_is_noop() {
     assert_eq!(
         engine.run_named_action("chained", context.clone()).unwrap(),
         vec![
-            Action::Focus {
-                direction: embers_client::NavigationDirection::Left,
+            Action::FocusDirection {
+                direction: NavigationDirection::Left,
             },
-            Action::Focus {
-                direction: embers_client::NavigationDirection::Right,
+            Action::FocusDirection {
+                direction: NavigationDirection::Right,
             },
-            Action::Focus {
-                direction: embers_client::NavigationDirection::Up,
+            Action::FocusDirection {
+                direction: NavigationDirection::Up,
             },
         ]
     );
@@ -253,7 +269,7 @@ fn action_arrays_preserve_order_and_unit_is_noop() {
 fn invalid_action_shapes_fail_cleanly() {
     let engine = load_engine(
         r#"
-            fn bad_bytes() { action.send_bytes(["x"]) }
+            fn bad_bytes(ctx) { action.send_bytes_current(["x"]) }
             define_action("bad-bytes", bad_bytes);
         "#,
     );
@@ -273,16 +289,16 @@ fn invalid_action_shapes_fail_cleanly() {
 fn query_api_supports_smart_nav_style_scripts() {
     let engine = load_engine(
         r#"
-            fn smart_nav_left() {
-                let buffer = mux.current_buffer();
-                let node = mux.current_node();
+            fn smart_nav_left(ctx) {
+                let buffer = ctx.current_buffer();
+                let node = ctx.current_node();
                 if buffer.is_visible()
                     && !buffer.is_detached()
-                    && system.process_name(buffer) == "sh"
+                    && buffer.process_name() == "sh"
                     && buffer.command()[0] == "/bin/sh"
                     && node.kind() == "buffer_view"
                 {
-                    action.send_keys("h")
+                    action.send_keys_current("h")
                 } else {
                     action.focus_left()
                 }
@@ -295,9 +311,9 @@ fn query_api_supports_smart_nav_style_scripts() {
         engine
             .run_named_action("smart-nav-left", demo_context())
             .unwrap(),
-        vec![Action::SendBytes {
-            target: BufferTarget::Current,
-            bytes: b"h".to_vec(),
+        vec![Action::SendKeys {
+            buffer_id: None,
+            keys: vec![KeyToken::Char('h')],
         }]
     );
 }
@@ -306,21 +322,37 @@ fn query_api_supports_smart_nav_style_scripts() {
 fn event_handlers_can_inspect_visibility_and_session_relationships() {
     let engine = load_engine(
         r#"
-            fn bell_handler() {
-                let session = mux.current_session();
-                if session.name() == "demo" && mux.visible_floating().len > 0 {
-                    action.notify("floating-visible")
+            fn bell_handler(ctx) {
+                let session = ctx.current_session();
+                let event = ctx.event();
+                if session.name() == "demo"
+                    && session.floating().len > 0
+                    && event.name() == "buffer_bell"
+                {
+                    action.notify("info", "floating-visible")
                 } else {
                     ()
                 }
             }
-            on("bell", bell_handler);
+            on("buffer_bell", bell_handler);
         "#,
     );
 
     assert_eq!(
-        engine.dispatch_event("bell", demo_context()).unwrap(),
+        engine
+            .dispatch_event(
+                "buffer_bell",
+                demo_context().with_event(EventInfo {
+                    name: "buffer_bell".to_owned(),
+                    session_id: Some(SESSION_ID),
+                    buffer_id: Some(BufferId(4)),
+                    node_id: None,
+                    floating_id: Some(FloatingId(90)),
+                }),
+            )
+            .unwrap(),
         vec![Action::Notify {
+            level: NotifyLevel::Info,
             message: "floating-visible".to_owned(),
         }]
     );
@@ -330,9 +362,9 @@ fn event_handlers_can_inspect_visibility_and_session_relationships() {
 fn missing_optional_values_surface_as_unit() {
     let engine = load_engine(
         r#"
-            fn check_missing() {
-                if mux.current_buffer() == () && mux.current_node() == () {
-                    action.notify("missing")
+            fn check_missing(ctx) {
+                if ctx.current_buffer() == () && ctx.current_node() == () {
+                    action.notify("warn", "missing")
                 } else {
                     action.focus_left()
                 }
@@ -346,6 +378,7 @@ fn missing_optional_values_surface_as_unit() {
             .run_named_action("check-missing", Context::default())
             .unwrap(),
         vec![Action::Notify {
+            level: NotifyLevel::Warn,
             message: "missing".to_owned(),
         }]
     );
@@ -355,15 +388,16 @@ fn missing_optional_values_surface_as_unit() {
 fn tree_builders_roundtrip_nested_specs() {
     let engine = load_engine(
         r#"
-            fn build_tree() {
+            fn build_tree(ctx) {
                 action.replace_current_with(
                     tree.tabs_with_active([
-                        tree.tab("main", tree.split_h([
+                        tree.tab("main", tree.split("horizontal", [
                             tree.buffer_current(),
-                            tree.weight(2, tree.buffer_attach(9))
-                        ])),
+                            tree.buffer_attach(9)
+                        ], [1, 2])),
                         tree.tab("scratch", tree.buffer_spawn(
-                            #{ title: "scratch", command: ["/bin/sh"], cwd: "/tmp" }
+                            ["/bin/sh"],
+                            #{ title: "scratch", cwd: "/tmp" }
                         ))
                     ], 1)
                 )
@@ -376,25 +410,21 @@ fn tree_builders_roundtrip_nested_specs() {
         engine
             .run_named_action("build-tree", demo_context())
             .unwrap(),
-        vec![Action::ReplaceCurrentWith {
-            tree: TreeSpec::Tabs {
+        vec![Action::ReplaceNode {
+            node_id: None,
+            tree: TreeSpec::Tabs(TabsSpec {
                 tabs: vec![
                     TabSpec {
                         title: "main".to_owned(),
                         tree: Box::new(TreeSpec::Split {
                             direction: SplitDirection::Horizontal,
                             children: vec![
-                                WeightedTreeSpec {
-                                    weight: 1,
-                                    tree: Box::new(TreeSpec::BufferCurrent),
-                                },
-                                WeightedTreeSpec {
-                                    weight: 2,
-                                    tree: Box::new(TreeSpec::BufferAttach {
-                                        buffer_id: BufferId(9),
-                                    }),
+                                TreeSpec::BufferCurrent,
+                                TreeSpec::BufferAttach {
+                                    buffer_id: BufferId(9),
                                 },
                             ],
+                            sizes: vec![1, 2],
                         }),
                     },
                     TabSpec {
@@ -403,11 +433,12 @@ fn tree_builders_roundtrip_nested_specs() {
                             title: Some("scratch".to_owned()),
                             command: vec!["/bin/sh".to_owned()],
                             cwd: Some("/tmp".to_owned()),
+                            env: BTreeMap::new(),
                         })),
                     },
                 ],
                 active: 1,
-            },
+            }),
         }]
     );
 }
@@ -416,19 +447,19 @@ fn tree_builders_roundtrip_nested_specs() {
 fn invalid_tree_specs_are_rejected() {
     let empty_split = load_engine(
         r#"
-            fn bad_split() { action.replace_current_with(tree.split_h([])) }
+            fn bad_split(ctx) { action.replace_current_with(tree.split_h([])) }
             define_action("bad-split", bad_split);
         "#,
     );
     let empty_tabs = load_engine(
         r#"
-            fn bad_tabs() { action.replace_current_with(tree.tabs([])) }
+            fn bad_tabs(ctx) { action.replace_current_with(tree.tabs([])) }
             define_action("bad-tabs", bad_tabs);
         "#,
     );
     let bad_active = load_engine(
         r#"
-            fn bad_active() {
+            fn bad_active(ctx) {
                 action.replace_current_with(
                     tree.tabs_with_active([tree.tab("main", tree.buffer_current())], 2)
                 )
@@ -436,14 +467,14 @@ fn invalid_tree_specs_are_rejected() {
             define_action("bad-active", bad_active);
         "#,
     );
-    let bad_weight = load_engine(
+    let bad_sizes = load_engine(
         r#"
-            fn bad_weight() {
+            fn bad_sizes(ctx) {
                 action.replace_current_with(
-                    tree.split_h([tree.weight(0, tree.buffer_current())])
+                    tree.split("horizontal", [tree.buffer_current()], [0])
                 )
             }
-            define_action("bad-weight", bad_weight);
+            define_action("bad-sizes", bad_sizes);
         "#,
     );
 
@@ -469,11 +500,11 @@ fn invalid_tree_specs_are_rejected() {
             .contains("active tab index is out of bounds")
     );
     assert!(
-        bad_weight
-            .run_named_action("bad-weight", demo_context())
+        bad_sizes
+            .run_named_action("bad-sizes", demo_context())
             .unwrap_err()
             .to_string()
-            .contains("weight must be greater than zero")
+            .contains("split size must be greater than zero")
     );
 }
 

@@ -28,7 +28,8 @@ use tracing::{debug, error, info};
 use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
 use crate::{
     AlacrittyTerminalBackend, BackendDamage, BufferAttachment, BufferRuntimeCallbacks,
-    BufferRuntimeHandle, BufferState, RawByteRouter, ServerConfig, ServerState, TerminalBackend,
+    BufferRuntimeHandle, BufferState, RawByteRouter, ServerConfig, ServerState, TabEntry,
+    TerminalBackend,
 };
 
 #[derive(Debug)]
@@ -429,6 +430,7 @@ impl Runtime {
                 title,
                 command,
                 cwd,
+                env,
             } => {
                 if command.is_empty() {
                     return (
@@ -443,10 +445,11 @@ impl Runtime {
 
                 let buffer_id = {
                     let mut state = self.state.lock().await;
-                    state.create_buffer(
+                    state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
                         cwd.map(Into::into),
+                        env,
                     )
                 };
 
@@ -715,6 +718,83 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            embers_protocol::NodeRequest::CreateSplit {
+                request_id,
+                session_id,
+                direction,
+                child_node_ids,
+                sizes,
+            } => match state.create_split_node(session_id, direction, child_node_ids) {
+                Ok(split_id) => {
+                    if !sizes.is_empty()
+                        && let Err(error) = state.resize_split_children(split_id, sizes)
+                    {
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                    layout_snapshot_response(&state, request_id, session_id)
+                }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            embers_protocol::NodeRequest::CreateTabs {
+                request_id,
+                session_id,
+                child_node_ids,
+                titles,
+                active,
+            } => {
+                if child_node_ids.len() != titles.len() {
+                    return (
+                        mux_error_response(
+                            Some(request_id),
+                            MuxError::invalid_input(
+                                "create-tabs requires the same number of titles and child ids",
+                            ),
+                        ),
+                        Vec::new(),
+                    );
+                }
+                let tabs = titles
+                    .into_iter()
+                    .zip(child_node_ids)
+                    .map(|(title, child)| TabEntry::new(title, child))
+                    .collect();
+                match protocol_tab_index(active)
+                    .and_then(|active| state.create_tabs_node(session_id, tabs, active))
+                {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::ReplaceNode {
+                request_id,
+                node_id,
+                child_node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.replace_node(node_id, child_node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::WrapInSplit {
+                request_id,
+                node_id,
+                child_node_id,
+                direction,
+                insert_before,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.wrap_node_in_split(node_id, direction, child_node_id, insert_before) {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
             embers_protocol::NodeRequest::WrapInTabs {
                 request_id,
                 node_id,
@@ -735,17 +815,18 @@ impl Runtime {
                 title,
                 buffer_id,
                 child_node_id,
+                index,
             } => {
                 let session_id = match state.node(tabs_node_id) {
                     Ok(node) => node.session_id(),
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
-                let result = match (buffer_id, child_node_id) {
+                let result = protocol_tab_index(index).and_then(|index| match (buffer_id, child_node_id) {
                     (Some(buffer_id), None) => {
-                        state.add_tab_from_buffer(tabs_node_id, title, buffer_id)
+                        state.add_tab_from_buffer_at(tabs_node_id, index, title, buffer_id)
                     }
                     (None, Some(child_node_id)) => {
-                        state.add_tab_sibling(tabs_node_id, title, child_node_id)
+                        state.add_tab_sibling_at(tabs_node_id, index, title, child_node_id)
                     }
                     (Some(_), Some(_)) => Err(MuxError::invalid_input(
                         "add-tab requires either buffer_id or child_node_id, not both",
@@ -753,7 +834,7 @@ impl Runtime {
                     (None, None) => Err(MuxError::invalid_input(
                         "add-tab requires either buffer_id or child_node_id",
                     )),
-                };
+                });
                 match result {
                     Ok(_) => layout_snapshot_response(&state, request_id, session_id),
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
@@ -915,12 +996,28 @@ impl Runtime {
                 buffer_id,
                 geometry,
                 title,
+                focus,
+                close_on_empty,
             } => match match (root_node_id, buffer_id) {
                 (Some(root_node_id), None) => {
-                    state.create_floating_window(session_id, root_node_id, geometry, title)
+                    state.create_floating_window_with_options(
+                        session_id,
+                        root_node_id,
+                        geometry,
+                        title,
+                        focus,
+                        close_on_empty,
+                    )
                 }
                 (None, Some(buffer_id)) => {
-                    state.create_floating_from_buffer(session_id, buffer_id, geometry, title)
+                    state.create_floating_from_buffer_with_options(
+                        session_id,
+                        buffer_id,
+                        geometry,
+                        title,
+                        focus,
+                        close_on_empty,
+                    )
                 }
                 (Some(_), Some(_)) => Err(MuxError::invalid_input(
                     "create-floating requires either root_node_id or buffer_id, not both",
@@ -930,9 +1027,6 @@ impl Runtime {
                 )),
             } {
                 Ok(floating_id) => {
-                    if let Err(error) = state.focus_floating(floating_id) {
-                        return (mux_error_response(Some(request_id), error), Vec::new());
-                    }
                     match state.floating_window(floating_id) {
                         Ok(floating) => {
                             let mut events =
@@ -1032,17 +1126,20 @@ impl Runtime {
     }
 
     async fn spawn_buffer_runtime(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
-        let (command, cwd, size) = {
+        let (command, cwd, size, env_hints) = {
             let state = self.state.lock().await;
             let buffer = state.buffer(buffer_id)?.clone();
-            (buffer.command, buffer.cwd, buffer.pty_size)
+            (buffer.command, buffer.cwd, buffer.pty_size, buffer.env)
         };
 
         let output_handle = tokio::runtime::Handle::current();
         let exit_handle = output_handle.clone();
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
-        let buffer_env = self.buffer_env.clone();
+        let mut buffer_env = self.buffer_env.clone();
+        for (key, value) in env_hints {
+            buffer_env.insert(key, OsString::from(value));
+        }
         let runtime = BufferRuntimeHandle::spawn(
             buffer_id,
             &command,

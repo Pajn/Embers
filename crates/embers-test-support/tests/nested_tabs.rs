@@ -27,6 +27,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             title: Some(title.to_owned()),
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), "cat".to_owned()],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");
@@ -181,6 +182,7 @@ async fn nested_tab_mutations_round_trip_through_socket() {
             title: "other".to_owned(),
             buffer_id: Some(third_buffer.id),
             child_node_id: None,
+            index: 1,
         }))
         .await
         .expect("add nested tab request succeeds");
@@ -303,6 +305,7 @@ async fn get_tree_returns_nested_tab_structure() {
             title: "other".to_owned(),
             buffer_id: Some(third_buffer.id),
             child_node_id: None,
+            index: 1,
         }))
         .await
         .expect("add nested tab request succeeds");

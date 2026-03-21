@@ -3,10 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use embers_core::{ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, Rect, SessionId};
 use embers_protocol::{BufferRecordState, NodeRecordKind};
 
+use crate::input::NORMAL_MODE;
 use crate::{ClientState, PresentationModel, TabsFrame};
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Context {
+    current_mode: String,
+    event: Option<EventInfo>,
     current_session_id: Option<SessionId>,
     current_node_id: Option<NodeId>,
     current_buffer_id: Option<BufferId>,
@@ -19,6 +22,15 @@ pub struct Context {
 
 impl Context {
     pub fn from_state(state: &ClientState, presentation: Option<&PresentationModel>) -> Self {
+        Self::from_state_with_mode(state, presentation, NORMAL_MODE)
+    }
+
+    pub fn from_state_with_mode(
+        state: &ClientState,
+        presentation: Option<&PresentationModel>,
+        current_mode: impl Into<String>,
+    ) -> Self {
+        let current_mode = current_mode.into();
         let current_session_id = presentation.map(|presentation| presentation.session_id);
         let current_node_id = presentation
             .and_then(|presentation| presentation.focused_leaf())
@@ -37,6 +49,21 @@ impl Context {
             .unwrap_or_default();
         let geometry_by_node = presentation.map(geometry_by_node).unwrap_or_default();
         let visible_node_ids = geometry_by_node.keys().copied().collect::<BTreeSet<_>>();
+        let focused_leaf_ids = state
+            .sessions
+            .values()
+            .filter_map(|session| session.focused_leaf_id)
+            .collect::<BTreeSet<_>>();
+        let session_root_ids = state
+            .sessions
+            .values()
+            .map(|session| session.root_node_id)
+            .collect::<BTreeSet<_>>();
+        let floating_root_ids = state
+            .floating
+            .values()
+            .map(|floating| floating.root_node_id)
+            .collect::<BTreeSet<_>>();
 
         let sessions = state
             .sessions
@@ -70,28 +97,36 @@ impl Context {
                             .map(|tabs| tabs.tabs.iter().map(|tab| tab.child_id).collect())
                     })
                     .unwrap_or_default();
+                let buffer_id = node
+                    .buffer_view
+                    .as_ref()
+                    .map(|buffer_view| buffer_view.buffer_id);
+                let split_direction = node.split.as_ref().map(|split| split.direction);
+                let split_weights = node.split.as_ref().map(|split| split.sizes.clone());
+                let active_tab_index = node.tabs.as_ref().map(|tabs| tabs.active);
                 let tab_titles = node
                     .tabs
                     .as_ref()
                     .map(|tabs| tabs.tabs.iter().map(|tab| tab.title.clone()).collect())
                     .unwrap_or_default();
-                let buffer_id = node
-                    .buffer_view
-                    .as_ref()
-                    .map(|buffer_view| buffer_view.buffer_id);
                 (
                     node.id,
                     NodeRef {
                         id: node.id,
                         session_id: node.session_id,
-                        parent_id: node.parent_id,
                         kind: node.kind,
+                        parent_id: node.parent_id,
                         child_ids,
                         geometry: geometry_by_node.get(&node.id).copied(),
-                        tab_titles,
-                        active_tab: node.tabs.as_ref().map(|tabs| tabs.active),
-                        buffer_id,
+                        is_root: session_root_ids.contains(&node.id),
+                        is_floating_root: floating_root_ids.contains(&node.id),
+                        is_focused: focused_leaf_ids.contains(&node.id),
                         visible: visible_node_ids.contains(&node.id),
+                        buffer_id,
+                        split_direction,
+                        split_weights,
+                        active_tab_index,
+                        tab_titles,
                     },
                 )
             })
@@ -104,6 +139,11 @@ impl Context {
                 let session_id = buffer
                     .attachment_node_id
                     .and_then(|node_id| state.nodes.get(&node_id).map(|node| node.session_id));
+                let snapshot_lines = state
+                    .snapshots
+                    .get(&buffer.id)
+                    .map(|snapshot| snapshot.lines.clone())
+                    .unwrap_or_default();
                 (
                     buffer.id,
                     BufferRef {
@@ -111,14 +151,16 @@ impl Context {
                         title: buffer.title.clone(),
                         command: buffer.command.clone(),
                         cwd: buffer.cwd.clone(),
+                        pid: buffer.pid,
+                        env: buffer.env.clone(),
                         state: buffer.state,
-                        attachment_node_id: buffer.attachment_node_id,
                         activity: buffer.activity,
-                        exit_code: buffer.exit_code,
+                        attachment_node_id: buffer.attachment_node_id,
                         session_id,
                         visible: visible_buffer_ids.contains(&buffer.id),
-                        detached: buffer.attachment_node_id.is_none(),
+                        exit_code: buffer.exit_code,
                         tty_path: None,
+                        snapshot_lines,
                     },
                 )
             })
@@ -145,6 +187,8 @@ impl Context {
             .collect::<BTreeMap<_, _>>();
 
         Self {
+            current_mode,
+            event: None,
             current_session_id,
             current_node_id,
             current_buffer_id,
@@ -154,6 +198,19 @@ impl Context {
             nodes,
             floating,
         }
+    }
+
+    pub fn with_event(mut self, event: EventInfo) -> Self {
+        self.event = Some(event);
+        self
+    }
+
+    pub fn current_mode(&self) -> &str {
+        &self.current_mode
+    }
+
+    pub fn event(&self) -> Option<EventInfo> {
+        self.event.clone()
     }
 
     pub fn current_session(&self) -> Option<SessionRef> {
@@ -176,10 +233,26 @@ impl Context {
             .and_then(|floating_id| self.floating.get(&floating_id).cloned())
     }
 
+    pub fn sessions(&self) -> Vec<SessionRef> {
+        self.sessions.values().cloned().collect()
+    }
+
+    pub fn find_buffer(&self, buffer_id: BufferId) -> Option<BufferRef> {
+        self.buffers.get(&buffer_id).cloned()
+    }
+
+    pub fn find_node(&self, node_id: NodeId) -> Option<NodeRef> {
+        self.nodes.get(&node_id).cloned()
+    }
+
+    pub fn find_floating(&self, floating_id: FloatingId) -> Option<FloatingRef> {
+        self.floating.get(&floating_id).cloned()
+    }
+
     pub fn detached_buffers(&self) -> Vec<BufferRef> {
         self.buffers
             .values()
-            .filter(|buffer| buffer.detached)
+            .filter(|buffer| buffer.is_detached())
             .cloned()
             .collect()
     }
@@ -195,10 +268,19 @@ impl Context {
     pub fn visible_floating(&self) -> Vec<FloatingRef> {
         self.floating
             .values()
-            .filter(|window| window.visible)
+            .filter(|floating| floating.visible)
             .cloned()
             .collect()
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventInfo {
+    pub name: String,
+    pub session_id: Option<SessionId>,
+    pub buffer_id: Option<BufferId>,
+    pub node_id: Option<NodeId>,
+    pub floating_id: Option<FloatingId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,17 +299,23 @@ pub struct BufferRef {
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<String>,
+    pub pid: Option<u32>,
+    pub env: BTreeMap<String, String>,
     pub state: BufferRecordState,
-    pub attachment_node_id: Option<NodeId>,
     pub activity: ActivityState,
-    pub exit_code: Option<i32>,
+    pub attachment_node_id: Option<NodeId>,
     pub session_id: Option<SessionId>,
     pub visible: bool,
-    pub detached: bool,
+    pub exit_code: Option<i32>,
     pub tty_path: Option<String>,
+    pub snapshot_lines: Vec<String>,
 }
 
 impl BufferRef {
+    pub fn node_id(&self) -> Option<NodeId> {
+        self.attachment_node_id
+    }
+
     pub fn process_name(&self) -> Option<String> {
         let command = self.command.first()?;
         Some(
@@ -238,20 +326,61 @@ impl BufferRef {
                 .to_owned(),
         )
     }
+
+    pub fn env_hint(&self, key: &str) -> Option<String> {
+        self.env.get(key).cloned()
+    }
+
+    pub fn snapshot_text(&self, limit: usize) -> String {
+        if limit == 0 {
+            return String::new();
+        }
+        self.snapshot_lines
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn history_text(&self) -> String {
+        self.snapshot_lines.join("\n")
+    }
+
+    pub fn is_attached(&self) -> bool {
+        self.attachment_node_id.is_some()
+    }
+
+    pub fn is_detached(&self) -> bool {
+        self.attachment_node_id.is_none()
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, BufferRecordState::Running)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeRef {
     pub id: NodeId,
     pub session_id: SessionId,
-    pub parent_id: Option<NodeId>,
     pub kind: NodeRecordKind,
+    pub parent_id: Option<NodeId>,
     pub child_ids: Vec<NodeId>,
     pub geometry: Option<Rect>,
-    pub tab_titles: Vec<String>,
-    pub active_tab: Option<u32>,
-    pub buffer_id: Option<BufferId>,
+    pub is_root: bool,
+    pub is_floating_root: bool,
+    pub is_focused: bool,
     pub visible: bool,
+    pub buffer_id: Option<BufferId>,
+    pub split_direction: Option<embers_core::SplitDirection>,
+    pub split_weights: Option<Vec<u16>>,
+    pub active_tab_index: Option<u32>,
+    pub tab_titles: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,22 +400,30 @@ pub struct TabBarContext {
     pub node_id: NodeId,
     pub is_root: bool,
     pub active: usize,
-    pub tabs: Vec<TabStateRef>,
+    pub mode: String,
+    pub viewport_width: u16,
+    pub tabs: Vec<TabInfo>,
 }
 
 impl TabBarContext {
-    pub fn from_frame(frame: &TabsFrame) -> Self {
+    pub fn from_frame(frame: &TabsFrame, mode: impl Into<String>, viewport_width: u16) -> Self {
         Self {
             node_id: frame.node_id,
             is_root: frame.is_root,
             active: frame.active,
+            mode: mode.into(),
+            viewport_width,
             tabs: frame
                 .tabs
                 .iter()
-                .map(|tab| TabStateRef {
+                .enumerate()
+                .map(|(index, tab)| TabInfo {
+                    index,
                     title: tab.title.clone(),
                     active: tab.active,
-                    activity: tab.activity,
+                    has_activity: matches!(tab.activity, ActivityState::Activity | ActivityState::Bell),
+                    has_bell: matches!(tab.activity, ActivityState::Bell),
+                    buffer_count: 1,
                 })
                 .collect(),
         }
@@ -294,10 +431,13 @@ impl TabBarContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TabStateRef {
+pub struct TabInfo {
+    pub index: usize,
     pub title: String,
     pub active: bool,
-    pub activity: ActivityState,
+    pub has_activity: bool,
+    pub has_bell: bool,
+    pub buffer_count: usize,
 }
 
 fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> {

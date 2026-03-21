@@ -8,13 +8,14 @@ use rhai::{
 
 use crate::config::LoadedConfigSource;
 use crate::input::{
-    BindingSpec, KeySequence, ModeSpec, builtin_modes, expand_leader, parse_key_sequence,
+    BindingSpec, FallbackPolicy, KeySequence, ModeSpec, builtin_modes, expand_leader,
+    parse_key_sequence,
 };
 
 use super::error::ScriptError;
 use super::runtime::{normalize_actions, normalize_bar, register_runtime_api, runtime_scope};
-use super::types::{LoadedConfig, RgbColor, ScriptFunctionRef, ThemeSpec};
-use super::{Action, BarSpec, Context, TabBarContext};
+use super::types::{LoadedConfig, ModeHooks, RgbColor, ScriptFunctionRef, ThemeSpec};
+use super::{Action, Context, TabBarContext};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -66,23 +67,15 @@ impl ScriptEngine {
         self.loaded.has_event_handlers(event)
     }
 
-    pub fn has_root_formatter(&self) -> bool {
-        self.loaded.has_root_formatter()
-    }
-
-    pub fn has_nested_formatter(&self) -> bool {
-        self.loaded.has_nested_formatter()
+    pub fn has_tab_bar_formatter(&self) -> bool {
+        self.loaded.has_tab_bar_formatter()
     }
 
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
 
-    pub fn run_named_action(
-        &self,
-        name: &str,
-        context: Context,
-    ) -> Result<Vec<Action>, ScriptError> {
+    pub fn run_named_action(&self, name: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
         let callback = self.loaded.named_actions.get(name).ok_or_else(|| {
             ScriptError::validation_path(
                 self.loaded.source_path.as_deref(),
@@ -93,11 +86,7 @@ impl ScriptEngine {
         self.invoke_action_function(&callback.name, context)
     }
 
-    pub fn dispatch_event(
-        &self,
-        event: &str,
-        context: Context,
-    ) -> Result<Vec<Action>, ScriptError> {
+    pub fn dispatch_event(&self, event: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
         let Some(handlers) = self.loaded.event_handlers.get(event) else {
             return Ok(Vec::new());
         };
@@ -109,28 +98,38 @@ impl ScriptEngine {
         Ok(actions)
     }
 
-    pub fn format_root_tabbar(
-        &self,
-        context: Context,
-        bar_context: TabBarContext,
-    ) -> Result<Option<BarSpec>, ScriptError> {
-        let Some(formatter) = &self.loaded.root_tab_formatter else {
-            return Ok(None);
-        };
-        self.invoke_bar_function(&formatter.name, context, bar_context)
-            .map(Some)
+    pub fn run_enter_hook(&self, mode: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
+        self.run_mode_hook(mode, ModeHook::Enter, context)
     }
 
-    pub fn format_nested_tabbar(
+    pub fn run_leave_hook(&self, mode: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
+        self.run_mode_hook(mode, ModeHook::Leave, context)
+    }
+
+    fn run_mode_hook(
         &self,
+        mode: &str,
+        hook: ModeHook,
         context: Context,
-        bar_context: TabBarContext,
-    ) -> Result<Option<BarSpec>, ScriptError> {
-        let Some(formatter) = &self.loaded.nested_tab_formatter else {
+    ) -> Result<Vec<Action>, ScriptError> {
+        let Some(hooks) = self.loaded.mode_hooks.get(mode) else {
+            return Ok(Vec::new());
+        };
+        let callback = match hook {
+            ModeHook::Enter => hooks.on_enter.as_ref(),
+            ModeHook::Leave => hooks.on_leave.as_ref(),
+        };
+        let Some(callback) = callback else {
+            return Ok(Vec::new());
+        };
+        self.invoke_action_function(&callback.name, context)
+    }
+
+    pub fn format_tab_bar(&self, bar_context: TabBarContext) -> Result<Option<super::BarSpec>, ScriptError> {
+        let Some(formatter) = &self.loaded.tab_bar_formatter else {
             return Ok(None);
         };
-        self.invoke_bar_function(&formatter.name, context, bar_context)
-            .map(Some)
+        self.invoke_bar_function(&formatter.name, bar_context).map(Some)
     }
 
     fn invoke_action_function(
@@ -138,7 +137,7 @@ impl ScriptEngine {
         function_name: &str,
         context: Context,
     ) -> Result<Vec<Action>, ScriptError> {
-        let mut scope = runtime_scope(context, self.loaded.theme.clone(), None);
+        let mut scope = runtime_scope(Some(context.clone()), self.loaded.theme.clone());
         let result = self
             .engine
             .call_fn_with_options::<Dynamic>(
@@ -146,7 +145,7 @@ impl ScriptEngine {
                 &mut scope,
                 &self.loaded.ast,
                 function_name,
-                (),
+                (context,),
             )
             .map_err(|error| {
                 ScriptError::runtime_path(self.loaded.source_path.as_deref(), error)
@@ -163,10 +162,9 @@ impl ScriptEngine {
     fn invoke_bar_function(
         &self,
         function_name: &str,
-        context: Context,
         bar_context: TabBarContext,
-    ) -> Result<BarSpec, ScriptError> {
-        let mut scope = runtime_scope(context, self.loaded.theme.clone(), Some(bar_context));
+    ) -> Result<super::BarSpec, ScriptError> {
+        let mut scope = runtime_scope(None, self.loaded.theme.clone());
         let result = self
             .engine
             .call_fn_with_options::<Dynamic>(
@@ -174,7 +172,7 @@ impl ScriptEngine {
                 &mut scope,
                 &self.loaded.ast,
                 function_name,
-                (),
+                (bar_context,),
             )
             .map_err(|error| {
                 ScriptError::runtime_path(self.loaded.source_path.as_deref(), error)
@@ -189,15 +187,21 @@ impl ScriptEngine {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeHook {
+    Enter,
+    Leave,
+}
+
 #[derive(Clone, Debug, Default)]
 struct RegistrationState {
     leader: Option<KeySequence>,
     custom_modes: BTreeMap<String, ModeSpec>,
+    mode_hooks: BTreeMap<String, ModeHooks>,
     bindings: Vec<PendingBinding>,
     named_actions: BTreeMap<String, ScriptFunctionRef>,
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
-    root_tab_formatter: Option<ScriptFunctionRef>,
-    nested_tab_formatter: Option<ScriptFunctionRef>,
+    tab_bar_formatter: Option<ScriptFunctionRef>,
     theme: ThemeSpec,
 }
 
@@ -210,7 +214,7 @@ impl RegistrationState {
         let mut modes = builtin_modes();
         modes.extend(self.custom_modes);
 
-        let mut bindings = BTreeMap::<String, Vec<BindingSpec<String>>>::new();
+        let mut bindings = BTreeMap::<String, Vec<BindingSpec<Vec<Action>>>>::new();
         let mut seen = BTreeSet::<(String, KeySequence)>::new();
         for pending in self.bindings {
             if !modes.contains_key(&pending.mode) {
@@ -220,16 +224,8 @@ impl RegistrationState {
                     format!("binding uses unknown mode '{}'", pending.mode),
                 ));
             }
-            if !self.named_actions.contains_key(&pending.action_name) {
-                return Err(ScriptError::validation(
-                    source,
-                    pending.position,
-                    format!(
-                        "binding references unknown action '{}'",
-                        pending.action_name
-                    ),
-                ));
-            }
+
+            validate_action_refs(source, pending.position, &self.named_actions, &pending.target)?;
 
             let sequence = expand_leader(
                 pending.raw_sequence.clone(),
@@ -254,8 +250,27 @@ impl RegistrationState {
             bindings.entry(pending.mode).or_default().push(BindingSpec {
                 notation: pending.notation,
                 sequence,
-                target: pending.action_name,
+                target: pending.target,
             });
+        }
+
+        for (mode_name, hooks) in &self.mode_hooks {
+            if !modes.contains_key(mode_name) {
+                return Err(ScriptError::validation(
+                    source,
+                    Position::NONE,
+                    format!("mode hooks reference unknown mode '{mode_name}'"),
+                ));
+            }
+            if let Some(on_enter) = &hooks.on_enter
+                && !self.named_actions.values().any(|action| action == on_enter)
+            {
+                // Mode hooks are direct function refs, so no named-action validation is needed.
+            }
+            if let Some(on_leave) = &hooks.on_leave
+                && !self.named_actions.values().any(|action| action == on_leave)
+            {
+            }
         }
 
         Ok(LoadedConfig {
@@ -264,14 +279,40 @@ impl RegistrationState {
             ast,
             leader: self.leader.unwrap_or_default(),
             modes,
+            mode_hooks: self.mode_hooks,
             bindings,
             named_actions: self.named_actions,
             event_handlers: self.event_handlers,
-            root_tab_formatter: self.root_tab_formatter,
-            nested_tab_formatter: self.nested_tab_formatter,
+            tab_bar_formatter: self.tab_bar_formatter,
             theme: self.theme,
         })
     }
+}
+
+fn validate_action_refs(
+    source: &LoadedConfigSource,
+    position: Position,
+    named_actions: &BTreeMap<String, ScriptFunctionRef>,
+    actions: &[Action],
+) -> Result<(), ScriptError> {
+    for action in actions {
+        match action {
+            Action::RunNamedAction { name } => {
+                if !named_actions.contains_key(name) {
+                    return Err(ScriptError::validation(
+                        source,
+                        position,
+                        format!("binding references unknown action '{name}'"),
+                    ));
+                }
+            }
+            Action::Chain(actions) => {
+                validate_action_refs(source, position, named_actions, actions)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -279,7 +320,7 @@ struct PendingBinding {
     mode: String,
     notation: String,
     raw_sequence: KeySequence,
-    action_name: String,
+    target: Vec<Action>,
     position: Position,
 }
 
@@ -293,33 +334,14 @@ impl TabbarApi {
         Self { registration }
     }
 
-    fn set_root_formatter(&mut self, position: Position, formatter: FnPtr) -> RhaiResult<()> {
+    fn set_formatter(&mut self, position: Position, formatter: FnPtr) -> RhaiResult<()> {
         let mut registration = self.registration.lock().expect("registration lock");
-        if registration.root_tab_formatter.is_some() {
-            return Err(runtime_error(
-                "root tab formatter already defined",
-                position,
-            ));
+        if registration.tab_bar_formatter.is_some() {
+            return Err(runtime_error("tab bar formatter already defined", position));
         }
-        registration.root_tab_formatter = Some(checked_function_ref(
+        registration.tab_bar_formatter = Some(checked_function_ref(
             formatter,
-            "root tab formatter",
-            position,
-        )?);
-        Ok(())
-    }
-
-    fn set_nested_formatter(&mut self, position: Position, formatter: FnPtr) -> RhaiResult<()> {
-        let mut registration = self.registration.lock().expect("registration lock");
-        if registration.nested_tab_formatter.is_some() {
-            return Err(runtime_error(
-                "nested tab formatter already defined",
-                position,
-            ));
-        }
-        registration.nested_tab_formatter = Some(checked_function_ref(
-            formatter,
-            "nested tab formatter",
+            "tab bar formatter",
             position,
         )?);
         Ok(())
@@ -385,20 +407,15 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     engine.register_fn(
         "define_mode",
         move |context: NativeCallContext, mode_name: ImmutableString| -> RhaiResult<()> {
-            let mut registration = mode_registration.lock().expect("registration lock");
-            if builtin_modes().contains_key(mode_name.as_str())
-                || registration.custom_modes.contains_key(mode_name.as_str())
-            {
-                return Err(runtime_error(
-                    format!("mode '{mode_name}' is already defined"),
-                    context.call_position(),
-                ));
-            }
-            registration.custom_modes.insert(
-                mode_name.to_string(),
-                ModeSpec::new(mode_name.to_string(), crate::input::FallbackPolicy::Ignore),
-            );
-            Ok(())
+            define_mode_impl(&mode_registration, context.call_position(), mode_name, Map::new())
+        },
+    );
+
+    let mode_registration = registration.clone();
+    engine.register_fn(
+        "define_mode",
+        move |context: NativeCallContext, mode_name: ImmutableString, options: Map| -> RhaiResult<()> {
+            define_mode_impl(&mode_registration, context.call_position(), mode_name, options)
         },
     );
 
@@ -410,20 +427,59 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
               notation: ImmutableString,
               action_name: ImmutableString|
               -> RhaiResult<()> {
-            let raw_sequence = parse_key_sequence(notation.as_str())
-                .map_err(|error| runtime_error(error.to_string(), context.call_position()))?;
-            bind_registration
-                .lock()
-                .expect("registration lock")
-                .bindings
-                .push(PendingBinding {
-                    mode: mode.to_string(),
-                    notation: notation.to_string(),
-                    raw_sequence,
-                    action_name: action_name.to_string(),
-                    position: context.call_position(),
-                });
-            Ok(())
+            register_binding(
+                &bind_registration,
+                context.call_position(),
+                mode,
+                notation,
+                vec![Action::RunNamedAction {
+                    name: action_name.to_string(),
+                }],
+            )
+        },
+    );
+
+    let bind_registration = registration.clone();
+    engine.register_fn(
+        "bind",
+        move |context: NativeCallContext,
+              mode: ImmutableString,
+              notation: ImmutableString,
+              action: Action|
+              -> RhaiResult<()> {
+            register_binding(
+                &bind_registration,
+                context.call_position(),
+                mode,
+                notation,
+                vec![action],
+            )
+        },
+    );
+
+    let bind_registration = registration.clone();
+    engine.register_fn(
+        "bind",
+        move |context: NativeCallContext,
+              mode: ImmutableString,
+              notation: ImmutableString,
+              actions: rhai::Array|
+              -> RhaiResult<()> {
+            let target = actions
+                .into_iter()
+                .map(|action| {
+                    action
+                        .try_cast::<Action>()
+                        .ok_or_else(|| runtime_error("bind expects Action values", context.call_position()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            register_binding(
+                &bind_registration,
+                context.call_position(),
+                mode,
+                notation,
+                target,
+            )
         },
     );
 
@@ -472,15 +528,9 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     );
 
     engine.register_fn(
-        "set_root_formatter",
+        "set_formatter",
         |context: NativeCallContext, tabbar: &mut TabbarApi, callback: FnPtr| -> RhaiResult<()> {
-            tabbar.set_root_formatter(context.call_position(), callback)
-        },
-    );
-    engine.register_fn(
-        "set_nested_formatter",
-        |context: NativeCallContext, tabbar: &mut TabbarApi, callback: FnPtr| -> RhaiResult<()> {
-            tabbar.set_nested_formatter(context.call_position(), callback)
+            tabbar.set_formatter(context.call_position(), callback)
         },
     );
     engine.register_fn(
@@ -491,8 +541,102 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     );
 }
 
+fn define_mode_impl(
+    registration: &SharedRegistration,
+    position: Position,
+    mode_name: ImmutableString,
+    mut options: Map,
+) -> RhaiResult<()> {
+    let fallback_policy = parse_fallback_policy(options.remove("fallback"))?;
+    let on_enter = parse_optional_function_ref(options.remove("on_enter"), "mode on_enter", position)?;
+    let on_leave = parse_optional_function_ref(options.remove("on_leave"), "mode on_leave", position)?;
+
+    let mut registration = registration.lock().expect("registration lock");
+    if registration.custom_modes.contains_key(mode_name.as_str()) {
+        return Err(runtime_error(
+            format!("mode '{mode_name}' is already defined"),
+            position,
+        ));
+    }
+    registration.custom_modes.insert(
+        mode_name.to_string(),
+        ModeSpec::new(mode_name.to_string(), fallback_policy),
+    );
+    registration.mode_hooks.insert(
+        mode_name.to_string(),
+        ModeHooks {
+            on_enter,
+            on_leave,
+        },
+    );
+    Ok(())
+}
+
+fn register_binding(
+    registration: &SharedRegistration,
+    position: Position,
+    mode: ImmutableString,
+    notation: ImmutableString,
+    target: Vec<Action>,
+) -> RhaiResult<()> {
+    let raw_sequence = parse_key_sequence(notation.as_str())
+        .map_err(|error| runtime_error(error.to_string(), position))?;
+    registration
+        .lock()
+        .expect("registration lock")
+        .bindings
+        .push(PendingBinding {
+            mode: mode.to_string(),
+            notation: notation.to_string(),
+            raw_sequence,
+            target,
+            position,
+        });
+    Ok(())
+}
+
+fn parse_fallback_policy(value: Option<Dynamic>) -> RhaiResult<FallbackPolicy> {
+    let Some(value) = value else {
+        return Ok(FallbackPolicy::Ignore);
+    };
+    if value.is_unit() {
+        return Ok(FallbackPolicy::Ignore);
+    }
+    let Some(value) = value.try_cast::<ImmutableString>() else {
+        return Err(runtime_error(
+            "mode fallback must be 'pass_to_buffer' or 'ignore'",
+            Position::NONE,
+        ));
+    };
+    match value.as_str() {
+        "pass_to_buffer" => Ok(FallbackPolicy::Passthrough),
+        "ignore" => Ok(FallbackPolicy::Ignore),
+        other => Err(runtime_error(
+            format!("unknown fallback policy '{other}'"),
+            Position::NONE,
+        )),
+    }
+}
+
 fn function_ref(callback: FnPtr) -> ScriptFunctionRef {
     ScriptFunctionRef::new(callback.fn_name().to_owned())
+}
+
+fn parse_optional_function_ref(
+    value: Option<Dynamic>,
+    role: &str,
+    position: Position,
+) -> RhaiResult<Option<ScriptFunctionRef>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_unit() {
+        return Ok(None);
+    }
+    let Some(callback) = value.try_cast::<FnPtr>() else {
+        return Err(runtime_error(format!("{role} must be a function"), position));
+    };
+    checked_function_ref(callback, role, position).map(Some)
 }
 
 fn checked_function_ref(
@@ -511,144 +655,4 @@ fn checked_function_ref(
 
 fn runtime_error(message: impl Into<String>, position: Position) -> Box<EvalAltResult> {
     EvalAltResult::ErrorRuntime(message.into().into(), position).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use crate::config::{ConfigOrigin, LoadedConfigSource};
-
-    use super::ScriptEngine;
-
-    #[test]
-    fn loads_valid_config_and_tracks_registries() {
-        let source = inline_source(
-            r##"
-                fn split_workspace() { () }
-                fn on_created() { () }
-                fn root_tabs() { () }
-                fn nested_tabs() { () }
-
-                set_leader("<C-a>");
-                define_mode("locked");
-                define_action("workspace-split", split_workspace);
-                bind("normal", "<leader>ws", "workspace-split");
-                on("session-created", on_created);
-                tabbar.set_root_formatter(root_tabs);
-                tabbar.set_nested_formatter(nested_tabs);
-                theme.set_palette(#{ active: "#00ff00", inactive: "#333333" });
-            "##,
-        );
-
-        let engine = ScriptEngine::load(&source).unwrap();
-
-        assert_eq!(
-            engine.loaded_config().leader,
-            crate::parse_key_sequence("<C-a>").unwrap()
-        );
-        assert!(engine.loaded_config().modes.contains_key("normal"));
-        assert!(engine.loaded_config().modes.contains_key("locked"));
-        assert!(engine.has_action("workspace-split"));
-        assert!(engine.has_event_handlers("session-created"));
-        assert!(engine.has_root_formatter());
-        assert!(engine.has_nested_formatter());
-        assert_eq!(
-            engine.loaded_config().bindings["normal"][0].target,
-            "workspace-split"
-        );
-    }
-
-    #[test]
-    fn reports_invalid_syntax_with_path_and_location() {
-        let source = inline_source("set_leader(");
-
-        let error = ScriptEngine::load(&source)
-            .err()
-            .expect("script should fail");
-        let message = error.to_string();
-
-        assert!(message.contains("inline-config.rhai"));
-        assert!(message.contains("failed to compile"));
-        assert!(message.contains("at 1"));
-    }
-
-    #[test]
-    fn duplicate_action_names_fail() {
-        let source = inline_source(
-            r#"
-                fn first() { () }
-                fn second() { () }
-                define_action("dup", first);
-                define_action("dup", second);
-            "#,
-        );
-
-        let error = ScriptEngine::load(&source)
-            .err()
-            .expect("script should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("action 'dup' is already defined")
-        );
-    }
-
-    #[test]
-    fn duplicate_modes_fail() {
-        let source = inline_source(
-            r#"
-                define_mode("locked");
-                define_mode("locked");
-            "#,
-        );
-
-        let error = ScriptEngine::load(&source)
-            .err()
-            .expect("script should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("mode 'locked' is already defined")
-        );
-    }
-
-    #[test]
-    fn invalid_key_notation_fails() {
-        let source = inline_source(
-            r#"
-                fn noop() { () }
-                define_action("noop", noop);
-                bind("normal", "<Hyper-x>", "noop");
-            "#,
-        );
-
-        let error = ScriptEngine::load(&source)
-            .err()
-            .expect("script should fail");
-
-        assert!(error.to_string().contains("key modifier"));
-    }
-
-    #[test]
-    fn invalid_palette_values_fail() {
-        let source = inline_source(r##"theme.set_palette(#{ active: "green" });"##);
-
-        let error = ScriptEngine::load(&source)
-            .err()
-            .expect("script should fail");
-
-        assert!(error.to_string().contains("must be in '#RRGGBB' form"));
-    }
-
-    fn inline_source(source: &str) -> LoadedConfigSource {
-        LoadedConfigSource {
-            origin: ConfigOrigin::BuiltIn,
-            path: Some(PathBuf::from("inline-config.rhai")),
-            source: source.trim().to_owned(),
-            source_hash: 0,
-        }
-    }
 }

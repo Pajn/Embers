@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use embers_core::{
@@ -22,6 +23,7 @@ pub struct Buffer {
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
     pub pty_size: PtySize,

@@ -1,76 +1,125 @@
-use embers_core::{BufferId, FloatGeometry, NodeId, SplitDirection};
+use std::collections::BTreeMap;
 
+use embers_core::{BufferId, FloatingId, NodeId, SplitDirection};
+
+use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    Noop,
+    Chain(Vec<Action>),
     EnterMode {
         mode: String,
     },
-    Focus {
+    LeaveMode,
+    ToggleMode {
+        mode: String,
+    },
+    ClearPendingKeys,
+    FocusDirection {
         direction: NavigationDirection,
     },
-    Resize {
+    ResizeDirection {
         direction: NavigationDirection,
         amount: u16,
     },
     SelectTab {
+        tabs_node_id: Option<NodeId>,
         index: usize,
     },
-    Split {
-        direction: SplitDirection,
-        tree: TreeSpec,
+    NextTab {
+        tabs_node_id: Option<NodeId>,
     },
-    ReplaceCurrentWith {
-        tree: TreeSpec,
+    PrevTab {
+        tabs_node_id: Option<NodeId>,
+    },
+    FocusBuffer {
+        buffer_id: BufferId,
+    },
+    RevealBuffer {
+        buffer_id: BufferId,
+    },
+    SplitCurrent {
+        direction: SplitDirection,
+        new_child: TreeSpec,
     },
     ReplaceNode {
-        target: NodeTarget,
+        node_id: Option<NodeId>,
         tree: TreeSpec,
     },
-    WrapCurrentInSplit {
+    WrapNodeInSplit {
+        node_id: Option<NodeId>,
         direction: SplitDirection,
-        tree: TreeSpec,
+        sibling: TreeSpec,
     },
-    WrapCurrentInTabs {
-        tabs: Vec<TabSpec>,
-        active: usize,
+    WrapNodeInTabs {
+        node_id: Option<NodeId>,
+        tabs: TabsSpec,
     },
-    InsertTabAfterCurrent {
-        title: String,
-        tree: TreeSpec,
+    InsertTabAfter {
+        tabs_node_id: Option<NodeId>,
+        title: Option<String>,
+        child: TreeSpec,
+    },
+    InsertTabBefore {
+        tabs_node_id: Option<NodeId>,
+        title: Option<String>,
+        child: TreeSpec,
     },
     OpenFloating {
-        tree: TreeSpec,
-        options: FloatingOptions,
+        spec: FloatingSpec,
     },
-    DetachBuffer {
-        target: BufferTarget,
+    ReplaceFloatingRoot {
+        floating_id: Option<FloatingId>,
+        tree: TreeSpec,
+    },
+    CloseFloating {
+        floating_id: Option<FloatingId>,
+    },
+    CloseView {
+        node_id: Option<NodeId>,
     },
     KillBuffer {
-        target: BufferTarget,
-        force: bool,
+        buffer_id: Option<BufferId>,
+    },
+    DetachBuffer {
+        buffer_id: Option<BufferId>,
+    },
+    MoveBufferToNode {
+        buffer_id: BufferId,
+        node_id: NodeId,
+    },
+    MoveBufferToFloating {
+        buffer_id: BufferId,
+        geometry: FloatingGeometrySpec,
+        title: Option<String>,
+        focus: bool,
+    },
+    SendKeys {
+        buffer_id: Option<BufferId>,
+        keys: KeySequence,
     },
     SendBytes {
-        target: BufferTarget,
+        buffer_id: Option<BufferId>,
         bytes: Vec<u8>,
     },
+    CopySelection,
+    CancelSelection,
     Notify {
+        level: NotifyLevel,
         message: String,
     },
-    ReloadConfig,
+    RunNamedAction {
+        name: String,
+    },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BufferTarget {
-    Current,
-    Buffer(BufferId),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NodeTarget {
-    Current,
-    Node(NodeId),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotifyLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,18 +127,52 @@ pub struct BufferSpawnSpec {
     pub title: Option<String>,
     pub command: Vec<String>,
     pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FloatingOptions {
-    pub geometry: FloatGeometry,
+pub struct FloatingSpec {
+    pub tree: TreeSpec,
+    pub geometry: FloatingGeometrySpec,
     pub title: Option<String>,
+    pub focus: bool,
+    pub close_on_empty: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WeightedTreeSpec {
-    pub weight: u16,
-    pub tree: Box<TreeSpec>,
+pub struct FloatingGeometrySpec {
+    pub width: FloatingSize,
+    pub height: FloatingSize,
+    pub anchor: FloatingAnchor,
+    pub offset_x: i16,
+    pub offset_y: i16,
+}
+
+impl Default for FloatingGeometrySpec {
+    fn default() -> Self {
+        Self {
+            width: FloatingSize::Percent(50),
+            height: FloatingSize::Percent(50),
+            anchor: FloatingAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatingSize {
+    Cells(u16),
+    Percent(u8),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatingAnchor {
+    Center,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,20 +182,24 @@ pub struct TabSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabsSpec {
+    pub tabs: Vec<TabSpec>,
+    pub active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeSpec {
-    BufferSpawn(BufferSpawnSpec),
+    BufferCurrent,
     BufferAttach {
         buffer_id: BufferId,
     },
-    BufferCurrent,
-    CurrentNode,
+    BufferSpawn(BufferSpawnSpec),
     BufferEmpty,
+    CurrentNode,
     Split {
         direction: SplitDirection,
-        children: Vec<WeightedTreeSpec>,
+        children: Vec<TreeSpec>,
+        sizes: Vec<u16>,
     },
-    Tabs {
-        tabs: Vec<TabSpec>,
-        active: usize,
-    },
+    Tabs(TabsSpec),
 }

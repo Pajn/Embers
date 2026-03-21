@@ -7,15 +7,16 @@ mod runtime;
 mod types;
 
 pub use context::{
-    BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef,
+    BufferRef, Context, EventInfo, FloatingRef, NodeRef, SessionRef, TabBarContext, TabInfo,
 };
 pub use engine::ScriptEngine;
 pub use error::ScriptError;
 pub use harness::ScriptHarness;
 pub use model::{
-    Action, BufferSpawnSpec, BufferTarget, FloatingOptions, NodeTarget, TabSpec, TreeSpec,
-    WeightedTreeSpec,
+    Action, BufferSpawnSpec, FloatingAnchor, FloatingGeometrySpec, FloatingSize, FloatingSpec,
+    NotifyLevel, TabSpec, TabsSpec, TreeSpec,
 };
 pub use types::{
-    BarSpec, LoadedConfig, PaletteError, RgbColor, ScriptFunctionRef, SegmentSpec, ThemeSpec,
+    BarSegment, BarSpec, BarTarget, LoadedConfig, ModeHooks, PaletteError, RgbColor,
+    ScriptFunctionRef, StyleSpec, ThemeSpec,
 };

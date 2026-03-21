@@ -32,10 +32,11 @@ pub use presentation::{
 };
 pub use renderer::Renderer;
 pub use scripting::{
-    Action, BarSpec, BufferRef, BufferSpawnSpec, BufferTarget, Context, FloatingOptions,
-    FloatingRef, LoadedConfig, NodeRef, NodeTarget, PaletteError, RgbColor, ScriptEngine,
-    ScriptError, ScriptFunctionRef, ScriptHarness, SegmentSpec, SessionRef, TabBarContext, TabSpec,
-    TabStateRef, ThemeSpec, TreeSpec, WeightedTreeSpec,
+    Action, BarSegment, BarSpec, BarTarget, BufferRef, BufferSpawnSpec, Context, EventInfo,
+    FloatingAnchor, FloatingGeometrySpec, FloatingRef, FloatingSize, FloatingSpec, LoadedConfig,
+    ModeHooks, NodeRef, NotifyLevel, PaletteError, RgbColor, ScriptEngine, ScriptError,
+    ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec, TabBarContext, TabInfo, TabSpec,
+    TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
 pub use state::ClientState;

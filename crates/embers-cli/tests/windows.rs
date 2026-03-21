@@ -58,10 +58,23 @@ async fn window_commands_round_trip_through_cli() {
         .nodes
         .iter()
         .find(|node| node.id == snapshot.session.root_node_id)
-        .expect("root tabs node exists");
-    let tabs = root.tabs.as_ref().expect("root tabs payload");
-    assert_eq!(tabs.tabs.len(), 1);
-    assert_eq!(tabs.tabs[0].title, "logs");
+        .expect("root node exists");
+    if let Some(tabs) = root.tabs.as_ref() {
+        assert_eq!(tabs.tabs.len(), 1);
+        assert_eq!(tabs.tabs[0].title, "logs");
+    } else {
+        let buffer_id = root
+            .buffer_view
+            .as_ref()
+            .expect("single remaining root window collapses to a buffer view")
+            .buffer_id;
+        let buffer = snapshot
+            .buffers
+            .iter()
+            .find(|buffer| buffer.id == buffer_id)
+            .expect("root buffer exists");
+        assert_eq!(buffer.title, "logs");
+    }
 
     server.shutdown().await.expect("shutdown server");
 }

@@ -40,6 +40,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             title: Some(title.to_owned()),
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), "cat".to_owned()],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");
@@ -68,13 +69,16 @@ async fn get_buffer(
     }
 }
 
-fn root_tabs(snapshot: &embers_protocol::SessionSnapshot) -> TabsRecord {
+fn root_node(snapshot: &embers_protocol::SessionSnapshot) -> &embers_protocol::NodeRecord {
     snapshot
         .nodes
         .iter()
         .find(|node| node.id == snapshot.session.root_node_id)
-        .and_then(|node| node.tabs.clone())
-        .expect("session root snapshot includes tabs record")
+        .expect("session root snapshot includes root node")
+}
+
+fn root_tabs(snapshot: &embers_protocol::SessionSnapshot) -> Option<TabsRecord> {
+    root_node(snapshot).tabs.clone()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,7 +119,10 @@ async fn create_list_get_and_close_sessions_via_socket() {
         other => panic!("expected session snapshot response, got {other:?}"),
     };
     assert_eq!(fetched.snapshot.session.name, "alpha");
-    assert!(root_tabs(&fetched.snapshot).tabs.is_empty());
+    assert!(root_tabs(&fetched.snapshot)
+        .expect("new sessions start with empty root tabs")
+        .tabs
+        .is_empty());
 
     let close = connection
         .request(&ClientMessage::Session(SessionRequest::Close {
@@ -162,7 +169,7 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let first_tabs = root_tabs(&first_added.snapshot);
+    let first_tabs = root_tabs(&first_added.snapshot).expect("first root tab keeps tabs root");
     let first_leaf = first_tabs.tabs[0].child_id;
     assert_eq!(first_added.snapshot.session.root_node_id, root_node_id);
     assert_eq!(first_tabs.active, 0);
@@ -183,7 +190,7 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let second_tabs = root_tabs(&second_added.snapshot);
+    let second_tabs = root_tabs(&second_added.snapshot).expect("second root tab keeps tabs root");
     assert_eq!(second_added.snapshot.session.root_node_id, root_node_id);
     assert_eq!(second_tabs.active, 1);
     assert_eq!(second_tabs.tabs.len(), 2);
@@ -200,7 +207,12 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    assert_eq!(root_tabs(&selected.snapshot).active, 0);
+    assert_eq!(
+        root_tabs(&selected.snapshot)
+            .expect("selecting between root windows keeps tabs root")
+            .active,
+        0
+    );
     assert_eq!(selected.snapshot.session.focused_leaf_id, Some(first_leaf));
 
     let renamed = connection
@@ -216,7 +228,13 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    assert_eq!(root_tabs(&renamed.snapshot).tabs[0].title, "editor");
+    assert_eq!(
+        root_tabs(&renamed.snapshot)
+            .expect("renaming root windows keeps tabs root")
+            .tabs[0]
+            .title,
+        "editor"
+    );
 
     let closed_second = connection
         .request(&ClientMessage::Session(SessionRequest::CloseRootTab {
@@ -230,7 +248,14 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    assert_eq!(root_tabs(&closed_second.snapshot).tabs.len(), 1);
+    assert!(root_tabs(&closed_second.snapshot).is_none());
+    let root = root_node(&closed_second.snapshot);
+    let root_buffer = root
+        .buffer_view
+        .as_ref()
+        .expect("single remaining root window collapses to a buffer view");
+    assert_eq!(root.id, first_leaf);
+    assert_eq!(root_buffer.buffer_id, first_buffer.id);
     assert_eq!(
         get_buffer(&mut connection, second_buffer.id)
             .await
@@ -250,7 +275,8 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let final_tabs = root_tabs(&closed_last.snapshot);
+    let final_tabs = root_tabs(&closed_last.snapshot)
+        .expect("closing the last implicit root window resets the empty root tabs");
     assert!(final_tabs.tabs.is_empty());
     assert_eq!(closed_last.snapshot.session.focused_leaf_id, None);
     assert_eq!(

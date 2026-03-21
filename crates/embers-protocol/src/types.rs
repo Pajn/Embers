@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId,
     SplitDirection, WireError,
@@ -80,6 +82,7 @@ pub enum BufferRequest {
         title: Option<String>,
         command: Vec<String>,
         cwd: Option<String>,
+        env: BTreeMap<String, String>,
     },
     List {
         request_id: RequestId,
@@ -131,6 +134,32 @@ pub enum NodeRequest {
         direction: SplitDirection,
         new_buffer_id: BufferId,
     },
+    CreateSplit {
+        request_id: RequestId,
+        session_id: SessionId,
+        direction: SplitDirection,
+        child_node_ids: Vec<NodeId>,
+        sizes: Vec<u16>,
+    },
+    CreateTabs {
+        request_id: RequestId,
+        session_id: SessionId,
+        child_node_ids: Vec<NodeId>,
+        titles: Vec<String>,
+        active: u32,
+    },
+    ReplaceNode {
+        request_id: RequestId,
+        node_id: NodeId,
+        child_node_id: NodeId,
+    },
+    WrapInSplit {
+        request_id: RequestId,
+        node_id: NodeId,
+        child_node_id: NodeId,
+        direction: SplitDirection,
+        insert_before: bool,
+    },
     WrapInTabs {
         request_id: RequestId,
         node_id: NodeId,
@@ -142,6 +171,7 @@ pub enum NodeRequest {
         title: String,
         buffer_id: Option<BufferId>,
         child_node_id: Option<NodeId>,
+        index: u32,
     },
     SelectTab {
         request_id: RequestId,
@@ -174,6 +204,10 @@ impl NodeRequest {
         match self {
             Self::GetTree { request_id, .. }
             | Self::Split { request_id, .. }
+            | Self::CreateSplit { request_id, .. }
+            | Self::CreateTabs { request_id, .. }
+            | Self::ReplaceNode { request_id, .. }
+            | Self::WrapInSplit { request_id, .. }
             | Self::WrapInTabs { request_id, .. }
             | Self::AddTab { request_id, .. }
             | Self::SelectTab { request_id, .. }
@@ -194,6 +228,8 @@ pub enum FloatingRequest {
         buffer_id: Option<BufferId>,
         geometry: FloatGeometry,
         title: Option<String>,
+        focus: bool,
+        close_on_empty: bool,
     },
     Close {
         request_id: RequestId,
@@ -307,11 +343,13 @@ pub struct BufferRecord {
     pub command: Vec<String>,
     pub cwd: Option<String>,
     pub state: BufferRecordState,
+    pub pid: Option<u32>,
     pub attachment_node_id: Option<NodeId>,
     pub pty_size: PtySize,
     pub activity: ActivityState,
     pub last_snapshot_seq: u64,
     pub exit_code: Option<i32>,
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
