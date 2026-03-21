@@ -1,5 +1,6 @@
 pub mod client;
 pub mod config;
+pub mod configured_client;
 pub mod controller;
 pub mod grid;
 pub mod input;
@@ -13,10 +14,11 @@ pub mod transport;
 
 pub use client::MuxClient;
 pub use config::{
-    BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError, ConfigManager,
-    ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir, default_config_path,
-    discover_config, load_config_source,
+    BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError,
+    ConfigManager, ConfigManagerError, ConfigOrigin, DiscoveredConfig, LoadedConfigSource,
+    config_file_in_dir, default_config_path, discover_config, load_config_source,
 };
+pub use configured_client::ConfiguredClient;
 pub use controller::{Controller, KeyEvent};
 pub use grid::{BorderStyle, RenderGrid};
 pub use input::{
@@ -32,7 +34,8 @@ pub use renderer::Renderer;
 pub use scripting::{
     Action, BufferRef, BufferSpawnSpec, BufferTarget, Context, FloatingOptions, FloatingRef,
     LoadedConfig, NodeRef, NodeTarget, PaletteError, RgbColor, ScriptEngine, ScriptError,
-    ScriptFunctionRef, ScriptHarness, SessionRef, TabSpec, ThemeSpec, TreeSpec, WeightedTreeSpec,
+    ScriptFunctionRef, ScriptHarness, SessionRef, TabBarContext, TabSpec, TabStateRef, ThemeSpec,
+    TreeSpec, WeightedTreeSpec, BarSpec, SegmentSpec,
 };
 pub use socket_transport::SocketTransport;
 pub use state::ClientState;

@@ -5,11 +5,12 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, Scope};
 
 use crate::presentation::NavigationDirection;
 
-use super::context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef};
+use super::context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef};
 use super::model::{
     Action, BufferSpawnSpec, BufferTarget, FloatingOptions, NodeTarget, TabSpec, TreeSpec,
     WeightedTreeSpec,
 };
+use super::types::{BarSpec, RgbColor, SegmentSpec, ThemeSpec};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
@@ -19,6 +20,9 @@ struct ActionApi;
 #[derive(Clone, Default)]
 struct TreeApi;
 
+#[derive(Clone, Default)]
+struct UiApi;
+
 #[derive(Clone)]
 struct MuxApi {
     context: Context,
@@ -26,6 +30,11 @@ struct MuxApi {
 
 #[derive(Clone, Default)]
 struct SystemApi;
+
+#[derive(Clone)]
+struct ThemeRuntimeApi {
+    theme: ThemeSpec,
+}
 
 impl MuxApi {
     fn new(context: Context) -> Self {
@@ -43,10 +52,17 @@ pub fn register_runtime_api(engine: &mut Engine) {
     engine.register_type_with_name::<BufferRef>("BufferRef");
     engine.register_type_with_name::<NodeRef>("NodeRef");
     engine.register_type_with_name::<FloatingRef>("FloatingRef");
+    engine.register_type_with_name::<TabBarContext>("TabBarContext");
+    engine.register_type_with_name::<TabStateRef>("TabStateRef");
+    engine.register_type_with_name::<BarSpec>("BarSpec");
+    engine.register_type_with_name::<SegmentSpec>("SegmentSpec");
+    engine.register_type_with_name::<RgbColor>("RgbColor");
     engine.register_type_with_name::<ActionApi>("ActionApi");
     engine.register_type_with_name::<TreeApi>("TreeApi");
+    engine.register_type_with_name::<UiApi>("UiApi");
     engine.register_type_with_name::<MuxApi>("MuxApi");
     engine.register_type_with_name::<SystemApi>("SystemApi");
+    engine.register_type_with_name::<ThemeRuntimeApi>("ThemeRuntimeApi");
 
     register_context_api(engine);
     register_ref_api(engine);
@@ -54,15 +70,26 @@ pub fn register_runtime_api(engine: &mut Engine) {
     register_tree_api(engine);
     register_mux_api(engine);
     register_system_api(engine);
+    register_ui_api(engine);
+    register_theme_runtime_api(engine);
 }
 
-pub fn runtime_scope(context: Context) -> Scope<'static> {
+pub fn runtime_scope(
+    context: Context,
+    theme: ThemeSpec,
+    bar_context: Option<TabBarContext>,
+) -> Scope<'static> {
     let mut scope = Scope::new();
     scope.push_constant("ctx", context.clone());
     scope.push_constant("mux", MuxApi::new(context));
     scope.push_constant("system", SystemApi);
     scope.push_constant("action", ActionApi);
     scope.push_constant("tree", TreeApi);
+    scope.push_constant("ui", UiApi);
+    scope.push_constant("theme", ThemeRuntimeApi { theme });
+    if let Some(bar_context) = bar_context {
+        scope.push_constant("bar", bar_context);
+    }
     scope
 }
 
@@ -85,6 +112,12 @@ pub fn normalize_actions(result: Dynamic) -> Result<Vec<Action>, String> {
     }
 
     Err("script must return Action, [Action], or ()".to_owned())
+}
+
+pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
+    result
+        .try_cast::<BarSpec>()
+        .ok_or_else(|| "script formatter must return a BarSpec".to_owned())
 }
 
 fn register_context_api(engine: &mut Engine) {
@@ -184,6 +217,16 @@ fn register_ref_api(engine: &mut Engine) {
     engine.register_fn("geometry", |window: &mut FloatingRef| -> Map {
         float_geometry_map(window.geometry)
     });
+
+    engine.register_fn("is_root", |bar: &mut TabBarContext| bar.is_root);
+    engine.register_fn("active_index", |bar: &mut TabBarContext| bar.active as i64);
+    engine.register_fn("tabs", |bar: &mut TabBarContext| -> Array {
+        bar.tabs.iter().cloned().map(Dynamic::from).collect()
+    });
+
+    engine.register_fn("title", |tab: &mut TabStateRef| tab.title.clone());
+    engine.register_fn("is_active", |tab: &mut TabStateRef| tab.active);
+    engine.register_fn("activity", |tab: &mut TabStateRef| activity_name(tab.activity));
 }
 
 fn register_action_api(engine: &mut Engine) {
@@ -452,6 +495,57 @@ fn register_system_api(engine: &mut Engine) {
     engine.register_fn("command", |_: &mut SystemApi, buffer: BufferRef| -> Array {
         buffer.command.into_iter().map(Dynamic::from).collect()
     });
+}
+
+fn register_ui_api(engine: &mut Engine) {
+    engine.register_fn("segment", |_: &mut UiApi, text: ImmutableString| SegmentSpec {
+        text: text.to_string(),
+        foreground: None,
+        background: None,
+    });
+    engine.register_fn(
+        "segment",
+        |_: &mut UiApi, text: ImmutableString, foreground: RgbColor| SegmentSpec {
+            text: text.to_string(),
+            foreground: Some(foreground),
+            background: None,
+        },
+    );
+    engine.register_fn(
+        "segment",
+        |_: &mut UiApi, text: ImmutableString, foreground: RgbColor, background: RgbColor| {
+            SegmentSpec {
+                text: text.to_string(),
+                foreground: Some(foreground),
+                background: Some(background),
+            }
+        },
+    );
+    engine.register_fn("bar", |_: &mut UiApi, segments: Array| -> RhaiResult<BarSpec> {
+        let mut parsed = Vec::with_capacity(segments.len());
+        for segment in segments {
+            let Some(segment) = segment.try_cast::<SegmentSpec>() else {
+                return Err(runtime_error("ui.bar expects SegmentSpec values"));
+            };
+            parsed.push(segment);
+        }
+        Ok(BarSpec { segments: parsed })
+    });
+}
+
+fn register_theme_runtime_api(engine: &mut Engine) {
+    engine.register_fn(
+        "color",
+        |theme: &mut ThemeRuntimeApi, name: ImmutableString| -> Dynamic {
+            theme
+                .theme
+                .palette
+                .get(name.as_str())
+                .copied()
+                .map(Dynamic::from)
+                .unwrap_or(Dynamic::UNIT)
+        },
+    );
 }
 
 fn build_split(direction: SplitDirection, children: Array) -> RhaiResult<TreeSpec> {

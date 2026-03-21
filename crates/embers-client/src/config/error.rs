@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use super::discover::ConfigOrigin;
+use crate::scripting::ScriptError;
 
 pub type ConfigResult<T> = std::result::Result<T, ConfigError>;
 
@@ -32,4 +33,12 @@ pub enum ConfigError {
         #[source]
         source: io::Error,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigManagerError {
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Script(#[from] ScriptError),
 }

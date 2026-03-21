@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use embers_core::{ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, Rect, SessionId};
 use embers_protocol::{BufferRecordState, NodeRecordKind};
 
-use crate::{ClientState, PresentationModel};
+use crate::{ClientState, PresentationModel, TabsFrame};
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Context {
@@ -260,6 +260,40 @@ pub struct FloatingRef {
     pub focused: bool,
     pub visible: bool,
     pub close_on_empty: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabBarContext {
+    pub node_id: NodeId,
+    pub is_root: bool,
+    pub active: usize,
+    pub tabs: Vec<TabStateRef>,
+}
+
+impl TabBarContext {
+    pub fn from_frame(frame: &TabsFrame) -> Self {
+        Self {
+            node_id: frame.node_id,
+            is_root: frame.is_root,
+            active: frame.active,
+            tabs: frame
+                .tabs
+                .iter()
+                .map(|tab| TabStateRef {
+                    title: tab.title.clone(),
+                    active: tab.active,
+                    activity: tab.activity,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabStateRef {
+    pub title: String,
+    pub active: bool,
+    pub activity: ActivityState,
 }
 
 fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> {

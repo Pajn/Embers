@@ -4,7 +4,8 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use super::discover::{ConfigDiscoveryOptions, ConfigOrigin, DiscoveredConfig, discover_config};
-use super::error::{ConfigError, ConfigResult};
+use super::error::{ConfigError, ConfigManagerError, ConfigResult};
+use crate::scripting::ScriptEngine;
 
 pub const BUILTIN_CONFIG_SOURCE: &str = "";
 
@@ -25,22 +26,24 @@ impl LoadedConfigSource {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct ConfigManager {
     discovery: ConfigDiscoveryOptions,
     active_source: LoadedConfigSource,
+    active_script: ScriptEngine,
 }
 
 impl ConfigManager {
-    pub fn load(discovery: ConfigDiscoveryOptions) -> ConfigResult<Self> {
+    pub fn load(discovery: ConfigDiscoveryOptions) -> Result<Self, ConfigManagerError> {
         let active_source = load_config_source(&discovery)?;
+        let active_script = ScriptEngine::load(&active_source)?;
         Ok(Self {
             discovery,
             active_source,
+            active_script,
         })
     }
 
-    pub fn from_process(explicit_path: Option<PathBuf>) -> ConfigResult<Self> {
+    pub fn from_process(explicit_path: Option<PathBuf>) -> Result<Self, ConfigManagerError> {
         Self::load(ConfigDiscoveryOptions::from_process(explicit_path))
     }
 
@@ -50,6 +53,18 @@ impl ConfigManager {
 
     pub fn active_source(&self) -> &LoadedConfigSource {
         &self.active_source
+    }
+
+    pub fn active_script(&self) -> &ScriptEngine {
+        &self.active_script
+    }
+
+    pub fn reload(&mut self) -> Result<(), ConfigManagerError> {
+        let candidate_source = load_config_source(&self.discovery)?;
+        let candidate_script = ScriptEngine::load(&candidate_source)?;
+        self.active_source = candidate_source;
+        self.active_script = candidate_script;
+        Ok(())
     }
 }
 

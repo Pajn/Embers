@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+
 use embers_core::{ActivityState, Point, Rect, Size};
 
 use crate::grid::{BorderStyle, RenderGrid};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
+use crate::scripting::BarSpec;
 use crate::state::ClientState;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -9,8 +12,17 @@ pub struct Renderer;
 
 impl Renderer {
     pub fn render(&self, state: &ClientState, model: &PresentationModel) -> RenderGrid {
+        self.render_with_tab_bars(state, model, &BTreeMap::new())
+    }
+
+    pub fn render_with_tab_bars(
+        &self,
+        state: &ClientState,
+        model: &PresentationModel,
+        tab_bars: &BTreeMap<embers_core::NodeId, BarSpec>,
+    ) -> RenderGrid {
         let mut grid = RenderGrid::new(model.viewport.width, model.viewport.height);
-        self.render_into(state, model, &mut grid);
+        self.render_into_with_tab_bars(state, model, &mut grid, tab_bars);
         grid
     }
 
@@ -20,12 +32,22 @@ impl Renderer {
         model: &PresentationModel,
         grid: &mut RenderGrid,
     ) {
+        self.render_into_with_tab_bars(state, model, grid, &BTreeMap::new());
+    }
+
+    pub fn render_into_with_tab_bars(
+        &self,
+        state: &ClientState,
+        model: &PresentationModel,
+        grid: &mut RenderGrid,
+        tab_bars: &BTreeMap<embers_core::NodeId, BarSpec>,
+    ) {
         grid.clear(' ');
-        self.render_layer(state, model, grid, None);
+        self.render_layer(state, model, grid, None, tab_bars);
 
         for window in &model.floating {
             self.render_floating_frame(grid, window);
-            self.render_layer(state, model, grid, Some(window.floating_id));
+            self.render_layer(state, model, grid, Some(window.floating_id), tab_bars);
         }
     }
 
@@ -35,6 +57,7 @@ impl Renderer {
         model: &PresentationModel,
         grid: &mut RenderGrid,
         floating_id: Option<embers_core::FloatingId>,
+        tab_bars: &BTreeMap<embers_core::NodeId, BarSpec>,
     ) {
         for leaf in model
             .leaves
@@ -57,11 +80,11 @@ impl Renderer {
             .iter()
             .filter(|tabs| tabs.floating_id == floating_id)
         {
-            self.render_tabs(grid, tabs);
+            self.render_tabs(grid, tabs, tab_bars.get(&tabs.node_id));
         }
     }
 
-    fn render_tabs(&self, grid: &mut RenderGrid, tabs: &TabsFrame) {
+    fn render_tabs(&self, grid: &mut RenderGrid, tabs: &TabsFrame, custom: Option<&BarSpec>) {
         if tabs.rect.size.height == 0 || tabs.rect.size.width == 0 {
             return;
         }
@@ -70,6 +93,22 @@ impl Renderer {
         let y = tabs.rect.origin.y.max(0) as u16;
         let end_x = x.saturating_add(tabs.rect.size.width);
         grid.put_str(x, y, &" ".repeat(usize::from(tabs.rect.size.width)));
+
+        if let Some(bar) = custom {
+            for segment in &bar.segments {
+                if x >= end_x {
+                    break;
+                }
+                let available = end_x.saturating_sub(x);
+                if available == 0 {
+                    break;
+                }
+                let label = truncate(&segment.text, available);
+                grid.put_str(x, y, &label);
+                x = x.saturating_add(label.chars().count() as u16);
+            }
+            return;
+        }
 
         for tab in &tabs.tabs {
             if x >= end_x {
