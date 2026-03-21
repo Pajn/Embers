@@ -10,6 +10,7 @@ async-trait.workspace = true
 directories.workspace = true
 embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
+rhai.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
