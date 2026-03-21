@@ -1,4 +1,4 @@
-namespace mux.protocol;
+namespace embers.protocol;
 
 enum MessageKind : ubyte {
   None = 0,

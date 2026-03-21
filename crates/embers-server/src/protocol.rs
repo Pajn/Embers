@@ -1,4 +1,4 @@
-use embers_core::{ActivityState, MuxError, Result, SplitDirection};
+use embers_core::{MuxError, Result};
 use embers_protocol::{
     BufferRecord, BufferRecordState, BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind,
     SessionRecord, SessionSnapshot, SplitRecord, TabRecord, TabsRecord,
@@ -39,11 +39,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
             BufferAttachment::Detached => None,
         },
         pty_size: buffer.pty_size,
-        activity: match buffer.activity {
-            ActivityState::Idle => ActivityState::Idle,
-            ActivityState::Activity => ActivityState::Activity,
-            ActivityState::Bell => ActivityState::Bell,
-        },
+        activity: buffer.activity,
         last_snapshot_seq: buffer.last_snapshot_seq,
         exit_code,
     }
@@ -73,10 +69,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
             kind: NodeRecordKind::Split,
             buffer_view: None,
             split: Some(SplitRecord {
-                direction: match split.direction {
-                    SplitDirection::Horizontal => SplitDirection::Horizontal,
-                    SplitDirection::Vertical => SplitDirection::Vertical,
-                },
+                direction: split.direction,
                 child_ids: split.children.clone(),
                 sizes: split.sizes.clone(),
             }),

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ impl BufferRuntimeHandle {
         buffer_id: BufferId,
         command: &[String],
         cwd: Option<&Path>,
-        env: &BTreeMap<String, String>,
+        env: &BTreeMap<String, OsString>,
         size: PtySize,
         callbacks: BufferRuntimeCallbacks,
     ) -> Result<Self> {
@@ -183,7 +184,7 @@ fn exit_status_code(status: portable_pty::ExitStatus) -> Option<i32> {
     if status.signal().is_some() {
         None
     } else {
-        Some(status.exit_code() as i32)
+        i32::try_from(status.exit_code()).ok()
     }
 }
 

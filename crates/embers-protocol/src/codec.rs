@@ -6,7 +6,7 @@ use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
 
 use crate::framing::FrameType;
-use crate::generated::mux::protocol as fb;
+use crate::generated::embers::protocol as fb;
 use crate::types::*;
 
 #[derive(Debug, Error)]
@@ -1907,23 +1907,25 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
         })
     });
 
-    let tabs = record.tabs().and_then(|tabs| {
-        let tabs_fb = tabs.tabs()?;
-        let tabs_vec: Vec<TabRecord> = tabs_fb
-            .iter()
-            .filter_map(|tab| {
-                let title = tab.title()?.to_owned();
-                Some(TabRecord {
-                    title,
-                    child_id: NodeId(tab.child_id()),
+    let tabs = record
+        .tabs()
+        .map(|tabs| -> Result<TabsRecord, ProtocolError> {
+            let tabs_fb = required(tabs.tabs(), "node_record.tabs.tabs")?;
+            let tabs_vec = tabs_fb
+                .iter()
+                .map(|tab| {
+                    Ok(TabRecord {
+                        title: required(tab.title(), "node_record.tabs.title")?.to_owned(),
+                        child_id: NodeId(tab.child_id()),
+                    })
                 })
+                .collect::<Result<Vec<_>, ProtocolError>>()?;
+            Ok(TabsRecord {
+                active: usize::try_from(tabs.active()).expect("u32 tabs.active fits into usize"),
+                tabs: tabs_vec,
             })
-            .collect();
-        Some(TabsRecord {
-            active: tabs.active() as usize,
-            tabs: tabs_vec,
         })
-    });
+        .transpose()?;
 
     Ok(NodeRecord {
         id: NodeId(record.id()),

@@ -186,6 +186,120 @@ fn focus_heals_deterministically_after_close() {
 }
 
 #[test]
+fn create_split_rejects_duplicate_children_without_mutating_state() {
+    let mut state = ServerState::new();
+    let (session_id, _, _) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, leaf_id) = new_leaf(&mut state, session_id, "dup");
+    state
+        .create_floating_window(
+            session_id,
+            leaf_id,
+            FloatGeometry::new(1, 1, 10, 6),
+            Some("popup".to_owned()),
+        )
+        .expect("create floating window");
+
+    let error = state
+        .create_split_node(
+            session_id,
+            SplitDirection::Horizontal,
+            vec![leaf_id, leaf_id],
+        )
+        .expect_err("duplicate split children should fail");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    assert_eq!(state.node_parent(leaf_id).expect("leaf parent"), None);
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn create_tabs_rejects_children_with_existing_parents() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+
+    let error = state
+        .create_tabs_node(
+            session_id,
+            vec![embers_server::TabEntry::new("main", leaf_id)],
+            0,
+        )
+        .expect_err("attached child should be rejected");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn floating_root_cannot_be_reused() {
+    let mut state = ServerState::new();
+    let (session_id, _, _) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, floating_leaf) = new_leaf(&mut state, session_id, "popup");
+
+    state
+        .create_floating_window(
+            session_id,
+            floating_leaf,
+            FloatGeometry::new(2, 2, 15, 8),
+            Some("popup".to_owned()),
+        )
+        .expect("create floating window");
+
+    let error = state
+        .create_floating_window(
+            session_id,
+            floating_leaf,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("duplicate".to_owned()),
+        )
+        .expect_err("floating root reuse should fail");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn add_tab_sibling_rejects_self_parenting() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let wrapped = state
+        .wrap_node_in_tabs(leaf_id, "nested")
+        .expect("wrap node in tabs");
+
+    let error = state
+        .add_tab_sibling(wrapped, "self", wrapped)
+        .expect_err("tabs should not be able to contain themselves");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    state.validate().expect("state remains valid");
+    assert_eq!(
+        state.node_parent(wrapped).expect("wrapped parent"),
+        Some(state.root_tabs(session_id).expect("root tabs"))
+    );
+}
+
+#[test]
+fn public_detach_buffer_closes_live_views() {
+    let mut state = ServerState::new();
+    let (session_id, buffer_id, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+
+    state.detach_buffer(buffer_id).expect("detach buffer");
+
+    assert!(matches!(
+        state.node(leaf_id),
+        Err(embers_core::MuxError::NotFound(_))
+    ));
+    assert!(matches!(
+        state.buffer(buffer_id).expect("buffer exists").attachment,
+        BufferAttachment::Detached
+    ));
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        None
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
 fn focused_floating_transfers_back_to_root_when_closed() {
     let mut state = ServerState::new();
     let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");

@@ -7,6 +7,7 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage};
 use alacritty_terminal::vte::ansi;
 use embers_core::{ActivityState, CursorPosition, PtySize, SnapshotLine, TerminalSnapshot};
+use tracing::error;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackendMetadata {
@@ -83,6 +84,7 @@ impl BackendEventProxy {
 impl EventListener for BackendEventProxy {
     fn send_event(&self, event: Event) {
         let Ok(mut state) = self.state.lock() else {
+            error!(?event, "backend event lock poisoned");
             return;
         };
 
@@ -214,10 +216,12 @@ impl TerminalBackend for AlacrittyTerminalBackend {
     }
 
     fn metadata(&self) -> BackendMetadata {
-        let state = self.events.lock().expect("backend event lock");
+        let mut state = self.events.lock().expect("backend event lock");
+        let bell_pending = state.bell_pending;
+        state.bell_pending = false;
         BackendMetadata {
             title: state.title.clone(),
-            activity: if state.bell_pending {
+            activity: if bell_pending {
                 ActivityState::Bell
             } else {
                 ActivityState::Activity
@@ -298,5 +302,9 @@ mod tests {
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
         assert_eq!(metadata.activity, ActivityState::Bell);
+
+        let metadata = backend.metadata();
+        assert_eq!(metadata.title.as_deref(), Some("embers"));
+        assert_eq!(metadata.activity, ActivityState::Activity);
     }
 }

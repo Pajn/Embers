@@ -78,6 +78,24 @@ pub async fn write_frame<W>(writer: &mut W, frame: &RawFrame) -> Result<(), Prot
 where
     W: AsyncWrite + Unpin,
 {
+    write_frame_inner(writer, frame, true).await
+}
+
+pub async fn write_frame_no_flush<W>(writer: &mut W, frame: &RawFrame) -> Result<(), ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_frame_inner(writer, frame, false).await
+}
+
+async fn write_frame_inner<W>(
+    writer: &mut W,
+    frame: &RawFrame,
+    flush: bool,
+) -> Result<(), ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
     if frame.payload.len() > MAX_FRAME_LEN {
         return Err(ProtocolError::FrameTooLarge(frame.payload.len()));
     }
@@ -90,6 +108,8 @@ where
         .write_all(&u64::from(frame.request_id).to_le_bytes())
         .await?;
     writer.write_all(&frame.payload).await?;
-    writer.flush().await?;
+    if flush {
+        writer.flush().await?;
+    }
     Ok(())
 }
