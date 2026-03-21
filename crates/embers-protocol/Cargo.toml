@@ -1,0 +1,16 @@
+[package]
+name = "embers-protocol"
+build = "build.rs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+flatbuffers.workspace = true
+embers-core = { path = "../embers-core" }
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

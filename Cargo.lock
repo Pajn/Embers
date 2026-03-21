@@ -281,6 +281,76 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "embers-cli"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "embers-core",
+ "embers-protocol",
+ "embers-test-support",
+ "predicates",
+ "tokio",
+]
+
+[[package]]
+name = "embers-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "embers-core",
+ "embers-protocol",
+ "embers-test-support",
+ "tokio",
+]
+
+[[package]]
+name = "embers-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "embers-protocol"
+version = "0.1.0"
+dependencies = [
+ "embers-core",
+ "flatbuffers",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "embers-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "embers-core",
+ "embers-protocol",
+ "portable-pty",
+ "proptest",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "embers-test-support"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "embers-core",
+ "embers-protocol",
+ "embers-server",
+ "portable-pty",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -513,76 +583,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mux-cli"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "mux-core",
- "mux-protocol",
- "mux-test-support",
- "predicates",
- "tokio",
-]
-
-[[package]]
-name = "mux-client"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "mux-core",
- "mux-protocol",
- "mux-test-support",
- "tokio",
-]
-
-[[package]]
-name = "mux-core"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mux-protocol"
-version = "0.1.0"
-dependencies = [
- "flatbuffers",
- "mux-core",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "mux-server"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "mux-core",
- "mux-protocol",
- "portable-pty",
- "proptest",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mux-test-support"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "mux-core",
- "mux-protocol",
- "mux-server",
- "portable-pty",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
