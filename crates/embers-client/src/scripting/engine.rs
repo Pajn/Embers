@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use rhai::{
-    CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map,
-    NativeCallContext, Position, Scope,
+    CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, NativeCallContext,
+    Position, Scope,
 };
 
 use crate::config::LoadedConfigSource;
@@ -13,8 +13,8 @@ use crate::input::{
 
 use super::error::ScriptError;
 use super::runtime::{normalize_actions, normalize_bar, register_runtime_api, runtime_scope};
-use super::{Action, BarSpec, Context, TabBarContext};
 use super::types::{LoadedConfig, RgbColor, ScriptFunctionRef, ThemeSpec};
+use super::{Action, BarSpec, Context, TabBarContext};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -147,9 +147,15 @@ impl ScriptEngine {
                 function_name,
                 (),
             )
-            .map_err(|error| ScriptError::runtime_path(self.loaded.source_path.as_deref(), error))?;
+            .map_err(|error| {
+                ScriptError::runtime_path(self.loaded.source_path.as_deref(), error)
+            })?;
         normalize_actions(result).map_err(|message| {
-            ScriptError::validation_path(self.loaded.source_path.as_deref(), Position::NONE, message)
+            ScriptError::validation_path(
+                self.loaded.source_path.as_deref(),
+                Position::NONE,
+                message,
+            )
         })
     }
 
@@ -169,9 +175,15 @@ impl ScriptEngine {
                 function_name,
                 (),
             )
-            .map_err(|error| ScriptError::runtime_path(self.loaded.source_path.as_deref(), error))?;
+            .map_err(|error| {
+                ScriptError::runtime_path(self.loaded.source_path.as_deref(), error)
+            })?;
         normalize_bar(result).map_err(|message| {
-            ScriptError::validation_path(self.loaded.source_path.as_deref(), Position::NONE, message)
+            ScriptError::validation_path(
+                self.loaded.source_path.as_deref(),
+                Position::NONE,
+                message,
+            )
         })
     }
 }

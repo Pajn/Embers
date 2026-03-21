@@ -8,9 +8,7 @@ use embers_client::{
     ConfigManager, ConfiguredClient, KeyEvent, MuxClient, RenderGrid, SocketTransport,
 };
 use embers_core::{MuxError, Result, SessionId, Size};
-use embers_protocol::{
-    BufferRequest, ClientMessage, ServerResponse, SessionRequest,
-};
+use embers_protocol::{BufferRequest, ClientMessage, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
 
 const DEFAULT_SESSION_NAME: &str = "main";
@@ -39,7 +37,12 @@ pub async fn run(
     let mut dirty = true;
     loop {
         if dirty {
-            if !configured.client().state().sessions.contains_key(&session_id) {
+            if !configured
+                .client()
+                .state()
+                .sessions
+                .contains_key(&session_id)
+            {
                 session_id =
                     ensure_session_ready(configured.client_mut(), requested_target.as_deref())
                         .await?;
@@ -128,10 +131,7 @@ fn select_session_id(
         .map(|session| session.id))
 }
 
-async fn create_session(
-    client: &mut MuxClient<SocketTransport>,
-    name: &str,
-) -> Result<SessionId> {
+async fn create_session(client: &mut MuxClient<SocketTransport>, name: &str) -> Result<SessionId> {
     let response = client
         .request_message(ClientMessage::Session(SessionRequest::Create {
             request_id: client.next_request_id(),
@@ -195,7 +195,9 @@ fn session_has_root_window(
         .state()
         .nodes
         .get(&session.root_node_id)
-        .ok_or_else(|| MuxError::not_found(format!("node {} is not cached", session.root_node_id)))?;
+        .ok_or_else(|| {
+            MuxError::not_found(format!("node {} is not cached", session.root_node_id))
+        })?;
     let tabs = root
         .tabs
         .as_ref()
@@ -265,10 +267,7 @@ fn status_line(
         .unwrap_or("<missing>");
     match configured.notifications().last() {
         Some(message) => format!("[{session_name}] {message}"),
-        None => format!(
-            "[{session_name}] {}  ctrl-q quit",
-            socket_path.display()
-        ),
+        None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
     }
 }
 
@@ -517,8 +516,16 @@ fn terminal_size(fd: libc::c_int) -> Result<Size> {
         return Err(io::Error::last_os_error().into());
     }
 
-    let width = if winsize.ws_col == 0 { 80 } else { winsize.ws_col };
-    let height = if winsize.ws_row == 0 { 24 } else { winsize.ws_row };
+    let width = if winsize.ws_col == 0 {
+        80
+    } else {
+        winsize.ws_col
+    };
+    let height = if winsize.ws_row == 0 {
+        24
+    } else {
+        winsize.ws_row
+    };
     Ok(Size { width, height })
 }
 

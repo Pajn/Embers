@@ -8,15 +8,17 @@ use embers_protocol::{
     ServerEvent, ServerResponse, SessionRequest,
 };
 
+use crate::RenderGrid;
 use crate::client::MuxClient;
 use crate::config::ConfigManager;
 use crate::controller::KeyEvent;
-use crate::input::{FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, resolve_key};
+use crate::input::{
+    FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, resolve_key,
+};
 use crate::presentation::PresentationModel;
 use crate::renderer::Renderer;
 use crate::scripting::{Action, BarSpec, BufferTarget, Context, TabBarContext, TreeSpec};
 use crate::transport::Transport;
-use crate::RenderGrid;
 
 pub struct ConfiguredClient<T> {
     client: MuxClient<T>,
@@ -90,7 +92,9 @@ where
                             .active_script()
                             .run_named_action(&binding.target, context)
                         {
-                            Ok(actions) => self.execute_actions(session_id, viewport, actions).await,
+                            Ok(actions) => {
+                                self.execute_actions(session_id, viewport, actions).await
+                            }
                             Err(error) => {
                                 self.record_notification(error.to_string());
                                 Ok(())
@@ -254,7 +258,9 @@ where
                 self.client.resync_session(session_id).await
             }
             Action::SelectTab { index } => {
-                let tabs = presentation.focused_tabs().unwrap_or(&presentation.root_tabs);
+                let tabs = presentation
+                    .focused_tabs()
+                    .unwrap_or(&presentation.root_tabs);
                 if index >= tabs.tabs.len() {
                     return Err(MuxError::invalid_input(format!(
                         "tab index {index} is out of range for {} tabs",
@@ -335,7 +341,8 @@ where
                 self.client.resync_all_sessions().await
             }
             Action::SendBytes { target, bytes } => {
-                self.send_bytes(target, session_id, presentation, bytes).await
+                self.send_bytes(target, session_id, presentation, bytes)
+                    .await
             }
             Action::Notify { message } => {
                 self.record_notification(message);
@@ -430,11 +437,17 @@ where
         session_id: SessionId,
         viewport: Size,
     ) -> Result<PresentationModel> {
-        let mut presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+        let mut presentation =
+            PresentationModel::project(self.client.state(), session_id, viewport)?;
         let invalidated = presentation
             .leaves
             .iter()
-            .filter(|leaf| self.client.state().invalidated_buffers.contains(&leaf.buffer_id))
+            .filter(|leaf| {
+                self.client
+                    .state()
+                    .invalidated_buffers
+                    .contains(&leaf.buffer_id)
+            })
             .map(|leaf| leaf.buffer_id)
             .collect::<Vec<_>>();
         for buffer_id in invalidated {
@@ -504,7 +517,9 @@ fn sequence_to_bytes(sequence: &[KeyToken]) -> Result<Vec<u8>> {
                 bytes.extend(sequence_to_bytes(&[KeyToken::Char(*ch)])?);
             }
             KeyToken::Leader => {
-                return Err(MuxError::invalid_input("leader placeholders cannot be sent directly"))
+                return Err(MuxError::invalid_input(
+                    "leader placeholders cannot be sent directly",
+                ));
             }
         }
     }

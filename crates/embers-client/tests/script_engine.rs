@@ -229,7 +229,10 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
     let context = Context::from_state(&state, Some(&presentation));
 
     let root = engine
-        .format_root_tabbar(context.clone(), TabBarContext::from_frame(&presentation.root_tabs))
+        .format_root_tabbar(
+            context.clone(),
+            TabBarContext::from_frame(&presentation.root_tabs),
+        )
         .unwrap()
         .unwrap();
     let nested = engine

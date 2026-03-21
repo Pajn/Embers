@@ -6,7 +6,9 @@ mod model;
 mod runtime;
 mod types;
 
-pub use context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef};
+pub use context::{
+    BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef,
+};
 pub use engine::ScriptEngine;
 pub use error::ScriptError;
 pub use harness::ScriptHarness;

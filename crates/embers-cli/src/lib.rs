@@ -17,10 +17,7 @@ use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "embers",
-    about = "headless terminal multiplexer for embers"
-)]
+#[command(name = "embers", about = "headless terminal multiplexer for embers")]
 pub struct Cli {
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,

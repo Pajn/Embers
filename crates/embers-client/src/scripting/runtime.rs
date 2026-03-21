@@ -5,7 +5,9 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, Scope};
 
 use crate::presentation::NavigationDirection;
 
-use super::context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef};
+use super::context::{
+    BufferRef, Context, FloatingRef, NodeRef, SessionRef, TabBarContext, TabStateRef,
+};
 use super::model::{
     Action, BufferSpawnSpec, BufferTarget, FloatingOptions, NodeTarget, TabSpec, TreeSpec,
     WeightedTreeSpec,
@@ -176,8 +178,12 @@ fn register_ref_api(engine: &mut Engine) {
     });
     engine.register_fn("is_visible", |buffer: &mut BufferRef| buffer.visible);
     engine.register_fn("is_detached", |buffer: &mut BufferRef| buffer.detached);
-    engine.register_fn("activity", |buffer: &mut BufferRef| activity_name(buffer.activity));
-    engine.register_fn("state", |buffer: &mut BufferRef| buffer_state_name(buffer.state));
+    engine.register_fn("activity", |buffer: &mut BufferRef| {
+        activity_name(buffer.activity)
+    });
+    engine.register_fn("state", |buffer: &mut BufferRef| {
+        buffer_state_name(buffer.state)
+    });
 
     engine.register_fn("id", |node: &mut NodeRef| node.id.0 as i64);
     engine.register_fn("kind", |node: &mut NodeRef| node_kind_name(node.kind));
@@ -226,12 +232,16 @@ fn register_ref_api(engine: &mut Engine) {
 
     engine.register_fn("title", |tab: &mut TabStateRef| tab.title.clone());
     engine.register_fn("is_active", |tab: &mut TabStateRef| tab.active);
-    engine.register_fn("activity", |tab: &mut TabStateRef| activity_name(tab.activity));
+    engine.register_fn("activity", |tab: &mut TabStateRef| {
+        activity_name(tab.activity)
+    });
 }
 
 fn register_action_api(engine: &mut Engine) {
-    engine.register_fn("enter_mode", |_: &mut ActionApi, mode: ImmutableString| Action::EnterMode {
-        mode: mode.to_string(),
+    engine.register_fn("enter_mode", |_: &mut ActionApi, mode: ImmutableString| {
+        Action::EnterMode {
+            mode: mode.to_string(),
+        }
     });
     engine.register_fn("focus_left", |_: &mut ActionApi| Action::Focus {
         direction: NavigationDirection::Left,
@@ -289,13 +299,17 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("split_h", |_: &mut ActionApi, tree: TreeSpec| Action::Split {
-        direction: SplitDirection::Horizontal,
-        tree,
+    engine.register_fn("split_h", |_: &mut ActionApi, tree: TreeSpec| {
+        Action::Split {
+            direction: SplitDirection::Horizontal,
+            tree,
+        }
     });
-    engine.register_fn("split_v", |_: &mut ActionApi, tree: TreeSpec| Action::Split {
-        direction: SplitDirection::Vertical,
-        tree,
+    engine.register_fn("split_v", |_: &mut ActionApi, tree: TreeSpec| {
+        Action::Split {
+            direction: SplitDirection::Vertical,
+            tree,
+        }
     });
     engine.register_fn(
         "replace_current_with",
@@ -354,20 +368,23 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("detach_current_buffer", |_: &mut ActionApi| Action::DetachBuffer {
-        target: BufferTarget::Current,
+    engine.register_fn("detach_current_buffer", |_: &mut ActionApi| {
+        Action::DetachBuffer {
+            target: BufferTarget::Current,
+        }
     });
-    engine.register_fn("kill_current_buffer", |_: &mut ActionApi| Action::KillBuffer {
-        target: BufferTarget::Current,
-        force: false,
+    engine.register_fn("kill_current_buffer", |_: &mut ActionApi| {
+        Action::KillBuffer {
+            target: BufferTarget::Current,
+            force: false,
+        }
     });
-    engine.register_fn(
-        "send_keys",
-        |_: &mut ActionApi, text: ImmutableString| Action::SendBytes {
+    engine.register_fn("send_keys", |_: &mut ActionApi, text: ImmutableString| {
+        Action::SendBytes {
             target: BufferTarget::Current,
             bytes: text.as_bytes().to_vec(),
-        },
-    );
+        }
+    });
     engine.register_fn(
         "send_bytes",
         |_: &mut ActionApi, bytes: Array| -> RhaiResult<Action> {
@@ -377,18 +394,25 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("notify", |_: &mut ActionApi, message: ImmutableString| Action::Notify {
-        message: message.to_string(),
+    engine.register_fn("notify", |_: &mut ActionApi, message: ImmutableString| {
+        Action::Notify {
+            message: message.to_string(),
+        }
     });
     engine.register_fn("reload_config", |_: &mut ActionApi| Action::ReloadConfig);
-    engine.register_fn("chain", |_: &mut ActionApi, actions: Array| -> RhaiResult<Array> {
-        for action in &actions {
-            if action.clone().try_cast::<Action>().is_none() {
-                return Err(runtime_error("action.chain expects an array of Action values"));
+    engine.register_fn(
+        "chain",
+        |_: &mut ActionApi, actions: Array| -> RhaiResult<Array> {
+            for action in &actions {
+                if action.clone().try_cast::<Action>().is_none() {
+                    return Err(runtime_error(
+                        "action.chain expects an array of Action values",
+                    ));
+                }
             }
-        }
-        Ok(actions)
-    });
+            Ok(actions)
+        },
+    );
 }
 
 fn register_tree_api(engine: &mut Engine) {
@@ -429,21 +453,28 @@ fn register_tree_api(engine: &mut Engine) {
             tree: Box::new(tree),
         },
     );
-    engine.register_fn("tabs", |_: &mut TreeApi, tabs: Array| -> RhaiResult<TreeSpec> {
-        build_tabs(tabs, 0)
-    });
+    engine.register_fn(
+        "tabs",
+        |_: &mut TreeApi, tabs: Array| -> RhaiResult<TreeSpec> { build_tabs(tabs, 0) },
+    );
     engine.register_fn(
         "tabs_with_active",
         |_: &mut TreeApi, tabs: Array, active: i64| -> RhaiResult<TreeSpec> {
             build_tabs(tabs, parse_index(active, "active tab")?)
         },
     );
-    engine.register_fn("split_h", |_: &mut TreeApi, children: Array| -> RhaiResult<TreeSpec> {
-        build_split(SplitDirection::Horizontal, children)
-    });
-    engine.register_fn("split_v", |_: &mut TreeApi, children: Array| -> RhaiResult<TreeSpec> {
-        build_split(SplitDirection::Vertical, children)
-    });
+    engine.register_fn(
+        "split_h",
+        |_: &mut TreeApi, children: Array| -> RhaiResult<TreeSpec> {
+            build_split(SplitDirection::Horizontal, children)
+        },
+    );
+    engine.register_fn(
+        "split_v",
+        |_: &mut TreeApi, children: Array| -> RhaiResult<TreeSpec> {
+            build_split(SplitDirection::Vertical, children)
+        },
+    );
     engine.register_fn(
         "split",
         |_: &mut TreeApi, direction: ImmutableString, children: Array| -> RhaiResult<TreeSpec> {
@@ -486,22 +517,30 @@ fn register_mux_api(engine: &mut Engine) {
 }
 
 fn register_system_api(engine: &mut Engine) {
-    engine.register_fn("process_name", |_: &mut SystemApi, buffer: BufferRef| -> Dynamic {
-        dynamic_option_string(buffer.process_name())
-    });
-    engine.register_fn("tty_path", |_: &mut SystemApi, buffer: BufferRef| -> Dynamic {
-        dynamic_option_string(buffer.tty_path)
-    });
+    engine.register_fn(
+        "process_name",
+        |_: &mut SystemApi, buffer: BufferRef| -> Dynamic {
+            dynamic_option_string(buffer.process_name())
+        },
+    );
+    engine.register_fn(
+        "tty_path",
+        |_: &mut SystemApi, buffer: BufferRef| -> Dynamic {
+            dynamic_option_string(buffer.tty_path)
+        },
+    );
     engine.register_fn("command", |_: &mut SystemApi, buffer: BufferRef| -> Array {
         buffer.command.into_iter().map(Dynamic::from).collect()
     });
 }
 
 fn register_ui_api(engine: &mut Engine) {
-    engine.register_fn("segment", |_: &mut UiApi, text: ImmutableString| SegmentSpec {
-        text: text.to_string(),
-        foreground: None,
-        background: None,
+    engine.register_fn("segment", |_: &mut UiApi, text: ImmutableString| {
+        SegmentSpec {
+            text: text.to_string(),
+            foreground: None,
+            background: None,
+        }
     });
     engine.register_fn(
         "segment",
@@ -521,16 +560,19 @@ fn register_ui_api(engine: &mut Engine) {
             }
         },
     );
-    engine.register_fn("bar", |_: &mut UiApi, segments: Array| -> RhaiResult<BarSpec> {
-        let mut parsed = Vec::with_capacity(segments.len());
-        for segment in segments {
-            let Some(segment) = segment.try_cast::<SegmentSpec>() else {
-                return Err(runtime_error("ui.bar expects SegmentSpec values"));
-            };
-            parsed.push(segment);
-        }
-        Ok(BarSpec { segments: parsed })
-    });
+    engine.register_fn(
+        "bar",
+        |_: &mut UiApi, segments: Array| -> RhaiResult<BarSpec> {
+            let mut parsed = Vec::with_capacity(segments.len());
+            for segment in segments {
+                let Some(segment) = segment.try_cast::<SegmentSpec>() else {
+                    return Err(runtime_error("ui.bar expects SegmentSpec values"));
+                };
+                parsed.push(segment);
+            }
+            Ok(BarSpec { segments: parsed })
+        },
+    );
 }
 
 fn register_theme_runtime_api(engine: &mut Engine) {
@@ -666,9 +708,8 @@ fn parse_bytes(bytes: Array) -> RhaiResult<Vec<u8>> {
         let Some(value) = byte.try_cast::<i64>() else {
             return Err(runtime_error("send_bytes expects an array of integers"));
         };
-        let value = u8::try_from(value).map_err(|_| {
-            runtime_error("send_bytes values must be between 0 and 255")
-        })?;
+        let value = u8::try_from(value)
+            .map_err(|_| runtime_error("send_bytes values must be between 0 and 255"))?;
         parsed.push(value);
     }
     Ok(parsed)
