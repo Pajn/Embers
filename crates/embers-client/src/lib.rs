@@ -1,4 +1,5 @@
 pub mod client;
+pub mod config;
 pub mod controller;
 pub mod grid;
 pub mod presentation;
@@ -9,6 +10,11 @@ pub mod testing;
 pub mod transport;
 
 pub use client::MuxClient;
+pub use config::{
+    BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError, ConfigManager,
+    ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir, default_config_path,
+    discover_config, load_config_source,
+};
 pub use controller::{Controller, KeyEvent};
 pub use grid::{BorderStyle, RenderGrid};
 pub use presentation::{
