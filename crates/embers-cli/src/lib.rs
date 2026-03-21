@@ -787,7 +787,7 @@ impl CliConnection {
         let (index, child_id) = {
             let (_, root_tabs) = root_tabs(&snapshot)?;
             let index = resolve_window_index(root_tabs, selector.as_deref())?;
-            let tab = root_tabs.tabs.get(index).ok_or_else(|| {
+            let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
                 MuxError::not_found(format!(
                     "window index {index} is not present in session {}",
                     snapshot.session.id
@@ -873,7 +873,7 @@ impl CliConnection {
 #[derive(Debug)]
 struct ResolvedWindow {
     snapshot: SessionSnapshot,
-    index: usize,
+    index: u32,
     child_id: NodeId,
 }
 
@@ -942,7 +942,7 @@ fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
         .map(|(index, tab)| {
             format!(
                 "{index}\t{}\t{}",
-                usize::from(index == tabs.active),
+                usize::from(u32::try_from(index).ok() == Some(tabs.active)),
                 tab.title
             )
         })
@@ -973,11 +973,9 @@ fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<Strin
         .map(|lines| lines.join("\n"))
 }
 
-fn active_root_window(snapshot: &SessionSnapshot) -> Result<(usize, String)> {
+fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
     let (_, tabs) = root_tabs(snapshot)?;
-    let tab = tabs
-        .tabs
-        .get(tabs.active)
+    let tab = protocol_tab(tabs, tabs.active)
         .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
     Ok((tabs.active, tab.title.clone()))
 }
@@ -1047,7 +1045,7 @@ fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<N
                 .tabs
                 .as_ref()
                 .ok_or_else(|| MuxError::protocol(format!("tabs node {node_id} is malformed")))?;
-            let active_child = tabs.tabs.get(tabs.active).ok_or_else(|| {
+            let active_child = protocol_tab(tabs, tabs.active).ok_or_else(|| {
                 MuxError::protocol(format!("tabs node {node_id} has invalid active index"))
             })?;
             visible_leaf_ids(snapshot, active_child.child_id)
@@ -1055,21 +1053,20 @@ fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<N
     }
 }
 
-fn resolve_window_index(
-    tabs: &embers_protocol::TabsRecord,
-    selector: Option<&str>,
-) -> Result<usize> {
+fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&str>) -> Result<u32> {
     let Some(selector) = selector else {
         return Ok(tabs.active);
     };
 
-    if let Ok(index) = selector.parse::<usize>() {
+    if let Ok(index) = selector.parse::<u32>() {
         let mut candidates = Vec::new();
-        if index < tabs.tabs.len() {
+        if protocol_tab(tabs, index).is_some() {
             candidates.push(index);
         }
-        if index > 0 && index - 1 < tabs.tabs.len() {
-            candidates.push(index - 1);
+        if let Some(one_based) = index.checked_sub(1)
+            && protocol_tab(tabs, one_based).is_some()
+        {
+            candidates.push(one_based);
         }
         candidates.sort_unstable();
         candidates.dedup();
@@ -1089,7 +1086,7 @@ fn resolve_window_index(
         .iter()
         .enumerate()
         .filter(|(_, tab)| tab.title == selector)
-        .map(|(index, _)| index)
+        .map(|(index, _)| u32::try_from(index).expect("tab index fits into protocol width"))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -1101,6 +1098,15 @@ fn resolve_window_index(
             "window title '{selector}' matched multiple root tabs"
         ))),
     }
+}
+
+fn protocol_tab(
+    tabs: &embers_protocol::TabsRecord,
+    index: u32,
+) -> Option<&embers_protocol::TabRecord> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| tabs.tabs.get(index))
 }
 
 fn split_scoped_target(target: Option<&str>) -> (Option<String>, Option<String>) {

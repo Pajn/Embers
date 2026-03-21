@@ -43,18 +43,18 @@ pub enum SessionRequest {
     SelectRootTab {
         request_id: RequestId,
         session_id: SessionId,
-        index: usize,
+        index: u32,
     },
     RenameRootTab {
         request_id: RequestId,
         session_id: SessionId,
-        index: usize,
+        index: u32,
         title: String,
     },
     CloseRootTab {
         request_id: RequestId,
         session_id: SessionId,
-        index: usize,
+        index: u32,
     },
 }
 
@@ -146,7 +146,7 @@ pub enum NodeRequest {
     SelectTab {
         request_id: RequestId,
         tabs_node_id: NodeId,
-        index: usize,
+        index: u32,
     },
     Focus {
         request_id: RequestId,
@@ -345,7 +345,7 @@ pub struct TabRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabsRecord {
-    pub active: usize,
+    pub active: u32,
     pub tabs: Vec<TabRecord>,
 }
 

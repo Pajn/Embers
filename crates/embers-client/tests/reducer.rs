@@ -47,7 +47,7 @@ fn buffer_view_node(
     }
 }
 
-fn session_snapshot(root_active: usize, nested_active: usize) -> SessionSnapshot {
+fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
     let session_id = SessionId(1);
     SessionSnapshot {
         session: SessionRecord {

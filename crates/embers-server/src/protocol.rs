@@ -83,7 +83,8 @@ pub fn node_record(node: &Node) -> NodeRecord {
             buffer_view: None,
             split: None,
             tabs: Some(TabsRecord {
-                active: tabs.active,
+                active: u32::try_from(tabs.active)
+                    .expect("server tab indices fit into the protocol width"),
                 tabs: tabs
                     .tabs
                     .iter()
