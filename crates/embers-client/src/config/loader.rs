@@ -82,10 +82,9 @@ fn load_discovered_source(discovered: &DiscoveredConfig) -> ConfigResult<LoadedC
             source_hash: source_hash(BUILTIN_CONFIG_SOURCE),
         }),
         origin => {
-            let path = discovered
-                .path
-                .clone()
-                .expect("non-built-in config is missing a path");
+            let Some(path) = discovered.path.clone() else {
+                return Err(ConfigError::MissingPath { origin });
+            };
             let source = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
                 origin,
                 path: path.clone(),
@@ -151,5 +150,19 @@ mod tests {
         assert_eq!(loaded.path, Some(path.canonicalize().unwrap()));
         assert_eq!(loaded.source, "bind(\"normal\", \"q\", ())");
         assert_eq!(loaded.source_hash, super::source_hash(&loaded.source));
+    }
+
+    #[test]
+    fn missing_paths_fail_without_panicking() {
+        let error = super::load_discovered_source(&crate::config::DiscoveredConfig {
+            origin: ConfigOrigin::Explicit,
+            path: None,
+        })
+        .expect_err("missing path should error");
+
+        assert!(matches!(
+            error,
+            crate::config::ConfigError::MissingPath { .. }
+        ));
     }
 }

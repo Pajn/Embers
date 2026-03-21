@@ -15,12 +15,17 @@ use tempfile::tempdir;
 
 use support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
 
-fn manager_from_source(source: &str) -> ConfigManager {
+fn manager_from_source(source: &str) -> (ConfigManager, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("config.rhai");
     fs::write(&config_path, source).unwrap();
-    ConfigManager::load(ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()))
-        .unwrap()
+    (
+        ConfigManager::load(
+            ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+        )
+        .unwrap(),
+        tempdir,
+    )
 }
 
 fn session_snapshot_from_state(
@@ -66,7 +71,7 @@ async fn configured_keybinding_executes_live_focus_action() {
 
     let mut client = MuxClient::new(transport.clone());
     *client.state_mut() = demo_state();
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r#"
             fn move_left() { action.focus_left() }
             define_action("move-left", move_left);
@@ -103,7 +108,7 @@ async fn configured_keybinding_executes_live_focus_action() {
 #[tokio::test]
 async fn configured_render_uses_scripted_tab_bars() {
     let client = MuxClient::new(FakeTransport::default());
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r##"
             fn root_bar() {
                 let tabs = bar.tabs();
@@ -234,7 +239,7 @@ async fn event_hook_executes_real_actions() {
 
     let mut client = MuxClient::new(transport.clone());
     *client.state_mut() = demo_state();
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r#"
             fn on_focus() { action.focus_left() }
             on("focus-changed", on_focus);
@@ -270,7 +275,7 @@ async fn event_hook_executes_real_actions() {
 #[tokio::test]
 async fn keybinding_runtime_errors_become_notifications() {
     let client = MuxClient::new(FakeTransport::default());
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r#"
             fn broken() {
                 let xs = [];
@@ -308,7 +313,7 @@ async fn event_handler_runtime_errors_do_not_crash_client() {
         focused_floating_id: None,
     }));
     let client = MuxClient::new(transport);
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r#"
             fn broken() {
                 let xs = [];
@@ -330,7 +335,7 @@ async fn event_handler_runtime_errors_do_not_crash_client() {
 #[tokio::test]
 async fn formatter_failures_fall_back_to_default_rendering() {
     let client = MuxClient::new(FakeTransport::default());
-    let config = manager_from_source(
+    let (config, _tempdir) = manager_from_source(
         r#"
             fn root_bar() { 1 }
             tabbar.set_root_formatter(root_bar);
@@ -353,4 +358,28 @@ async fn formatter_failures_fall_back_to_default_rendering() {
 
     assert!(rendered.contains("workspace"));
     assert_eq!(configured.notifications().len(), 1);
+}
+
+#[tokio::test]
+async fn event_hooks_can_notify_without_an_active_view() {
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::FocusChanged(FocusChangedEvent {
+        session_id: SESSION_ID,
+        focused_leaf_id: Some(FOCUSED_LEAF_ID),
+        focused_floating_id: None,
+    }));
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_focus() { action.notify("focus hook") }
+            on("focus-changed", on_focus);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::FocusChanged(_)));
+    assert_eq!(configured.notifications(), ["focus hook"]);
 }

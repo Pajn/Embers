@@ -51,10 +51,7 @@ impl ScriptError {
     pub fn runtime_path(path: Option<&Path>, error: Box<EvalAltResult>) -> Self {
         let position = error.position();
         Self::Runtime {
-            path: path
-                .unwrap_or_else(|| Path::new("<built-in>"))
-                .display()
-                .to_string(),
+            path: format_path(path),
             location: format_location(position),
             message: error.to_string(),
         }
@@ -66,10 +63,7 @@ impl ScriptError {
         message: impl Into<String>,
     ) -> Self {
         Self::Validation {
-            path: path
-                .unwrap_or_else(|| Path::new("<built-in>"))
-                .display()
-                .to_string(),
+            path: format_path(path),
             location: format_location(position),
             message: message.into(),
         }
@@ -77,10 +71,11 @@ impl ScriptError {
 }
 
 fn source_path(source: &LoadedConfigSource) -> String {
-    source
-        .path
-        .as_deref()
-        .unwrap_or_else(|| Path::new("<built-in>"))
+    format_path(source.path.as_deref())
+}
+
+fn format_path(path: Option<&Path>) -> String {
+    path.unwrap_or_else(|| Path::new("<built-in>"))
         .display()
         .to_string()
 }

@@ -42,7 +42,7 @@ pub fn floating_focused_state() -> ClientState {
 
 pub fn root_focus_state() -> ClientState {
     let mut state = ClientState::default();
-    state.apply_session_snapshot(demo_snapshot(Some((FloatingId(0), LEFT_LEAF_ID))));
+    state.apply_session_snapshot(demo_snapshot(None));
     for snapshot in demo_snapshots() {
         state.apply_buffer_snapshot(snapshot);
     }

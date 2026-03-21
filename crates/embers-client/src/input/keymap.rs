@@ -37,18 +37,17 @@ pub fn resolve_key<T: Clone + PartialEq + Eq>(
     state.push_pending(key);
     let mode = state.current_mode().to_owned();
     let pending = state.pending_sequence().to_vec();
-    let mode_bindings = bindings.get(&mode).cloned().unwrap_or_default();
+    let mode_bindings = bindings.get(&mode).map(Vec::as_slice).unwrap_or(&[]);
 
     if let Some(binding) = mode_bindings
         .iter()
         .find(|binding| binding.sequence == pending)
-        .cloned()
     {
         state.clear_pending();
         return InputResolution::ExactMatch(BindingMatch {
             mode,
-            sequence: binding.sequence,
-            target: binding.target,
+            sequence: binding.sequence.clone(),
+            target: binding.target.clone(),
         });
     }
 

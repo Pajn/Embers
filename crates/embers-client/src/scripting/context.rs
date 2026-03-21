@@ -229,9 +229,14 @@ pub struct BufferRef {
 
 impl BufferRef {
     pub fn process_name(&self) -> Option<String> {
-        self.command
-            .first()
-            .map(|command| command.rsplit('/').next().unwrap_or(command).to_owned())
+        let command = self.command.first()?;
+        Some(
+            std::path::Path::new(command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(command)
+                .to_owned(),
+        )
     }
 }
 

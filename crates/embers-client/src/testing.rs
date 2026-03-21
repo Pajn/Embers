@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn test_grid_renders_rows() {
         let mut grid = TestGrid::new(6, 2);
-        grid.put_str(1, 0, "mux");
+        grid.put_str(1, 0, "embers");
         grid.put_str(0, 1, "ok");
 
-        assert_eq!(grid.render(), " mux  \nok    ");
+        assert_eq!(grid.render(), " ember\nok    ");
     }
 }

@@ -159,10 +159,10 @@ fn register_context_api(engine: &mut Engine) {
 }
 
 fn register_ref_api(engine: &mut Engine) {
-    engine.register_fn("id", |session: &mut SessionRef| session.id.0 as i64);
+    engine.register_fn("id", |session: &mut SessionRef| dynamic_u64(session.id.0));
     engine.register_fn("name", |session: &mut SessionRef| session.name.clone());
 
-    engine.register_fn("id", |buffer: &mut BufferRef| buffer.id.0 as i64);
+    engine.register_fn("id", |buffer: &mut BufferRef| dynamic_u64(buffer.id.0));
     engine.register_fn("title", |buffer: &mut BufferRef| buffer.title.clone());
     engine.register_fn("command", |buffer: &mut BufferRef| -> Array {
         buffer.command.iter().cloned().map(Dynamic::from).collect()
@@ -185,12 +185,12 @@ fn register_ref_api(engine: &mut Engine) {
         buffer_state_name(buffer.state)
     });
 
-    engine.register_fn("id", |node: &mut NodeRef| node.id.0 as i64);
+    engine.register_fn("id", |node: &mut NodeRef| dynamic_u64(node.id.0));
     engine.register_fn("kind", |node: &mut NodeRef| node_kind_name(node.kind));
     engine.register_fn("children", |node: &mut NodeRef| -> Array {
         node.child_ids
             .iter()
-            .map(|child_id| Dynamic::from(child_id.0 as i64))
+            .map(|child_id| dynamic_u64(child_id.0))
             .collect()
     });
     engine.register_fn("geometry", |node: &mut NodeRef| -> Dynamic {
@@ -203,18 +203,16 @@ fn register_ref_api(engine: &mut Engine) {
         node.tab_titles.iter().cloned().map(Dynamic::from).collect()
     });
     engine.register_fn("active_tab", |node: &mut NodeRef| -> Dynamic {
-        node.active_tab
-            .map(|index| Dynamic::from(index as i64))
-            .unwrap_or(Dynamic::UNIT)
+        node.active_tab.map(dynamic_usize).unwrap_or(Dynamic::UNIT)
     });
     engine.register_fn("buffer_id", |node: &mut NodeRef| -> Dynamic {
         node.buffer_id
-            .map(|buffer_id| Dynamic::from(buffer_id.0 as i64))
+            .map(|buffer_id| dynamic_u64(buffer_id.0))
             .unwrap_or(Dynamic::UNIT)
     });
     engine.register_fn("is_visible", |node: &mut NodeRef| node.visible);
 
-    engine.register_fn("id", |window: &mut FloatingRef| window.id.0 as i64);
+    engine.register_fn("id", |window: &mut FloatingRef| dynamic_u64(window.id.0));
     engine.register_fn("title", |window: &mut FloatingRef| -> Dynamic {
         dynamic_option_string(window.title.clone())
     });
@@ -225,7 +223,9 @@ fn register_ref_api(engine: &mut Engine) {
     });
 
     engine.register_fn("is_root", |bar: &mut TabBarContext| bar.is_root);
-    engine.register_fn("active_index", |bar: &mut TabBarContext| bar.active as i64);
+    engine.register_fn("active_index", |bar: &mut TabBarContext| {
+        dynamic_usize(bar.active)
+    });
     engine.register_fn("tabs", |bar: &mut TabBarContext| -> Array {
         bar.tabs.iter().cloned().map(Dynamic::from).collect()
     });
@@ -757,6 +757,18 @@ fn dynamic_option_custom<T: Clone + Send + Sync + 'static>(value: Option<T>) -> 
 
 fn dynamic_option_string(value: Option<String>) -> Dynamic {
     value.map(Dynamic::from).unwrap_or(Dynamic::UNIT)
+}
+
+fn dynamic_u64(value: u64) -> Dynamic {
+    i64::try_from(value)
+        .map(Dynamic::from)
+        .unwrap_or_else(|_| Dynamic::from(value.to_string()))
+}
+
+fn dynamic_usize(value: usize) -> Dynamic {
+    i64::try_from(value)
+        .map(Dynamic::from)
+        .unwrap_or_else(|_| Dynamic::from(value.to_string()))
 }
 
 fn rect_map(rect: Rect) -> Map {

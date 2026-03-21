@@ -44,7 +44,10 @@ impl RenderGrid {
         }
 
         for (offset, ch) in text.chars().enumerate() {
-            let Some(x_pos) = x.checked_add(offset as u16) else {
+            let Some(offset) = u16::try_from(offset).ok() else {
+                break;
+            };
+            let Some(x_pos) = x.checked_add(offset) else {
                 break;
             };
             if x_pos >= self.width {
@@ -71,8 +74,8 @@ impl RenderGrid {
             return;
         }
 
-        let x = rect.origin.x.max(0) as u16;
-        let y = rect.origin.y.max(0) as u16;
+        let x = clamp_i32_to_u16(rect.origin.x);
+        let y = clamp_i32_to_u16(rect.origin.y);
         let width = rect.size.width;
         let height = rect.size.height;
         let right = x.saturating_add(width.saturating_sub(1));
@@ -84,13 +87,13 @@ impl RenderGrid {
         self.put_char(right, bottom, border.bottom_right);
 
         if width > 2 {
-            self.draw_hline(x + 1, y, width - 2, border.horizontal);
-            self.draw_hline(x + 1, bottom, width - 2, border.horizontal);
+            self.draw_hline(x.saturating_add(1), y, width - 2, border.horizontal);
+            self.draw_hline(x.saturating_add(1), bottom, width - 2, border.horizontal);
         }
 
         if height > 2 {
-            self.draw_vline(x, y + 1, height - 2, border.vertical);
-            self.draw_vline(right, y + 1, height - 2, border.vertical);
+            self.draw_vline(x, y.saturating_add(1), height - 2, border.vertical);
+            self.draw_vline(right, y.saturating_add(1), height - 2, border.vertical);
         }
     }
 
@@ -104,6 +107,10 @@ impl RenderGrid {
     pub fn render(&self) -> String {
         self.lines().join("\n")
     }
+}
+
+fn clamp_i32_to_u16(value: i32) -> u16 {
+    value.clamp(0, i32::from(u16::MAX)) as u16
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
