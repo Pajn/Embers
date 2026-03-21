@@ -7,8 +7,8 @@ use mux_core::{
 };
 
 use crate::model::{
-    Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, FloatingWindow, Node,
-    Session, SplitNode, TabEntry, TabsNode,
+    Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
+    FloatingWindow, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 
 #[derive(Debug)]
@@ -133,6 +133,54 @@ impl ServerState {
             },
         );
         buffer_id
+    }
+
+    pub fn remove_buffer(&mut self, buffer_id: BufferId) -> Result<Buffer> {
+        let buffer = self.buffer(buffer_id)?.clone();
+        if !matches!(buffer.attachment, BufferAttachment::Detached) {
+            return Err(MuxError::conflict(format!(
+                "buffer {buffer_id} must be detached before removal"
+            )));
+        }
+        self.buffers
+            .remove(&buffer_id)
+            .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))
+    }
+
+    pub fn mark_buffer_running(&mut self, buffer_id: BufferId, pid: Option<u32>) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        if matches!(buffer.state, BufferState::Exited(_)) {
+            return Err(MuxError::conflict(format!(
+                "buffer {buffer_id} has already exited"
+            )));
+        }
+        buffer.state = BufferState::Running(RunningBuffer { pid });
+        Ok(())
+    }
+
+    pub fn mark_buffer_exited(
+        &mut self,
+        buffer_id: BufferId,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        buffer.state = BufferState::Exited(ExitedBuffer {
+            exit_code,
+            exited_at: Timestamp::now(),
+        });
+        Ok(())
+    }
+
+    pub fn set_buffer_size(&mut self, buffer_id: BufferId, size: PtySize) -> Result<()> {
+        self.buffer_mut(buffer_id)?.pty_size = size;
+        Ok(())
+    }
+
+    pub fn note_buffer_output(&mut self, buffer_id: BufferId) -> Result<u64> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        buffer.last_snapshot_seq = buffer.last_snapshot_seq.saturating_add(1);
+        buffer.activity = ActivityState::Activity;
+        Ok(buffer.last_snapshot_seq)
     }
 
     pub fn create_buffer_view(

@@ -456,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "mux-core",
  "mux-protocol",
+ "portable-pty",
  "proptest",
  "tempfile",
  "tokio",

@@ -3,14 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mux_core::{ErrorCode, MuxError, RequestId, Result, WireError, request_span};
+use mux_core::{
+    BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, WireError, request_span,
+};
 use mux_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferRequest, BufferResponse, BuffersResponse,
     ClientMessage, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
-    FocusChangedEvent, FrameType, NodeChangedEvent, OkResponse, PingResponse, ProtocolError,
-    RawFrame, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent,
-    SessionRequest, SessionSnapshotResponse, SessionsResponse, SubscriptionAckResponse,
-    decode_client_message, encode_server_envelope, read_frame, write_frame,
+    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
+    ProtocolError, RawFrame, RenderInvalidatedEvent, ServerEnvelope, ServerEvent, ServerResponse,
+    SessionClosedEvent, SessionCreatedEvent, SessionRequest, SessionSnapshotResponse,
+    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, decode_client_message,
+    encode_server_envelope, read_frame, write_frame,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -19,7 +22,10 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
 use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
-use crate::{BufferAttachment, ServerConfig, ServerState};
+use crate::{
+    BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferState, ServerConfig,
+    ServerState,
+};
 
 #[derive(Debug)]
 pub struct Server {
@@ -69,6 +75,7 @@ impl Server {
                 }
             }
 
+            runtime.shutdown_runtimes().await;
             Ok(())
         });
 
@@ -129,15 +136,56 @@ struct Subscription {
 #[derive(Debug)]
 struct Runtime {
     state: Mutex<ServerState>,
+    buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
+    buffer_captures: Mutex<BTreeMap<BufferId, BufferCapture>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
+}
+
+#[derive(Clone, Debug)]
+struct BufferCapture {
+    transcript: String,
+    size: PtySize,
+    sequence: u64,
+}
+
+impl BufferCapture {
+    fn new(size: PtySize) -> Self {
+        Self {
+            transcript: String::new(),
+            size,
+            sequence: 0,
+        }
+    }
+
+    fn record_output(&mut self, sequence: u64, bytes: &[u8]) {
+        self.transcript.push_str(&String::from_utf8_lossy(bytes));
+        self.sequence = sequence;
+    }
+
+    fn resize(&mut self, size: PtySize) {
+        self.size = size;
+    }
+
+    fn lines(&self) -> Vec<String> {
+        if self.transcript.is_empty() {
+            Vec::new()
+        } else {
+            self.transcript
+                .split('\n')
+                .map(|line| line.trim_end_matches('\r').to_owned())
+                .collect()
+        }
+    }
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self {
             state: Mutex::new(ServerState::new()),
+            buffer_runtimes: Mutex::new(BTreeMap::new()),
+            buffer_captures: Mutex::new(BTreeMap::new()),
             subscriptions: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -147,7 +195,7 @@ impl Default for Runtime {
 
 impl Runtime {
     async fn dispatch_request(
-        &self,
+        self: &Arc<Self>,
         connection_id: u64,
         outbound: &mpsc::UnboundedSender<ServerEnvelope>,
         request: ClientMessage,
@@ -164,10 +212,7 @@ impl Runtime {
             ClientMessage::Buffer(request) => self.dispatch_buffer(request).await,
             ClientMessage::Node(request) => self.dispatch_node(request).await,
             ClientMessage::Floating(request) => self.dispatch_floating(request).await,
-            ClientMessage::Input(request) => (
-                unsupported_response(request.request_id(), "input requests are not available yet"),
-                Vec::new(),
-            ),
+            ClientMessage::Input(request) => self.dispatch_input(request).await,
             ClientMessage::Subscribe(request) => {
                 let subscription_id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
                 self.subscriptions.lock().await.insert(
@@ -280,9 +325,10 @@ impl Runtime {
         }
     }
 
-    async fn dispatch_buffer(&self, request: BufferRequest) -> (ServerResponse, Vec<ServerEvent>) {
-        let mut state = self.state.lock().await;
-
+    async fn dispatch_buffer(
+        self: &Arc<Self>,
+        request: BufferRequest,
+    ) -> (ServerResponse, Vec<ServerEvent>) {
         match request {
             BufferRequest::Create {
                 request_id,
@@ -290,12 +336,37 @@ impl Runtime {
                 command,
                 cwd,
             } => {
-                let buffer_id = state.create_buffer(
-                    title.unwrap_or_else(|| "buffer".to_owned()),
-                    command,
-                    cwd.map(Into::into),
-                );
-                let record = state
+                if command.is_empty() {
+                    return (
+                        error_response(
+                            Some(request_id),
+                            ErrorCode::InvalidRequest,
+                            "buffer command must not be empty",
+                        ),
+                        Vec::new(),
+                    );
+                }
+
+                let buffer_id = {
+                    let mut state = self.state.lock().await;
+                    state.create_buffer(
+                        title.unwrap_or_else(|| "buffer".to_owned()),
+                        command,
+                        cwd.map(Into::into),
+                    )
+                };
+
+                if let Err(error) = self.spawn_buffer_runtime(buffer_id).await {
+                    let mut state = self.state.lock().await;
+                    let _ = state.remove_buffer(buffer_id);
+                    self.buffer_captures.lock().await.remove(&buffer_id);
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+
+                let record = self
+                    .state
+                    .lock()
+                    .await
                     .buffer(buffer_id)
                     .map(buffer_record)
                     .map_err(|error| mux_error_response(Some(request_id), error));
@@ -329,6 +400,7 @@ impl Runtime {
                     );
                 }
 
+                let state = self.state.lock().await;
                 let buffers = state
                     .buffers
                     .values()
@@ -366,7 +438,7 @@ impl Runtime {
             BufferRequest::Get {
                 request_id,
                 buffer_id,
-            } => match state.buffer(buffer_id) {
+            } => match self.state.lock().await.buffer(buffer_id) {
                 Ok(buffer) => (
                     ServerResponse::Buffer(BufferResponse {
                         request_id,
@@ -380,6 +452,7 @@ impl Runtime {
                 request_id,
                 buffer_id,
             } => {
+                let mut state = self.state.lock().await;
                 let attached_view = match state.buffer(buffer_id) {
                     Ok(buffer) => match buffer.attachment {
                         BufferAttachment::Attached(node_id) => Some(node_id),
@@ -409,14 +482,87 @@ impl Runtime {
 
                 (ServerResponse::Ok(OkResponse { request_id }), events)
             }
-            BufferRequest::Kill { request_id, .. } => (
-                unsupported_response(request_id, "kill-buffer is not available yet"),
-                Vec::new(),
-            ),
-            BufferRequest::Capture { request_id, .. } => (
-                unsupported_response(request_id, "capture-buffer is not available yet"),
-                Vec::new(),
-            ),
+            BufferRequest::Kill {
+                request_id,
+                buffer_id,
+                force: _,
+            } => match self.running_buffer_runtime(buffer_id).await {
+                Ok(runtime) => match runtime.kill().await {
+                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                },
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::Capture {
+                request_id,
+                buffer_id,
+            } => match self.capture_snapshot(request_id, buffer_id).await {
+                Ok(snapshot) => (ServerResponse::Snapshot(snapshot), Vec::new()),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+        }
+    }
+
+    async fn dispatch_input(
+        self: &Arc<Self>,
+        request: InputRequest,
+    ) -> (ServerResponse, Vec<ServerEvent>) {
+        match request {
+            InputRequest::Send {
+                request_id,
+                buffer_id,
+                bytes,
+            } => match self.running_buffer_runtime(buffer_id).await {
+                Ok(runtime) => match runtime.write(bytes).await {
+                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                },
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            InputRequest::Resize {
+                request_id,
+                buffer_id,
+                cols,
+                rows,
+            } => {
+                let runtime = match self.running_buffer_runtime(buffer_id).await {
+                    Ok(runtime) => runtime,
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                let size = {
+                    let state = self.state.lock().await;
+                    match state.buffer(buffer_id) {
+                        Ok(buffer) => PtySize {
+                            cols,
+                            rows,
+                            pixel_width: buffer.pty_size.pixel_width,
+                            pixel_height: buffer.pty_size.pixel_height,
+                        },
+                        Err(error) => {
+                            return (mux_error_response(Some(request_id), error), Vec::new());
+                        }
+                    }
+                };
+
+                if let Err(error) = runtime.resize(size).await {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+
+                {
+                    let mut state = self.state.lock().await;
+                    if let Err(error) = state.set_buffer_size(buffer_id, size) {
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                }
+                self.resize_capture(buffer_id, size).await;
+
+                (
+                    ServerResponse::Ok(OkResponse { request_id }),
+                    vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                        buffer_id,
+                    })],
+                )
+            }
         }
     }
 
@@ -735,6 +881,183 @@ impl Runtime {
                     }),
                     events,
                 )
+            }
+        }
+    }
+
+    async fn spawn_buffer_runtime(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
+        let (command, cwd, size) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?.clone();
+            (buffer.command, buffer.cwd, buffer.pty_size)
+        };
+
+        let output_handle = tokio::runtime::Handle::current();
+        let exit_handle = output_handle.clone();
+        let output_runtime = self.clone();
+        let exit_runtime = self.clone();
+        let runtime = BufferRuntimeHandle::spawn(
+            buffer_id,
+            &command,
+            cwd.as_deref(),
+            size,
+            BufferRuntimeCallbacks {
+                on_output: Arc::new(move |buffer_id, bytes| {
+                    let runtime = output_runtime.clone();
+                    std::mem::drop(output_handle.spawn(async move {
+                        runtime.record_buffer_output(buffer_id, bytes).await;
+                    }));
+                }),
+                on_exit: Arc::new(move |buffer_id, exit_code| {
+                    let runtime = exit_runtime.clone();
+                    std::mem::drop(exit_handle.spawn(async move {
+                        runtime.record_buffer_exit(buffer_id, exit_code).await;
+                    }));
+                }),
+            },
+        )?;
+
+        {
+            let mut state = self.state.lock().await;
+            if let Err(error) = state.mark_buffer_running(buffer_id, runtime.pid()) {
+                let _ = runtime.kill().await;
+                return Err(error);
+            }
+        }
+
+        self.buffer_captures
+            .lock()
+            .await
+            .entry(buffer_id)
+            .or_insert_with(|| BufferCapture::new(size));
+        self.buffer_runtimes.lock().await.insert(buffer_id, runtime);
+        Ok(())
+    }
+
+    async fn running_buffer_runtime(&self, buffer_id: BufferId) -> Result<BufferRuntimeHandle> {
+        if let Some(runtime) = self.buffer_runtimes.lock().await.get(&buffer_id).cloned() {
+            return Ok(runtime);
+        }
+
+        let state = self.state.lock().await;
+        let buffer = state.buffer(buffer_id)?;
+        match buffer.state {
+            BufferState::Created => Err(MuxError::conflict(format!(
+                "buffer {buffer_id} is not running"
+            ))),
+            BufferState::Running(_) => Err(MuxError::internal(format!(
+                "buffer {buffer_id} is marked running without an active runtime"
+            ))),
+            BufferState::Exited(_) => Err(MuxError::conflict(format!(
+                "buffer {buffer_id} has already exited"
+            ))),
+        }
+    }
+
+    async fn capture_snapshot(
+        &self,
+        request_id: RequestId,
+        buffer_id: BufferId,
+    ) -> Result<SnapshotResponse> {
+        let buffer = {
+            let state = self.state.lock().await;
+            state.buffer(buffer_id)?.clone()
+        };
+        let capture = self
+            .buffer_captures
+            .lock()
+            .await
+            .get(&buffer_id)
+            .cloned()
+            .unwrap_or_else(|| BufferCapture::new(buffer.pty_size));
+
+        Ok(SnapshotResponse {
+            request_id,
+            buffer_id,
+            sequence: buffer.last_snapshot_seq.max(capture.sequence),
+            size: capture.size,
+            lines: capture.lines(),
+            title: Some(buffer.title),
+            cwd: buffer.cwd.map(|path| path.display().to_string()),
+        })
+    }
+
+    async fn resize_capture(&self, buffer_id: BufferId, size: PtySize) {
+        self.buffer_captures
+            .lock()
+            .await
+            .entry(buffer_id)
+            .or_insert_with(|| BufferCapture::new(size))
+            .resize(size);
+    }
+
+    async fn record_buffer_output(&self, buffer_id: BufferId, bytes: Vec<u8>) {
+        let (sequence, size) = {
+            let mut state = self.state.lock().await;
+            let sequence = match state.note_buffer_output(buffer_id) {
+                Ok(sequence) => sequence,
+                Err(error) => {
+                    debug!(%buffer_id, %error, "dropping PTY output for unknown buffer");
+                    return;
+                }
+            };
+            let size = match state.buffer(buffer_id) {
+                Ok(buffer) => buffer.pty_size,
+                Err(error) => {
+                    debug!(%buffer_id, %error, "buffer disappeared while recording output");
+                    return;
+                }
+            };
+            (sequence, size)
+        };
+
+        {
+            let mut captures = self.buffer_captures.lock().await;
+            let capture = captures
+                .entry(buffer_id)
+                .or_insert_with(|| BufferCapture::new(size));
+            capture.resize(size);
+            capture.record_output(sequence, &bytes);
+        }
+
+        self.broadcast(vec![ServerEvent::RenderInvalidated(
+            RenderInvalidatedEvent { buffer_id },
+        )])
+        .await;
+    }
+
+    async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
+        self.buffer_runtimes.lock().await.remove(&buffer_id);
+        let updated = {
+            let mut state = self.state.lock().await;
+            match state.mark_buffer_exited(buffer_id, exit_code) {
+                Ok(()) => true,
+                Err(error) => {
+                    debug!(%buffer_id, %error, "buffer exited after state cleanup");
+                    false
+                }
+            }
+        };
+
+        if updated {
+            self.broadcast(vec![ServerEvent::RenderInvalidated(
+                RenderInvalidatedEvent { buffer_id },
+            )])
+            .await;
+        }
+    }
+
+    async fn shutdown_runtimes(&self) {
+        let runtimes: Vec<_> = self
+            .buffer_runtimes
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        for runtime in runtimes {
+            if let Err(error) = runtime.kill().await {
+                debug!(%error, "failed to kill buffer runtime during shutdown");
             }
         }
     }
