@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use rhai::{
-    Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, NativeCallContext, Position, Scope,
+    CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map,
+    NativeCallContext, Position, Scope,
 };
 
 use crate::config::LoadedConfigSource;
@@ -11,6 +12,9 @@ use crate::input::{
 };
 
 use super::error::ScriptError;
+use super::runtime::{normalize_actions, register_runtime_api, runtime_scope};
+use super::Context;
+use super::Action;
 use super::types::{LoadedConfig, RgbColor, ScriptFunctionRef, ThemeSpec};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
@@ -25,7 +29,9 @@ impl ScriptEngine {
     pub fn load(source: &LoadedConfigSource) -> Result<Self, ScriptError> {
         let registration = Arc::new(Mutex::new(RegistrationState::default()));
         let mut engine = Engine::new();
+        engine.set_max_expr_depths(256, 256);
         register_api(&mut engine, registration.clone());
+        register_runtime_api(&mut engine);
 
         let ast = engine
             .compile(&source.source)
@@ -70,6 +76,58 @@ impl ScriptEngine {
 
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    pub fn run_named_action(
+        &self,
+        name: &str,
+        context: Context,
+    ) -> Result<Vec<Action>, ScriptError> {
+        let callback = self.loaded.named_actions.get(name).ok_or_else(|| {
+            ScriptError::validation_path(
+                self.loaded.source_path.as_deref(),
+                Position::NONE,
+                format!("unknown named action '{name}'"),
+            )
+        })?;
+        self.invoke_action_function(&callback.name, context)
+    }
+
+    pub fn dispatch_event(
+        &self,
+        event: &str,
+        context: Context,
+    ) -> Result<Vec<Action>, ScriptError> {
+        let Some(handlers) = self.loaded.event_handlers.get(event) else {
+            return Ok(Vec::new());
+        };
+
+        let mut actions = Vec::new();
+        for handler in handlers {
+            actions.extend(self.invoke_action_function(&handler.name, context.clone())?);
+        }
+        Ok(actions)
+    }
+
+    fn invoke_action_function(
+        &self,
+        function_name: &str,
+        context: Context,
+    ) -> Result<Vec<Action>, ScriptError> {
+        let mut scope = runtime_scope(context);
+        let result = self
+            .engine
+            .call_fn_with_options::<Dynamic>(
+                CallFnOptions::new().eval_ast(false),
+                &mut scope,
+                &self.loaded.ast,
+                function_name,
+                (),
+            )
+            .map_err(|error| ScriptError::runtime_path(self.loaded.source_path.as_deref(), error))?;
+        normalize_actions(result).map_err(|message| {
+            ScriptError::validation_path(self.loaded.source_path.as_deref(), Position::NONE, message)
+        })
     }
 }
 

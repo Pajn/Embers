@@ -1,9 +1,17 @@
+mod context;
 mod engine;
 mod error;
 mod harness;
+mod model;
+mod runtime;
 mod types;
 
+pub use context::{BufferRef, Context, FloatingRef, NodeRef, SessionRef};
 pub use engine::ScriptEngine;
 pub use error::ScriptError;
 pub use harness::ScriptHarness;
+pub use model::{
+    Action, BufferSpawnSpec, BufferTarget, FloatingOptions, NodeTarget, TabSpec, TreeSpec,
+    WeightedTreeSpec,
+};
 pub use types::{LoadedConfig, PaletteError, RgbColor, ScriptFunctionRef, ThemeSpec};
