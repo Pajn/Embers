@@ -128,7 +128,8 @@ fn client_message_families_round_trip() {
         ClientMessage::Floating(FloatingRequest::Create {
             request_id: RequestId(25),
             session_id: SessionId(10),
-            root_node_id: NodeId(35),
+            root_node_id: Some(NodeId(35)),
+            buffer_id: None,
             geometry: FloatGeometry::new(4, 2, 60, 18),
             title: Some("inspector".to_owned()),
         }),

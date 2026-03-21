@@ -872,9 +872,23 @@ impl Runtime {
                 request_id,
                 session_id,
                 root_node_id,
+                buffer_id,
                 geometry,
                 title,
-            } => match state.create_floating_window(session_id, root_node_id, geometry, title) {
+            } => match match (root_node_id, buffer_id) {
+                (Some(root_node_id), None) => {
+                    state.create_floating_window(session_id, root_node_id, geometry, title)
+                }
+                (None, Some(buffer_id)) => {
+                    state.create_floating_from_buffer(session_id, buffer_id, geometry, title)
+                }
+                (Some(_), Some(_)) => Err(MuxError::invalid_input(
+                    "create-floating requires either root_node_id or buffer_id, not both",
+                )),
+                (None, None) => Err(MuxError::invalid_input(
+                    "create-floating requires either root_node_id or buffer_id",
+                )),
+            } {
                 Ok(floating_id) => {
                     if let Err(error) = state.focus_floating(floating_id) {
                         return (mux_error_response(Some(request_id), error), Vec::new());
