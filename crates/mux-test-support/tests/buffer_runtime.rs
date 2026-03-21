@@ -237,3 +237,28 @@ async fn resize_and_kill_requests_update_buffer_state_and_preserve_capture() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_preserves_scrollback_for_long_output() {
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            "i=1; while [ $i -le 40 ]; do printf 'line-%02d\\n' \"$i\"; i=$((i+1)); done",
+        ],
+    )
+    .await;
+
+    let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "line-40").await;
+    let text = snapshot.lines.join("\n");
+    assert!(text.contains("line-01"));
+    assert!(text.contains("line-40"));
+
+    server.shutdown().await.expect("shutdown server");
+}

@@ -23,8 +23,8 @@ use tracing::{debug, error, info};
 
 use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
 use crate::{
-    BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferState, ServerConfig,
-    ServerState,
+    AlacrittyTerminalBackend, BackendDamage, BufferAttachment, BufferRuntimeCallbacks,
+    BufferRuntimeHandle, BufferState, RawByteRouter, ServerConfig, ServerState, TerminalBackend,
 };
 
 #[derive(Debug)]
@@ -137,46 +137,63 @@ struct Subscription {
 struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
-    buffer_captures: Mutex<BTreeMap<BufferId, BufferCapture>>,
+    buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
 }
 
-#[derive(Clone, Debug)]
-struct BufferCapture {
-    transcript: String,
+struct BufferSurface {
+    router: RawByteRouter,
+    backend: Box<dyn TerminalBackend>,
     size: PtySize,
-    sequence: u64,
 }
 
-impl BufferCapture {
+impl std::fmt::Debug for BufferSurface {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BufferSurface")
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+impl BufferSurface {
     fn new(size: PtySize) -> Self {
         Self {
-            transcript: String::new(),
+            router: RawByteRouter,
+            backend: Box::new(AlacrittyTerminalBackend::new(size)),
             size,
-            sequence: 0,
         }
     }
 
-    fn record_output(&mut self, sequence: u64, bytes: &[u8]) {
-        self.transcript.push_str(&String::from_utf8_lossy(bytes));
-        self.sequence = sequence;
+    fn route_input(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        self.router.route_input(bytes)
+    }
+
+    fn route_output(&mut self, bytes: &[u8]) {
+        self.router.route_output(self.backend.as_mut(), bytes);
     }
 
     fn resize(&mut self, size: PtySize) {
         self.size = size;
+        self.backend.resize(size);
     }
 
-    fn lines(&self) -> Vec<String> {
-        if self.transcript.is_empty() {
-            Vec::new()
-        } else {
-            self.transcript
-                .split('\n')
-                .map(|line| line.trim_end_matches('\r').to_owned())
-                .collect()
-        }
+    fn capture_lines(&self) -> Vec<String> {
+        self.backend.capture_scrollback()
+    }
+
+    fn damage(&mut self) -> BackendDamage {
+        self.backend.take_damage()
+    }
+
+    fn title(&self) -> Option<String> {
+        self.backend.metadata().title
+    }
+
+    fn activity(&self) -> mux_core::ActivityState {
+        self.backend.metadata().activity
     }
 }
 
@@ -185,7 +202,7 @@ impl Default for Runtime {
         Self {
             state: Mutex::new(ServerState::new()),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
-            buffer_captures: Mutex::new(BTreeMap::new()),
+            buffer_surfaces: Mutex::new(BTreeMap::new()),
             subscriptions: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -359,7 +376,7 @@ impl Runtime {
                 if let Err(error) = self.spawn_buffer_runtime(buffer_id).await {
                     let mut state = self.state.lock().await;
                     let _ = state.remove_buffer(buffer_id);
-                    self.buffer_captures.lock().await.remove(&buffer_id);
+                    self.buffer_surfaces.lock().await.remove(&buffer_id);
                     return (mux_error_response(Some(request_id), error), Vec::new());
                 }
 
@@ -513,10 +530,13 @@ impl Runtime {
                 buffer_id,
                 bytes,
             } => match self.running_buffer_runtime(buffer_id).await {
-                Ok(runtime) => match runtime.write(bytes).await {
-                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
-                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                },
+                Ok(runtime) => {
+                    let bytes = self.route_input_bytes(buffer_id, bytes).await;
+                    match runtime.write(bytes).await {
+                        Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                    }
+                }
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             InputRequest::Resize {
@@ -554,13 +574,11 @@ impl Runtime {
                         return (mux_error_response(Some(request_id), error), Vec::new());
                     }
                 }
-                self.resize_capture(buffer_id, size).await;
+                let damage = self.resize_surface(buffer_id, size).await;
 
                 (
                     ServerResponse::Ok(OkResponse { request_id }),
-                    vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
-                        buffer_id,
-                    })],
+                    render_events(buffer_id, damage),
                 )
             }
         }
@@ -925,11 +943,11 @@ impl Runtime {
             }
         }
 
-        self.buffer_captures
+        self.buffer_surfaces
             .lock()
             .await
             .entry(buffer_id)
-            .or_insert_with(|| BufferCapture::new(size));
+            .or_insert_with(|| BufferSurface::new(size));
         self.buffer_runtimes.lock().await.insert(buffer_id, runtime);
         Ok(())
     }
@@ -963,67 +981,80 @@ impl Runtime {
             let state = self.state.lock().await;
             state.buffer(buffer_id)?.clone()
         };
-        let capture = self
-            .buffer_captures
+        let lines = self
+            .buffer_surfaces
             .lock()
             .await
             .get(&buffer_id)
-            .cloned()
-            .unwrap_or_else(|| BufferCapture::new(buffer.pty_size));
+            .map(BufferSurface::capture_lines)
+            .unwrap_or_default();
 
         Ok(SnapshotResponse {
             request_id,
             buffer_id,
-            sequence: buffer.last_snapshot_seq.max(capture.sequence),
-            size: capture.size,
-            lines: capture.lines(),
+            sequence: buffer.last_snapshot_seq,
+            size: buffer.pty_size,
+            lines,
             title: Some(buffer.title),
             cwd: buffer.cwd.map(|path| path.display().to_string()),
         })
     }
 
-    async fn resize_capture(&self, buffer_id: BufferId, size: PtySize) {
-        self.buffer_captures
-            .lock()
-            .await
+    async fn route_input_bytes(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Vec<u8> {
+        match self.buffer_surfaces.lock().await.get_mut(&buffer_id) {
+            Some(surface) => surface.route_input(bytes),
+            None => bytes,
+        }
+    }
+
+    async fn resize_surface(&self, buffer_id: BufferId, size: PtySize) -> BackendDamage {
+        let mut surfaces = self.buffer_surfaces.lock().await;
+        let surface = surfaces
             .entry(buffer_id)
-            .or_insert_with(|| BufferCapture::new(size))
-            .resize(size);
+            .or_insert_with(|| BufferSurface::new(size));
+        surface.resize(size);
+        surface.damage()
     }
 
     async fn record_buffer_output(&self, buffer_id: BufferId, bytes: Vec<u8>) {
-        let (sequence, size) = {
+        let size = {
             let mut state = self.state.lock().await;
-            let sequence = match state.note_buffer_output(buffer_id) {
-                Ok(sequence) => sequence,
-                Err(error) => {
-                    debug!(%buffer_id, %error, "dropping PTY output for unknown buffer");
-                    return;
-                }
-            };
-            let size = match state.buffer(buffer_id) {
+            if let Err(error) = state.note_buffer_output(buffer_id) {
+                debug!(%buffer_id, %error, "dropping PTY output for unknown buffer");
+                return;
+            }
+            match state.buffer(buffer_id) {
                 Ok(buffer) => buffer.pty_size,
                 Err(error) => {
                     debug!(%buffer_id, %error, "buffer disappeared while recording output");
                     return;
                 }
-            };
-            (sequence, size)
+            }
+        };
+
+        let (title, activity, damage) = {
+            let mut surfaces = self.buffer_surfaces.lock().await;
+            let surface = surfaces
+                .entry(buffer_id)
+                .or_insert_with(|| BufferSurface::new(size));
+            surface.resize(size);
+            surface.route_output(&bytes);
+            (surface.title(), surface.activity(), surface.damage())
         };
 
         {
-            let mut captures = self.buffer_captures.lock().await;
-            let capture = captures
-                .entry(buffer_id)
-                .or_insert_with(|| BufferCapture::new(size));
-            capture.resize(size);
-            capture.record_output(sequence, &bytes);
+            let mut state = self.state.lock().await;
+            if let Some(title) = title
+                && let Err(error) = state.set_buffer_title(buffer_id, title)
+            {
+                debug!(%buffer_id, %error, "failed to apply terminal title update");
+            }
+            if let Err(error) = state.set_buffer_activity(buffer_id, activity) {
+                debug!(%buffer_id, %error, "failed to apply buffer activity update");
+            }
         }
 
-        self.broadcast(vec![ServerEvent::RenderInvalidated(
-            RenderInvalidatedEvent { buffer_id },
-        )])
-        .await;
+        self.broadcast(render_events(buffer_id, damage)).await;
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
@@ -1231,4 +1262,15 @@ fn mux_error_response(request_id: Option<RequestId>, error: MuxError) -> ServerR
 
 fn protocol_error_to_mux(error: ProtocolError) -> MuxError {
     MuxError::protocol(error.to_string())
+}
+
+fn render_events(buffer_id: BufferId, damage: BackendDamage) -> Vec<ServerEvent> {
+    match damage {
+        BackendDamage::None => Vec::new(),
+        BackendDamage::Full | BackendDamage::Partial(_) => {
+            vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                buffer_id,
+            })]
+        }
+    }
 }

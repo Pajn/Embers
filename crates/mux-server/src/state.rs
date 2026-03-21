@@ -183,6 +183,24 @@ impl ServerState {
         Ok(buffer.last_snapshot_seq)
     }
 
+    pub fn set_buffer_title(
+        &mut self,
+        buffer_id: BufferId,
+        title: impl Into<String>,
+    ) -> Result<()> {
+        self.buffer_mut(buffer_id)?.title = title.into();
+        Ok(())
+    }
+
+    pub fn set_buffer_activity(
+        &mut self,
+        buffer_id: BufferId,
+        activity: ActivityState,
+    ) -> Result<()> {
+        self.buffer_mut(buffer_id)?.activity = activity;
+        Ok(())
+    }
+
     pub fn create_buffer_view(
         &mut self,
         session_id: SessionId,
