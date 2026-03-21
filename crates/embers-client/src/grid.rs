@@ -1,10 +1,107 @@
-use embers_core::Rect;
+use std::fmt::Write;
+
+use embers_core::{CursorShape, Rect};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Color {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl From<crate::scripting::RgbColor> for Color {
+    fn from(value: crate::scripting::RgbColor) -> Self {
+        Self {
+            red: value.red,
+            green: value.green,
+            blue: value.blue,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellStyle {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub dim: bool,
+    pub reverse: bool,
+}
+
+impl CellStyle {
+    pub const fn with_reverse(mut self) -> Self {
+        self.reverse = true;
+        self
+    }
+
+    pub const fn with_bold(mut self) -> Self {
+        self.bold = true;
+        self
+    }
+
+    pub fn is_plain(self) -> bool {
+        self == Self::default()
+    }
+}
+
+impl From<&crate::scripting::StyleSpec> for CellStyle {
+    fn from(value: &crate::scripting::StyleSpec) -> Self {
+        Self {
+            fg: value.fg.map(Into::into),
+            bg: value.bg.map(Into::into),
+            bold: value.bold,
+            italic: value.italic,
+            underline: value.underline,
+            dim: value.dim,
+            reverse: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridCursor {
+    pub x: u16,
+    pub y: u16,
+    pub shape: CursorShape,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Cell {
+    text: String,
+    style: CellStyle,
+    continuation: bool,
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            text: " ".to_owned(),
+            style: CellStyle::default(),
+            continuation: false,
+        }
+    }
+}
+
+impl Cell {
+    fn blank(fill: char) -> Self {
+        Self {
+            text: fill.to_string(),
+            style: CellStyle::default(),
+            continuation: false,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderGrid {
     width: u16,
     height: u16,
-    cells: Vec<char>,
+    cells: Vec<Cell>,
+    cursor: Option<GridCursor>,
 }
 
 impl RenderGrid {
@@ -13,12 +110,14 @@ impl RenderGrid {
         Self {
             width,
             height,
-            cells: vec![' '; len],
+            cells: vec![Cell::default(); len],
+            cursor: None,
         }
     }
 
     pub fn clear(&mut self, fill: char) {
-        self.cells.fill(fill);
+        self.cells.fill(Cell::blank(fill));
+        self.cursor = None;
     }
 
     pub fn width(&self) -> u16 {
@@ -29,47 +128,88 @@ impl RenderGrid {
         self.height
     }
 
-    pub fn put_char(&mut self, x: u16, y: u16, ch: char) {
-        if x >= self.width || y >= self.height {
-            return;
-        }
+    pub fn cursor(&self) -> Option<GridCursor> {
+        self.cursor
+    }
 
-        let idx = usize::from(y) * usize::from(self.width) + usize::from(x);
-        self.cells[idx] = ch;
+    pub fn set_cursor(&mut self, cursor: Option<GridCursor>) {
+        self.cursor = cursor.filter(|cursor| cursor.x < self.width && cursor.y < self.height);
+    }
+
+    pub fn put_char(&mut self, x: u16, y: u16, ch: char) {
+        self.put_char_styled(x, y, ch, CellStyle::default());
+    }
+
+    pub fn put_char_styled(&mut self, x: u16, y: u16, ch: char, style: CellStyle) {
+        self.put_str_styled(x, y, &ch.to_string(), style);
     }
 
     pub fn put_str(&mut self, x: u16, y: u16, text: &str) {
-        if y >= self.height {
+        self.put_str_styled(x, y, text, CellStyle::default());
+    }
+
+    pub fn put_str_styled(&mut self, x: u16, y: u16, text: &str, style: CellStyle) {
+        if y >= self.height || x >= self.width {
             return;
         }
 
-        for (offset, ch) in text.chars().enumerate() {
-            let Some(offset) = u16::try_from(offset).ok() else {
-                break;
-            };
-            let Some(x_pos) = x.checked_add(offset) else {
-                break;
-            };
+        let mut x_pos = x;
+        for grapheme in UnicodeSegmentation::graphemes(text, true) {
             if x_pos >= self.width {
                 break;
             }
-            self.put_char(x_pos, y, ch);
+            let width = grapheme_width(grapheme);
+            if width == 0 {
+                continue;
+            }
+            if x_pos.saturating_add(width) > self.width {
+                break;
+            }
+
+            self.set_cell(x_pos, y, grapheme, style, width);
+            x_pos = x_pos.saturating_add(width);
         }
     }
 
     pub fn draw_hline(&mut self, x: u16, y: u16, width: u16, ch: char) {
+        self.draw_hline_styled(x, y, width, ch, CellStyle::default());
+    }
+
+    pub fn draw_hline_styled(&mut self, x: u16, y: u16, width: u16, ch: char, style: CellStyle) {
         for offset in 0..width {
-            self.put_char(x.saturating_add(offset), y, ch);
+            self.put_char_styled(x.saturating_add(offset), y, ch, style);
         }
     }
 
     pub fn draw_vline(&mut self, x: u16, y: u16, height: u16, ch: char) {
+        self.draw_vline_styled(x, y, height, ch, CellStyle::default());
+    }
+
+    pub fn draw_vline_styled(&mut self, x: u16, y: u16, height: u16, ch: char, style: CellStyle) {
         for offset in 0..height {
-            self.put_char(x, y.saturating_add(offset), ch);
+            self.put_char_styled(x, y.saturating_add(offset), ch, style);
+        }
+    }
+
+    pub fn fill_rect(&mut self, rect: Rect, fill: char, style: CellStyle) {
+        if rect.size.width == 0 || rect.size.height == 0 {
+            return;
+        }
+
+        let x = clamp_i32_to_u16(rect.origin.x);
+        let y = clamp_i32_to_u16(rect.origin.y);
+        for row in 0..rect.size.height {
+            for col in 0..rect.size.width {
+                self.put_char_styled(x.saturating_add(col), y.saturating_add(row), fill, style);
+            }
         }
     }
 
     pub fn draw_box(&mut self, rect: Rect, border: BorderStyle) {
+        self.draw_box_styled(rect, border, CellStyle::default());
+    }
+
+    pub fn draw_box_styled(&mut self, rect: Rect, border: BorderStyle, style: CellStyle) {
         if rect.size.width == 0 || rect.size.height == 0 {
             return;
         }
@@ -81,31 +221,133 @@ impl RenderGrid {
         let right = x.saturating_add(width.saturating_sub(1));
         let bottom = y.saturating_add(height.saturating_sub(1));
 
-        self.put_char(x, y, border.top_left);
-        self.put_char(right, y, border.top_right);
-        self.put_char(x, bottom, border.bottom_left);
-        self.put_char(right, bottom, border.bottom_right);
+        self.put_char_styled(x, y, border.top_left, style);
+        self.put_char_styled(right, y, border.top_right, style);
+        self.put_char_styled(x, bottom, border.bottom_left, style);
+        self.put_char_styled(right, bottom, border.bottom_right, style);
 
         if width > 2 {
-            self.draw_hline(x.saturating_add(1), y, width - 2, border.horizontal);
-            self.draw_hline(x.saturating_add(1), bottom, width - 2, border.horizontal);
+            self.draw_hline_styled(x.saturating_add(1), y, width - 2, border.horizontal, style);
+            self.draw_hline_styled(
+                x.saturating_add(1),
+                bottom,
+                width - 2,
+                border.horizontal,
+                style,
+            );
         }
 
         if height > 2 {
-            self.draw_vline(x, y.saturating_add(1), height - 2, border.vertical);
-            self.draw_vline(right, y.saturating_add(1), height - 2, border.vertical);
+            self.draw_vline_styled(x, y.saturating_add(1), height - 2, border.vertical, style);
+            self.draw_vline_styled(right, y.saturating_add(1), height - 2, border.vertical, style);
         }
     }
 
     pub fn lines(&self) -> Vec<String> {
-        self.cells
-            .chunks(usize::from(self.width))
-            .map(|row| row.iter().collect::<String>())
+        (0..self.height)
+            .map(|row| {
+                let start = usize::from(row) * usize::from(self.width);
+                let end = start + usize::from(self.width);
+                let mut output = String::new();
+                for cell in &self.cells[start..end] {
+                    if cell.continuation {
+                        continue;
+                    }
+                    if cell.text.is_empty() {
+                        output.push(' ');
+                    } else {
+                        output.push_str(&cell.text);
+                    }
+                }
+                output
+            })
+            .collect()
+    }
+
+    pub fn ansi_lines(&self) -> Vec<String> {
+        (0..self.height)
+            .map(|row| {
+                let start = usize::from(row) * usize::from(self.width);
+                let end = start + usize::from(self.width);
+                let mut output = String::new();
+                let mut current_style = CellStyle::default();
+                for cell in &self.cells[start..end] {
+                    if cell.continuation {
+                        continue;
+                    }
+                    write_style_transition(&mut output, current_style, cell.style);
+                    current_style = cell.style;
+                    if cell.text.is_empty() {
+                        output.push(' ');
+                    } else {
+                        output.push_str(&cell.text);
+                    }
+                }
+                if !current_style.is_plain() {
+                    output.push_str("\x1b[0m");
+                }
+                output
+            })
             .collect()
     }
 
     pub fn render(&self) -> String {
         self.lines().join("\n")
+    }
+
+    fn set_cell(&mut self, x: u16, y: u16, grapheme: &str, style: CellStyle, width: u16) {
+        let idx = self.index(x, y);
+        self.cells[idx] = Cell {
+            text: grapheme.to_owned(),
+            style,
+            continuation: false,
+        };
+
+        for offset in 1..width {
+            let idx = self.index(x + offset, y);
+            self.cells[idx] = Cell {
+                text: String::new(),
+                style,
+                continuation: true,
+            };
+        }
+    }
+
+    fn index(&self, x: u16, y: u16) -> usize {
+        usize::from(y) * usize::from(self.width) + usize::from(x)
+    }
+}
+
+fn grapheme_width(grapheme: &str) -> u16 {
+    let width = UnicodeWidthStr::width(grapheme);
+    u16::try_from(width.max(1)).unwrap_or(u16::MAX)
+}
+
+fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
+    if from == to {
+        return;
+    }
+    output.push_str("\x1b[0m");
+    if to.bold {
+        output.push_str("\x1b[1m");
+    }
+    if to.dim {
+        output.push_str("\x1b[2m");
+    }
+    if to.italic {
+        output.push_str("\x1b[3m");
+    }
+    if to.underline {
+        output.push_str("\x1b[4m");
+    }
+    if to.reverse {
+        output.push_str("\x1b[7m");
+    }
+    if let Some(fg) = to.fg {
+        let _ = write!(output, "\x1b[38;2;{};{};{}m", fg.red, fg.green, fg.blue);
+    }
+    if let Some(bg) = to.bg {
+        let _ = write!(output, "\x1b[48;2;{};{};{}m", bg.red, bg.green, bg.blue);
     }
 }
 
@@ -141,4 +383,76 @@ impl BorderStyle {
         horizontal: '#',
         vertical: '#',
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CellStyle, Color, GridCursor, RenderGrid};
+    use embers_core::CursorShape;
+
+    #[test]
+    fn render_preserves_plain_text_rows() {
+        let mut grid = RenderGrid::new(6, 2);
+        grid.put_str(1, 0, "embers");
+        grid.put_str(0, 1, "ok");
+
+        assert_eq!(grid.render(), " ember\nok    ");
+    }
+
+    #[test]
+    fn ansi_lines_include_style_sequences() {
+        let mut grid = RenderGrid::new(4, 1);
+        grid.put_str_styled(
+            0,
+            0,
+            "ab",
+            CellStyle {
+                fg: Some(Color {
+                    red: 1,
+                    green: 2,
+                    blue: 3,
+                }),
+                bold: true,
+                ..CellStyle::default()
+            },
+        );
+
+        let line = &grid.ansi_lines()[0];
+        assert!(line.contains("\x1b[1m"));
+        assert!(line.contains("\x1b[38;2;1;2;3m"));
+        assert!(line.contains("ab"));
+    }
+
+    #[test]
+    fn wide_graphemes_preserve_cell_alignment() {
+        let mut grid = RenderGrid::new(4, 1);
+        grid.put_str(0, 0, "界a");
+
+        assert_eq!(grid.lines()[0], "界a ");
+    }
+
+    #[test]
+    fn cursor_is_clamped_to_the_grid() {
+        let mut grid = RenderGrid::new(4, 2);
+        grid.set_cursor(Some(GridCursor {
+            x: 1,
+            y: 1,
+            shape: CursorShape::Beam,
+        }));
+        assert_eq!(
+            grid.cursor(),
+            Some(GridCursor {
+                x: 1,
+                y: 1,
+                shape: CursorShape::Beam
+            })
+        );
+
+        grid.set_cursor(Some(GridCursor {
+            x: 5,
+            y: 1,
+            shape: CursorShape::Block,
+        }));
+        assert_eq!(grid.cursor(), None);
+    }
 }
