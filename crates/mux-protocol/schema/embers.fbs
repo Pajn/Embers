@@ -160,6 +160,7 @@ table FloatingRequest {
   floating_id:ulong = 0;
   session_id:ulong = 0;
   root_node_id:ulong = 0;
+  buffer_id:ulong = 0;
   title:string;
   x:ushort = 0;
   y:ushort = 0;

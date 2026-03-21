@@ -373,6 +373,17 @@ impl ServerState {
         Ok(floating_id)
     }
 
+    pub fn create_floating_from_buffer(
+        &mut self,
+        session_id: SessionId,
+        buffer_id: BufferId,
+        geometry: FloatGeometry,
+        title: Option<String>,
+    ) -> Result<FloatingId> {
+        let root_node = self.create_buffer_view(session_id, buffer_id)?;
+        self.create_floating_window(session_id, root_node, geometry, title)
+    }
+
     pub fn close_floating(&mut self, floating_id: FloatingId) -> Result<()> {
         let floating = self.remove_floating_window(floating_id)?;
         let session_id = floating.session_id;

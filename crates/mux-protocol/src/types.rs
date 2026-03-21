@@ -190,7 +190,8 @@ pub enum FloatingRequest {
     Create {
         request_id: RequestId,
         session_id: SessionId,
-        root_node_id: NodeId,
+        root_node_id: Option<NodeId>,
+        buffer_id: Option<BufferId>,
         geometry: FloatGeometry,
         title: Option<String>,
     },

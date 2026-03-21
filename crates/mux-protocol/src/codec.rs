@@ -554,10 +554,11 @@ fn encode_floating_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &FloatingRequest,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
-    let (op, floating_id, session_id, root_node_id, title_str, geom) = match req {
+    let (op, floating_id, session_id, root_node_id, buffer_id, title_str, geom) = match req {
         FloatingRequest::Create {
             session_id,
             root_node_id,
+            buffer_id,
             geometry,
             title,
             ..
@@ -565,13 +566,15 @@ fn encode_floating_request<'a>(
             fb::FloatingOp::Create,
             0,
             (*session_id).into(),
-            (*root_node_id).into(),
+            root_node_id.map_or(0, u64::from),
+            buffer_id.map_or(0, u64::from),
             title.as_deref(),
             Some(*geometry),
         ),
         FloatingRequest::Close { floating_id, .. } => (
             fb::FloatingOp::Close,
             (*floating_id).into(),
+            0,
             0,
             0,
             None,
@@ -586,12 +589,14 @@ fn encode_floating_request<'a>(
             (*floating_id).into(),
             0,
             0,
+            0,
             None,
             Some(*geometry),
         ),
         FloatingRequest::Focus { floating_id, .. } => (
             fb::FloatingOp::Focus,
             (*floating_id).into(),
+            0,
             0,
             0,
             None,
@@ -611,6 +616,7 @@ fn encode_floating_request<'a>(
             floating_id,
             session_id,
             root_node_id,
+            buffer_id,
             title,
             x,
             y,
@@ -1489,7 +1495,8 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::FloatingOp::Create => FloatingRequest::Create {
                     request_id,
                     session_id: SessionId(req.session_id()),
-                    root_node_id: NodeId(req.root_node_id()),
+                    root_node_id: (req.root_node_id() != 0).then(|| NodeId(req.root_node_id())),
+                    buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
                     geometry: FloatGeometry {
                         x: req.x(),
                         y: req.y(),
