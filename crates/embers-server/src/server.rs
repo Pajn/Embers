@@ -389,7 +389,9 @@ impl Runtime {
                 request_id,
                 session_id,
                 index,
-            } => match state.select_root_tab(session_id, index) {
+            } => match protocol_tab_index(index)
+                .and_then(|index| state.select_root_tab(session_id, index))
+            {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
@@ -398,7 +400,9 @@ impl Runtime {
                 session_id,
                 index,
                 title,
-            } => match state.rename_root_tab(session_id, index, title) {
+            } => match protocol_tab_index(index)
+                .and_then(|index| state.rename_root_tab(session_id, index, title))
+            {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
@@ -406,7 +410,9 @@ impl Runtime {
                 request_id,
                 session_id,
                 index,
-            } => match state.close_root_tab(session_id, index) {
+            } => match protocol_tab_index(index)
+                .and_then(|index| state.close_root_tab(session_id, index))
+            {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
@@ -762,6 +768,10 @@ impl Runtime {
                     Ok(node) => node.session_id(),
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
+                let index = match protocol_tab_index(index) {
+                    Ok(index) => index,
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
                 if let Err(error) = state.switch_tab(tabs_node_id, index) {
                     return (mux_error_response(Some(request_id), error), Vec::new());
                 }
@@ -1059,6 +1069,7 @@ impl Runtime {
             let mut state = self.state.lock().await;
             if let Err(error) = state.mark_buffer_running(buffer_id, runtime.pid()) {
                 let _ = runtime.kill().await;
+                let _ = runtime.join_threads().await;
                 return Err(error);
             }
         }
@@ -1178,7 +1189,7 @@ impl Runtime {
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
-        self.buffer_runtimes.lock().await.remove(&buffer_id);
+        let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
         let updated = {
             let mut state = self.state.lock().await;
             match state.mark_buffer_exited(buffer_id, exit_code) {
@@ -1189,6 +1200,12 @@ impl Runtime {
                 }
             }
         };
+
+        if let Some(runtime) = runtime
+            && let Err(error) = runtime.join_threads().await
+        {
+            debug!(%buffer_id, %error, "failed to join buffer runtime threads");
+        }
 
         if updated {
             self.broadcast(vec![ServerEvent::RenderInvalidated(
@@ -1209,6 +1226,9 @@ impl Runtime {
         for runtime in runtimes {
             if let Err(error) = runtime.kill().await {
                 debug!(%error, "failed to kill buffer runtime during shutdown");
+            }
+            if let Err(error) = runtime.join_threads().await {
+                debug!(%error, "failed to join buffer runtime threads during shutdown");
             }
         }
     }
@@ -1333,6 +1353,11 @@ fn set_socket_permissions(socket_path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+fn protocol_tab_index(index: u32) -> Result<usize> {
+    usize::try_from(index)
+        .map_err(|_| MuxError::invalid_input(format!("tab index {index} exceeds platform limits")))
 }
 
 fn focus_changed_event(

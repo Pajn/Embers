@@ -252,7 +252,13 @@ impl Projector<'_> {
                 let tabs = node.tabs.as_ref().ok_or_else(|| {
                     MuxError::protocol(format!("tabs node {} is missing payload", node.id))
                 })?;
-                let active_child = tabs.tabs.get(tabs.active).ok_or_else(|| {
+                let active_index = usize::try_from(tabs.active).map_err(|_| {
+                    MuxError::protocol(format!(
+                        "tabs node {} has active index {} that exceeds platform limits",
+                        node.id, tabs.active
+                    ))
+                })?;
+                let active_child = tabs.tabs.get(active_index).ok_or_else(|| {
                     MuxError::protocol(format!(
                         "tabs node {} has invalid active index {}",
                         node.id, tabs.active
@@ -276,11 +282,11 @@ impl Projector<'_> {
                         .map(|(index, tab)| TabItem {
                             title: tab.title.clone(),
                             child_id: tab.child_id,
-                            active: index == tabs.active,
+                            active: u32::try_from(index).ok() == Some(tabs.active),
                             activity: subtree_activity(self.state, tab.child_id),
                         })
                         .collect(),
-                    active: tabs.active,
+                    active: active_index,
                     is_root,
                     floating_id,
                 });

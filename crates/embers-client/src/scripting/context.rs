@@ -249,7 +249,7 @@ pub struct NodeRef {
     pub child_ids: Vec<NodeId>,
     pub geometry: Option<Rect>,
     pub tab_titles: Vec<String>,
-    pub active_tab: Option<usize>,
+    pub active_tab: Option<u32>,
     pub buffer_id: Option<BufferId>,
     pub visible: bool,
 }

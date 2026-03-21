@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -10,6 +11,7 @@ use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
     PtySystem,
 };
+use tracing::error;
 
 #[derive(Clone)]
 pub struct BufferRuntimeHandle {
@@ -22,6 +24,13 @@ struct BufferRuntimeInner {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    threads: Mutex<RuntimeThreads>,
+}
+
+#[derive(Default)]
+struct RuntimeThreads {
+    reader: Option<thread::JoinHandle<()>>,
+    wait: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -67,12 +76,12 @@ impl BufferRuntimeHandle {
             command_builder.env(key, value);
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(command_builder)
             .map_err(|error| MuxError::pty(error.to_string()))?;
         let pid = child.process_id();
-        let killer = child.clone_killer();
+        let mut killer = child.clone_killer();
         let reader = pair
             .master
             .try_clone_reader()
@@ -83,16 +92,27 @@ impl BufferRuntimeHandle {
             .map_err(|error| MuxError::pty(error.to_string()))?;
 
         let on_output = callbacks.on_output.clone();
-        thread::Builder::new()
+        let reader_handle = thread::Builder::new()
             .name(format!("buffer-{buffer_id}-reader"))
             .spawn(move || read_loop(buffer_id, reader, on_output))
-            .map_err(|error| MuxError::internal(error.to_string()))?;
+            .map_err(|error| {
+                let _ = killer.kill();
+                let _ = child.wait();
+                MuxError::internal(error.to_string())
+            })?;
 
         let on_exit = callbacks.on_exit.clone();
-        thread::Builder::new()
+        let wait_handle = match thread::Builder::new()
             .name(format!("buffer-{buffer_id}-wait"))
             .spawn(move || wait_loop(buffer_id, child, on_exit))
-            .map_err(|error| MuxError::internal(error.to_string()))?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = killer.kill();
+                join_thread(buffer_id, "reader", reader_handle);
+                return Err(MuxError::internal(error.to_string()));
+            }
+        };
 
         Ok(Self {
             inner: Arc::new(BufferRuntimeInner {
@@ -101,6 +121,10 @@ impl BufferRuntimeHandle {
                 master: Mutex::new(pair.master),
                 writer: Mutex::new(writer),
                 killer: Mutex::new(killer),
+                threads: Mutex::new(RuntimeThreads {
+                    reader: Some(reader_handle),
+                    wait: Some(wait_handle),
+                }),
             }),
         })
     }
@@ -153,6 +177,43 @@ impl BufferRuntimeHandle {
         .await
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
+
+    pub async fn join_threads(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.join_threads_blocking())
+            .await
+            .map_err(|error| MuxError::internal(error.to_string()))
+    }
+}
+
+impl BufferRuntimeInner {
+    fn join_threads_blocking(&self) {
+        let mut threads = match self.threads.lock() {
+            Ok(threads) => threads,
+            Err(poisoned) => {
+                error!(
+                    %self.buffer_id,
+                    "buffer runtime thread registry lock poisoned during shutdown"
+                );
+                poisoned.into_inner()
+            }
+        };
+        let RuntimeThreads { reader, wait } = std::mem::take(&mut *threads);
+        drop(threads);
+
+        if let Some(handle) = reader {
+            join_thread(self.buffer_id, "reader", handle);
+        }
+        if let Some(handle) = wait {
+            join_thread(self.buffer_id, "wait", handle);
+        }
+    }
+}
+
+impl Drop for BufferRuntimeInner {
+    fn drop(&mut self) {
+        self.join_threads_blocking();
+    }
 }
 
 fn read_loop(
@@ -194,5 +255,26 @@ fn to_portable_size(size: PtySize) -> PortablePtySize {
         cols: size.cols,
         pixel_width: size.pixel_width,
         pixel_height: size.pixel_height,
+    }
+}
+
+fn join_thread(buffer_id: BufferId, role: &str, handle: thread::JoinHandle<()>) {
+    if let Err(payload) = handle.join() {
+        error!(
+            %buffer_id,
+            thread = role,
+            panic = %panic_payload_message(payload),
+            "buffer runtime thread panicked"
+        );
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn Any + Send + 'static>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "non-string panic payload".to_owned(),
+        },
     }
 }

@@ -42,11 +42,12 @@ impl Controller {
                 }))
             }
             KeyEvent::Alt(ch) if ('1'..='9').contains(&ch) => {
-                let index = usize::try_from(ch.to_digit(10)?).ok()?.saturating_sub(1);
+                let index = ch.to_digit(10)?.saturating_sub(1);
+                let index_usize = usize::try_from(index).ok()?;
                 let tabs = presentation
                     .focused_tabs()
                     .unwrap_or(&presentation.root_tabs);
-                if index >= tabs.tabs.len() {
+                if index_usize >= tabs.tabs.len() {
                     return None;
                 }
 

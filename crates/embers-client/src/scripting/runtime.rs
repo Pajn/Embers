@@ -203,7 +203,7 @@ fn register_ref_api(engine: &mut Engine) {
         node.tab_titles.iter().cloned().map(Dynamic::from).collect()
     });
     engine.register_fn("active_tab", |node: &mut NodeRef| -> Dynamic {
-        node.active_tab.map(dynamic_usize).unwrap_or(Dynamic::UNIT)
+        node.active_tab.map(dynamic_u32).unwrap_or(Dynamic::UNIT)
     });
     engine.register_fn("buffer_id", |node: &mut NodeRef| -> Dynamic {
         node.buffer_id
@@ -763,6 +763,10 @@ fn dynamic_u64(value: u64) -> Dynamic {
     i64::try_from(value)
         .map(Dynamic::from)
         .unwrap_or_else(|_| Dynamic::from(value.to_string()))
+}
+
+fn dynamic_u32(value: u32) -> Dynamic {
+    Dynamic::from(i64::from(value))
 }
 
 fn dynamic_usize(value: usize) -> Dynamic {

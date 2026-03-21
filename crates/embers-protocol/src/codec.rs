@@ -147,7 +147,7 @@ fn encode_session_request<'a>(
             None,
             None,
             false,
-            *index as u32,
+            *index,
         ),
         SessionRequest::RenameRootTab {
             session_id,
@@ -162,7 +162,7 @@ fn encode_session_request<'a>(
             None,
             Some(title.as_str()),
             false,
-            *index as u32,
+            *index,
         ),
         SessionRequest::CloseRootTab {
             session_id, index, ..
@@ -174,7 +174,7 @@ fn encode_session_request<'a>(
             None,
             None,
             false,
-            *index as u32,
+            *index,
         ),
     };
 
@@ -444,7 +444,7 @@ fn encode_node_request<'a>(
             0,
             0,
             None,
-            *index as u32,
+            *index,
             fb::SplitDirectionWire::Horizontal,
             None,
         ),
@@ -1234,7 +1234,7 @@ fn encode_node_record<'a>(
         fb::TabsRecord::create(
             builder,
             &fb::TabsRecordArgs {
-                active: tabs.active as u32,
+                active: tabs.active,
                 tabs: Some(tabs_vector),
             },
         )
@@ -1358,18 +1358,18 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::SessionOp::SelectRootTab => SessionRequest::SelectRootTab {
                     request_id,
                     session_id: SessionId(req.session_id()),
-                    index: req.index() as usize,
+                    index: req.index(),
                 },
                 fb::SessionOp::RenameRootTab => SessionRequest::RenameRootTab {
                     request_id,
                     session_id: SessionId(req.session_id()),
-                    index: req.index() as usize,
+                    index: req.index(),
                     title: required(req.title(), "session_request.title")?.to_owned(),
                 },
                 fb::SessionOp::CloseRootTab => SessionRequest::CloseRootTab {
                     request_id,
                     session_id: SessionId(req.session_id()),
-                    index: req.index() as usize,
+                    index: req.index(),
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };
@@ -1461,7 +1461,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::NodeOp::SelectTab => NodeRequest::SelectTab {
                     request_id,
                     tabs_node_id: NodeId(req.tabs_node_id()),
-                    index: req.index() as usize,
+                    index: req.index(),
                 },
                 fb::NodeOp::Focus => NodeRequest::Focus {
                     request_id,
@@ -1921,7 +1921,7 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
                 })
                 .collect::<Result<Vec<_>, ProtocolError>>()?;
             Ok(TabsRecord {
-                active: usize::try_from(tabs.active()).expect("u32 tabs.active fits into usize"),
+                active: tabs.active(),
                 tabs: tabs_vec,
             })
         })

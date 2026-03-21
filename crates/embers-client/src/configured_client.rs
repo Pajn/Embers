@@ -290,6 +290,9 @@ where
                         tabs.tabs.len()
                     )));
                 }
+                let index = u32::try_from(index).map_err(|_| {
+                    MuxError::invalid_input(format!("tab index {index} exceeds protocol limits"))
+                })?;
                 if tabs.is_root {
                     self.client
                         .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
