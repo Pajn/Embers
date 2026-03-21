@@ -454,6 +454,17 @@ impl ServerState {
         Ok(index)
     }
 
+    pub fn add_tab_from_buffer(
+        &mut self,
+        tabs_id: NodeId,
+        title: impl Into<String>,
+        buffer_id: BufferId,
+    ) -> Result<usize> {
+        let session_id = self.node_session_id(tabs_id)?;
+        let child = self.create_buffer_view(session_id, buffer_id)?;
+        self.add_tab_sibling(tabs_id, title, child)
+    }
+
     pub fn rename_tab(
         &mut self,
         tabs_id: NodeId,
@@ -1350,8 +1361,20 @@ impl ServerState {
     fn replace_node_in_owner(&mut self, old_node: NodeId, new_node: NodeId) -> Result<()> {
         let session_id = self.node_session_id(old_node)?;
         let owner = self.node_parent(old_node)?;
+        let replacement_focus = self.resolve_focus_candidate(new_node)?;
         if let Some(parent_id) = owner {
+            let should_update_focus = match self.node(parent_id)?.last_focused_descendant() {
+                Some(leaf_id) if self.nodes.contains_key(&leaf_id) => {
+                    self.subtree_contains(old_node, leaf_id)?
+                }
+                Some(_) => true,
+                None => false,
+            };
             self.replace_child(parent_id, old_node, new_node)?;
+            if should_update_focus {
+                self.node_mut(parent_id)?
+                    .set_last_focused_descendant(replacement_focus);
+            }
             return Ok(());
         }
 
