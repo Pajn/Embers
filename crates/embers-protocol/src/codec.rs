@@ -1,8 +1,8 @@
-use flatbuffers::FlatBufferBuilder;
 use embers_core::{
     ActivityState, BufferId, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
     SessionId, SplitDirection, WireError,
 };
+use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
 
 use crate::framing::FrameType;

@@ -122,7 +122,11 @@ async fn get_buffer(
     }
 }
 
-async fn send_input(connection: &mut TestConnection, buffer_id: embers_core::BufferId, input: &str) {
+async fn send_input(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    input: &str,
+) {
     let response = connection
         .request(&ClientMessage::Input(InputRequest::Send {
             request_id: new_request_id(),

@@ -11,13 +11,29 @@ async fn window_commands_round_trip_through_cli() {
     run_cli(&server, ["new-session", "alpha"]);
     let first = run_cli(
         &server,
-        ["new-window", "-t", "alpha", "--title", "editor", "--", "/bin/sh"],
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "editor",
+            "--",
+            "/bin/sh",
+        ],
     );
     assert_eq!(stdout(&first).trim(), "0\teditor");
 
     let second = run_cli(
         &server,
-        ["new-window", "-t", "alpha", "--title", "logs", "--", "/bin/sh"],
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "logs",
+            "--",
+            "/bin/sh",
+        ],
     );
     assert_eq!(stdout(&second).trim(), "1\tlogs");
 

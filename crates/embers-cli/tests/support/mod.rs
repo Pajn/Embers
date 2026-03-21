@@ -45,12 +45,14 @@ pub async fn session_snapshot_by_name(
         .await
         .expect("list sessions succeeds");
     let session_id = match response {
-        ServerResponse::Sessions(response) => response
-            .sessions
-            .into_iter()
-            .find(|session| session.name == name)
-            .expect("session is present")
-            .id,
+        ServerResponse::Sessions(response) => {
+            response
+                .sessions
+                .into_iter()
+                .find(|session| session.name == name)
+                .expect("session is present")
+                .id
+        }
         other => panic!("expected sessions response, got {other:?}"),
     };
 

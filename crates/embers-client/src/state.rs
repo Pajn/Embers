@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use embers_core::{BufferId, NodeId, SessionId};
-use embers_protocol::{BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, SnapshotResponse};
+use embers_protocol::{
+    BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, SnapshotResponse,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientState {
