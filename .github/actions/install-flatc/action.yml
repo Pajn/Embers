@@ -1,0 +1,47 @@
+name: Install flatc
+description: Download and install a flatc binary for CI
+
+inputs:
+  version:
+    description: FlatBuffers release version to install
+    required: true
+  sha256:
+    description: SHA-256 of the expected flatc archive
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download flatc
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        mkdir -p flatbuffers-bin
+        asset=""
+        candidates=(
+          "Linux.flatc.binary.g++-13.zip"
+          "Linux.flatc.binary.clang++-18.zip"
+        )
+
+        for candidate in "${candidates[@]}"; do
+          if curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 120 -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${{ inputs.version }}/${candidate}"; then
+            asset="${candidate}"
+            break
+          fi
+        done
+
+        if [[ -z "${asset}" ]]; then
+          echo "::error::failed to download flatc v${{ inputs.version }}; attempted assets: ${candidates[*]}"
+          exit 1
+        fi
+
+        actual_sha256="$(sha256sum flatbuffers-bin/flatc.zip | awk '{print $1}')"
+        if [[ "${actual_sha256}" != "${{ inputs.sha256 }}" ]]; then
+          echo "::error::flatc archive checksum mismatch for ${asset}: expected ${{ inputs.sha256 }}, got ${actual_sha256}"
+          exit 1
+        fi
+
+        unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
+        chmod +x flatbuffers-bin/flatc
+        sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
