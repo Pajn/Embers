@@ -6,6 +6,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+alacritty_terminal = "0.25.1"
 mux-core = { path = "../mux-core" }
 mux-protocol = { path = "../mux-protocol" }
 portable-pty.workspace = true
