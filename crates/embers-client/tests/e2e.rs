@@ -12,7 +12,7 @@ use embers_protocol::{
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
 
 fn run_cli(server: &TestServer, args: &[&str]) -> Output {
-    let output = cargo_bin("embers-cli")
+    let output = cargo_bin("embers")
         .arg("--socket")
         .arg(server.socket_path())
         .args(args)
