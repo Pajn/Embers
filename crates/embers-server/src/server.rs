@@ -1,4 +1,8 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,7 +17,7 @@ use embers_protocol::{
     ProtocolError, RawFrame, RenderInvalidatedEvent, ServerEnvelope, ServerEvent, ServerResponse,
     SessionClosedEvent, SessionCreatedEvent, SessionRequest, SessionSnapshotResponse,
     SessionsResponse, SnapshotResponse, SubscriptionAckResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame,
+    encode_server_envelope, read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -43,6 +47,7 @@ impl Server {
         }
 
         let listener = UnixListener::bind(&self.config.socket_path)?;
+        set_socket_permissions(&self.config.socket_path)?;
         let socket_path = self.config.socket_path.clone();
         let runtime = Arc::new(Runtime::new(self.config.buffer_env.clone()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -63,7 +68,20 @@ impl Server {
                         let (reader, writer) = stream.into_split();
                         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
-                        tokio::spawn(write_loop(writer, outbound_rx));
+                        let write_runtime = runtime.clone();
+                        let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        tokio::spawn(async move {
+                            match write_handle.await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    error!(%error, connection_id, "write_loop failed");
+                                }
+                                Err(error) => {
+                                    error!(%error, connection_id, "write_loop panicked");
+                                }
+                            }
+                            write_runtime.cleanup_connection(connection_id).await;
+                        });
 
                         let runtime = runtime.clone();
                         tokio::spawn(async move {
@@ -138,7 +156,7 @@ struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
-    buffer_env: BTreeMap<String, String>,
+    buffer_env: BTreeMap<String, OsString>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
@@ -199,7 +217,7 @@ impl BufferSurface {
 }
 
 impl Runtime {
-    fn new(buffer_env: BTreeMap<String, String>) -> Self {
+    fn new(buffer_env: BTreeMap<String, OsString>) -> Self {
         Self {
             state: Mutex::new(ServerState::new()),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
@@ -1303,11 +1321,17 @@ async fn write_loop(
             ServerEnvelope::Event(_) => (FrameType::Event, RequestId(0)),
         };
         let frame = RawFrame::new(frame_type, request_id, payload);
-        write_frame(&mut writer, &frame)
+        write_frame_no_flush(&mut writer, &frame)
             .await
             .map_err(protocol_error_to_mux)?;
     }
 
+    Ok(())
+}
+
+fn set_socket_permissions(socket_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 

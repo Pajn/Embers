@@ -276,9 +276,22 @@ impl ServerState {
             ));
         }
 
+        let mut seen_children = BTreeSet::new();
         let node_id = self.node_ids.next();
         for child in &children {
             self.ensure_node_belongs_to(*child, session_id)?;
+            if !seen_children.insert(*child) {
+                return Err(MuxError::invalid_input(format!(
+                    "split node {node_id} reuses child {child}"
+                )));
+            }
+            if self.node_parent(*child)?.is_some() {
+                return Err(MuxError::invalid_input(format!(
+                    "split child {child} already has a parent"
+                )));
+            }
+        }
+        for child in &children {
             self.set_parent(*child, Some(node_id))?;
         }
 
@@ -305,9 +318,24 @@ impl ServerState {
     ) -> Result<NodeId> {
         self.ensure_session_exists(session_id)?;
 
+        let mut seen_children = BTreeSet::new();
         let node_id = self.node_ids.next();
         for tab in &tabs {
             self.ensure_node_belongs_to(tab.child, session_id)?;
+            if !seen_children.insert(tab.child) {
+                return Err(MuxError::invalid_input(format!(
+                    "tabs node {node_id} reuses child {}",
+                    tab.child
+                )));
+            }
+            if self.node_parent(tab.child)?.is_some() {
+                return Err(MuxError::invalid_input(format!(
+                    "tabs child {} already has a parent",
+                    tab.child
+                )));
+            }
+        }
+        for tab in &tabs {
             self.set_parent(tab.child, Some(node_id))?;
         }
 
@@ -351,6 +379,11 @@ impl ServerState {
         if self.is_session_root(root_node) {
             return Err(MuxError::invalid_input(
                 "session root cannot also become a floating root",
+            ));
+        }
+        if self.floating_id_by_root(root_node).is_some() {
+            return Err(MuxError::invalid_input(
+                "node is already a floating root".to_owned(),
             ));
         }
 
@@ -429,6 +462,14 @@ impl ServerState {
     ) -> Result<usize> {
         let session_id = self.node_session_id(tabs_id)?;
         self.ensure_node_belongs_to(child, session_id)?;
+        if child == tabs_id {
+            return Err(MuxError::invalid_input(
+                "tabs container cannot contain itself".to_owned(),
+            ));
+        }
+        if !matches!(self.node(tabs_id)?, Node::Tabs(_)) {
+            return Err(MuxError::invalid_input("node is not a tabs container"));
+        }
         if self.node_parent(child)?.is_some() {
             return Err(MuxError::invalid_input(
                 "new tab child must not already have a parent",
@@ -812,8 +853,10 @@ impl ServerState {
     }
 
     pub fn detach_buffer(&mut self, buffer_id: BufferId) -> Result<()> {
-        self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Detached;
-        Ok(())
+        match self.buffer(buffer_id)?.attachment {
+            BufferAttachment::Attached(node_id) => self.close_node(node_id),
+            BufferAttachment::Detached => Ok(()),
+        }
     }
 
     pub fn focus_leaf(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
@@ -1519,10 +1562,15 @@ impl ServerState {
         }
 
         if let Node::BufferView(leaf) = self.node(node_id)? {
-            self.detach_buffer(leaf.buffer_id)?;
+            self.detach_buffer_raw(leaf.buffer_id)?;
         }
 
         self.nodes.remove(&node_id);
+        Ok(())
+    }
+
+    fn detach_buffer_raw(&mut self, buffer_id: BufferId) -> Result<()> {
+        self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Detached;
         Ok(())
     }
 
