@@ -1,15 +1,21 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use mux_core::{MuxError, Result, new_request_id};
-use mux_protocol::{ClientMessage, PingRequest, ProtocolClient, ServerResponse};
+use mux_core::{
+    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Result, SessionId, SplitDirection,
+    new_request_id,
+};
+use mux_protocol::{
+    BufferRequest, BufferResponse, ClientMessage, FloatingRecord, FloatingRequest,
+    FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SnapshotResponse,
+};
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "mux-cli",
-    about = "Phase-0 control surface for the embers workspace"
-)]
+#[command(name = "mux-cli", about = "tmux-inspired control surface for embers")]
 pub struct Cli {
+    #[arg(long, global = true)]
+    pub socket: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -17,43 +23,947 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Ping {
-        #[arg(long)]
-        socket: PathBuf,
         #[arg(default_value = "phase0")]
         payload: String,
+    },
+    #[command(name = "new-session")]
+    NewSession { name: String },
+    #[command(name = "list-sessions")]
+    ListSessions,
+    #[command(name = "has-session")]
+    HasSession {
+        #[arg(short = 't', long = "target")]
+        target: String,
+    },
+    #[command(name = "kill-session")]
+    KillSession {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    #[command(name = "new-window")]
+    NewWindow {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    #[command(name = "list-windows")]
+    ListWindows {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "select-window")]
+    SelectWindow {
+        #[arg(short = 't', long = "target")]
+        target: String,
+    },
+    #[command(name = "rename-window")]
+    RenameWindow {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        title: String,
+    },
+    #[command(name = "kill-window")]
+    KillWindow {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "split-window")]
+    SplitWindow {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long, conflicts_with = "vertical")]
+        horizontal: bool,
+        #[arg(long)]
+        vertical: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    #[command(name = "list-panes")]
+    ListPanes {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "select-pane")]
+    SelectPane {
+        #[arg(short = 't', long = "target")]
+        target: String,
+    },
+    #[command(name = "resize-pane")]
+    ResizePane {
+        #[arg(short = 't', long = "target")]
+        target: String,
+        #[arg(long, value_delimiter = ',')]
+        sizes: Vec<u16>,
+    },
+    #[command(name = "send-keys")]
+    SendKeys {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long)]
+        enter: bool,
+        keys: Vec<String>,
+    },
+    #[command(name = "capture-pane")]
+    CapturePane {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "kill-pane")]
+    KillPane {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    #[command(name = "display-popup")]
+    DisplayPopup {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value_t = 14)]
+        x: u16,
+        #[arg(long, default_value_t = 4)]
+        y: u16,
+        #[arg(long, default_value_t = 60)]
+        width: u16,
+        #[arg(long, default_value_t = 12)]
+        height: u16,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    #[command(name = "kill-popup")]
+    KillPopup {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
     },
 }
 
 pub async fn execute(cli: Cli) -> Result<String> {
+    let socket = cli
+        .socket
+        .as_ref()
+        .ok_or_else(|| MuxError::invalid_input("--socket is required"))?;
+    let mut connection = CliConnection::connect(socket).await?;
+
     match cli.command {
-        Command::Ping { socket, payload } => ping(socket, payload).await,
+        Command::Ping { payload } => {
+            let response = connection
+                .request(ClientMessage::Ping(PingRequest {
+                    request_id: new_request_id(),
+                    payload,
+                }))
+                .await?;
+            match response {
+                ServerResponse::Pong(response) => Ok(format!("pong {}", response.payload)),
+                other => Err(MuxError::protocol(format!(
+                    "unexpected response to ping request: {other:?}"
+                ))),
+            }
+        }
+        Command::NewSession { name } => {
+            let response = connection
+                .request(ClientMessage::Session(SessionRequest::Create {
+                    request_id: new_request_id(),
+                    name,
+                }))
+                .await?;
+            let snapshot = expect_session_snapshot(response, "new-session")?;
+            Ok(format!(
+                "{}\t{}",
+                snapshot.session.id, snapshot.session.name
+            ))
+        }
+        Command::ListSessions => {
+            let sessions = connection.list_sessions().await?;
+            Ok(format_sessions(&sessions))
+        }
+        Command::HasSession { target } => {
+            connection.resolve_session_record(Some(&target)).await?;
+            Ok(String::new())
+        }
+        Command::KillSession { target, force } => {
+            let session = connection.resolve_session_record(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Session(SessionRequest::Close {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                    force,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::NewWindow {
+            target,
+            title,
+            command,
+        } => {
+            let session = connection.resolve_session_record(target.as_deref()).await?;
+            let command = buffer_command(command);
+            let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
+            let buffer = connection
+                .create_buffer(Some(window_title.clone()), command, None)
+                .await?;
+            let response = connection
+                .request(ClientMessage::Session(SessionRequest::AddRootTab {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                    title: window_title.clone(),
+                    buffer_id: Some(buffer.buffer.id),
+                    child_node_id: None,
+                }))
+                .await?;
+            let snapshot = expect_session_snapshot(response, "new-window")?;
+            let (index, title) = active_root_window(&snapshot)?;
+            Ok(format!("{index}\t{title}"))
+        }
+        Command::ListWindows { target } => {
+            let snapshot = connection
+                .resolve_session_snapshot(target.as_deref())
+                .await?;
+            Ok(format_windows(&snapshot)?)
+        }
+        Command::SelectWindow { target } => {
+            let window = connection.resolve_window(Some(&target)).await?;
+            connection
+                .request(ClientMessage::Session(SessionRequest::SelectRootTab {
+                    request_id: new_request_id(),
+                    session_id: window.snapshot.session.id,
+                    index: window.index,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::RenameWindow { target, title } => {
+            let window = connection.resolve_window(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Session(SessionRequest::RenameRootTab {
+                    request_id: new_request_id(),
+                    session_id: window.snapshot.session.id,
+                    index: window.index,
+                    title,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::KillWindow { target } => {
+            let window = connection.resolve_window(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Session(SessionRequest::CloseRootTab {
+                    request_id: new_request_id(),
+                    session_id: window.snapshot.session.id,
+                    index: window.index,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::SplitWindow {
+            target,
+            horizontal,
+            vertical: _,
+            command,
+        } => {
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let command = buffer_command(command);
+            let buffer = connection
+                .create_buffer(Some(default_title(&command, "pane")), command, None)
+                .await?;
+            let direction = if horizontal {
+                SplitDirection::Horizontal
+            } else {
+                SplitDirection::Vertical
+            };
+            let response = connection
+                .request(ClientMessage::Node(NodeRequest::Split {
+                    request_id: new_request_id(),
+                    leaf_node_id: pane.leaf_id,
+                    direction,
+                    new_buffer_id: buffer.buffer.id,
+                }))
+                .await?;
+            let snapshot = expect_session_snapshot(response, "split-window")?;
+            let focused_leaf = snapshot.session.focused_leaf_id.ok_or_else(|| {
+                MuxError::protocol("split-window response did not include focused leaf")
+            })?;
+            Ok(focused_leaf.to_string())
+        }
+        Command::ListPanes { target } => {
+            let window = connection.resolve_window(target.as_deref()).await?;
+            let leaf_ids = visible_leaf_ids(&window.snapshot, window.child_id)?;
+            Ok(format_panes(&window.snapshot, &leaf_ids)?)
+        }
+        Command::SelectPane { target } => {
+            let pane = connection.resolve_pane(Some(&target)).await?;
+            connection
+                .request(ClientMessage::Node(NodeRequest::Focus {
+                    request_id: new_request_id(),
+                    session_id: pane.snapshot.session.id,
+                    node_id: pane.leaf_id,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::ResizePane { target, sizes } => {
+            if sizes.is_empty() {
+                return Err(MuxError::invalid_input(
+                    "resize-pane requires at least one size value",
+                ));
+            }
+            let pane = connection.resolve_pane(Some(&target)).await?;
+            let leaf = node_record(&pane.snapshot, pane.leaf_id)?;
+            let parent_id = leaf
+                .parent_id
+                .ok_or_else(|| MuxError::invalid_input("pane is not inside a resizable split"))?;
+            let parent = node_record(&pane.snapshot, parent_id)?;
+            if parent.kind != mux_protocol::NodeRecordKind::Split {
+                return Err(MuxError::invalid_input(
+                    "pane parent is not a split and cannot be resized",
+                ));
+            }
+
+            connection
+                .request(ClientMessage::Node(NodeRequest::Resize {
+                    request_id: new_request_id(),
+                    node_id: parent_id,
+                    sizes,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::SendKeys {
+            target,
+            enter,
+            keys,
+        } => {
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            if keys.is_empty() && !enter {
+                return Err(MuxError::invalid_input(
+                    "send-keys requires at least one key or --enter",
+                ));
+            }
+            let mut bytes = keys.join(" ").into_bytes();
+            if enter {
+                bytes.push(b'\r');
+            }
+            connection
+                .request(ClientMessage::Input(mux_protocol::InputRequest::Send {
+                    request_id: new_request_id(),
+                    buffer_id: pane.buffer_id,
+                    bytes,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::CapturePane { target } => {
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let response = connection
+                .request(ClientMessage::Buffer(BufferRequest::Capture {
+                    request_id: new_request_id(),
+                    buffer_id: pane.buffer_id,
+                }))
+                .await?;
+            let snapshot = expect_capture(response, "capture-pane")?;
+            Ok(snapshot.lines.join("\n"))
+        }
+        Command::KillPane { target } => {
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Node(NodeRequest::Close {
+                    request_id: new_request_id(),
+                    node_id: pane.leaf_id,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::DisplayPopup {
+            target,
+            title,
+            x,
+            y,
+            width,
+            height,
+            command,
+        } => {
+            let session = connection.resolve_session_record(target.as_deref()).await?;
+            let command = buffer_command(command);
+            let popup_title = title.unwrap_or_else(|| default_title(&command, "popup"));
+            let buffer = connection
+                .create_buffer(Some(popup_title.clone()), command, None)
+                .await?;
+            let response = connection
+                .request(ClientMessage::Floating(FloatingRequest::Create {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                    root_node_id: None,
+                    buffer_id: Some(buffer.buffer.id),
+                    geometry: FloatGeometry::new(x, y, width, height),
+                    title: Some(popup_title),
+                }))
+                .await?;
+            let popup = expect_floating(response, "display-popup")?;
+            Ok(popup.id.to_string())
+        }
+        Command::KillPopup { target } => {
+            let popup = connection.resolve_popup(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Floating(FloatingRequest::Close {
+                    request_id: new_request_id(),
+                    floating_id: popup.id,
+                }))
+                .await?;
+            Ok(String::new())
+        }
     }
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
     let output = execute(cli).await?;
-    println!("{output}");
+    if !output.is_empty() {
+        println!("{output}");
+    }
     Ok(())
 }
 
-async fn ping(socket: PathBuf, payload: String) -> Result<String> {
-    let mut client = ProtocolClient::connect(&socket)
-        .await
-        .map_err(|error| MuxError::transport(error.to_string()))?;
-    let request = ClientMessage::Ping(PingRequest {
-        request_id: new_request_id(),
-        payload: payload.clone(),
-    });
+#[derive(Debug)]
+struct CliConnection {
+    client: ProtocolClient,
+}
 
-    match client
-        .request(&request)
-        .await
-        .map_err(|error| MuxError::transport(error.to_string()))?
-    {
-        ServerResponse::Pong(response) => Ok(format!("pong {}", response.payload)),
-        ServerResponse::Error(response) => Err(response.error.into()),
+impl CliConnection {
+    async fn connect(path: impl AsRef<Path>) -> Result<Self> {
+        let client = ProtocolClient::connect(path)
+            .await
+            .map_err(|error| MuxError::transport(error.to_string()))?;
+        Ok(Self { client })
+    }
+
+    async fn request(&mut self, message: ClientMessage) -> Result<ServerResponse> {
+        match self
+            .client
+            .request(&message)
+            .await
+            .map_err(|error| MuxError::transport(error.to_string()))?
+        {
+            ServerResponse::Error(response) => Err(response.error.into()),
+            response => Ok(response),
+        }
+    }
+
+    async fn list_sessions(&mut self) -> Result<Vec<SessionRecord>> {
+        match self
+            .request(ClientMessage::Session(SessionRequest::List {
+                request_id: new_request_id(),
+            }))
+            .await?
+        {
+            ServerResponse::Sessions(response) => Ok(response.sessions),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to list-sessions: {other:?}"
+            ))),
+        }
+    }
+
+    async fn session_snapshot(&mut self, session_id: SessionId) -> Result<SessionSnapshot> {
+        match self
+            .request(ClientMessage::Session(SessionRequest::Get {
+                request_id: new_request_id(),
+                session_id,
+            }))
+            .await?
+        {
+            ServerResponse::SessionSnapshot(response) => Ok(response.snapshot),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to session get: {other:?}"
+            ))),
+        }
+    }
+
+    async fn create_buffer(
+        &mut self,
+        title: Option<String>,
+        command: Vec<String>,
+        cwd: Option<String>,
+    ) -> Result<BufferResponse> {
+        match self
+            .request(ClientMessage::Buffer(BufferRequest::Create {
+                request_id: new_request_id(),
+                title,
+                command,
+                cwd,
+            }))
+            .await?
+        {
+            ServerResponse::Buffer(response) => Ok(response),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to buffer create: {other:?}"
+            ))),
+        }
+    }
+
+    async fn resolve_session_record(&mut self, target: Option<&str>) -> Result<SessionRecord> {
+        let sessions = self.list_sessions().await?;
+        match target {
+            Some(target) => sessions
+                .into_iter()
+                .find(|session| session.name == target)
+                .ok_or_else(|| MuxError::not_found(format!("session '{target}' was not found"))),
+            None => match sessions.as_slice() {
+                [session] => Ok(session.clone()),
+                [] => Err(MuxError::not_found("no sessions exist")),
+                _ => Err(MuxError::invalid_input(
+                    "session target is required when multiple sessions exist",
+                )),
+            },
+        }
+    }
+
+    async fn resolve_session_snapshot(&mut self, target: Option<&str>) -> Result<SessionSnapshot> {
+        let session = self.resolve_session_record(target).await?;
+        self.session_snapshot(session.id).await
+    }
+
+    async fn resolve_window(&mut self, target: Option<&str>) -> Result<ResolvedWindow> {
+        let (session_target, selector) = split_scoped_target(target);
+        let snapshot = self
+            .resolve_session_snapshot(session_target.as_deref())
+            .await?;
+        let (index, child_id) = {
+            let (_, root_tabs) = root_tabs(&snapshot)?;
+            let index = resolve_window_index(root_tabs, selector.as_deref())?;
+            let tab = root_tabs.tabs.get(index).ok_or_else(|| {
+                MuxError::not_found(format!(
+                    "window index {index} is not present in session {}",
+                    snapshot.session.id
+                ))
+            })?;
+            (index, tab.child_id)
+        };
+        Ok(ResolvedWindow {
+            snapshot,
+            index,
+            child_id,
+        })
+    }
+
+    async fn resolve_pane(&mut self, target: Option<&str>) -> Result<ResolvedPane> {
+        match target {
+            Some(target) => {
+                let (session_target, selector) = split_scoped_required(target, "pane target")?;
+                let pane_id = parse_node_id(&selector)?;
+                let snapshot = if let Some(session_target) = session_target {
+                    self.resolve_session_snapshot(Some(&session_target)).await?
+                } else {
+                    self.find_session_containing_pane(pane_id).await?
+                };
+                resolved_pane(snapshot, pane_id)
+            }
+            None => {
+                let snapshot = self.resolve_session_snapshot(None).await?;
+                let pane_id = snapshot
+                    .session
+                    .focused_leaf_id
+                    .ok_or_else(|| MuxError::not_found("session has no focused pane"))?;
+                resolved_pane(snapshot, pane_id)
+            }
+        }
+    }
+
+    async fn resolve_popup(&mut self, target: Option<&str>) -> Result<FloatingRecord> {
+        match target {
+            Some(target) => {
+                let (session_target, selector) = split_scoped_required(target, "popup target")?;
+                let popup_id = parse_floating_id(&selector)?;
+                if let Some(session_target) = session_target {
+                    let snapshot = self.resolve_session_snapshot(Some(&session_target)).await?;
+                    floating_record(&snapshot, popup_id).cloned()
+                } else {
+                    let sessions = self.list_sessions().await?;
+                    for session in sessions {
+                        let snapshot = self.session_snapshot(session.id).await?;
+                        if let Ok(popup) = floating_record(&snapshot, popup_id) {
+                            return Ok(popup.clone());
+                        }
+                    }
+                    Err(MuxError::not_found(format!(
+                        "popup {popup_id} was not found"
+                    )))
+                }
+            }
+            None => {
+                let snapshot = self.resolve_session_snapshot(None).await?;
+                let popup_id = snapshot
+                    .session
+                    .focused_floating_id
+                    .ok_or_else(|| MuxError::not_found("session has no focused popup"))?;
+                floating_record(&snapshot, popup_id).cloned()
+            }
+        }
+    }
+
+    async fn find_session_containing_pane(&mut self, pane_id: NodeId) -> Result<SessionSnapshot> {
+        let sessions = self.list_sessions().await?;
+        for session in sessions {
+            let snapshot = self.session_snapshot(session.id).await?;
+            if node_record(&snapshot, pane_id).is_ok() {
+                return Ok(snapshot);
+            }
+        }
+
+        Err(MuxError::not_found(format!("pane {pane_id} was not found")))
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedWindow {
+    snapshot: SessionSnapshot,
+    index: usize,
+    child_id: NodeId,
+}
+
+#[derive(Debug)]
+struct ResolvedPane {
+    snapshot: SessionSnapshot,
+    leaf_id: NodeId,
+    buffer_id: BufferId,
+}
+
+fn resolved_pane(snapshot: SessionSnapshot, pane_id: NodeId) -> Result<ResolvedPane> {
+    let leaf = node_record(&snapshot, pane_id)?;
+    let buffer_id = leaf
+        .buffer_view
+        .as_ref()
+        .map(|view| view.buffer_id)
+        .ok_or_else(|| MuxError::invalid_input(format!("node {pane_id} is not a pane leaf")))?;
+    Ok(ResolvedPane {
+        snapshot,
+        leaf_id: pane_id,
+        buffer_id,
+    })
+}
+
+fn expect_session_snapshot(response: ServerResponse, operation: &str) -> Result<SessionSnapshot> {
+    match response {
+        ServerResponse::SessionSnapshot(response) => Ok(response.snapshot),
         other => Err(MuxError::protocol(format!(
-            "unexpected response to ping request: {other:?}"
+            "unexpected response to {operation}: {other:?}"
         ))),
+    }
+}
+
+fn expect_floating(response: ServerResponse, operation: &str) -> Result<FloatingRecord> {
+    match response {
+        ServerResponse::Floating(FloatingResponse { floating, .. }) => Ok(floating),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
+fn expect_capture(response: ServerResponse, operation: &str) -> Result<SnapshotResponse> {
+    match response {
+        ServerResponse::Snapshot(snapshot) => Ok(snapshot),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
+fn format_sessions(sessions: &[SessionRecord]) -> String {
+    sessions
+        .iter()
+        .map(|session| format!("{}\t{}", session.id, session.name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
+    let (_, tabs) = root_tabs(snapshot)?;
+    Ok(tabs
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            format!(
+                "{index}\t{}\t{}",
+                usize::from(index == tabs.active),
+                tab.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<String> {
+    pane_ids
+        .iter()
+        .map(|pane_id| {
+            let leaf = node_record(snapshot, *pane_id)?;
+            let buffer_id = leaf
+                .buffer_view
+                .as_ref()
+                .map(|view| view.buffer_id)
+                .ok_or_else(|| MuxError::invalid_input(format!("node {pane_id} is not a pane")))?;
+            let buffer = buffer_record(snapshot, buffer_id)?;
+            Ok(format!(
+                "{}\t{}\t{}\t{}",
+                pane_id,
+                buffer.id,
+                usize::from(snapshot.session.focused_leaf_id == Some(*pane_id)),
+                buffer.title
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|lines| lines.join("\n"))
+}
+
+fn active_root_window(snapshot: &SessionSnapshot) -> Result<(usize, String)> {
+    let (_, tabs) = root_tabs(snapshot)?;
+    let tab = tabs
+        .tabs
+        .get(tabs.active)
+        .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
+    Ok((tabs.active, tab.title.clone()))
+}
+
+fn root_tabs(
+    snapshot: &SessionSnapshot,
+) -> Result<(&mux_protocol::NodeRecord, &mux_protocol::TabsRecord)> {
+    let node = node_record(snapshot, snapshot.session.root_node_id)?;
+    let tabs = node
+        .tabs
+        .as_ref()
+        .ok_or_else(|| MuxError::protocol("session root node is not a tabs node"))?;
+    Ok((node, tabs))
+}
+
+fn node_record(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<&mux_protocol::NodeRecord> {
+    snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| MuxError::not_found(format!("node {node_id} is not present in snapshot")))
+}
+
+fn buffer_record(
+    snapshot: &SessionSnapshot,
+    buffer_id: BufferId,
+) -> Result<&mux_protocol::BufferRecord> {
+    snapshot
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id == buffer_id)
+        .ok_or_else(|| {
+            MuxError::not_found(format!("buffer {buffer_id} is not present in snapshot"))
+        })
+}
+
+fn floating_record(snapshot: &SessionSnapshot, floating_id: FloatingId) -> Result<&FloatingRecord> {
+    snapshot
+        .floating
+        .iter()
+        .find(|floating| floating.id == floating_id)
+        .ok_or_else(|| {
+            MuxError::not_found(format!("popup {floating_id} is not present in snapshot"))
+        })
+}
+
+fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<NodeId>> {
+    let node = node_record(snapshot, node_id)?;
+    match node.kind {
+        mux_protocol::NodeRecordKind::BufferView => Ok(vec![node.id]),
+        mux_protocol::NodeRecordKind::Split => {
+            let split = node
+                .split
+                .as_ref()
+                .ok_or_else(|| MuxError::protocol(format!("split node {node_id} is malformed")))?;
+            let mut leaves = Vec::new();
+            for child_id in &split.child_ids {
+                leaves.extend(visible_leaf_ids(snapshot, *child_id)?);
+            }
+            Ok(leaves)
+        }
+        mux_protocol::NodeRecordKind::Tabs => {
+            let tabs = node
+                .tabs
+                .as_ref()
+                .ok_or_else(|| MuxError::protocol(format!("tabs node {node_id} is malformed")))?;
+            let active_child = tabs.tabs.get(tabs.active).ok_or_else(|| {
+                MuxError::protocol(format!("tabs node {node_id} has invalid active index"))
+            })?;
+            visible_leaf_ids(snapshot, active_child.child_id)
+        }
+    }
+}
+
+fn resolve_window_index(tabs: &mux_protocol::TabsRecord, selector: Option<&str>) -> Result<usize> {
+    let Some(selector) = selector else {
+        return Ok(tabs.active);
+    };
+
+    if let Ok(index) = selector.parse::<usize>() {
+        let mut candidates = Vec::new();
+        if index < tabs.tabs.len() {
+            candidates.push(index);
+        }
+        if index > 0 && index - 1 < tabs.tabs.len() {
+            candidates.push(index - 1);
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        return match candidates.as_slice() {
+            [only] => Ok(*only),
+            [] => Err(MuxError::not_found(format!(
+                "window index '{selector}' is out of range"
+            ))),
+            _ => Err(MuxError::invalid_input(format!(
+                "window index '{selector}' is ambiguous between 0-based and 1-based addressing"
+            ))),
+        };
+    }
+
+    let matches = tabs
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(_, tab)| tab.title == selector)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(MuxError::not_found(format!(
+            "window '{selector}' was not found"
+        ))),
+        _ => Err(MuxError::conflict(format!(
+            "window title '{selector}' matched multiple root tabs"
+        ))),
+    }
+}
+
+fn split_scoped_target(target: Option<&str>) -> (Option<String>, Option<String>) {
+    match target {
+        Some(target) => {
+            if let Some((session, selector)) = target.split_once(':') {
+                (Some(session.to_owned()), Some(selector.to_owned()))
+            } else {
+                (None, Some(target.to_owned()))
+            }
+        }
+        None => (None, None),
+    }
+}
+
+fn split_scoped_required(target: &str, label: &str) -> Result<(Option<String>, String)> {
+    let (session, selector) = split_scoped_target(Some(target));
+    let selector =
+        selector.ok_or_else(|| MuxError::invalid_input(format!("{label} is required")))?;
+    Ok((session, selector))
+}
+
+fn parse_node_id(raw: &str) -> Result<NodeId> {
+    raw.parse::<u64>()
+        .map(NodeId)
+        .map_err(|_| MuxError::invalid_input(format!("pane target '{raw}' is not a valid pane id")))
+}
+
+fn parse_floating_id(raw: &str) -> Result<FloatingId> {
+    raw.parse::<u64>().map(FloatingId).map_err(|_| {
+        MuxError::invalid_input(format!("popup target '{raw}' is not a valid popup id"))
+    })
+}
+
+fn buffer_command(command: Vec<String>) -> Vec<String> {
+    if command.is_empty() {
+        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())]
+    } else {
+        command
+    }
+}
+
+fn default_title(command: &[String], fallback: &str) -> String {
+    command
+        .first()
+        .and_then(|value| {
+            Path::new(value)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use mux_core::NodeId;
+    use mux_protocol::{TabRecord, TabsRecord};
+
+    use super::{Cli, resolve_window_index, split_scoped_required, split_scoped_target};
+
+    #[test]
+    fn parser_accepts_global_socket_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "mux-cli",
+            "new-window",
+            "--socket",
+            "/tmp/mux.sock",
+            "--title",
+            "logs",
+            "--",
+            "/bin/sh",
+        ])
+        .expect("cli parses");
+
+        match cli.command {
+            super::Command::NewWindow { title, command, .. } => {
+                assert_eq!(title.as_deref(), Some("logs"));
+                assert_eq!(command, vec!["/bin/sh"]);
+            }
+            other => panic!("expected new-window command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scoped_targets_split_session_prefix() {
+        assert_eq!(
+            split_scoped_required("main:2", "window target").expect("target parses"),
+            (Some("main".to_owned()), "2".to_owned())
+        );
+        assert_eq!(split_scoped_target(Some("3")), (None, Some("3".to_owned())));
+    }
+
+    #[test]
+    fn numeric_window_indices_report_ambiguity() {
+        let tabs = TabsRecord {
+            active: 0,
+            tabs: vec![
+                TabRecord {
+                    title: "one".to_owned(),
+                    child_id: NodeId(1),
+                },
+                TabRecord {
+                    title: "two".to_owned(),
+                    child_id: NodeId(2),
+                },
+                TabRecord {
+                    title: "three".to_owned(),
+                    child_id: NodeId(3),
+                },
+            ],
+        };
+
+        let error = resolve_window_index(&tabs, Some("1")).expect_err("index is ambiguous");
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous between 0-based and 1-based")
+        );
+        assert_eq!(
+            resolve_window_index(&tabs, Some("0")).expect("zero resolves"),
+            0
+        );
     }
 }
