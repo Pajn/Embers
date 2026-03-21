@@ -532,6 +532,27 @@ impl ServerState {
         Ok(split_id)
     }
 
+    pub fn resize_split_children(&mut self, split_id: NodeId, sizes: Vec<u16>) -> Result<()> {
+        let split = match self.node_mut(split_id)? {
+            Node::Split(split) => split,
+            _ => return Err(MuxError::invalid_input("node is not a split")),
+        };
+        if sizes.len() != split.children.len() {
+            return Err(MuxError::invalid_input(format!(
+                "split {split_id} expected {} sizes but received {}",
+                split.children.len(),
+                sizes.len()
+            )));
+        }
+        if sizes.contains(&0) {
+            return Err(MuxError::invalid_input(
+                "split sizes must be greater than zero",
+            ));
+        }
+        split.sizes = sizes;
+        Ok(())
+    }
+
     pub fn node_parent(&self, node_id: NodeId) -> Result<Option<NodeId>> {
         Ok(self.node(node_id)?.parent())
     }
@@ -677,6 +698,16 @@ impl ServerState {
                 }
             }
         }
+    }
+
+    pub fn visible_leaf_ids(&self, node_id: NodeId) -> Result<Vec<NodeId>> {
+        let mut leaves = Vec::new();
+        self.collect_visible_leaf_ids(node_id, &mut leaves)?;
+        Ok(leaves)
+    }
+
+    pub fn visible_session_leaves(&self, session_id: SessionId) -> Result<Vec<NodeId>> {
+        self.visible_leaf_ids(self.root_tabs(session_id)?)
     }
 
     pub fn find_last_focused_descendant(&self, node_id: NodeId) -> Result<Option<NodeId>> {
@@ -1220,6 +1251,28 @@ impl ServerState {
         }
 
         Ok(false)
+    }
+
+    fn collect_visible_leaf_ids(&self, node_id: NodeId, leaves: &mut Vec<NodeId>) -> Result<()> {
+        match self.node(node_id)? {
+            Node::BufferView(_) => leaves.push(node_id),
+            Node::Split(split) => {
+                for child in &split.children {
+                    self.collect_visible_leaf_ids(*child, leaves)?;
+                }
+            }
+            Node::Tabs(tabs) => {
+                if let Some(child) = tabs
+                    .tabs
+                    .get(tabs.active)
+                    .or_else(|| tabs.tabs.first())
+                    .map(|tab| tab.child)
+                {
+                    self.collect_visible_leaf_ids(child, leaves)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn collect_subtree_nodes(&self, root_id: NodeId, seen: &mut BTreeSet<NodeId>) -> Result<()> {

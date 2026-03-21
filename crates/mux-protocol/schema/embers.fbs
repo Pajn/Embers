@@ -74,6 +74,7 @@ enum NodeOp : ubyte {
   Focus = 5,
   Close = 6,
   MoveBufferToNode = 7,
+  Resize = 8,
 }
 
 enum FloatingOp : ubyte {
@@ -151,6 +152,7 @@ table NodeRequest {
   title:string;
   index:uint = 0;
   direction:SplitDirectionWire = Horizontal;
+  sizes:[ushort];
 }
 
 table FloatingRequest {

@@ -350,6 +350,7 @@ fn encode_node_request<'a>(
         title_str,
         index,
         direction,
+        sizes_vec,
     ) = match req {
         NodeRequest::GetTree { session_id, .. } => (
             fb::NodeOp::GetTree,
@@ -364,6 +365,7 @@ fn encode_node_request<'a>(
             None,
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::Split {
             leaf_node_id,
@@ -388,6 +390,7 @@ fn encode_node_request<'a>(
                 None,
                 0,
                 dir,
+                None,
             )
         }
         NodeRequest::WrapInTabs { node_id, title, .. } => (
@@ -403,6 +406,7 @@ fn encode_node_request<'a>(
             Some(title.as_str()),
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::AddTab {
             tabs_node_id,
@@ -422,6 +426,7 @@ fn encode_node_request<'a>(
             Some(title.as_str()),
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::SelectTab {
             tabs_node_id,
@@ -440,6 +445,7 @@ fn encode_node_request<'a>(
             None,
             *index as u32,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::Focus {
             session_id,
@@ -458,6 +464,7 @@ fn encode_node_request<'a>(
             None,
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::Close { node_id, .. } => (
             fb::NodeOp::Close,
@@ -472,6 +479,7 @@ fn encode_node_request<'a>(
             None,
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
         ),
         NodeRequest::MoveBufferToNode {
             buffer_id,
@@ -490,10 +498,27 @@ fn encode_node_request<'a>(
             None,
             0,
             fb::SplitDirectionWire::Horizontal,
+            None,
+        ),
+        NodeRequest::Resize { node_id, sizes, .. } => (
+            fb::NodeOp::Resize,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            Some(sizes),
         ),
     };
 
     let title = title_str.map(|s| builder.create_string(s));
+    let sizes = sizes_vec.map(|sizes| builder.create_vector(sizes));
     let node_req = fb::NodeRequest::create(
         builder,
         &fb::NodeRequestArgs {
@@ -509,6 +534,7 @@ fn encode_node_request<'a>(
             title,
             index,
             direction,
+            sizes,
         },
     );
 
@@ -1442,6 +1468,14 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     buffer_id: BufferId(req.buffer_id()),
                     target_leaf_node_id: NodeId(req.target_leaf_node_id()),
                 },
+                fb::NodeOp::Resize => {
+                    let sizes = required(req.sizes(), "node_request.sizes")?;
+                    NodeRequest::Resize {
+                        request_id,
+                        node_id: NodeId(req.node_id()),
+                        sizes: sizes.iter().collect(),
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown node op")),
             };
             Ok(ClientMessage::Node(node_request))

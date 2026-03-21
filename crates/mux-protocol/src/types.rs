@@ -161,6 +161,11 @@ pub enum NodeRequest {
         buffer_id: BufferId,
         target_leaf_node_id: NodeId,
     },
+    Resize {
+        request_id: RequestId,
+        node_id: NodeId,
+        sizes: Vec<u16>,
+    },
 }
 
 impl NodeRequest {
@@ -173,7 +178,8 @@ impl NodeRequest {
             | Self::SelectTab { request_id, .. }
             | Self::Focus { request_id, .. }
             | Self::Close { request_id, .. }
-            | Self::MoveBufferToNode { request_id, .. } => *request_id,
+            | Self::MoveBufferToNode { request_id, .. }
+            | Self::Resize { request_id, .. } => *request_id,
         }
     }
 }

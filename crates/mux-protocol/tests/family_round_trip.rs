@@ -119,43 +119,48 @@ fn client_message_families_round_trip() {
             buffer_id: BufferId(22),
             target_leaf_node_id: NodeId(34),
         }),
-        ClientMessage::Floating(FloatingRequest::Create {
+        ClientMessage::Node(NodeRequest::Resize {
             request_id: RequestId(24),
+            node_id: NodeId(35),
+            sizes: vec![3, 2, 1],
+        }),
+        ClientMessage::Floating(FloatingRequest::Create {
+            request_id: RequestId(25),
             session_id: SessionId(10),
             root_node_id: NodeId(35),
             geometry: FloatGeometry::new(4, 2, 60, 18),
             title: Some("inspector".to_owned()),
         }),
         ClientMessage::Floating(FloatingRequest::Close {
-            request_id: RequestId(25),
+            request_id: RequestId(26),
             floating_id: FloatingId(40),
         }),
         ClientMessage::Floating(FloatingRequest::Move {
-            request_id: RequestId(26),
+            request_id: RequestId(27),
             floating_id: FloatingId(40),
             geometry: FloatGeometry::new(8, 6, 50, 14),
         }),
         ClientMessage::Floating(FloatingRequest::Focus {
-            request_id: RequestId(27),
+            request_id: RequestId(28),
             floating_id: FloatingId(40),
         }),
         ClientMessage::Input(InputRequest::Send {
-            request_id: RequestId(28),
+            request_id: RequestId(29),
             buffer_id: BufferId(22),
             bytes: vec![0x1b, b'[', b'A'],
         }),
         ClientMessage::Input(InputRequest::Resize {
-            request_id: RequestId(29),
+            request_id: RequestId(30),
             buffer_id: BufferId(22),
             cols: 132,
             rows: 42,
         }),
         ClientMessage::Subscribe(SubscribeRequest {
-            request_id: RequestId(30),
+            request_id: RequestId(31),
             session_id: Some(SessionId(10)),
         }),
         ClientMessage::Unsubscribe(UnsubscribeRequest {
-            request_id: RequestId(31),
+            request_id: RequestId(32),
             subscription_id: 99,
         }),
     ];
