@@ -411,6 +411,7 @@ fn encode_node_request<'a>(
         NodeRequest::AddTab {
             tabs_node_id,
             title,
+            buffer_id,
             child_node_id,
             ..
         } => (
@@ -419,9 +420,9 @@ fn encode_node_request<'a>(
             0,
             0,
             (*tabs_node_id).into(),
-            (*child_node_id).into(),
+            child_node_id.map_or(0, u64::from),
             0,
-            0,
+            buffer_id.map_or(0, u64::from),
             0,
             Some(title.as_str()),
             0,
@@ -1446,7 +1447,9 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         request_id,
                         tabs_node_id: NodeId(req.tabs_node_id()),
                         title: title.to_owned(),
-                        child_node_id: NodeId(req.child_node_id()),
+                        buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
+                        child_node_id: (req.child_node_id() != 0)
+                            .then(|| NodeId(req.child_node_id())),
                     }
                 }
                 fb::NodeOp::SelectTab => NodeRequest::SelectTab {

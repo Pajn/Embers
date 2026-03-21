@@ -98,7 +98,8 @@ fn client_message_families_round_trip() {
             request_id: RequestId(19),
             tabs_node_id: NodeId(32),
             title: "logs".to_owned(),
-            child_node_id: NodeId(33),
+            buffer_id: Some(BufferId(23)),
+            child_node_id: None,
         }),
         ClientMessage::Node(NodeRequest::SelectTab {
             request_id: RequestId(20),

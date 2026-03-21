@@ -140,7 +140,8 @@ pub enum NodeRequest {
         request_id: RequestId,
         tabs_node_id: NodeId,
         title: String,
-        child_node_id: NodeId,
+        buffer_id: Option<BufferId>,
+        child_node_id: Option<NodeId>,
     },
     SelectTab {
         request_id: RequestId,

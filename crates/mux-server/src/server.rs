@@ -689,38 +689,47 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
-            mux_protocol::NodeRequest::WrapInTabs { request_id, .. } => (
-                unsupported_response(request_id, "wrap-node-in-tabs is not available yet"),
-                Vec::new(),
-            ),
+            mux_protocol::NodeRequest::WrapInTabs {
+                request_id,
+                node_id,
+                title,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                if let Err(error) = state.wrap_node_in_tabs(node_id, title) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                layout_snapshot_response(&state, request_id, session_id)
+            }
             mux_protocol::NodeRequest::AddTab {
                 request_id,
                 tabs_node_id,
                 title,
+                buffer_id,
                 child_node_id,
             } => {
                 let session_id = match state.node(tabs_node_id) {
                     Ok(node) => node.session_id(),
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
-                if let Err(error) = state.add_tab_sibling(tabs_node_id, title, child_node_id) {
-                    return (mux_error_response(Some(request_id), error), Vec::new());
-                }
-                match session_snapshot(&state, session_id) {
-                    Ok(snapshot) => {
-                        let mut events =
-                            vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
-                        if let Some(focus_event) = focus_changed_event(&state, session_id) {
-                            events.push(ServerEvent::FocusChanged(focus_event));
-                        }
-                        (
-                            ServerResponse::SessionSnapshot(SessionSnapshotResponse {
-                                request_id,
-                                snapshot,
-                            }),
-                            events,
-                        )
+                let result = match (buffer_id, child_node_id) {
+                    (Some(buffer_id), None) => {
+                        state.add_tab_from_buffer(tabs_node_id, title, buffer_id)
                     }
+                    (None, Some(child_node_id)) => {
+                        state.add_tab_sibling(tabs_node_id, title, child_node_id)
+                    }
+                    (Some(_), Some(_)) => Err(MuxError::invalid_input(
+                        "add-tab requires either buffer_id or child_node_id, not both",
+                    )),
+                    (None, None) => Err(MuxError::invalid_input(
+                        "add-tab requires either buffer_id or child_node_id",
+                    )),
+                };
+                match result {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }

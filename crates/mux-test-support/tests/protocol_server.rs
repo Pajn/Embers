@@ -246,10 +246,10 @@ async fn typed_errors_cover_invalid_ids_impossible_mutations_and_unsupported_req
 
     let unsupported_request_id = RequestId(73);
     let unsupported_response = connection
-        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
+        .request(&ClientMessage::Node(NodeRequest::MoveBufferToNode {
             request_id: unsupported_request_id,
-            node_id: session.snapshot.session.root_node_id,
-            title: "wrapped".to_owned(),
+            buffer_id: mux_core::BufferId(1),
+            target_leaf_node_id: session.snapshot.session.root_node_id,
         }))
         .await
         .expect("unsupported request returns response");
