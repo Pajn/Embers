@@ -31,7 +31,7 @@ pub async fn run(
 
     let terminal = TerminalGuard::enter()?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    spawn_input_thread(input_tx);
+    let _input_thread = spawn_input_thread(input_tx)?;
 
     let mut terminal_size = terminal.size()?;
     let mut dirty = true;
@@ -277,14 +277,17 @@ enum TerminalEvent {
     InputError(String),
 }
 
-fn spawn_input_thread(tx: mpsc::UnboundedSender<TerminalEvent>) {
-    let _ = thread::Builder::new()
+fn spawn_input_thread(
+    tx: mpsc::UnboundedSender<TerminalEvent>,
+) -> Result<std::thread::JoinHandle<()>> {
+    thread::Builder::new()
         .name("embers-input".to_owned())
         .spawn(move || {
             let stdin = io::stdin();
-            let lock = stdin.lock();
-            let fd = lock.as_raw_fd();
-            let _lock = lock;
+            // Keep the stdin lock alive for the full read loop so the raw fd stays valid.
+            let stdin_lock = stdin.lock();
+            let fd = stdin_lock.as_raw_fd();
+            let _stdin_lock = stdin_lock;
             loop {
                 match read_key_event(fd) {
                     Ok(Some(key)) => {
@@ -302,7 +305,8 @@ fn spawn_input_thread(tx: mpsc::UnboundedSender<TerminalEvent>) {
                     }
                 }
             }
-        });
+        })
+        .map_err(|error| MuxError::internal(format!("failed to spawn input thread: {error}")))
 }
 
 fn read_key_event(fd: libc::c_int) -> Result<Option<KeyEvent>> {

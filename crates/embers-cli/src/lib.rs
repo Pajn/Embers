@@ -1,5 +1,9 @@
 mod interactive;
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -23,8 +27,38 @@ pub struct Cli {
     pub socket: Option<PathBuf>,
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
+    #[arg(long, global = true, value_name = "FILTER")]
+    pub log: Option<String>,
+    #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    pub fn log_filter(&self) -> String {
+        if let Some(filter) = self.log.as_ref().filter(|value| !value.trim().is_empty()) {
+            return filter.clone();
+        }
+        match self.verbose {
+            0 => {}
+            1 => return "debug".to_owned(),
+            _ => return "trace".to_owned(),
+        }
+        if let Some(filter) = std::env::var("EMBERS_LOG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return filter;
+        }
+        if let Some(filter) = std::env::var("RUST_LOG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return filter;
+        }
+        "info".to_owned()
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -467,7 +501,22 @@ fn resolve_socket_path(explicit: Option<&Path>) -> PathBuf {
 }
 
 fn default_socket_path() -> PathBuf {
-    PathBuf::from("/tmp").join(format!("embers-{}.sock", current_user_label()))
+    default_runtime_dir().join("embers.sock")
+}
+
+fn default_runtime_dir() -> PathBuf {
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(runtime_dir).join("embers");
+    }
+    #[cfg(unix)]
+    {
+        let run_user_dir = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+        if run_user_dir.is_dir() {
+            return run_user_dir.join("embers");
+        }
+    }
+    PathBuf::from("/tmp").join(format!("embers-{}", current_user_label()))
 }
 
 fn current_user_label() -> String {
@@ -499,9 +548,7 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    ensure_socket_parent(socket_path)?;
 
     let current_exe = std::env::current_exe()?;
     let mut child = ProcessCommand::new(current_exe)
@@ -524,6 +571,8 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
             )));
         }
         if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(MuxError::timeout(format!(
                 "timed out waiting for embers server at {}",
                 socket_path.display()
@@ -534,13 +583,33 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
 }
 
 async fn run_server(socket_path: PathBuf) -> Result<()> {
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let _pid = ServerPidFile::create(&pid_path(&socket_path))?;
+    ensure_socket_parent(&socket_path)?;
+    let secure_parent = socket_path
+        .parent()
+        .is_some_and(|parent| parent == default_runtime_dir().as_path());
+    let _pid = ServerPidFile::create(&pid_path(&socket_path), secure_parent)?;
     let handle = Server::new(ServerConfig::new(socket_path)).start().await?;
     wait_for_shutdown_signal().await?;
     handle.shutdown().await
+}
+
+fn ensure_socket_parent(socket_path: &Path) -> Result<()> {
+    let Some(parent) = socket_path.parent() else {
+        return Ok(());
+    };
+    if parent == default_runtime_dir().as_path() {
+        ensure_private_dir(parent)
+    } else {
+        fs::create_dir_all(parent)?;
+        Ok(())
+    }
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -566,11 +635,40 @@ struct ServerPidFile {
 }
 
 impl ServerPidFile {
-    fn create(path: &Path) -> Result<Self> {
+    fn create(path: &Path, secure_parent: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if secure_parent {
+                ensure_private_dir(parent)?;
+            } else {
+                fs::create_dir_all(parent)?;
+            }
         }
-        std::fs::write(path, std::process::id().to_string())?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(MuxError::conflict(format!(
+                        "refusing to overwrite symlink pid file {}",
+                        path.display()
+                    )));
+                }
+                fs::remove_file(path)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        #[cfg(unix)]
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+
+        #[cfg(not(unix))]
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+
+        file.write_all(std::process::id().to_string().as_bytes())?;
         Ok(Self {
             path: path.to_path_buf(),
         })

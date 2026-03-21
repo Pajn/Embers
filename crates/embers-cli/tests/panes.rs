@@ -105,9 +105,19 @@ async fn pane_commands_round_trip_through_cli() {
             "cli-pane\\n",
         ],
     );
-    sleep(Duration::from_millis(100)).await;
-
-    let captured = run_cli(&server, ["capture-pane", "-t", &other_pane_id.to_string()]);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let captured = loop {
+        let captured = run_cli(&server, ["capture-pane", "-t", &other_pane_id.to_string()]);
+        if stdout(&captured).contains("cli-pane") {
+            break captured;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for pane {} to render cli-pane",
+            other_pane_id
+        );
+        sleep(Duration::from_millis(50)).await;
+    };
     assert!(stdout(&captured).contains("cli-pane"));
 
     run_cli(&server, ["kill-pane", "-t", &other_pane_id.to_string()]);
