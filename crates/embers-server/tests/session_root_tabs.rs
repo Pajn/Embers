@@ -119,7 +119,7 @@ fn switching_root_tabs_restores_previous_focus() {
 }
 
 #[test]
-fn closing_root_tabs_detaches_buffers_and_preserves_empty_root() {
+fn closing_root_tabs_can_collapse_root_and_closing_root_resets_to_empty_tabs() {
     let mut state = ServerState::new();
     let session_id = state.create_session("main");
 
@@ -143,11 +143,15 @@ fn closing_root_tabs_detaches_buffers_and_preserves_empty_root() {
             .attachment,
         BufferAttachment::Detached
     ));
-    assert_eq!(root_tabs(&state, session_id).tabs.len(), 1);
+    let collapsed_root = state.session(session_id).expect("session exists").root_node;
+    let first_attachment = match &state.buffer(first_buffer).expect("buffer exists").attachment {
+        BufferAttachment::Attached(node_id) => *node_id,
+        BufferAttachment::Detached => panic!("buffer should remain attached"),
+    };
+    assert_eq!(collapsed_root, first_attachment);
+    assert_eq!(state.node_parent(collapsed_root).expect("root parent"), None);
 
-    state
-        .close_root_tab(session_id, 0)
-        .expect("close final root tab");
+    state.close_node(collapsed_root).expect("close collapsed root");
     let tabs = root_tabs(&state, session_id);
     assert!(tabs.tabs.is_empty());
     assert_eq!(tabs.active, 0);

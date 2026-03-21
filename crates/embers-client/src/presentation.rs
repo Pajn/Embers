@@ -64,7 +64,7 @@ pub struct FloatingFrame {
 pub struct PresentationModel {
     pub session_id: SessionId,
     pub viewport: Size,
-    pub root_tabs: TabsFrame,
+    pub root_tabs: Option<TabsFrame>,
     pub tab_bars: Vec<TabsFrame>,
     pub leaves: Vec<LeafFrame>,
     pub dividers: Vec<DividerFrame>,
@@ -126,12 +126,7 @@ impl PresentationModel {
             )?;
         }
 
-        let root_tabs = projection
-            .tab_bars
-            .iter()
-            .find(|bar| bar.is_root)
-            .cloned()
-            .ok_or_else(|| MuxError::protocol("session root did not project to a tabs frame"))?;
+        let root_tabs = projection.tab_bars.iter().find(|bar| bar.is_root).cloned();
 
         Ok(Self {
             session_id,

@@ -177,7 +177,7 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
     let root = engine
         .format_root_tabbar(
             context.clone(),
-            TabBarContext::from_frame(&presentation.root_tabs),
+            TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap()),
         )
         .unwrap()
         .unwrap();

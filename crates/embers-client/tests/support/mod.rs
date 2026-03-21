@@ -21,6 +21,10 @@ pub const FLOATING_ID: FloatingId = FloatingId(90);
 pub const FLOATING_SPLIT_ID: NodeId = NodeId(40);
 pub const FLOATING_TOP_LEAF_ID: NodeId = NodeId(41);
 pub const FLOATING_BOTTOM_LEAF_ID: NodeId = NodeId(42);
+pub const ROOT_BUFFER_LEAF_ID: NodeId = NodeId(50);
+pub const ROOT_ONLY_SPLIT_ID: NodeId = NodeId(60);
+pub const ROOT_SPLIT_LEFT_LEAF_ID: NodeId = NodeId(61);
+pub const ROOT_SPLIT_RIGHT_LEAF_ID: NodeId = NodeId(62);
 
 pub fn demo_state() -> ClientState {
     let mut state = ClientState::default();
@@ -50,6 +54,21 @@ pub fn root_focus_state() -> ClientState {
         session.focused_floating_id = None;
         session.focused_leaf_id = Some(LEFT_LEAF_ID);
     }
+    state
+}
+
+pub fn root_buffer_state() -> ClientState {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(root_buffer_snapshot());
+    state.apply_buffer_snapshot(snapshot(7, ["root buffer", "extra line"]));
+    state
+}
+
+pub fn root_split_state() -> ClientState {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(root_split_snapshot());
+    state.apply_buffer_snapshot(snapshot(7, ["left root pane"]));
+    state.apply_buffer_snapshot(snapshot(8, ["right root pane"]));
     state
 }
 
@@ -186,6 +205,76 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
             visible: true,
             close_on_empty: true,
         }],
+    }
+}
+
+fn root_buffer_snapshot() -> SessionSnapshot {
+    SessionSnapshot {
+        session: SessionRecord {
+            id: SESSION_ID,
+            name: "root-buffer".to_owned(),
+            root_node_id: ROOT_BUFFER_LEAF_ID,
+            floating_ids: Vec::new(),
+            focused_leaf_id: Some(ROOT_BUFFER_LEAF_ID),
+            focused_floating_id: None,
+        },
+        nodes: vec![buffer_view_node(ROOT_BUFFER_LEAF_ID, None, BufferId(7))],
+        buffers: vec![buffer(
+            7,
+            Some(ROOT_BUFFER_LEAF_ID),
+            "root-buffer",
+            ActivityState::Idle,
+        )],
+        floating: Vec::new(),
+    }
+}
+
+fn root_split_snapshot() -> SessionSnapshot {
+    SessionSnapshot {
+        session: SessionRecord {
+            id: SESSION_ID,
+            name: "root-split".to_owned(),
+            root_node_id: ROOT_ONLY_SPLIT_ID,
+            floating_ids: Vec::new(),
+            focused_leaf_id: Some(ROOT_SPLIT_RIGHT_LEAF_ID),
+            focused_floating_id: None,
+        },
+        nodes: vec![
+            NodeRecord {
+                id: ROOT_ONLY_SPLIT_ID,
+                session_id: SESSION_ID,
+                parent_id: None,
+                kind: NodeRecordKind::Split,
+                buffer_view: None,
+                split: Some(SplitRecord {
+                    direction: SplitDirection::Vertical,
+                    child_ids: vec![ROOT_SPLIT_LEFT_LEAF_ID, ROOT_SPLIT_RIGHT_LEAF_ID],
+                    sizes: vec![1, 1],
+                }),
+                tabs: None,
+            },
+            buffer_view_node(ROOT_SPLIT_LEFT_LEAF_ID, Some(ROOT_ONLY_SPLIT_ID), BufferId(7)),
+            buffer_view_node(
+                ROOT_SPLIT_RIGHT_LEAF_ID,
+                Some(ROOT_ONLY_SPLIT_ID),
+                BufferId(8),
+            ),
+        ],
+        buffers: vec![
+            buffer(
+                7,
+                Some(ROOT_SPLIT_LEFT_LEAF_ID),
+                "root-left",
+                ActivityState::Idle,
+            ),
+            buffer(
+                8,
+                Some(ROOT_SPLIT_RIGHT_LEAF_ID),
+                "root-right",
+                ActivityState::Activity,
+            ),
+        ],
+        floating: Vec::new(),
     }
 }
 

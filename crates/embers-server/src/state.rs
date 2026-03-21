@@ -67,8 +67,19 @@ impl ServerState {
             .ok_or_else(|| MuxError::not_found(format!("unknown floating window {floating_id}")))
     }
 
-    pub fn root_tabs(&self, session_id: SessionId) -> Result<NodeId> {
+    pub fn root_node(&self, session_id: SessionId) -> Result<NodeId> {
         Ok(self.session(session_id)?.root_node)
+    }
+
+    pub fn root_tabs(&self, session_id: SessionId) -> Result<NodeId> {
+        let root_node = self.root_node(session_id)?;
+        if matches!(self.node(root_node)?, Node::Tabs(_)) {
+            Ok(root_node)
+        } else {
+            Err(MuxError::conflict(format!(
+                "session {session_id} root node {root_node} is not tabs"
+            )))
+        }
     }
 
     pub fn add_root_tab_from_buffer(
@@ -77,8 +88,9 @@ impl ServerState {
         title: impl Into<String>,
         buffer_id: BufferId,
     ) -> Result<usize> {
+        let root_tabs = self.root_tabs(session_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
-        self.add_root_tab(session_id, title, child)
+        self.add_tab_sibling(root_tabs, title, child)
     }
 
     pub fn add_root_tab_from_subtree(
@@ -87,7 +99,8 @@ impl ServerState {
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
-        self.add_root_tab(session_id, title, child)
+        let root_tabs = self.root_tabs(session_id)?;
+        self.add_tab_sibling(root_tabs, title, child)
     }
 
     pub fn select_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
@@ -115,7 +128,7 @@ impl ServerState {
         for floating_id in session.floating.clone() {
             self.close_floating(floating_id)?;
         }
-        self.clear_session_root(session_id)?;
+        self.remove_subtree_nodes(session.root_node)?;
         self.sessions.remove(&session_id);
         Ok(())
     }
@@ -512,6 +525,9 @@ impl ServerState {
         title: impl Into<String>,
         buffer_id: BufferId,
     ) -> Result<usize> {
+        if !matches!(self.node(tabs_id)?, Node::Tabs(_)) {
+            return Err(MuxError::invalid_input("node is not a tabs container"));
+        }
         let session_id = self.node_session_id(tabs_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
         self.add_tab_sibling(tabs_id, title, child)
@@ -770,7 +786,7 @@ impl ServerState {
     }
 
     pub fn visible_session_leaves(&self, session_id: SessionId) -> Result<Vec<NodeId>> {
-        self.visible_leaf_ids(self.root_tabs(session_id)?)
+        self.visible_leaf_ids(self.root_node(session_id)?)
     }
 
     pub fn find_last_focused_descendant(&self, node_id: NodeId) -> Result<Option<NodeId>> {
@@ -1002,21 +1018,11 @@ impl ServerState {
 
         for session in self.sessions.values() {
             let root = self.node(session.root_node)?;
-            match root {
-                Node::Tabs(tabs) => {
-                    if tabs.parent.is_some() {
-                        return Err(MuxError::conflict(format!(
-                            "session root tabs {} must not have a parent",
-                            tabs.id
-                        )));
-                    }
-                }
-                _ => {
-                    return Err(MuxError::conflict(format!(
-                        "session {} root node {} is not tabs",
-                        session.id, session.root_node
-                    )));
-                }
+            if root.parent().is_some() {
+                return Err(MuxError::conflict(format!(
+                    "session {} root node {} must not have a parent",
+                    session.id, session.root_node
+                )));
             }
 
             self.validate_subtree(session.id, session.root_node, None, true, &mut seen)?;
@@ -1096,22 +1102,21 @@ impl ServerState {
     }
 
     fn clear_session_root(&mut self, session_id: SessionId) -> Result<()> {
-        let root = self.root_tabs(session_id)?;
-        let children = match self.node(root)? {
-            Node::Tabs(tabs) => tabs.tabs.iter().map(|tab| tab.child).collect::<Vec<_>>(),
-            _ => return Err(MuxError::conflict("session root is not tabs".to_owned())),
-        };
-
-        for child in children {
-            self.remove_subtree_nodes(child)?;
-        }
-
-        if let Node::Tabs(tabs) = self.node_mut(root)? {
-            tabs.tabs.clear();
-            tabs.active = 0;
-            tabs.last_focused_descendant = None;
-        }
-
+        let old_root = self.root_node(session_id)?;
+        self.remove_subtree_nodes(old_root)?;
+        let new_root = self.node_ids.next();
+        self.nodes.insert(
+            new_root,
+            Node::Tabs(TabsNode {
+                id: new_root,
+                session_id,
+                parent: None,
+                tabs: Vec::new(),
+                active: 0,
+                last_focused_descendant: None,
+            }),
+        );
+        self.session_mut(session_id)?.root_node = new_root;
         self.heal_focus(session_id)
     }
 
@@ -1127,7 +1132,7 @@ impl ServerState {
             return self.focus_leaf(session_id, leaf);
         }
 
-        let root = self.root_tabs(session_id)?;
+        let root = self.root_node(session_id)?;
         if let Some(leaf) = self.resolve_focus_candidate(root)? {
             return self.focus_leaf(session_id, leaf);
         }
@@ -1536,7 +1541,7 @@ impl ServerState {
             return Ok(parent);
         }
 
-        if tabs_len == 1 && !is_root && floating_owner.is_none() {
+        if tabs_len == 1 && floating_owner.is_none() {
             let child = match self.node(node_id)? {
                 Node::Tabs(tabs) => tabs.tabs[0].child,
                 _ => unreachable!(),
