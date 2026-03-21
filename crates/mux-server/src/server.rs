@@ -831,6 +831,20 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            mux_protocol::NodeRequest::Resize {
+                request_id,
+                node_id,
+                sizes,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                if let Err(error) = state.resize_split_children(node_id, sizes) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                layout_snapshot_response(&state, request_id, session_id)
+            }
             mux_protocol::NodeRequest::MoveBufferToNode { request_id, .. } => (
                 unsupported_response(request_id, "move-buffer-to-node is not available yet"),
                 Vec::new(),
