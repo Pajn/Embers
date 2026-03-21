@@ -71,6 +71,45 @@ impl ServerState {
         Ok(self.session(session_id)?.root_node)
     }
 
+    pub fn add_root_tab_from_buffer(
+        &mut self,
+        session_id: SessionId,
+        title: impl Into<String>,
+        buffer_id: BufferId,
+    ) -> Result<usize> {
+        let child = self.create_buffer_view(session_id, buffer_id)?;
+        self.add_root_tab(session_id, title, child)
+    }
+
+    pub fn add_root_tab_from_subtree(
+        &mut self,
+        session_id: SessionId,
+        title: impl Into<String>,
+        child: NodeId,
+    ) -> Result<usize> {
+        self.add_root_tab(session_id, title, child)
+    }
+
+    pub fn select_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
+        let root_tabs = self.root_tabs(session_id)?;
+        self.switch_tab(root_tabs, index)
+    }
+
+    pub fn rename_root_tab(
+        &mut self,
+        session_id: SessionId,
+        index: usize,
+        title: impl Into<String>,
+    ) -> Result<()> {
+        let root_tabs = self.root_tabs(session_id)?;
+        self.rename_tab(root_tabs, index, title)
+    }
+
+    pub fn close_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
+        let root_tabs = self.root_tabs(session_id)?;
+        self.close_tab(root_tabs, index)
+    }
+
     pub fn close_session(&mut self, session_id: SessionId) -> Result<()> {
         let session = self.session(session_id)?.clone();
         for floating_id in session.floating.clone() {
@@ -384,6 +423,16 @@ impl ServerState {
                 "new tab child must not already have a parent",
             ));
         }
+        if self.is_session_root(child) {
+            return Err(MuxError::conflict(
+                "session root cannot become a tab child".to_owned(),
+            ));
+        }
+        if self.floating_id_by_root(child).is_some() {
+            return Err(MuxError::conflict(
+                "floating root cannot become a tab child".to_owned(),
+            ));
+        }
 
         self.set_parent(child, Some(tabs_id))?;
         let index = {
@@ -403,6 +452,26 @@ impl ServerState {
         }
 
         Ok(index)
+    }
+
+    pub fn rename_tab(
+        &mut self,
+        tabs_id: NodeId,
+        index: usize,
+        title: impl Into<String>,
+    ) -> Result<()> {
+        let title = title.into();
+        let tabs = match self.node_mut(tabs_id)? {
+            Node::Tabs(tabs) => tabs,
+            _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+        };
+        if index >= tabs.tabs.len() {
+            return Err(MuxError::not_found(format!(
+                "tab index {index} is out of range for node {tabs_id}"
+            )));
+        }
+        tabs.tabs[index].title = title;
+        Ok(())
     }
 
     pub fn wrap_node_in_tabs(

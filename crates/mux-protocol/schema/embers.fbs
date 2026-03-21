@@ -50,6 +50,10 @@ enum SessionOp : ubyte {
   List = 1,
   Get = 2,
   Close = 3,
+  AddRootTab = 4,
+  SelectRootTab = 5,
+  RenameRootTab = 6,
+  CloseRootTab = 7,
 }
 
 enum BufferOp : ubyte {
@@ -114,8 +118,12 @@ table PingRequest {
 table SessionRequest {
   op:SessionOp = Create;
   session_id:ulong = 0;
+  buffer_id:ulong = 0;
+  child_node_id:ulong = 0;
   name:string;
+  title:string;
   force:bool = false;
+  index:uint = 0;
 }
 
 table BufferRequest {
