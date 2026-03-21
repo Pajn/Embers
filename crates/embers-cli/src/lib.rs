@@ -12,7 +12,10 @@ use embers_protocol::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "embers-cli", about = "tmux-inspired control surface for embers")]
+#[command(
+    name = "embers-cli",
+    about = "tmux-inspired control surface for embers"
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub socket: Option<PathBuf>,
@@ -739,7 +742,10 @@ fn root_tabs(
     Ok((node, tabs))
 }
 
-fn node_record(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<&embers_protocol::NodeRecord> {
+fn node_record(
+    snapshot: &SessionSnapshot,
+    node_id: NodeId,
+) -> Result<&embers_protocol::NodeRecord> {
     snapshot
         .nodes
         .iter()
@@ -798,7 +804,10 @@ fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<N
     }
 }
 
-fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&str>) -> Result<usize> {
+fn resolve_window_index(
+    tabs: &embers_protocol::TabsRecord,
+    selector: Option<&str>,
+) -> Result<usize> {
     let Some(selector) = selector else {
         return Ok(tabs.active);
     };

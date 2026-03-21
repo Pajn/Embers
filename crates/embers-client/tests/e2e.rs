@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use embers_client::{MuxClient, PresentationModel, Renderer};
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, NodeId, SessionId, Size, SplitDirection,
-    new_request_id,
+    ActivityState, BufferId, FloatGeometry, NodeId, SessionId, Size, SplitDirection, new_request_id,
 };
 use embers_protocol::{
     BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest, NodeRequest,
@@ -46,7 +45,10 @@ async fn create_session(connection: &mut TestConnection, name: &str) -> SessionS
     }
 }
 
-async fn create_buffer(connection: &mut TestConnection, title: &str) -> embers_protocol::BufferRecord {
+async fn create_buffer(
+    connection: &mut TestConnection,
+    title: &str,
+) -> embers_protocol::BufferRecord {
     let response = connection
         .request(&ClientMessage::Buffer(BufferRequest::Create {
             request_id: new_request_id(),
@@ -62,10 +64,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> embers_p
     }
 }
 
-async fn session_snapshot_by_name(
-    connection: &mut TestConnection,
-    name: &str,
-) -> SessionSnapshot {
+async fn session_snapshot_by_name(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::List {
             request_id: new_request_id(),
@@ -73,12 +72,14 @@ async fn session_snapshot_by_name(
         .await
         .expect("list sessions succeeds");
     let session_id = match response {
-        ServerResponse::Sessions(response) => response
-            .sessions
-            .into_iter()
-            .find(|session| session.name == name)
-            .expect("session exists")
-            .id,
+        ServerResponse::Sessions(response) => {
+            response
+                .sessions
+                .into_iter()
+                .find(|session| session.name == name)
+                .expect("session exists")
+                .id
+        }
         other => panic!("expected sessions response, got {other:?}"),
     };
     connection
@@ -149,7 +150,15 @@ async fn basic_cli_workflow_renders_split_output() {
     run_cli(&server, &["new-session", "alpha"]);
     run_cli(
         &server,
-        &["new-window", "-t", "alpha", "--title", "work", "--", "/bin/sh"],
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
     );
     let split = run_cli(&server, &["split-window", "--", "/bin/sh"]);
     let pane_id = stdout(&split)
@@ -211,7 +220,10 @@ async fn nested_tabs_switch_visible_output() {
         ServerResponse::SessionSnapshot(response) => response.snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let root_leaf = session.session.focused_leaf_id.expect("root leaf is focused");
+    let root_leaf = session
+        .session
+        .focused_leaf_id
+        .expect("root leaf is focused");
 
     let buffer_b = create_buffer(&mut connection, "nested-one").await;
     let session = match connection
@@ -227,7 +239,10 @@ async fn nested_tabs_switch_visible_output() {
         ServerResponse::SessionSnapshot(response) => response.snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let right_leaf = session.session.focused_leaf_id.expect("new split leaf is focused");
+    let right_leaf = session
+        .session
+        .focused_leaf_id
+        .expect("new split leaf is focused");
 
     let session = match connection
         .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
@@ -330,24 +345,30 @@ async fn popup_close_preserves_underlying_buffer() {
     run_cli(&server, &["new-session", "alpha"]);
     run_cli(
         &server,
-        &["new-window", "-t", "alpha", "--title", "work", "--", "/bin/sh"],
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
     );
 
     let mut connection = TestConnection::connect(server.socket_path())
         .await
         .expect("protocol connection");
     let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
-    let base_leaf = snapshot.session.focused_leaf_id.expect("focused leaf exists");
+    let base_leaf = snapshot
+        .session
+        .focused_leaf_id
+        .expect("focused leaf exists");
     let base_buffer = buffer_for_leaf(&snapshot, base_leaf);
 
     run_cli(
         &server,
-        &[
-            "send-keys",
-            "--enter",
-            "printf",
-            "popup-base\\n",
-        ],
+        &["send-keys", "--enter", "printf", "popup-base\\n"],
     );
     connection
         .wait_for_capture_contains(base_buffer, "popup-base", Duration::from_secs(3))
@@ -611,7 +632,11 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
         .iter()
         .find(|tabs| tabs.node_id == nested_tabs_id)
         .expect("nested tabs frame exists");
-    assert!(tabs.tabs.iter().any(|tab| tab.title == "bg" && tab.activity != ActivityState::Idle));
+    assert!(
+        tabs.tabs
+            .iter()
+            .any(|tab| tab.title == "bg" && tab.activity != ActivityState::Idle)
+    );
 
     drop(first_client);
 

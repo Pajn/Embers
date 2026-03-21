@@ -14,7 +14,15 @@ async fn pane_commands_round_trip_through_cli() {
     run_cli(&server, ["new-session", "alpha"]);
     run_cli(
         &server,
-        ["new-window", "-t", "alpha", "--title", "work", "--", "/bin/sh"],
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
     );
 
     let split = run_cli(&server, ["split-window", "--", "/bin/sh"]);
@@ -49,13 +57,21 @@ async fn pane_commands_round_trip_through_cli() {
 
     run_cli(&server, ["select-pane", "-t", &other_pane_id.to_string()]);
     let listed = run_cli(&server, ["list-panes"]);
-    assert!(stdout(&listed)
-        .lines()
-        .any(|line| line.starts_with(&format!("{other_pane_id}\t")) && line.contains("\t1\t")));
+    assert!(
+        stdout(&listed)
+            .lines()
+            .any(|line| line.starts_with(&format!("{other_pane_id}\t")) && line.contains("\t1\t"))
+    );
 
     run_cli(
         &server,
-        ["resize-pane", "-t", &other_pane_id.to_string(), "--sizes", "3,1"],
+        [
+            "resize-pane",
+            "-t",
+            &other_pane_id.to_string(),
+            "--sizes",
+            "3,1",
+        ],
     );
 
     let mut connection = TestConnection::connect(server.socket_path())
@@ -65,14 +81,16 @@ async fn pane_commands_round_trip_through_cli() {
     let parent_split = snapshot
         .nodes
         .iter()
-        .find(|node| node.split.as_ref().is_some_and(|split| split.child_ids.contains(&embers_core::NodeId(other_pane_id))))
+        .find(|node| {
+            node.split.as_ref().is_some_and(|split| {
+                split
+                    .child_ids
+                    .contains(&embers_core::NodeId(other_pane_id))
+            })
+        })
         .expect("parent split exists");
     assert_eq!(
-        parent_split
-            .split
-            .as_ref()
-            .expect("split payload")
-            .sizes,
+        parent_split.split.as_ref().expect("split payload").sizes,
         vec![3, 1]
     );
 
