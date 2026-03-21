@@ -55,6 +55,7 @@ async fn create_buffer(
             title: Some(title.to_owned()),
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer succeeds");
@@ -268,6 +269,7 @@ async fn nested_tabs_switch_visible_output() {
             title: "two".to_owned(),
             buffer_id: Some(buffer_c.id),
             child_node_id: None,
+            index: 1,
         }))
         .await
         .expect("add nested tab succeeds")
@@ -466,6 +468,8 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
             buffer_id: Some(buffer_a.id),
             geometry: FloatGeometry::new(4, 2, 24, 8),
             title: Some("moved".to_owned()),
+            focus: true,
+            close_on_empty: true,
         }))
         .await
         .expect("create floating from detached buffer succeeds")
@@ -584,6 +588,7 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
             title: "bg".to_owned(),
             buffer_id: Some(buffer_b.id),
             child_node_id: None,
+            index: 1,
         }))
         .await
         .expect("add hidden tab succeeds");

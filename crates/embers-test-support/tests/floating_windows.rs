@@ -45,6 +45,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             title: Some(title.to_owned()),
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), "cat".to_owned()],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");
@@ -122,6 +123,8 @@ async fn create_focus_move_and_close_floating_window_via_socket() {
             buffer_id: Some(popup_buffer.id),
             geometry: FloatGeometry::new(4, 2, 40, 12),
             title: Some("popup".to_owned()),
+            focus: true,
+            close_on_empty: true,
         }))
         .await
         .expect("create floating request succeeds");
@@ -224,6 +227,8 @@ async fn closing_last_tab_in_floating_tabs_removes_popup() {
             buffer_id: Some(popup_buffer.id),
             geometry: FloatGeometry::new(2, 2, 30, 10),
             title: Some("popup".to_owned()),
+            focus: true,
+            close_on_empty: true,
         }))
         .await
         .expect("create floating request succeeds");

@@ -41,6 +41,39 @@ fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ProtocolError
     value.ok_or(ProtocolError::InvalidMessage(field))
 }
 
+fn create_string_vector<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    values: &[String],
+) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>> {
+    let strings: Vec<_> = values.iter().map(|value| builder.create_string(value)).collect();
+    builder.create_vector(&strings)
+}
+
+fn decode_string_map(
+    keys: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<&str>>>,
+    values: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<&str>>>,
+    field: &'static str,
+) -> Result<std::collections::BTreeMap<String, String>, ProtocolError> {
+    let Some(keys) = keys else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Some(values) = values else {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} is missing matching values"
+        )));
+    };
+    if keys.len() != values.len() {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} has mismatched key/value lengths"
+        )));
+    }
+    Ok(keys
+        .iter()
+        .zip(values.iter())
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect())
+}
+
 // ==================== ENCODING ====================
 
 pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, ProtocolError> {
@@ -219,11 +252,13 @@ fn encode_buffer_request<'a>(
         title_str,
         command_vec,
         cwd_str,
+        env_entries,
     ) = match req {
         BufferRequest::Create {
             title,
             command,
             cwd,
+            env,
             ..
         } => (
             fb::BufferOp::Create,
@@ -235,6 +270,7 @@ fn encode_buffer_request<'a>(
             title.as_deref(),
             Some(command),
             cwd.as_deref(),
+            Some(env),
         ),
         BufferRequest::List {
             session_id,
@@ -251,6 +287,7 @@ fn encode_buffer_request<'a>(
             None,
             None,
             None,
+            None,
         ),
         BufferRequest::Get { buffer_id, .. } => (
             fb::BufferOp::Get,
@@ -262,6 +299,7 @@ fn encode_buffer_request<'a>(
             None,
             None,
             None,
+            None,
         ),
         BufferRequest::Detach { buffer_id, .. } => (
             fb::BufferOp::Detach,
@@ -270,6 +308,7 @@ fn encode_buffer_request<'a>(
             false,
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -286,6 +325,7 @@ fn encode_buffer_request<'a>(
             None,
             None,
             None,
+            None,
         ),
         BufferRequest::Capture { buffer_id, .. } => (
             fb::BufferOp::Capture,
@@ -297,6 +337,7 @@ fn encode_buffer_request<'a>(
             None,
             None,
             None,
+            None,
         ),
     };
 
@@ -305,6 +346,14 @@ fn encode_buffer_request<'a>(
     let command = command_vec.map(|cmd_vec| {
         let strings: Vec<_> = cmd_vec.iter().map(|s| builder.create_string(s)).collect();
         builder.create_vector(&strings)
+    });
+    let env_keys = env_entries.map(|env| {
+        let keys = env.keys().cloned().collect::<Vec<_>>();
+        create_string_vector(builder, &keys)
+    });
+    let env_values = env_entries.map(|env| {
+        let values = env.values().cloned().collect::<Vec<_>>();
+        create_string_vector(builder, &values)
     });
 
     let buffer_req = fb::BufferRequest::create(
@@ -319,6 +368,8 @@ fn encode_buffer_request<'a>(
             title,
             command,
             cwd,
+            env_keys,
+            env_values,
         },
     );
 
@@ -349,8 +400,30 @@ fn encode_node_request<'a>(
         new_buffer_id,
         title_str,
         index,
+        active,
         direction,
         sizes_vec,
+        child_node_ids_vec,
+        titles_vec,
+        insert_before,
+    ): (
+        fb::NodeOp,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        Option<&str>,
+        u32,
+        u32,
+        fb::SplitDirectionWire,
+        Option<&Vec<u16>>,
+        Option<Vec<u64>>,
+        Option<Vec<String>>,
+        bool,
     ) = match req {
         NodeRequest::GetTree { session_id, .. } => (
             fb::NodeOp::GetTree,
@@ -364,8 +437,12 @@ fn encode_node_request<'a>(
             0,
             None,
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::Split {
             leaf_node_id,
@@ -389,8 +466,132 @@ fn encode_node_request<'a>(
                 (*new_buffer_id).into(),
                 None,
                 0,
+                0,
                 dir,
                 None,
+                None,
+                None,
+                false,
+            )
+        }
+        NodeRequest::CreateSplit {
+            session_id,
+            direction,
+            child_node_ids,
+            sizes,
+            ..
+        } => {
+            let dir = match direction {
+                SplitDirection::Horizontal => fb::SplitDirectionWire::Horizontal,
+                SplitDirection::Vertical => fb::SplitDirectionWire::Vertical,
+            };
+            (
+                fb::NodeOp::CreateSplit,
+                (*session_id).into(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                None,
+                0,
+                0,
+                dir,
+                Some(sizes),
+                Some(
+                    child_node_ids
+                        .iter()
+                        .map(|node_id| u64::from(*node_id))
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+                false,
+            )
+        }
+        NodeRequest::CreateTabs {
+            session_id,
+            child_node_ids,
+            titles,
+            active,
+            ..
+        } => (
+            fb::NodeOp::CreateTabs,
+            (*session_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            *active,
+            fb::SplitDirectionWire::Horizontal,
+            None,
+            Some(
+                child_node_ids
+                    .iter()
+                    .map(|node_id| u64::from(*node_id))
+                    .collect::<Vec<_>>(),
+            ),
+            Some(titles.clone()),
+            false,
+        ),
+        NodeRequest::ReplaceNode {
+            node_id,
+            child_node_id,
+            ..
+        } => (
+            fb::NodeOp::ReplaceNode,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            (*child_node_id).into(),
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            None,
+            None,
+            None,
+            false,
+        ),
+        NodeRequest::WrapInSplit {
+            node_id,
+            child_node_id,
+            direction,
+            insert_before,
+            ..
+        } => {
+            let dir = match direction {
+                SplitDirection::Horizontal => fb::SplitDirectionWire::Horizontal,
+                SplitDirection::Vertical => fb::SplitDirectionWire::Vertical,
+            };
+            (
+                fb::NodeOp::WrapInSplit,
+                0,
+                (*node_id).into(),
+                0,
+                0,
+                (*child_node_id).into(),
+                0,
+                0,
+                0,
+                None,
+                0,
+                0,
+                dir,
+                None,
+                None,
+                None,
+                *insert_before,
             )
         }
         NodeRequest::WrapInTabs { node_id, title, .. } => (
@@ -405,14 +606,19 @@ fn encode_node_request<'a>(
             0,
             Some(title.as_str()),
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::AddTab {
             tabs_node_id,
             title,
             buffer_id,
             child_node_id,
+            index,
             ..
         } => (
             fb::NodeOp::AddTab,
@@ -425,9 +631,13 @@ fn encode_node_request<'a>(
             buffer_id.map_or(0, u64::from),
             0,
             Some(title.as_str()),
+            *index,
             0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::SelectTab {
             tabs_node_id,
@@ -445,8 +655,12 @@ fn encode_node_request<'a>(
             0,
             None,
             *index,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::Focus {
             session_id,
@@ -464,8 +678,12 @@ fn encode_node_request<'a>(
             0,
             None,
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::Close { node_id, .. } => (
             fb::NodeOp::Close,
@@ -479,8 +697,12 @@ fn encode_node_request<'a>(
             0,
             None,
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::MoveBufferToNode {
             buffer_id,
@@ -498,8 +720,12 @@ fn encode_node_request<'a>(
             0,
             None,
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             None,
+            None,
+            None,
+            false,
         ),
         NodeRequest::Resize { node_id, sizes, .. } => (
             fb::NodeOp::Resize,
@@ -513,13 +739,19 @@ fn encode_node_request<'a>(
             0,
             None,
             0,
+            0,
             fb::SplitDirectionWire::Horizontal,
             Some(sizes),
+            None,
+            None,
+            false,
         ),
     };
 
     let title = title_str.map(|s| builder.create_string(s));
     let sizes = sizes_vec.map(|sizes| builder.create_vector(sizes));
+    let child_node_ids = child_node_ids_vec.map(|ids| builder.create_vector(&ids));
+    let titles = titles_vec.map(|values| create_string_vector(builder, &values));
     let node_req = fb::NodeRequest::create(
         builder,
         &fb::NodeRequestArgs {
@@ -534,8 +766,12 @@ fn encode_node_request<'a>(
             new_buffer_id,
             title,
             index,
+            active,
             direction,
             sizes,
+            child_node_ids,
+            titles,
+            insert_before,
         },
     );
 
@@ -554,13 +790,15 @@ fn encode_floating_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &FloatingRequest,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
-    let (op, floating_id, session_id, root_node_id, buffer_id, title_str, geom) = match req {
+    let (op, floating_id, session_id, root_node_id, buffer_id, title_str, geom, focus, close_on_empty) = match req {
         FloatingRequest::Create {
             session_id,
             root_node_id,
             buffer_id,
             geometry,
             title,
+            focus,
+            close_on_empty,
             ..
         } => (
             fb::FloatingOp::Create,
@@ -570,6 +808,8 @@ fn encode_floating_request<'a>(
             buffer_id.map_or(0, u64::from),
             title.as_deref(),
             Some(*geometry),
+            *focus,
+            *close_on_empty,
         ),
         FloatingRequest::Close { floating_id, .. } => (
             fb::FloatingOp::Close,
@@ -579,6 +819,8 @@ fn encode_floating_request<'a>(
             0,
             None,
             None,
+            true,
+            true,
         ),
         FloatingRequest::Move {
             floating_id,
@@ -592,6 +834,8 @@ fn encode_floating_request<'a>(
             0,
             None,
             Some(*geometry),
+            true,
+            true,
         ),
         FloatingRequest::Focus { floating_id, .. } => (
             fb::FloatingOp::Focus,
@@ -601,6 +845,8 @@ fn encode_floating_request<'a>(
             0,
             None,
             None,
+            true,
+            true,
         ),
     };
 
@@ -622,6 +868,8 @@ fn encode_floating_request<'a>(
             y,
             width,
             height,
+            focus,
+            close_on_empty,
         },
     );
 
@@ -1139,6 +1387,10 @@ fn encode_buffer_record<'a>(
         .collect();
     let command = builder.create_vector(&command_vec);
     let cwd = record.cwd.as_ref().map(|c| builder.create_string(c));
+    let env_keys_vec = record.env.keys().cloned().collect::<Vec<_>>();
+    let env_values_vec = record.env.values().cloned().collect::<Vec<_>>();
+    let env_keys = create_string_vector(builder, &env_keys_vec);
+    let env_values = create_string_vector(builder, &env_values_vec);
 
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
@@ -1160,6 +1412,8 @@ fn encode_buffer_record<'a>(
             command: Some(command),
             cwd,
             state,
+            pid: record.pid.unwrap_or(0),
+            has_pid: record.pid.is_some(),
             attachment_node_id: record.attachment_node_id.map(|n| n.into()).unwrap_or(0),
             pty_cols: record.pty_size.cols,
             pty_rows: record.pty_size.rows,
@@ -1167,6 +1421,8 @@ fn encode_buffer_record<'a>(
             last_snapshot_seq: record.last_snapshot_seq,
             exit_code: record.exit_code.unwrap_or(0),
             has_exit_code: record.exit_code.is_some(),
+            env_keys: Some(env_keys),
+            env_values: Some(env_values),
         },
     )
 }
@@ -1381,11 +1637,17 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::BufferOp::Create => {
                     let command = required(req.command(), "buffer_request.command")?;
                     let command_vec: Vec<String> = command.iter().map(|s| s.to_owned()).collect();
+                    let env = decode_string_map(
+                        req.env_keys(),
+                        req.env_values(),
+                        "buffer_request.env",
+                    )?;
                     BufferRequest::Create {
                         request_id,
                         title: req.title().map(|t| t.to_owned()),
                         command: command_vec,
                         cwd: req.cwd().map(|c| c.to_owned()),
+                        env,
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -1439,6 +1701,70 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         new_buffer_id: BufferId(req.new_buffer_id()),
                     }
                 }
+                fb::NodeOp::CreateSplit => {
+                    let direction = match req.direction() {
+                        fb::SplitDirectionWire::Horizontal => SplitDirection::Horizontal,
+                        fb::SplitDirectionWire::Vertical => SplitDirection::Vertical,
+                        _ => return Err(ProtocolError::InvalidMessage("unknown split direction")),
+                    };
+                    let child_node_ids = required(
+                        req.child_node_ids(),
+                        "node_request.child_node_ids",
+                    )?
+                    .iter()
+                    .map(NodeId)
+                    .collect();
+                    let sizes = req
+                        .sizes()
+                        .map(|sizes| sizes.iter().collect())
+                        .unwrap_or_default();
+                    NodeRequest::CreateSplit {
+                        request_id,
+                        session_id: SessionId(req.session_id()),
+                        direction,
+                        child_node_ids,
+                        sizes,
+                    }
+                }
+                fb::NodeOp::CreateTabs => {
+                    let child_node_ids = required(
+                        req.child_node_ids(),
+                        "node_request.child_node_ids",
+                    )?
+                    .iter()
+                    .map(NodeId)
+                    .collect();
+                    let titles = required(req.titles(), "node_request.titles")?
+                        .iter()
+                        .map(|title| title.to_owned())
+                        .collect();
+                    NodeRequest::CreateTabs {
+                        request_id,
+                        session_id: SessionId(req.session_id()),
+                        child_node_ids,
+                        titles,
+                        active: req.active(),
+                    }
+                }
+                fb::NodeOp::ReplaceNode => NodeRequest::ReplaceNode {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                    child_node_id: NodeId(req.child_node_id()),
+                },
+                fb::NodeOp::WrapInSplit => {
+                    let direction = match req.direction() {
+                        fb::SplitDirectionWire::Horizontal => SplitDirection::Horizontal,
+                        fb::SplitDirectionWire::Vertical => SplitDirection::Vertical,
+                        _ => return Err(ProtocolError::InvalidMessage("unknown split direction")),
+                    };
+                    NodeRequest::WrapInSplit {
+                        request_id,
+                        node_id: NodeId(req.node_id()),
+                        child_node_id: NodeId(req.child_node_id()),
+                        direction,
+                        insert_before: req.insert_before(),
+                    }
+                }
                 fb::NodeOp::WrapInTabs => {
                     let title = required(req.title(), "node_request.title")?;
                     NodeRequest::WrapInTabs {
@@ -1456,6 +1782,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
                         child_node_id: (req.child_node_id() != 0)
                             .then(|| NodeId(req.child_node_id())),
+                        index: req.index(),
                     }
                 }
                 fb::NodeOp::SelectTab => NodeRequest::SelectTab {
@@ -1504,6 +1831,8 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         height: req.height(),
                     },
                     title: req.title().map(|t| t.to_owned()),
+                    focus: req.focus(),
+                    close_on_empty: req.close_on_empty(),
                 },
                 fb::FloatingOp::Close => FloatingRequest::Close {
                     request_id,
@@ -1841,6 +2170,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         fb::ActivityStateWire::Bell => ActivityState::Bell,
         _ => return Err(ProtocolError::InvalidMessage("unknown activity state")),
     };
+    let env = decode_string_map(record.env_keys(), record.env_values(), "buffer_record.env")?;
 
     Ok(BufferRecord {
         id: BufferId(record.id()),
@@ -1848,6 +2178,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         command,
         cwd: record.cwd().map(|c| c.to_owned()),
         state,
+        pid: record.has_pid().then(|| record.pid()),
         attachment_node_id: if record.attachment_node_id() == 0 {
             None
         } else {
@@ -1866,6 +2197,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         } else {
             None
         },
+        env,
     })
 }
 

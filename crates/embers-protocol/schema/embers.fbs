@@ -75,6 +75,10 @@ enum NodeOp : ubyte {
   Close = 6,
   MoveBufferToNode = 7,
   Resize = 8,
+  CreateSplit = 9,
+  CreateTabs = 10,
+  ReplaceNode = 11,
+  WrapInSplit = 12,
 }
 
 enum FloatingOp : ubyte {
@@ -137,6 +141,8 @@ table BufferRequest {
   title:string;
   command:[string];
   cwd:string;
+  env_keys:[string];
+  env_values:[string];
 }
 
 table NodeRequest {
@@ -151,8 +157,12 @@ table NodeRequest {
   new_buffer_id:ulong = 0;
   title:string;
   index:uint = 0;
+  active:uint = 0;
   direction:SplitDirectionWire = Horizontal;
   sizes:[ushort];
+  child_node_ids:[ulong];
+  titles:[string];
+  insert_before:bool = false;
 }
 
 table FloatingRequest {
@@ -166,6 +176,8 @@ table FloatingRequest {
   y:ushort = 0;
   width:ushort = 0;
   height:ushort = 0;
+  focus:bool = true;
+  close_on_empty:bool = true;
 }
 
 table InputRequest {
@@ -210,6 +222,8 @@ table BufferRecord {
   command:[string];
   cwd:string;
   state:BufferStateWire = Created;
+  pid:uint = 0;
+  has_pid:bool = false;
   attachment_node_id:ulong = 0;
   pty_cols:ushort = 0;
   pty_rows:ushort = 0;
@@ -217,6 +231,8 @@ table BufferRecord {
   last_snapshot_seq:ulong = 0;
   exit_code:int = 0;
   has_exit_code:bool = false;
+  env_keys:[string];
+  env_values:[string];
 }
 
 table BufferViewRecord {

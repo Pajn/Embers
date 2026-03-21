@@ -15,6 +15,8 @@ fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord
         title: title.to_owned(),
         command: vec!["/bin/sh".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        pid: None,
+        env: Default::default(),
         state: BufferRecordState::Running,
         attachment_node_id: attachment_node_id.map(NodeId),
         pty_size: PtySize::new(80, 24),

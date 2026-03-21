@@ -3,7 +3,7 @@ mod support;
 use std::path::Path;
 
 use embers_client::{
-    Context, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
+    Action, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
     TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
@@ -17,16 +17,16 @@ fn loaded_config_debug_snapshot_is_stable() {
         origin: ConfigOrigin::BuiltIn,
         path: Some("snapshot-config.rhai".into()),
         source: r##"
-            fn split_workspace() { () }
-            fn on_created() { () }
-            fn root_tabs() { () }
+            fn split_workspace(ctx) { () }
+            fn on_created(ctx) { () }
+            fn format_tabs(ctx) { ui.bar([], [], []) }
 
             set_leader("<C-a>");
             define_mode("locked");
             define_action("workspace-split", split_workspace);
             bind("normal", "<leader>ws", "workspace-split");
-            on("session-created", on_created);
-            tabbar.set_root_formatter(root_tabs);
+            on("session_created", on_created);
+            tabbar.set_formatter(format_tabs);
             theme.set_palette(#{ active: "#00ff00", inactive: "#333333" });
         "##
         .trim()
@@ -51,17 +51,16 @@ fn loaded_config_debug_snapshot_is_stable() {
         "split_workspace"
     );
     assert_eq!(
-        loaded.event_handlers["session-created"][0].name,
+        loaded.event_handlers["session_created"][0].name,
         "on_created"
     );
     assert_eq!(
         loaded
-            .root_tab_formatter
+            .tab_bar_formatter
             .as_ref()
             .map(|formatter| formatter.name.as_str()),
-        Some("root_tabs")
+        Some("format_tabs")
     );
-    assert!(loaded.nested_tab_formatter.is_none());
     assert_eq!(loaded.theme.palette["active"].green, 255);
     assert!(debug_output.contains("source_path: Some("));
     assert!(debug_output.contains("ast: \"<ast>\""));
@@ -71,7 +70,7 @@ fn loaded_config_debug_snapshot_is_stable() {
 fn harness_resolves_leader_binding_to_exact_match() {
     let mut harness = ScriptHarness::load(
         r#"
-            fn split_workspace() { () }
+            fn split_workspace(ctx) { () }
             define_action("workspace-split", split_workspace);
             set_leader("<C-a>");
             bind("normal", "<leader>ws", "workspace-split");
@@ -92,7 +91,9 @@ fn harness_resolves_leader_binding_to_exact_match() {
                 KeyToken::Char('w'),
                 KeyToken::Char('s'),
             ],
-            target: "workspace-split".to_owned(),
+            target: vec![Action::RunNamedAction {
+                name: "workspace-split".to_owned(),
+            }],
         })
     );
 }
@@ -101,8 +102,8 @@ fn harness_resolves_leader_binding_to_exact_match() {
 fn same_sequence_can_resolve_differently_by_mode() {
     let mut harness = ScriptHarness::load(
         r#"
-            fn normal_action() { () }
-            fn copy_action() { () }
+            fn normal_action(ctx) { () }
+            fn copy_action(ctx) { () }
             define_action("normal-a", normal_action);
             define_action("copy-a", copy_action);
             bind("normal", "a", "normal-a");
@@ -116,7 +117,9 @@ fn same_sequence_can_resolve_differently_by_mode() {
         InputResolution::ExactMatch(embers_client::BindingMatch {
             mode: "normal".to_owned(),
             sequence: vec![KeyToken::Char('a')],
-            target: "normal-a".to_owned(),
+            target: vec![Action::RunNamedAction {
+                name: "normal-a".to_owned(),
+            }],
         })
     );
     assert_eq!(
@@ -124,7 +127,9 @@ fn same_sequence_can_resolve_differently_by_mode() {
         InputResolution::ExactMatch(embers_client::BindingMatch {
             mode: "copy".to_owned(),
             sequence: vec![KeyToken::Char('a')],
-            target: "copy-a".to_owned(),
+            target: vec![Action::RunNamedAction {
+                name: "copy-a".to_owned(),
+            }],
         })
     );
 }
@@ -135,26 +140,26 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
         origin: ConfigOrigin::BuiltIn,
         path: Some("formatters.rhai".into()),
         source: r##"
-            fn root_bar() {
-                let tabs = bar.tabs();
-                let active = tabs[bar.active_index()];
-                ui.bar([
-                    ui.segment("ROOT ", theme.color("active"), theme.color("inactive")),
-                    ui.segment(active.title())
-                ])
+            fn format_tabs(ctx) {
+                let tabs = ctx.tabs();
+                let active = tabs[ctx.active_index()];
+                if ctx.is_root() {
+                    ui.bar([
+                        ui.segment("ROOT ", #{
+                            fg: theme.color("active"),
+                            bg: theme.color("inactive")
+                        }),
+                        ui.segment(active.title())
+                    ], [], [])
+                } else {
+                    ui.bar([
+                        ui.segment("NESTED "),
+                        ui.segment(active.title(), #{ fg: theme.color("active") })
+                    ], [], [])
+                }
             }
 
-            fn nested_bar() {
-                let tabs = bar.tabs();
-                let active = tabs[bar.active_index()];
-                ui.bar([
-                    ui.segment("NESTED "),
-                    ui.segment(active.title(), theme.color("active"))
-                ])
-            }
-
-            tabbar.set_root_formatter(root_bar);
-            tabbar.set_nested_formatter(nested_bar);
+            tabbar.set_formatter(format_tabs);
             theme.set_palette(#{ active: "#00ff00", inactive: "#102030" });
         "##
         .trim()
@@ -172,31 +177,36 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
         },
     )
     .unwrap();
-    let context = Context::from_state(&state, Some(&presentation));
 
     let root = engine
-        .format_root_tabbar(
-            context.clone(),
-            TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap()),
-        )
+        .format_tab_bar(TabBarContext::from_frame(
+            presentation.root_tabs.as_ref().unwrap(),
+            "normal",
+            80,
+        ))
         .unwrap()
         .unwrap();
     let nested = engine
-        .format_nested_tabbar(
-            context,
-            TabBarContext::from_frame(presentation.focused_tabs().unwrap()),
-        )
+        .format_tab_bar(TabBarContext::from_frame(
+            presentation.focused_tabs().unwrap(),
+            "normal",
+            80,
+        ))
         .unwrap()
         .unwrap();
 
-    assert_eq!(root.segments.len(), 2);
-    assert_eq!(root.segments[0].text, "ROOT ");
-    assert_eq!(root.segments[1].text, "workspace");
-    assert_eq!(root.segments[0].foreground.unwrap().green, 255);
-    assert_eq!(root.segments[0].background.unwrap().blue, 48);
+    assert_eq!(root.left.len(), 2);
+    assert!(root.center.is_empty());
+    assert!(root.right.is_empty());
+    assert_eq!(root.left[0].text, "ROOT ");
+    assert_eq!(root.left[1].text, "workspace");
+    assert_eq!(root.left[0].style.fg.unwrap().green, 255);
+    assert_eq!(root.left[0].style.bg.unwrap().blue, 48);
 
-    assert_eq!(nested.segments.len(), 2);
-    assert_eq!(nested.segments[0].text, "NESTED ");
-    assert_eq!(nested.segments[1].text, "logs-long-title");
-    assert_eq!(nested.segments[1].foreground.unwrap().green, 255);
+    assert_eq!(nested.left.len(), 2);
+    assert!(nested.center.is_empty());
+    assert!(nested.right.is_empty());
+    assert_eq!(nested.left[0].text, "NESTED ");
+    assert_eq!(nested.left[1].text, "logs-long-title");
+    assert_eq!(nested.left[1].style.fg.unwrap().green, 255);
 }

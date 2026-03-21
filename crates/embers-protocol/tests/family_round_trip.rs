@@ -55,6 +55,7 @@ fn client_message_families_round_trip() {
             title: Some("shell".to_owned()),
             command: vec!["bash".to_owned(), "-lc".to_owned(), "pwd".to_owned()],
             cwd: Some("/tmp".to_owned()),
+            env: std::collections::BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
         }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
@@ -89,6 +90,32 @@ fn client_message_families_round_trip() {
             direction: SplitDirection::Vertical,
             new_buffer_id: BufferId(21),
         }),
+        ClientMessage::Node(NodeRequest::CreateSplit {
+            request_id: RequestId(170),
+            session_id: SessionId(10),
+            direction: SplitDirection::Horizontal,
+            child_node_ids: vec![NodeId(50), NodeId(51)],
+            sizes: vec![2, 1],
+        }),
+        ClientMessage::Node(NodeRequest::CreateTabs {
+            request_id: RequestId(171),
+            session_id: SessionId(10),
+            child_node_ids: vec![NodeId(52), NodeId(53)],
+            titles: vec!["one".to_owned(), "two".to_owned()],
+            active: 1,
+        }),
+        ClientMessage::Node(NodeRequest::ReplaceNode {
+            request_id: RequestId(172),
+            node_id: NodeId(54),
+            child_node_id: NodeId(55),
+        }),
+        ClientMessage::Node(NodeRequest::WrapInSplit {
+            request_id: RequestId(173),
+            node_id: NodeId(56),
+            child_node_id: NodeId(57),
+            direction: SplitDirection::Vertical,
+            insert_before: true,
+        }),
         ClientMessage::Node(NodeRequest::WrapInTabs {
             request_id: RequestId(18),
             node_id: NodeId(31),
@@ -100,6 +127,7 @@ fn client_message_families_round_trip() {
             title: "logs".to_owned(),
             buffer_id: Some(BufferId(23)),
             child_node_id: None,
+            index: 2,
         }),
         ClientMessage::Node(NodeRequest::SelectTab {
             request_id: RequestId(20),
@@ -132,6 +160,8 @@ fn client_message_families_round_trip() {
             buffer_id: None,
             geometry: FloatGeometry::new(4, 2, 60, 18),
             title: Some("inspector".to_owned()),
+            focus: false,
+            close_on_empty: false,
         }),
         ClientMessage::Floating(FloatingRequest::Close {
             request_id: RequestId(26),
@@ -410,10 +440,12 @@ fn sample_buffer_record(
         command: vec!["bash".to_owned(), "-lc".to_owned(), "echo mux".to_owned()],
         cwd: Some("/tmp".to_owned()),
         state,
+        pid: Some(4242),
         attachment_node_id,
         pty_size: PtySize::new(120, 40),
         activity,
         last_snapshot_seq: 9,
         exit_code,
+        env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
     }
 }

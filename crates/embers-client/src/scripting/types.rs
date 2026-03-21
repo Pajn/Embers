@@ -7,6 +7,8 @@ use thiserror::Error;
 
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
 
+use super::model::Action;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ScriptFunctionRef {
     pub name: String,
@@ -57,16 +59,48 @@ pub struct ThemeSpec {
     pub palette: BTreeMap<String, RgbColor>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StyleSpec {
+    pub fg: Option<RgbColor>,
+    pub bg: Option<RgbColor>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub dim: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SegmentSpec {
+pub enum BarTarget {
+    Tab {
+        tabs_node_id: embers_core::NodeId,
+        index: usize,
+    },
+    Floating {
+        floating_id: embers_core::FloatingId,
+    },
+    Buffer {
+        buffer_id: embers_core::BufferId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BarSegment {
     pub text: String,
-    pub foreground: Option<RgbColor>,
-    pub background: Option<RgbColor>,
+    pub style: StyleSpec,
+    pub target: Option<BarTarget>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BarSpec {
-    pub segments: Vec<SegmentSpec>,
+    pub left: Vec<BarSegment>,
+    pub center: Vec<BarSegment>,
+    pub right: Vec<BarSegment>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModeHooks {
+    pub on_enter: Option<ScriptFunctionRef>,
+    pub on_leave: Option<ScriptFunctionRef>,
 }
 
 #[derive(Clone)]
@@ -76,11 +110,11 @@ pub struct LoadedConfig {
     pub ast: AST,
     pub leader: KeySequence,
     pub modes: BTreeMap<String, ModeSpec>,
-    pub bindings: BTreeMap<String, Vec<BindingSpec<String>>>,
+    pub mode_hooks: BTreeMap<String, ModeHooks>,
+    pub bindings: BTreeMap<String, Vec<BindingSpec<Vec<Action>>>>,
     pub named_actions: BTreeMap<String, ScriptFunctionRef>,
     pub event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
-    pub root_tab_formatter: Option<ScriptFunctionRef>,
-    pub nested_tab_formatter: Option<ScriptFunctionRef>,
+    pub tab_bar_formatter: Option<ScriptFunctionRef>,
     pub theme: ThemeSpec,
 }
 
@@ -95,12 +129,8 @@ impl LoadedConfig {
             .is_some_and(|handlers| !handlers.is_empty())
     }
 
-    pub fn has_root_formatter(&self) -> bool {
-        self.root_tab_formatter.is_some()
-    }
-
-    pub fn has_nested_formatter(&self) -> bool {
-        self.nested_tab_formatter.is_some()
+    pub fn has_tab_bar_formatter(&self) -> bool {
+        self.tab_bar_formatter.is_some()
     }
 }
 
@@ -113,11 +143,11 @@ impl fmt::Debug for LoadedConfig {
             .field("ast", &"<ast>")
             .field("leader", &self.leader)
             .field("modes", &self.modes)
+            .field("mode_hooks", &self.mode_hooks)
             .field("bindings", &self.bindings)
             .field("named_actions", &self.named_actions)
             .field("event_handlers", &self.event_handlers)
-            .field("root_tab_formatter", &self.root_tab_formatter)
-            .field("nested_tab_formatter", &self.nested_tab_formatter)
+            .field("tab_bar_formatter", &self.tab_bar_formatter)
             .field("theme", &self.theme)
             .finish()
     }

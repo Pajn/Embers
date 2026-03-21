@@ -19,10 +19,10 @@ pub fn session_record(session: &Session) -> SessionRecord {
 }
 
 pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
-    let (state, exit_code) = match &buffer.state {
-        BufferState::Created => (BufferRecordState::Created, None),
-        BufferState::Running(_) => (BufferRecordState::Running, None),
-        BufferState::Exited(exited) => (BufferRecordState::Exited, exited.exit_code),
+    let (state, pid, exit_code) = match &buffer.state {
+        BufferState::Created => (BufferRecordState::Created, None, None),
+        BufferState::Running(running) => (BufferRecordState::Running, running.pid, None),
+        BufferState::Exited(exited) => (BufferRecordState::Exited, None, exited.exit_code),
     };
 
     BufferRecord {
@@ -34,6 +34,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
         state,
+        pid,
         attachment_node_id: match buffer.attachment {
             BufferAttachment::Attached(node_id) => Some(node_id),
             BufferAttachment::Detached => None,
@@ -42,6 +43,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         activity: buffer.activity,
         last_snapshot_seq: buffer.last_snapshot_seq,
         exit_code,
+        env: buffer.env.clone(),
     }
 }
 

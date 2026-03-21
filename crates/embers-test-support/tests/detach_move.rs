@@ -53,6 +53,7 @@ async fn create_echo_buffer(connection: &mut TestConnection, title: &str) -> Buf
                     .to_owned(),
             ],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");

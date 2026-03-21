@@ -15,6 +15,7 @@ async fn create_buffer(connection: &mut TestConnection, command: &[&str]) -> Buf
             title: Some("buffer".to_owned()),
             command: command.iter().map(|part| (*part).to_owned()).collect(),
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");

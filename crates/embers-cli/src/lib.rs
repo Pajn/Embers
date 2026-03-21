@@ -447,6 +447,8 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     buffer_id: Some(buffer.buffer.id),
                     geometry: FloatGeometry::new(x, y, width, height),
                     title: Some(popup_title),
+                    focus: true,
+                    close_on_empty: true,
                 }))
                 .await?;
             let popup = expect_floating(response, "display-popup")?;
@@ -747,6 +749,7 @@ impl CliConnection {
                 title,
                 command,
                 cwd,
+                env: Default::default(),
             }))
             .await?
         {
@@ -785,15 +788,20 @@ impl CliConnection {
             .resolve_session_snapshot(session_target.as_deref())
             .await?;
         let (index, child_id) = {
-            let (_, root_tabs) = root_tabs(&snapshot)?;
-            let index = resolve_window_index(root_tabs, selector.as_deref())?;
-            let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
-                MuxError::not_found(format!(
-                    "window index {index} is not present in session {}",
-                    snapshot.session.id
-                ))
-            })?;
-            (index, tab.child_id)
+            if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
+                let index = resolve_window_index(root_tabs, selector.as_deref())?;
+                let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
+                    MuxError::not_found(format!(
+                        "window index {index} is not present in session {}",
+                        snapshot.session.id
+                    ))
+                })?;
+                (index, tab.child_id)
+            } else {
+                let title = window_title(&snapshot, snapshot.session.root_node_id)?;
+                let index = resolve_single_window_index(&title, selector.as_deref())?;
+                (index, snapshot.session.root_node_id)
+            }
         };
         Ok(ResolvedWindow {
             snapshot,
@@ -934,20 +942,24 @@ fn format_sessions(sessions: &[SessionRecord]) -> String {
 }
 
 fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
-    let (_, tabs) = root_tabs(snapshot)?;
-    Ok(tabs
-        .tabs
-        .iter()
-        .enumerate()
-        .map(|(index, tab)| {
-            format!(
-                "{index}\t{}\t{}",
-                usize::from(u32::try_from(index).ok() == Some(tabs.active)),
-                tab.title
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n"))
+    if let Some((_, tabs)) = root_tabs(snapshot)? {
+        Ok(tabs
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                format!(
+                    "{index}\t{}\t{}",
+                    usize::from(u32::try_from(index).ok() == Some(tabs.active)),
+                    tab.title
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"))
+    } else {
+        let title = window_title(snapshot, snapshot.session.root_node_id)?;
+        Ok(format!("0\t1\t{title}"))
+    }
 }
 
 fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<String> {
@@ -974,21 +986,20 @@ fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<Strin
 }
 
 fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
-    let (_, tabs) = root_tabs(snapshot)?;
-    let tab = protocol_tab(tabs, tabs.active)
-        .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
-    Ok((tabs.active, tab.title.clone()))
+    if let Some((_, tabs)) = root_tabs(snapshot)? {
+        let tab = protocol_tab(tabs, tabs.active)
+            .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
+        Ok((tabs.active, tab.title.clone()))
+    } else {
+        Ok((0, window_title(snapshot, snapshot.session.root_node_id)?))
+    }
 }
 
 fn root_tabs(
     snapshot: &SessionSnapshot,
-) -> Result<(&embers_protocol::NodeRecord, &embers_protocol::TabsRecord)> {
+) -> Result<Option<(&embers_protocol::NodeRecord, &embers_protocol::TabsRecord)>> {
     let node = node_record(snapshot, snapshot.session.root_node_id)?;
-    let tabs = node
-        .tabs
-        .as_ref()
-        .ok_or_else(|| MuxError::protocol("session root node is not a tabs node"))?;
-    Ok((node, tabs))
+    Ok(node.tabs.as_ref().map(|tabs| (node, tabs)))
 }
 
 fn node_record(
@@ -1098,6 +1109,46 @@ fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&st
             "window title '{selector}' matched multiple root tabs"
         ))),
     }
+}
+
+fn resolve_single_window_index(title: &str, selector: Option<&str>) -> Result<u32> {
+    let Some(selector) = selector else {
+        return Ok(0);
+    };
+
+    if let Ok(index) = selector.parse::<u32>() {
+        return match index {
+            0 | 1 => Ok(0),
+            _ => Err(MuxError::not_found(format!(
+                "window index '{selector}' is out of range"
+            ))),
+        };
+    }
+
+    if selector == title {
+        Ok(0)
+    } else {
+        Err(MuxError::not_found(format!(
+            "window '{selector}' was not found"
+        )))
+    }
+}
+
+fn window_title(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<String> {
+    let visible_leaf_ids = visible_leaf_ids(snapshot, node_id)?;
+    let leaf_id = snapshot
+        .session
+        .focused_leaf_id
+        .filter(|leaf_id| visible_leaf_ids.contains(leaf_id))
+        .or_else(|| visible_leaf_ids.first().copied())
+        .ok_or_else(|| MuxError::not_found(format!("window {node_id} has no visible panes")))?;
+    let leaf = node_record(snapshot, leaf_id)?;
+    let buffer_id = leaf
+        .buffer_view
+        .as_ref()
+        .map(|view| view.buffer_id)
+        .ok_or_else(|| MuxError::invalid_input(format!("node {leaf_id} is not a pane leaf")))?;
+    Ok(buffer_record(snapshot, buffer_id)?.title.clone())
 }
 
 fn protocol_tab(

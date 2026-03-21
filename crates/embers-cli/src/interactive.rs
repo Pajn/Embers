@@ -200,9 +200,8 @@ fn session_has_root_window(
         })?;
     let tabs = root
         .tabs
-        .as_ref()
-        .ok_or_else(|| MuxError::protocol("session root node is not a tabs node"))?;
-    Ok(!tabs.tabs.is_empty())
+        .as_ref();
+    Ok(tabs.map_or(true, |tabs| !tabs.tabs.is_empty()))
 }
 
 async fn create_buffer(
@@ -216,6 +215,7 @@ async fn create_buffer(
             title: Some(title.to_owned()),
             command: command.to_vec(),
             cwd: None,
+            env: Default::default(),
         }))
         .await?;
     match response {

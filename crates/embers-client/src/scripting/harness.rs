@@ -32,7 +32,7 @@ impl ScriptHarness {
         &mut self,
         mode: &str,
         notation: &str,
-    ) -> Result<InputResolution<String>, crate::input::KeyParseError> {
+    ) -> Result<InputResolution<Vec<super::Action>>, crate::input::KeyParseError> {
         self.input_state.set_mode(mode);
         let mut last_resolution = None;
         for key in parse_key_sequence(notation)? {

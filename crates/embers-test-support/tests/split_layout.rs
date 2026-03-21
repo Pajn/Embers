@@ -27,6 +27,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             title: Some(title.to_owned()),
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), "cat".to_owned()],
             cwd: None,
+            env: Default::default(),
         }))
         .await
         .expect("create buffer request succeeds");
@@ -85,6 +86,14 @@ fn root_tabs(snapshot: &SessionSnapshot) -> TabsRecord {
         .find(|node| node.id == snapshot.session.root_node_id)
         .and_then(|node| node.tabs.clone())
         .expect("session root snapshot includes tabs record")
+}
+
+fn root_node(snapshot: &SessionSnapshot) -> &embers_protocol::NodeRecord {
+    snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == snapshot.session.root_node_id)
+        .expect("session root snapshot includes root node")
 }
 
 fn split_record(snapshot: &SessionSnapshot, node_id: embers_core::NodeId) -> SplitRecord {
@@ -235,7 +244,13 @@ async fn focus_and_close_requests_normalize_layout_and_detach_buffers() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot.snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    assert_eq!(root_tabs(&closed).tabs[0].child_id, second_leaf);
+    let root = root_node(&closed);
+    let root_buffer = root
+        .buffer_view
+        .as_ref()
+        .expect("single remaining pane collapses to the root buffer view");
+    assert_eq!(root.id, second_leaf);
+    assert_eq!(root_buffer.buffer_id, second_buffer.id);
     assert_eq!(closed.session.focused_leaf_id, Some(second_leaf));
     assert_eq!(
         get_buffer(&mut connection, first_buffer.id)
