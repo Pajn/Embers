@@ -88,6 +88,10 @@ impl MuxError {
         Self::InvalidInput(message.into())
     }
 
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(message.into())
     }
