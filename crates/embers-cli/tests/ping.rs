@@ -4,7 +4,7 @@ use predicates::prelude::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_command_reaches_server() {
     let server = TestServer::start().await.expect("start server");
-    let mut command = cargo_bin("embers-cli");
+    let mut command = cargo_bin("embers");
     command
         .arg("ping")
         .arg("--socket")

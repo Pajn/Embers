@@ -7,7 +7,7 @@ use embers_protocol::{ClientMessage, ServerResponse, SessionRequest, SessionSnap
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
 
 pub fn cli_command(server: &TestServer) -> assert_cmd::Command {
-    let mut command = cargo_bin("embers-cli");
+    let mut command = cargo_bin("embers");
     command.arg("--socket").arg(server.socket_path());
     command
 }
