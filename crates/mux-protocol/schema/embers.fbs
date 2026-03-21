@@ -3,9 +3,34 @@ namespace mux.protocol;
 enum MessageKind : ubyte {
   None = 0,
   PingRequest = 1,
-  PingResponse = 2,
-  ErrorResponse = 3,
-  HeartbeatEvent = 4,
+  SessionRequest = 2,
+  BufferRequest = 3,
+  NodeRequest = 4,
+  FloatingRequest = 5,
+  InputRequest = 6,
+  SubscribeRequest = 7,
+  UnsubscribeRequest = 8,
+
+  PingResponse = 20,
+  OkResponse = 21,
+  ErrorResponse = 22,
+  SessionsResponse = 23,
+  SessionSnapshotResponse = 24,
+  BuffersResponse = 25,
+  BufferResponse = 26,
+  FloatingListResponse = 27,
+  FloatingResponse = 28,
+  SubscriptionAckResponse = 29,
+  SnapshotResponse = 30,
+
+  SessionCreatedEvent = 40,
+  SessionClosedEvent = 41,
+  BufferCreatedEvent = 42,
+  BufferDetachedEvent = 43,
+  NodeChangedEvent = 44,
+  FloatingChangedEvent = 45,
+  FocusChangedEvent = 46,
+  RenderInvalidatedEvent = 47,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -20,30 +45,330 @@ enum ErrorCodeWire : ubyte {
   Internal = 8,
 }
 
+enum SessionOp : ubyte {
+  Create = 0,
+  List = 1,
+  Get = 2,
+  Close = 3,
+}
+
+enum BufferOp : ubyte {
+  Create = 0,
+  List = 1,
+  Get = 2,
+  Detach = 3,
+  Kill = 4,
+  Capture = 5,
+}
+
+enum NodeOp : ubyte {
+  GetTree = 0,
+  Split = 1,
+  WrapInTabs = 2,
+  AddTab = 3,
+  SelectTab = 4,
+  Focus = 5,
+  Close = 6,
+  MoveBufferToNode = 7,
+}
+
+enum FloatingOp : ubyte {
+  Create = 0,
+  Close = 1,
+  Move = 2,
+  Focus = 3,
+}
+
+enum InputOp : ubyte {
+  Send = 0,
+  Resize = 1,
+}
+
+enum SplitDirectionWire : ubyte {
+  Horizontal = 0,
+  Vertical = 1,
+}
+
+enum ActivityStateWire : ubyte {
+  Idle = 0,
+  Activity = 1,
+  Bell = 2,
+}
+
+enum BufferStateWire : ubyte {
+  Created = 0,
+  Running = 1,
+  Exited = 2,
+}
+
+enum NodeRecordKindWire : ubyte {
+  BufferView = 0,
+  Split = 1,
+  Tabs = 2,
+}
+
 table PingRequest {
   payload:string;
+}
+
+table SessionRequest {
+  op:SessionOp = Create;
+  session_id:ulong = 0;
+  name:string;
+  force:bool = false;
+}
+
+table BufferRequest {
+  op:BufferOp = Create;
+  buffer_id:ulong = 0;
+  session_id:ulong = 0;
+  attached_only:bool = false;
+  detached_only:bool = false;
+  force:bool = false;
+  title:string;
+  command:[string];
+  cwd:string;
+}
+
+table NodeRequest {
+  op:NodeOp = GetTree;
+  session_id:ulong = 0;
+  node_id:ulong = 0;
+  leaf_node_id:ulong = 0;
+  tabs_node_id:ulong = 0;
+  child_node_id:ulong = 0;
+  target_leaf_node_id:ulong = 0;
+  buffer_id:ulong = 0;
+  new_buffer_id:ulong = 0;
+  title:string;
+  index:uint = 0;
+  direction:SplitDirectionWire = Horizontal;
+}
+
+table FloatingRequest {
+  op:FloatingOp = Create;
+  floating_id:ulong = 0;
+  session_id:ulong = 0;
+  root_node_id:ulong = 0;
+  title:string;
+  x:ushort = 0;
+  y:ushort = 0;
+  width:ushort = 0;
+  height:ushort = 0;
+}
+
+table InputRequest {
+  op:InputOp = Send;
+  buffer_id:ulong = 0;
+  bytes:[ubyte];
+  cols:ushort = 0;
+  rows:ushort = 0;
+}
+
+table SubscribeRequest {
+  session_id:ulong = 0;
+}
+
+table UnsubscribeRequest {
+  subscription_id:ulong;
 }
 
 table PingResponse {
   payload:string;
 }
 
+table OkResponse {}
+
 table ErrorResponse {
   code:ErrorCodeWire = Unknown;
   message:string;
 }
 
-table HeartbeatEvent {
-  message:string;
+table SessionRecord {
+  id:ulong;
+  name:string;
+  root_node_id:ulong;
+  floating_ids:[ulong];
+  focused_leaf_id:ulong = 0;
+  focused_floating_id:ulong = 0;
+}
+
+table BufferRecord {
+  id:ulong;
+  title:string;
+  command:[string];
+  cwd:string;
+  state:BufferStateWire = Created;
+  attachment_node_id:ulong = 0;
+  pty_cols:ushort = 0;
+  pty_rows:ushort = 0;
+  activity:ActivityStateWire = Idle;
+  last_snapshot_seq:ulong = 0;
+  exit_code:int = 0;
+  has_exit_code:bool = false;
+}
+
+table BufferViewRecord {
+  buffer_id:ulong;
+  focused:bool = false;
+  zoomed:bool = false;
+  follow_output:bool = false;
+  last_render_cols:ushort = 0;
+  last_render_rows:ushort = 0;
+}
+
+table SplitRecord {
+  direction:SplitDirectionWire = Horizontal;
+  child_ids:[ulong];
+  sizes:[ushort];
+}
+
+table TabRecord {
+  title:string;
+  child_id:ulong;
+}
+
+table TabsRecord {
+  active:uint = 0;
+  tabs:[TabRecord];
+}
+
+table NodeRecord {
+  id:ulong;
+  session_id:ulong;
+  parent_id:ulong = 0;
+  kind:NodeRecordKindWire = BufferView;
+  buffer_view:BufferViewRecord;
+  split:SplitRecord;
+  tabs:TabsRecord;
+}
+
+table FloatingRecord {
+  id:ulong;
+  session_id:ulong;
+  root_node_id:ulong;
+  title:string;
+  x:ushort = 0;
+  y:ushort = 0;
+  width:ushort = 0;
+  height:ushort = 0;
+  focused:bool = false;
+  visible:bool = true;
+  close_on_empty:bool = true;
+}
+
+table SessionSnapshot {
+  session:SessionRecord;
+  nodes:[NodeRecord];
+  buffers:[BufferRecord];
+  floating:[FloatingRecord];
+}
+
+table SessionsResponse {
+  sessions:[SessionRecord];
+}
+
+table SessionSnapshotResponse {
+  snapshot:SessionSnapshot;
+}
+
+table BuffersResponse {
+  buffers:[BufferRecord];
+}
+
+table BufferResponse {
+  buffer:BufferRecord;
+}
+
+table FloatingListResponse {
+  floating:[FloatingRecord];
+}
+
+table FloatingResponse {
+  floating:FloatingRecord;
+}
+
+table SubscriptionAckResponse {
+  subscription_id:ulong;
+}
+
+table SnapshotResponse {
+  buffer_id:ulong;
+  sequence:ulong = 0;
+  cols:ushort = 0;
+  rows:ushort = 0;
+  lines:[string];
+  title:string;
+  cwd:string;
+}
+
+table SessionCreatedEvent {
+  session:SessionRecord;
+}
+
+table SessionClosedEvent {
+  session_id:ulong;
+}
+
+table BufferCreatedEvent {
+  buffer:BufferRecord;
+}
+
+table BufferDetachedEvent {
+  buffer_id:ulong;
+}
+
+table NodeChangedEvent {
+  session_id:ulong;
+}
+
+table FloatingChangedEvent {
+  session_id:ulong;
+  floating_id:ulong = 0;
+}
+
+table FocusChangedEvent {
+  session_id:ulong;
+  focused_leaf_id:ulong = 0;
+  focused_floating_id:ulong = 0;
+}
+
+table RenderInvalidatedEvent {
+  buffer_id:ulong;
 }
 
 table Envelope {
   request_id:ulong = 0;
   kind:MessageKind = None;
   ping_request:PingRequest;
+  session_request:SessionRequest;
+  buffer_request:BufferRequest;
+  node_request:NodeRequest;
+  floating_request:FloatingRequest;
+  input_request:InputRequest;
+  subscribe_request:SubscribeRequest;
+  unsubscribe_request:UnsubscribeRequest;
+
   ping_response:PingResponse;
+  ok_response:OkResponse;
   error_response:ErrorResponse;
-  heartbeat_event:HeartbeatEvent;
+  sessions_response:SessionsResponse;
+  session_snapshot_response:SessionSnapshotResponse;
+  buffers_response:BuffersResponse;
+  buffer_response:BufferResponse;
+  floating_list_response:FloatingListResponse;
+  floating_response:FloatingResponse;
+  subscription_ack_response:SubscriptionAckResponse;
+  snapshot_response:SnapshotResponse;
+
+  session_created_event:SessionCreatedEvent;
+  session_closed_event:SessionClosedEvent;
+  buffer_created_event:BufferCreatedEvent;
+  buffer_detached_event:BufferDetachedEvent;
+  node_changed_event:NodeChangedEvent;
+  floating_changed_event:FloatingChangedEvent;
+  focus_changed_event:FocusChangedEvent;
+  render_invalidated_event:RenderInvalidatedEvent;
 }
 
 root_type Envelope;
