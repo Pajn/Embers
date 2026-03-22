@@ -4,9 +4,9 @@ use embers_client::{
     PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind, SelectionPoint,
     SelectionState,
 };
-use embers_core::{BufferId, CursorPosition, CursorShape, CursorState, Size};
+use embers_core::{CursorPosition, CursorShape, CursorState, Size};
 
-use support::{FOCUSED_LEAF_ID, SESSION_ID, demo_state};
+use support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
 
 #[test]
 fn renders_nested_tabs_splits_and_floating_overlay() {
@@ -70,7 +70,7 @@ fn renderer_emits_styles_and_tracks_cursor_position() {
     let mut state = demo_state();
     state
         .snapshots
-        .get_mut(&BufferId(4))
+        .get_mut(&FOCUSED_BUFFER_ID)
         .expect("focused pane snapshot")
         .cursor = Some(CursorState {
         position: CursorPosition { row: 1, col: 3 },
@@ -141,7 +141,7 @@ fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
     let mut state = demo_state();
     state
         .snapshots
-        .get_mut(&BufferId(4))
+        .get_mut(&FOCUSED_BUFFER_ID)
         .expect("focused pane snapshot")
         .cursor = Some(CursorState {
         position: CursorPosition { row: 0, col: 0 },

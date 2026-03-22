@@ -20,6 +20,7 @@ pub struct TabItem {
     pub child_id: NodeId,
     pub active: bool,
     pub activity: ActivityState,
+    pub buffer_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +90,7 @@ impl PresentationModel {
         }
         .project_node(session.root_node_id, root_bounds, None, true, Vec::new())?;
 
-        let overlay_bounds = inset_top(root_bounds, 1);
+        let overlay_bounds = root_bounds;
         for floating_id in &session.floating_ids {
             let Some(window) = state.floating.get(floating_id) else {
                 continue;
@@ -293,6 +294,7 @@ impl Projector<'_> {
                             child_id: tab.child_id,
                             active: u32::try_from(index).ok() == Some(tabs.active),
                             activity: subtree_activity(self.state, tab.child_id),
+                            buffer_count: subtree_buffer_count(self.state, tab.child_id),
                         })
                         .collect(),
                     active: active_index,
@@ -381,6 +383,37 @@ fn subtree_activity(state: &ClientState, node_id: NodeId) -> ActivityState {
                     })
             })
             .unwrap_or(ActivityState::Idle),
+    }
+}
+
+pub(crate) fn subtree_buffer_count(state: &ClientState, node_id: NodeId) -> usize {
+    let Some(node) = state.nodes.get(&node_id) else {
+        return 0;
+    };
+
+    match node.kind {
+        NodeRecordKind::BufferView => usize::from(node.buffer_view.is_some()),
+        NodeRecordKind::Tabs => node
+            .tabs
+            .as_ref()
+            .map(|tabs| {
+                tabs.tabs
+                    .iter()
+                    .map(|tab| subtree_buffer_count(state, tab.child_id))
+                    .sum()
+            })
+            .unwrap_or(0),
+        NodeRecordKind::Split => node
+            .split
+            .as_ref()
+            .map(|split| {
+                split
+                    .child_ids
+                    .iter()
+                    .map(|child_id| subtree_buffer_count(state, *child_id))
+                    .sum()
+            })
+            .unwrap_or(0),
     }
 }
 

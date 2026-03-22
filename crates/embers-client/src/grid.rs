@@ -166,6 +166,7 @@ impl RenderGrid {
                 break;
             }
 
+            self.clear_overlapping_cells(x_pos, y, width);
             self.set_cell(x_pos, y, grapheme, style, width);
             x_pos = x_pos.saturating_add(width);
         }
@@ -299,6 +300,23 @@ impl RenderGrid {
 
     pub fn render(&self) -> String {
         self.lines().join("\n")
+    }
+
+    fn clear_overlapping_cells(&mut self, x: u16, y: u16, width: u16) {
+        let mut start = x;
+        while start > 0 && self.cells[self.index(start, y)].continuation {
+            start -= 1;
+        }
+
+        let mut end = x.saturating_add(width);
+        while end < self.width && self.cells[self.index(end, y)].continuation {
+            end += 1;
+        }
+
+        for clear_x in start..end {
+            let idx = self.index(clear_x, y);
+            self.cells[idx] = Cell::default();
+        }
     }
 
     fn set_cell(&mut self, x: u16, y: u16, grapheme: &str, style: CellStyle, width: u16) {
@@ -435,6 +453,24 @@ mod tests {
         grid.put_str(0, 0, "界a");
 
         assert_eq!(grid.lines()[0], "界a ");
+    }
+
+    #[test]
+    fn overwriting_a_wide_grapheme_clears_its_trailing_continuation() {
+        let mut grid = RenderGrid::new(4, 1);
+        grid.put_str(0, 0, "界");
+        grid.put_char(0, 0, 'a');
+
+        assert_eq!(grid.lines()[0], "a   ");
+    }
+
+    #[test]
+    fn overwriting_inside_a_wide_grapheme_clears_the_lead_cell() {
+        let mut grid = RenderGrid::new(4, 1);
+        grid.put_str(0, 0, "界");
+        grid.put_char(1, 0, 'a');
+
+        assert_eq!(grid.lines()[0], " a  ");
     }
 
     #[test]

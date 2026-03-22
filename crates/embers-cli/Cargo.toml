@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+# `embers` is the main interactive entry point; `embers-cli` is the lightweight
+# command-focused binary kept for explicit CLI/tooling workflows.
 [[bin]]
 name = "embers"
 path = "src/main.rs"

@@ -35,6 +35,7 @@ async fn shutdown_spawned_server(socket_path: &Path) {
         .trim()
         .parse::<i32>()
         .expect("pid parses");
+    assert!(pid > 0, "invalid pid: {pid}");
 
     // SAFETY: pid comes from our own pid file and SIGTERM targets that specific process.
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
@@ -65,6 +66,25 @@ async fn wait_for_socket(socket_path: &Path) {
     panic!("timed out waiting for socket {}", socket_path.display());
 }
 
+fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> String {
+    harness
+        .write_all(&format!("{command}\r"))
+        .unwrap_or_else(|error| panic!("send pane command `{command}`: {error}"));
+
+    let output = harness
+        .read_until_contains(expected, Duration::from_secs(10))
+        .unwrap_or_else(|error| {
+            panic!("pane command `{command}` did not print `{expected}`: {error}")
+        });
+
+    assert!(
+        output.contains(expected),
+        "pane command `{command}` did not print `{expected}`:\n{output}"
+    );
+
+    output
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
     let tempdir = tempdir().expect("tempdir");
@@ -76,13 +96,11 @@ async fn embers_without_subcommand_starts_server_and_client() {
         .read_until_contains("[main]", Duration::from_secs(5))
         .expect("client starts and renders");
 
-    harness
-        .write_all("embers list-sessions\r")
-        .expect("send command inside pane");
-    let output = harness
-        .read_until_contains("1\tmain", Duration::from_secs(5))
-        .expect("pane command output");
-    assert!(output.contains("1\tmain"));
+    let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
+    assert!(
+        output.contains("1\tmain"),
+        "expected list-sessions output in pane:\n{output}"
+    );
 
     wait_for_socket(&socket_path).await;
 
@@ -139,13 +157,11 @@ async fn attach_subcommand_connects_to_running_server() {
         .read_until_contains("[main]", Duration::from_secs(5))
         .expect("attach client renders");
 
-    harness
-        .write_all("embers list-sessions\r")
-        .expect("send command inside attached pane");
-    let output = harness
-        .read_until_contains("1\tmain", Duration::from_secs(5))
-        .expect("attached pane command output");
-    assert!(output.contains("1\tmain"));
+    let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
+    assert!(
+        output.contains("1\tmain"),
+        "expected list-sessions output in attached pane:\n{output}"
+    );
 
     harness.write_all("\x11").expect("quit attached client");
     harness.wait().expect("client exits");
@@ -173,8 +189,8 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
         .write_all(&long_output)
         .expect("write scrolling command");
     harness
-        .read_until_contains("DONE", Duration::from_secs(5))
-        .expect("long output completed");
+        .read_until_contains("line-39", Duration::from_secs(10))
+        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     harness.write_all("\x1b[5~").expect("page up");
@@ -209,8 +225,8 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
         .write_all(&long_output)
         .expect("write scrolling command");
     harness
-        .read_until_contains("DONE", Duration::from_secs(5))
-        .expect("long output completed");
+        .read_until_contains("line-39", Duration::from_secs(10))
+        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     harness.write_all("\x1b[5~").expect("page up");

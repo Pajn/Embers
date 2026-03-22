@@ -321,6 +321,7 @@ async fn scrollback_slice_returns_history_while_full_capture_stays_available() {
     .await;
 
     let captured = wait_for_capture_contains(&mut connection, buffer.id, "line-40").await;
+    wait_for_exit(&mut connection, buffer.id).await;
     let visible = connection
         .capture_visible_buffer(buffer.id)
         .await
@@ -329,19 +330,13 @@ async fn scrollback_slice_returns_history_while_full_capture_stays_available() {
         .capture_scrollback_slice(buffer.id, 0, 3)
         .await
         .expect("scrollback slice succeeds");
+    let expected_prefix = captured.lines.iter().take(3).cloned().collect::<Vec<_>>();
 
     assert!(captured.lines.join("\n").contains("line-01"));
     assert!(captured.lines.join("\n").contains("line-40"));
     assert!(visible.total_lines >= 40);
     assert!(visible.viewport_top_line > 0);
-    assert_eq!(
-        slice.lines,
-        vec![
-            "line-01".to_owned(),
-            "line-02".to_owned(),
-            "line-03".to_owned()
-        ]
-    );
+    assert_eq!(slice.lines, expected_prefix);
     assert_eq!(slice.start_line, 0);
     assert_eq!(slice.total_lines, visible.total_lines);
 

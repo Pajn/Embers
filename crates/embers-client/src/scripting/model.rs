@@ -178,6 +178,8 @@ impl Default for FloatingGeometrySpec {
     }
 }
 
+/// Floating sizes expressed as percentages are resolved in the inclusive
+/// `1..=100` range when converted into concrete geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FloatingSize {
     Cells(u16),
