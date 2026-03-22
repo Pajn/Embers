@@ -239,7 +239,13 @@ impl RenderGrid {
 
         if height > 2 {
             self.draw_vline_styled(x, y.saturating_add(1), height - 2, border.vertical, style);
-            self.draw_vline_styled(right, y.saturating_add(1), height - 2, border.vertical, style);
+            self.draw_vline_styled(
+                right,
+                y.saturating_add(1),
+                height - 2,
+                border.vertical,
+                style,
+            );
         }
     }
 

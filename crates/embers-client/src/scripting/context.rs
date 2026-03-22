@@ -48,7 +48,7 @@ impl Context {
             })
             .unwrap_or_default();
         let geometry_by_node = presentation.map(geometry_by_node).unwrap_or_default();
-        let visible_node_ids = geometry_by_node.keys().copied().collect::<BTreeSet<_>>();
+        let visible_node_ids = visible_node_ids(state, &geometry_by_node);
         let focused_leaf_ids = state
             .sessions
             .values()
@@ -421,7 +421,10 @@ impl TabBarContext {
                     index,
                     title: tab.title.clone(),
                     active: tab.active,
-                    has_activity: matches!(tab.activity, ActivityState::Activity | ActivityState::Bell),
+                    has_activity: matches!(
+                        tab.activity,
+                        ActivityState::Activity | ActivityState::Bell
+                    ),
                     has_bell: matches!(tab.activity, ActivityState::Bell),
                     buffer_count: 1,
                 })
@@ -449,4 +452,21 @@ fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> 
         geometry.insert(leaf.node_id, leaf.rect);
     }
     geometry
+}
+
+fn visible_node_ids(
+    state: &ClientState,
+    geometry_by_node: &BTreeMap<NodeId, Rect>,
+) -> BTreeSet<NodeId> {
+    let mut visible = BTreeSet::new();
+    for node_id in geometry_by_node.keys().copied() {
+        let mut current = Some(node_id);
+        while let Some(node_id) = current {
+            if !visible.insert(node_id) {
+                break;
+            }
+            current = state.nodes.get(&node_id).and_then(|node| node.parent_id);
+        }
+    }
+    visible
 }

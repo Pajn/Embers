@@ -105,7 +105,13 @@ impl ServerState {
     ) -> Result<usize> {
         let root_tabs = self.ensure_root_tabs_container(session_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
-        self.add_tab_sibling(root_tabs, title, child)
+        match self.add_tab_sibling(root_tabs, title, child) {
+            Ok(index) => Ok(index),
+            Err(error) => {
+                self.discard_buffer_view(child);
+                Err(error)
+            }
+        }
     }
 
     pub fn add_root_tab_from_subtree(
@@ -325,7 +331,10 @@ impl ServerState {
                 view: BufferViewState::default(),
             }),
         );
-        self.attach_buffer(buffer_id, node_id)?;
+        if let Err(error) = self.attach_buffer(buffer_id, node_id) {
+            self.nodes.remove(&node_id);
+            return Err(error);
+        }
         Ok(node_id)
     }
 
@@ -435,14 +444,7 @@ impl ServerState {
         geometry: FloatGeometry,
         title: Option<String>,
     ) -> Result<FloatingId> {
-        self.create_floating_window_with_options(
-            session_id,
-            root_node,
-            geometry,
-            title,
-            true,
-            true,
-        )
+        self.create_floating_window_with_options(session_id, root_node, geometry, title, true, true)
     }
 
     pub fn create_floating_window_with_options(
@@ -502,12 +504,7 @@ impl ServerState {
         title: Option<String>,
     ) -> Result<FloatingId> {
         self.create_floating_from_buffer_with_options(
-            session_id,
-            buffer_id,
-            geometry,
-            title,
-            true,
-            true,
+            session_id, buffer_id, geometry, title, true, true,
         )
     }
 
@@ -669,7 +666,13 @@ impl ServerState {
         }
         let session_id = self.node_session_id(tabs_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
-        self.add_tab_sibling_at(tabs_id, index, title, child)
+        match self.add_tab_sibling_at(tabs_id, index, title, child) {
+            Ok(index) => Ok(index),
+            Err(error) => {
+                self.discard_buffer_view(child);
+                Err(error)
+            }
+        }
     }
 
     pub fn rename_tab(
@@ -1076,6 +1079,7 @@ impl ServerState {
 
     pub fn focus_leaf(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
         self.ensure_leaf_belongs_to(leaf_id, session_id)?;
+        self.ensure_leaf_is_focusable(session_id, leaf_id)?;
         self.clear_session_focus(session_id)?;
         self.set_leaf_focus(leaf_id, true)?;
 
@@ -1816,6 +1820,40 @@ impl ServerState {
 
     fn detach_buffer_raw(&mut self, buffer_id: BufferId) -> Result<()> {
         self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Detached;
+        Ok(())
+    }
+
+    fn discard_buffer_view(&mut self, node_id: NodeId) {
+        if self.node_parent(node_id).ok().flatten().is_some() && self.close_node(node_id).is_ok() {
+            return;
+        }
+
+        let buffer_id = match self.node(node_id) {
+            Ok(Node::BufferView(leaf)) => Some(leaf.buffer_id),
+            _ => None,
+        };
+        if let Some(buffer_id) = buffer_id {
+            let _ = self.detach_buffer_raw(buffer_id);
+        }
+        self.nodes.remove(&node_id);
+    }
+
+    fn ensure_leaf_is_focusable(&self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
+        let root = self.top_root_for_node(leaf_id)?;
+        if root == self.session(session_id)?.root_node {
+            return Ok(());
+        }
+
+        let Some(floating_id) = self.floating_id_by_root(root) else {
+            return Err(MuxError::invalid_input(format!(
+                "leaf {leaf_id} is not attached to session {session_id} layout"
+            )));
+        };
+        if !self.floating_window(floating_id)?.visible {
+            return Err(MuxError::invalid_input(format!(
+                "leaf {leaf_id} is inside hidden floating window {floating_id}"
+            )));
+        }
         Ok(())
     }
 

@@ -14,8 +14,8 @@ use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferRequest, BufferResponse, BuffersResponse,
     ClientMessage, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
     FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
-    ProtocolError, RawFrame, RenderInvalidatedEvent, ServerEnvelope, ServerEvent, ServerResponse,
-    ScrollbackSliceResponse, SessionClosedEvent, SessionCreatedEvent, SessionRequest,
+    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
+    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRequest,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
     VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
     write_frame_no_flush,
@@ -72,6 +72,15 @@ impl Server {
 
                         let write_runtime = runtime.clone();
                         let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        let read_runtime = runtime.clone();
+                        let read_handle = tokio::spawn(async move {
+                            if let Err(error) =
+                                handle_connection(read_runtime, connection_id, reader, outbound_tx)
+                                    .await
+                            {
+                                error!(%error, connection_id, "connection failed");
+                            }
+                        });
                         tokio::spawn(async move {
                             match write_handle.await {
                                 Ok(Ok(())) => {}
@@ -82,14 +91,9 @@ impl Server {
                                     error!(%error, connection_id, "write_loop panicked");
                                 }
                             }
+                            read_handle.abort();
+                            let _ = read_handle.await;
                             write_runtime.cleanup_connection(connection_id).await;
-                        });
-
-                        let runtime = runtime.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = handle_connection(runtime, connection_id, reader, outbound_tx).await {
-                                error!(%error, connection_id, "connection failed");
-                            }
                         });
                     }
                 }
@@ -213,8 +217,13 @@ impl BufferSurface {
         self.backend.visible_snapshot(sequence, self.size, cwd)
     }
 
-    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> crate::BackendScrollbackSlice {
-        self.backend.capture_scrollback_slice(start_line, line_count)
+    fn capture_scrollback_slice(
+        &self,
+        start_line: u64,
+        line_count: u32,
+    ) -> crate::BackendScrollbackSlice {
+        self.backend
+            .capture_scrollback_slice(start_line, line_count)
     }
 
     fn metadata(&self) -> crate::BackendMetadata {
@@ -853,20 +862,21 @@ impl Runtime {
                     Ok(node) => node.session_id(),
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
-                let result = protocol_tab_index(index).and_then(|index| match (buffer_id, child_node_id) {
-                    (Some(buffer_id), None) => {
-                        state.add_tab_from_buffer_at(tabs_node_id, index, title, buffer_id)
-                    }
-                    (None, Some(child_node_id)) => {
-                        state.add_tab_sibling_at(tabs_node_id, index, title, child_node_id)
-                    }
-                    (Some(_), Some(_)) => Err(MuxError::invalid_input(
-                        "add-tab requires either buffer_id or child_node_id, not both",
-                    )),
-                    (None, None) => Err(MuxError::invalid_input(
-                        "add-tab requires either buffer_id or child_node_id",
-                    )),
-                });
+                let result =
+                    protocol_tab_index(index).and_then(|index| match (buffer_id, child_node_id) {
+                        (Some(buffer_id), None) => {
+                            state.add_tab_from_buffer_at(tabs_node_id, index, title, buffer_id)
+                        }
+                        (None, Some(child_node_id)) => {
+                            state.add_tab_sibling_at(tabs_node_id, index, title, child_node_id)
+                        }
+                        (Some(_), Some(_)) => Err(MuxError::invalid_input(
+                            "add-tab requires either buffer_id or child_node_id, not both",
+                        )),
+                        (None, None) => Err(MuxError::invalid_input(
+                            "add-tab requires either buffer_id or child_node_id",
+                        )),
+                    });
                 match result {
                     Ok(_) => layout_snapshot_response(&state, request_id, session_id),
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
@@ -1031,26 +1041,22 @@ impl Runtime {
                 focus,
                 close_on_empty,
             } => match match (root_node_id, buffer_id) {
-                (Some(root_node_id), None) => {
-                    state.create_floating_window_with_options(
-                        session_id,
-                        root_node_id,
-                        geometry,
-                        title,
-                        focus,
-                        close_on_empty,
-                    )
-                }
-                (None, Some(buffer_id)) => {
-                    state.create_floating_from_buffer_with_options(
-                        session_id,
-                        buffer_id,
-                        geometry,
-                        title,
-                        focus,
-                        close_on_empty,
-                    )
-                }
+                (Some(root_node_id), None) => state.create_floating_window_with_options(
+                    session_id,
+                    root_node_id,
+                    geometry,
+                    title,
+                    focus,
+                    close_on_empty,
+                ),
+                (None, Some(buffer_id)) => state.create_floating_from_buffer_with_options(
+                    session_id,
+                    buffer_id,
+                    geometry,
+                    title,
+                    focus,
+                    close_on_empty,
+                ),
                 (Some(_), Some(_)) => Err(MuxError::invalid_input(
                     "create-floating requires either root_node_id or buffer_id, not both",
                 )),
@@ -1058,28 +1064,25 @@ impl Runtime {
                     "create-floating requires either root_node_id or buffer_id",
                 )),
             } {
-                Ok(floating_id) => {
-                    match state.floating_window(floating_id) {
-                        Ok(floating) => {
-                            let mut events =
-                                vec![ServerEvent::FloatingChanged(FloatingChangedEvent {
-                                    session_id,
-                                    floating_id: Some(floating_id),
-                                })];
-                            if let Some(focus_event) = focus_changed_event(&state, session_id) {
-                                events.push(ServerEvent::FocusChanged(focus_event));
-                            }
-                            (
-                                ServerResponse::Floating(FloatingResponse {
-                                    request_id,
-                                    floating: floating_record(floating),
-                                }),
-                                events,
-                            )
+                Ok(floating_id) => match state.floating_window(floating_id) {
+                    Ok(floating) => {
+                        let mut events = vec![ServerEvent::FloatingChanged(FloatingChangedEvent {
+                            session_id,
+                            floating_id: Some(floating_id),
+                        })];
+                        if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                            events.push(ServerEvent::FocusChanged(focus_event));
                         }
-                        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                        (
+                            ServerResponse::Floating(FloatingResponse {
+                                request_id,
+                                floating: floating_record(floating),
+                            }),
+                            events,
+                        )
                     }
-                }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                },
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             FloatingRequest::Close {
@@ -1362,7 +1365,11 @@ impl Runtime {
                 .or_insert_with(|| BufferSurface::new(size));
             surface.resize(size);
             surface.route_output(&bytes);
-            (surface.metadata(), surface.take_activity(), surface.damage())
+            (
+                surface.metadata(),
+                surface.take_activity(),
+                surface.damage(),
+            )
         };
 
         {
@@ -1475,32 +1482,47 @@ async fn handle_connection(
         };
 
         if frame.frame_type != FrameType::Request {
-            let _ = outbound.send(ServerEnvelope::Response(protocol_error_response(
-                Some(frame.request_id),
-                ProtocolError::UnexpectedFrameType(frame.frame_type),
-            )));
+            if outbound
+                .send(ServerEnvelope::Response(protocol_error_response(
+                    Some(frame.request_id),
+                    ProtocolError::UnexpectedFrameType(frame.frame_type),
+                )))
+                .is_err()
+            {
+                return Err(MuxError::transport("connection writer closed"));
+            }
             continue;
         }
 
         let request = match decode_client_message(&frame.payload) {
             Ok(request) => {
                 if request.request_id() != frame.request_id {
-                    let _ = outbound.send(ServerEnvelope::Response(protocol_error_response(
-                        Some(frame.request_id),
-                        ProtocolError::MismatchedRequestId {
-                            expected: frame.request_id,
-                            actual: request.request_id(),
-                        },
-                    )));
+                    if outbound
+                        .send(ServerEnvelope::Response(protocol_error_response(
+                            Some(frame.request_id),
+                            ProtocolError::MismatchedRequestId {
+                                expected: frame.request_id,
+                                actual: request.request_id(),
+                            },
+                        )))
+                        .is_err()
+                    {
+                        return Err(MuxError::transport("connection writer closed"));
+                    }
                     continue;
                 }
                 request
             }
             Err(error) => {
-                let _ = outbound.send(ServerEnvelope::Response(protocol_error_response(
-                    Some(frame.request_id),
-                    error,
-                )));
+                if outbound
+                    .send(ServerEnvelope::Response(protocol_error_response(
+                        Some(frame.request_id),
+                        error,
+                    )))
+                    .is_err()
+                {
+                    return Err(MuxError::transport("connection writer closed"));
+                }
                 continue;
             }
         };
@@ -1512,8 +1534,7 @@ async fn handle_connection(
             .await;
 
         if outbound.send(ServerEnvelope::Response(response)).is_err() {
-            runtime.cleanup_connection(connection_id).await;
-            return Ok(());
+            return Err(MuxError::transport("connection writer closed"));
         }
         runtime.broadcast(events).await;
     }

@@ -110,9 +110,7 @@ pub fn normalize_actions(result: Dynamic) -> Result<Vec<Action>, String> {
         return Ok(vec![action]);
     }
     if let Some(actions) = result.try_cast::<Array>() {
-        return parse_action_array(actions)
-            .map_err(|error| error.to_string())
-            .map(|actions| actions);
+        return parse_action_array(actions).map_err(|error| error.to_string());
     }
 
     Err("script must return Action, [Action], or ()".to_owned())

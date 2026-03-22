@@ -4,8 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use embers_client::{
-    Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    PresentationModel, ScriptEngine, TreeSpec,
+    Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec,
+    FloatingSize, PresentationModel, ScriptEngine, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::{BufferId, Size, SplitDirection};
@@ -86,17 +86,19 @@ fn repository_config_history_helper_spawns_buffer_with_history_env() {
         .run_named_action("full-history-tab", demo_context())
         .unwrap();
 
-    let [Action::InsertTabAfter {
-        tabs_node_id: None,
-        title: Some(title),
-        child:
-            TreeSpec::BufferSpawn(BufferSpawnSpec {
-                title: Some(buffer_title),
-                command,
-                cwd,
-                env,
-            }),
-    }] = actions.as_slice()
+    let [
+        Action::InsertTabAfter {
+            tabs_node_id: None,
+            title: Some(title),
+            child:
+                TreeSpec::BufferSpawn(BufferSpawnSpec {
+                    title: Some(buffer_title),
+                    command,
+                    cwd,
+                    env,
+                }),
+        },
+    ] = actions.as_slice()
     else {
         panic!("unexpected history action: {actions:?}");
     };
@@ -121,7 +123,9 @@ fn repository_config_split_and_tab_actions_build_expected_shell_trees() {
     let engine = repository_config_engine();
 
     assert_eq!(
-        engine.run_named_action("split-below", demo_context()).unwrap(),
+        engine
+            .run_named_action("split-below", demo_context())
+            .unwrap(),
         vec![Action::SplitCurrent {
             direction: SplitDirection::Horizontal,
             new_child: TreeSpec::BufferSpawn(BufferSpawnSpec {
@@ -134,7 +138,9 @@ fn repository_config_split_and_tab_actions_build_expected_shell_trees() {
     );
 
     assert_eq!(
-        engine.run_named_action("new-shell-tab", demo_context()).unwrap(),
+        engine
+            .run_named_action("new-shell-tab", demo_context())
+            .unwrap(),
         vec![Action::InsertTabAfter {
             tabs_node_id: None,
             title: Some("shell".to_owned()),
@@ -153,7 +159,9 @@ fn repository_config_popup_and_scratchpad_actions_build_floating_layouts() {
     let engine = repository_config_engine();
 
     assert_eq!(
-        engine.run_named_action("shell-popup", demo_context()).unwrap(),
+        engine
+            .run_named_action("shell-popup", demo_context())
+            .unwrap(),
         vec![Action::OpenFloating {
             spec: embers_client::FloatingSpec {
                 tree: TreeSpec::BufferSpawn(BufferSpawnSpec {
@@ -176,7 +184,9 @@ fn repository_config_popup_and_scratchpad_actions_build_floating_layouts() {
         }]
     );
 
-    let actions = engine.run_named_action("scratchpad", demo_context()).unwrap();
+    let actions = engine
+        .run_named_action("scratchpad", demo_context())
+        .unwrap();
     let [Action::OpenFloating { spec }] = actions.as_slice() else {
         panic!("unexpected scratchpad action: {actions:?}");
     };

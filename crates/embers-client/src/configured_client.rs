@@ -1658,15 +1658,11 @@ where
             } else {
                 false
             };
-            if sent_focus_in {
-                if let Some(buffer_id) = new_buffer {
-                    self.client.refresh_buffer_snapshot(buffer_id).await?;
-                }
+            if sent_focus_in && let Some(buffer_id) = new_buffer {
+                self.client.refresh_buffer_snapshot(buffer_id).await?;
             }
-            if sent_focus_out {
-                if let Some(buffer_id) = previous_buffer {
-                    self.client.refresh_buffer_snapshot(buffer_id).await?;
-                }
+            if sent_focus_out && let Some(buffer_id) = previous_buffer {
+                self.client.refresh_buffer_snapshot(buffer_id).await?;
             }
         }
         Ok(())

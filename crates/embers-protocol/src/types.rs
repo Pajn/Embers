@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use embers_core::{
-    ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize,
-    RequestId, SessionId, SplitDirection, WireError,
+    ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
+    SessionId, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

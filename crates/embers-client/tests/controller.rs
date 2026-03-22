@@ -5,8 +5,8 @@ use embers_core::{RequestId, Size};
 use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest};
 
 use support::{
-    FLOATING_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
-    floating_focused_state, root_focus_state, root_split_state,
+    FLOATING_ID, FOCUSED_BUFFER_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID,
+    demo_state, floating_focused_state, root_focus_state, root_split_state,
 };
 
 const TEST_SIZE: Size = Size {
@@ -107,7 +107,7 @@ fn plain_input_routes_to_focused_buffer() {
         request,
         ClientMessage::Input(InputRequest::Send {
             request_id: RequestId(11),
-            buffer_id: embers_core::BufferId(4),
+            buffer_id: FOCUSED_BUFFER_ID,
             bytes: vec![b'x'],
         })
     );

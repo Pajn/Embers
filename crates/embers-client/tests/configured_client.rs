@@ -626,9 +626,9 @@ async fn select_mode_yanks_selection_to_osc52() {
 
 #[tokio::test]
 async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
-    let mut state = demo_state();
+    let mut initial_state = demo_state();
     let presentation = PresentationModel::project(
-        &state,
+        &initial_state,
         SESSION_ID,
         Size {
             width: 80,
@@ -646,20 +646,24 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
         60,
         &["older output"],
     )));
-    state.snapshots.get_mut(&BufferId(4)).unwrap().total_lines = 60;
-    state
+    initial_state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .total_lines = 60;
+    initial_state
         .snapshots
         .get_mut(&BufferId(4))
         .unwrap()
         .viewport_top_line = 36;
-    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    let view = initial_state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
     view.total_line_count = 60;
     view.scroll_top_line = 36;
     view.follow_output = true;
     let client = MuxClient::new(local_transport.clone());
     let (config, _tempdir) = manager_from_source("");
     let mut configured = ConfiguredClient::new(client, config);
-    *configured.client_mut().state_mut() = state.clone();
+    *configured.client_mut().state_mut() = initial_state.clone();
     configured
         .handle_mouse(
             SESSION_ID,
@@ -689,16 +693,16 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
         request_id: RequestId(1),
     }));
     forward_transport.push_response(ServerResponse::VisibleSnapshot(
-        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+        visible_snapshot_from_state(&initial_state, BufferId(4), RequestId(2)),
     ));
     forward_transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
         request_id: RequestId(3),
-        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+        snapshot: session_snapshot_from_state(&initial_state, SESSION_ID),
     }));
     let client = MuxClient::new(forward_transport.clone());
     let (config, _tempdir) = manager_from_source("");
     let mut configured = ConfiguredClient::new(client, config);
-    let mut state = state;
+    let mut state = initial_state;
     state
         .snapshots
         .get_mut(&BufferId(4))

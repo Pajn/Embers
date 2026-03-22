@@ -362,6 +362,7 @@ dependencies = [
  "predicates",
  "tempfile",
  "tokio",
+ "tracing",
  "unicode-width",
 ]
 

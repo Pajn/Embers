@@ -22,6 +22,7 @@ embers-protocol = { path = "../embers-protocol" }
 embers-server = { path = "../embers-server" }
 libc.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

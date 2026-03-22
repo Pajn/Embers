@@ -137,7 +137,10 @@ fn closing_leaf_normalizes_split_and_detaches_buffer() {
         state.session(session_id).expect("session exists").root_node,
         first_leaf
     );
-    assert_eq!(state.node_parent(first_leaf).expect("first leaf parent"), None);
+    assert_eq!(
+        state.node_parent(first_leaf).expect("first leaf parent"),
+        None
+    );
     assert_eq!(
         state
             .session(session_id)

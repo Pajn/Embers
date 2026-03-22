@@ -84,8 +84,6 @@ async fn embers_without_subcommand_starts_server_and_client() {
         .expect("pane command output");
     assert!(output.contains("1\tmain"));
 
-    harness.write_all("\x11").expect("quit client");
-    harness.wait().expect("client exits");
     wait_for_socket(&socket_path).await;
 
     let output = cargo_bin("embers")
@@ -101,6 +99,9 @@ async fn embers_without_subcommand_starts_server_and_client() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1\tmain"));
+
+    harness.write_all("\x11").expect("quit client");
+    harness.wait().expect("client exits");
 
     shutdown_spawned_server(&socket_path).await;
 }
@@ -172,8 +173,8 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
         .write_all(&long_output)
         .expect("write scrolling command");
     harness
-        .read_until_contains("line-39", Duration::from_secs(5))
-        .expect("long output rendered");
+        .read_until_contains("DONE", Duration::from_secs(5))
+        .expect("long output completed");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     harness.write_all("\x1b[5~").expect("page up");
@@ -208,8 +209,8 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
         .write_all(&long_output)
         .expect("write scrolling command");
     harness
-        .read_until_contains("line-39", Duration::from_secs(5))
-        .expect("long output rendered");
+        .read_until_contains("DONE", Duration::from_secs(5))
+        .expect("long output completed");
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     harness.write_all("\x1b[5~").expect("page up");

@@ -45,3 +45,4 @@ runs:
         unzip -q flatbuffers-bin/flatc.zip -d flatbuffers-bin
         chmod +x flatbuffers-bin/flatc
         sudo install flatbuffers-bin/flatc /usr/local/bin/flatc
+        rm -rf flatbuffers-bin

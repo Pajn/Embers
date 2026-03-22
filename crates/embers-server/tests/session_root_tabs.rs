@@ -144,14 +144,23 @@ fn closing_root_tabs_can_collapse_root_and_closing_root_resets_to_empty_tabs() {
         BufferAttachment::Detached
     ));
     let collapsed_root = state.session(session_id).expect("session exists").root_node;
-    let first_attachment = match &state.buffer(first_buffer).expect("buffer exists").attachment {
+    let first_attachment = match &state
+        .buffer(first_buffer)
+        .expect("buffer exists")
+        .attachment
+    {
         BufferAttachment::Attached(node_id) => *node_id,
         BufferAttachment::Detached => panic!("buffer should remain attached"),
     };
     assert_eq!(collapsed_root, first_attachment);
-    assert_eq!(state.node_parent(collapsed_root).expect("root parent"), None);
+    assert_eq!(
+        state.node_parent(collapsed_root).expect("root parent"),
+        None
+    );
 
-    state.close_node(collapsed_root).expect("close collapsed root");
+    state
+        .close_node(collapsed_root)
+        .expect("close collapsed root");
     let tabs = root_tabs(&state, session_id);
     assert!(tabs.tabs.is_empty());
     assert_eq!(tabs.active, 0);

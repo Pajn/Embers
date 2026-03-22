@@ -7,8 +7,8 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{self, CursorShape as AlacrittyCursorShape};
 use embers_core::{
-    ActivityState, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine,
-    TerminalModes, TerminalSnapshot,
+    ActivityState, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine, TerminalModes,
+    TerminalSnapshot,
 };
 use tracing::error;
 
@@ -291,7 +291,9 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         let lines = self.all_lines();
         let total_lines = lines.len() as u64;
         let start_line = start_line.min(total_lines);
-        let end_line = start_line.saturating_add(u64::from(line_count)).min(total_lines);
+        let end_line = start_line
+            .saturating_add(u64::from(line_count))
+            .min(total_lines);
         let lines = lines[start_line as usize..end_line as usize].to_vec();
 
         BackendScrollbackSlice {
@@ -361,9 +363,7 @@ mod tests {
         assert_eq!(snapshot.viewport_top_line, 0);
         assert!(matches!(
             snapshot.cursor.as_ref().map(|cursor| cursor.shape),
-            Some(CursorShape::Block)
-                | Some(CursorShape::Underline)
-                | Some(CursorShape::Beam)
+            Some(CursorShape::Block) | Some(CursorShape::Underline) | Some(CursorShape::Beam)
         ));
     }
 

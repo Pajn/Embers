@@ -119,10 +119,12 @@ async fn create_list_get_and_close_sessions_via_socket() {
         other => panic!("expected session snapshot response, got {other:?}"),
     };
     assert_eq!(fetched.snapshot.session.name, "alpha");
-    assert!(root_tabs(&fetched.snapshot)
-        .expect("new sessions start with empty root tabs")
-        .tabs
-        .is_empty());
+    assert!(
+        root_tabs(&fetched.snapshot)
+            .expect("new sessions start with empty root tabs")
+            .tabs
+            .is_empty()
+    );
 
     let close = connection
         .request(&ClientMessage::Session(SessionRequest::Close {
