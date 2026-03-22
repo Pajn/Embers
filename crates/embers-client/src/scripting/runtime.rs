@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use embers_core::{BufferId, FloatingId, NodeId, Rect, SplitDirection};
 use rhai::plugin::*;
-use rhai::{Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, Scope};
+use rhai::{
+    Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, NativeCallContext, Position, Scope,
+};
 
 use crate::input::parse_key_sequence;
 use crate::presentation::NavigationDirection;
@@ -49,20 +51,16 @@ impl MuxApi {
 }
 
 pub fn register_runtime_api(engine: &mut Engine) {
-    register_runtime_types(engine);
-    engine.register_global_module(rhai::exported_module!(documented_context_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_ref_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_action_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_tree_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_mux_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_system_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_ui_api).into());
-    engine.register_global_module(rhai::exported_module!(documented_theme_runtime_api).into());
+    register_documented_runtime_modules(engine);
 }
 
 // Used by `documentation.rs` and the live runtime to register the shared exported API modules.
 #[allow(dead_code)]
 pub(crate) fn register_documented_runtime_api(engine: &mut Engine) {
+    register_documented_runtime_modules(engine);
+}
+
+fn register_documented_runtime_modules(engine: &mut Engine) {
     register_runtime_types(engine);
     engine.register_global_module(rhai::exported_module!(documented_context_api).into());
     engine.register_global_module(rhai::exported_module!(documented_ref_api).into());
@@ -164,8 +162,8 @@ pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
 #[export_module]
 mod documented_context_api {
     use super::{
-        Array, Context, Dynamic, dynamic_option_custom, parse_buffer_id, parse_floating_id,
-        parse_node_id,
+        Array, Context, Dynamic, NativeCallContext, dynamic_option_custom, parse_buffer_id,
+        parse_floating_id, parse_node_id, with_call_position,
     };
 
     /// Return the active input mode name.
@@ -233,30 +231,48 @@ mod documented_context_api {
     ///
     /// ReturnType: `BufferRef | ()`
     #[rhai_fn(return_raw, name = "find_buffer")]
-    pub fn find_buffer(context: &mut Context, buffer_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            context.find_buffer(parse_buffer_id(buffer_id)?),
-        ))
+    pub fn find_buffer(
+        ctx: NativeCallContext,
+        context: &mut Context,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                context.find_buffer(parse_buffer_id(buffer_id)?),
+            ))
+        })
     }
 
     /// Find a node by numeric id. Returns `()` when it does not exist.
     ///
     /// ReturnType: `NodeRef | ()`
     #[rhai_fn(return_raw, name = "find_node")]
-    pub fn find_node(context: &mut Context, node_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            context.find_node(parse_node_id(node_id)?),
-        ))
+    pub fn find_node(
+        ctx: NativeCallContext,
+        context: &mut Context,
+        node_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                context.find_node(parse_node_id(node_id)?),
+            ))
+        })
     }
 
     /// Find a floating window by numeric id. Returns `()` when it does not exist.
     ///
     /// ReturnType: `FloatingRef | ()`
     #[rhai_fn(return_raw, name = "find_floating")]
-    pub fn find_floating(context: &mut Context, floating_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            context.find_floating(parse_floating_id(floating_id)?),
-        ))
+    pub fn find_floating(
+        ctx: NativeCallContext,
+        context: &mut Context,
+        floating_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                context.find_floating(parse_floating_id(floating_id)?),
+            ))
+        })
     }
 
     /// Return detached buffers in the current model snapshot.
@@ -284,9 +300,10 @@ mod documented_context_api {
 #[export_module]
 mod documented_ref_api {
     use super::{
-        Array, BufferRef, Dynamic, EventInfo, FloatingRef, Map, NodeRef, SessionRef, TabBarContext,
-        TabInfo, activity_name, dynamic_option_string, dynamic_u32, dynamic_u64,
-        float_geometry_map, node_kind_name, parse_count, rect_map, split_direction_name,
+        Array, BufferRef, Dynamic, EventInfo, FloatingRef, Map, NativeCallContext, NodeRef,
+        SessionRef, TabBarContext, TabInfo, activity_name, dynamic_option_string, dynamic_u32,
+        dynamic_u64, float_geometry_map, node_kind_name, parse_count, rect_map,
+        split_direction_name, with_call_position,
     };
 
     /// Return the session id attached to an event, or `()`.
@@ -449,8 +466,14 @@ mod documented_ref_api {
 
     /// Return a text snapshot limited to the requested line count.
     #[rhai_fn(return_raw, name = "snapshot_text")]
-    pub fn buffer_snapshot_text(buffer: &mut BufferRef, limit: i64) -> RhaiResultOf<String> {
-        Ok(buffer.snapshot_text(parse_count(limit, "snapshot_text limit")?))
+    pub fn buffer_snapshot_text(
+        ctx: NativeCallContext,
+        buffer: &mut BufferRef,
+        limit: i64,
+    ) -> RhaiResultOf<String> {
+        with_call_position(ctx, || {
+            Ok(buffer.snapshot_text(parse_count(limit, "snapshot_text limit")?))
+        })
     }
 
     /// Return the full captured history text for the buffer.
@@ -754,8 +777,8 @@ mod documented_ref_api {
 #[export_module]
 mod documented_mux_api {
     use super::{
-        Array, Dynamic, MuxApi, dynamic_option_custom, parse_buffer_id, parse_floating_id,
-        parse_node_id,
+        Array, Dynamic, MuxApi, NativeCallContext, dynamic_option_custom, parse_buffer_id,
+        parse_floating_id, parse_node_id, with_call_position,
     };
 
     /// Return the current session reference, if any.
@@ -824,30 +847,48 @@ mod documented_mux_api {
     ///
     /// ReturnType: `BufferRef | ()`
     #[rhai_fn(return_raw, name = "find_buffer")]
-    pub fn find_buffer(mux: &mut MuxApi, buffer_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            mux.context.find_buffer(parse_buffer_id(buffer_id)?),
-        ))
+    pub fn find_buffer(
+        ctx: NativeCallContext,
+        mux: &mut MuxApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                mux.context.find_buffer(parse_buffer_id(buffer_id)?),
+            ))
+        })
     }
 
     /// Find a node by numeric id. Returns `()` when it does not exist.
     ///
     /// ReturnType: `NodeRef | ()`
     #[rhai_fn(return_raw, name = "find_node")]
-    pub fn find_node(mux: &mut MuxApi, node_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            mux.context.find_node(parse_node_id(node_id)?),
-        ))
+    pub fn find_node(
+        ctx: NativeCallContext,
+        mux: &mut MuxApi,
+        node_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                mux.context.find_node(parse_node_id(node_id)?),
+            ))
+        })
     }
 
     /// Find a floating window by numeric id. Returns `()` when it does not exist.
     ///
     /// ReturnType: `FloatingRef | ()`
     #[rhai_fn(return_raw, name = "find_floating")]
-    pub fn find_floating(mux: &mut MuxApi, floating_id: i64) -> RhaiResultOf<Dynamic> {
-        Ok(dynamic_option_custom(
-            mux.context.find_floating(parse_floating_id(floating_id)?),
-        ))
+    pub fn find_floating(
+        ctx: NativeCallContext,
+        mux: &mut MuxApi,
+        floating_id: i64,
+    ) -> RhaiResultOf<Dynamic> {
+        with_call_position(ctx, || {
+            Ok(dynamic_option_custom(
+                mux.context.find_floating(parse_floating_id(floating_id)?),
+            ))
+        })
     }
 }
 
@@ -855,10 +896,11 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, ImmutableString, Map, NavigationDirection, TreeSpec,
-        parse_action_array, parse_buffer_id, parse_bytes, parse_floating_id,
+        Action, ActionApi, Array, ImmutableString, Map, NativeCallContext, NavigationDirection,
+        TreeSpec, parse_action_array, parse_buffer_id, parse_bytes, parse_floating_id,
         parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
-        parse_node_id, parse_notify_level, parse_split_direction, runtime_error,
+        parse_node_id, parse_notify_level, parse_split_direction, runtime_error_at,
+        with_call_position,
     };
 
     /// Build a no-op action.
@@ -869,8 +911,12 @@ mod documented_action_api {
 
     /// Chain multiple actions into one composite action.
     #[rhai_fn(return_raw, name = "chain")]
-    pub fn chain(_: &mut ActionApi, actions: Array) -> RhaiResultOf<Action> {
-        Ok(Action::Chain(parse_action_array(actions)?))
+    pub fn chain(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        actions: Array,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || Ok(Action::Chain(parse_action_array(actions)?)))
     }
 
     /// Enter a specific input mode by name.
@@ -941,27 +987,46 @@ mod documented_action_api {
 
     /// Select a tab by index in a specific tabs node.
     #[rhai_fn(return_raw, name = "select_tab")]
-    pub fn select_tab(_: &mut ActionApi, tabs_node_id: i64, index: i64) -> RhaiResultOf<Action> {
-        Ok(Action::SelectTab {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
-            index: parse_index(index, "tab index")?,
+    pub fn select_tab(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        tabs_node_id: i64,
+        index: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SelectTab {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+                index: parse_index(index, "tab index")?,
+            })
         })
     }
 
     /// Select a tab by index in the currently focused tabs node.
     #[rhai_fn(return_raw, name = "select_current_tabs")]
-    pub fn select_current_tabs(_: &mut ActionApi, index: i64) -> RhaiResultOf<Action> {
-        Ok(Action::SelectTab {
-            tabs_node_id: None,
-            index: parse_index(index, "tab index")?,
+    pub fn select_current_tabs(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        index: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SelectTab {
+                tabs_node_id: None,
+                index: parse_index(index, "tab index")?,
+            })
         })
     }
 
     /// Select the next tab in a specific tabs node.
     #[rhai_fn(return_raw, name = "next_tab")]
-    pub fn next_tab(_: &mut ActionApi, tabs_node_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::NextTab {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+    pub fn next_tab(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        tabs_node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::NextTab {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+            })
         })
     }
 
@@ -973,9 +1038,15 @@ mod documented_action_api {
 
     /// Select the previous tab in a specific tabs node.
     #[rhai_fn(return_raw, name = "prev_tab")]
-    pub fn prev_tab(_: &mut ActionApi, tabs_node_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::PrevTab {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+    pub fn prev_tab(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        tabs_node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::PrevTab {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+            })
         })
     }
 
@@ -987,41 +1058,63 @@ mod documented_action_api {
 
     /// Focus a specific buffer by id.
     #[rhai_fn(return_raw, name = "focus_buffer")]
-    pub fn focus_buffer(_: &mut ActionApi, buffer_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::FocusBuffer {
-            buffer_id: parse_buffer_id(buffer_id)?,
+    pub fn focus_buffer(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::FocusBuffer {
+                buffer_id: parse_buffer_id(buffer_id)?,
+            })
         })
     }
 
     /// Reveal a specific buffer by id.
     #[rhai_fn(return_raw, name = "reveal_buffer")]
-    pub fn reveal_buffer(_: &mut ActionApi, buffer_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::RevealBuffer {
-            buffer_id: parse_buffer_id(buffer_id)?,
+    pub fn reveal_buffer(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::RevealBuffer {
+                buffer_id: parse_buffer_id(buffer_id)?,
+            })
         })
     }
 
     /// Split the current node and attach the provided tree as the new sibling.
     #[rhai_fn(return_raw, name = "split_with")]
-    pub fn split_with(_: &mut ActionApi, direction: &str, tree: TreeSpec) -> RhaiResultOf<Action> {
-        Ok(Action::SplitCurrent {
-            direction: parse_split_direction(direction)?,
-            new_child: tree,
+    pub fn split_with(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        direction: &str,
+        tree: TreeSpec,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SplitCurrent {
+                direction: parse_split_direction(direction)?,
+                new_child: tree,
+            })
         })
     }
 
     /// Insert a tab after a specific tabs node.
     #[rhai_fn(return_raw, name = "insert_tab_after")]
     pub fn insert_tab_after(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         tabs_node_id: i64,
         title: &str,
         tree: TreeSpec,
     ) -> RhaiResultOf<Action> {
-        Ok(Action::InsertTabAfter {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
-            title: Some(title.to_owned()),
-            child: tree,
+        with_call_position(ctx, || {
+            Ok(Action::InsertTabAfter {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+                title: Some(title.to_owned()),
+                child: tree,
+            })
         })
     }
 
@@ -1038,15 +1131,18 @@ mod documented_action_api {
     /// Insert a tab before a specific tabs node.
     #[rhai_fn(return_raw, name = "insert_tab_before")]
     pub fn insert_tab_before(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         tabs_node_id: i64,
         title: &str,
         tree: TreeSpec,
     ) -> RhaiResultOf<Action> {
-        Ok(Action::InsertTabBefore {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
-            title: Some(title.to_owned()),
-            child: tree,
+        with_call_position(ctx, || {
+            Ok(Action::InsertTabBefore {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+                title: Some(title.to_owned()),
+                child: tree,
+            })
         })
     }
 
@@ -1071,18 +1167,32 @@ mod documented_action_api {
 
     /// Replace a specific node by id with a new tree.
     #[rhai_fn(return_raw, name = "replace_node")]
-    pub fn replace_node(_: &mut ActionApi, node_id: i64, tree: TreeSpec) -> RhaiResultOf<Action> {
-        Ok(Action::ReplaceNode {
-            node_id: Some(parse_node_id(node_id)?),
-            tree,
+    pub fn replace_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+        tree: TreeSpec,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::ReplaceNode {
+                node_id: Some(parse_node_id(node_id)?),
+                tree,
+            })
         })
     }
 
     /// Open a floating view around the provided tree.
     #[rhai_fn(return_raw, name = "open_floating")]
-    pub fn open_floating(_: &mut ActionApi, tree: TreeSpec, options: Map) -> RhaiResultOf<Action> {
-        Ok(Action::OpenFloating {
-            spec: parse_floating_spec(tree, options)?,
+    pub fn open_floating(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        tree: TreeSpec,
+        options: Map,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::OpenFloating {
+                spec: parse_floating_spec(tree, options)?,
+            })
         })
     }
 
@@ -1094,9 +1204,15 @@ mod documented_action_api {
 
     /// Close a floating window by id.
     #[rhai_fn(return_raw, name = "close_floating_id")]
-    pub fn close_floating_id(_: &mut ActionApi, floating_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::CloseFloating {
-            floating_id: Some(parse_floating_id(floating_id)?),
+    pub fn close_floating_id(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        floating_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::CloseFloating {
+                floating_id: Some(parse_floating_id(floating_id)?),
+            })
         })
     }
 
@@ -1108,9 +1224,15 @@ mod documented_action_api {
 
     /// Close a view by node id.
     #[rhai_fn(return_raw, name = "close_node")]
-    pub fn close_node(_: &mut ActionApi, node_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::CloseView {
-            node_id: Some(parse_node_id(node_id)?),
+    pub fn close_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::CloseView {
+                node_id: Some(parse_node_id(node_id)?),
+            })
         })
     }
 
@@ -1122,9 +1244,15 @@ mod documented_action_api {
 
     /// Kill a buffer by id.
     #[rhai_fn(return_raw, name = "kill_buffer_id")]
-    pub fn kill_buffer_id(_: &mut ActionApi, buffer_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::KillBuffer {
-            buffer_id: Some(parse_buffer_id(buffer_id)?),
+    pub fn kill_buffer_id(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::KillBuffer {
+                buffer_id: Some(parse_buffer_id(buffer_id)?),
+            })
         })
     }
 
@@ -1136,22 +1264,31 @@ mod documented_action_api {
 
     /// Detach a buffer by id.
     #[rhai_fn(return_raw, name = "detach_buffer_id")]
-    pub fn detach_buffer_id(_: &mut ActionApi, buffer_id: i64) -> RhaiResultOf<Action> {
-        Ok(Action::DetachBuffer {
-            buffer_id: Some(parse_buffer_id(buffer_id)?),
+    pub fn detach_buffer_id(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::DetachBuffer {
+                buffer_id: Some(parse_buffer_id(buffer_id)?),
+            })
         })
     }
 
     /// Move a buffer into a specific node.
     #[rhai_fn(return_raw, name = "move_buffer_to_node")]
     pub fn move_buffer_to_node(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         buffer_id: i64,
         node_id: i64,
     ) -> RhaiResultOf<Action> {
-        Ok(Action::MoveBufferToNode {
-            buffer_id: parse_buffer_id(buffer_id)?,
-            node_id: parse_node_id(node_id)?,
+        with_call_position(ctx, || {
+            Ok(Action::MoveBufferToNode {
+                buffer_id: parse_buffer_id(buffer_id)?,
+                node_id: parse_node_id(node_id)?,
+            })
         })
     }
 
@@ -1169,16 +1306,19 @@ mod documented_action_api {
     /// - `close_on_empty` (bool): whether to close the window when its buffer empties (default: true)
     #[rhai_fn(return_raw, name = "move_buffer_to_floating")]
     pub fn move_buffer_to_floating(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         buffer_id: i64,
         options: Map,
     ) -> RhaiResultOf<Action> {
-        let spec = parse_floating_options(options)?;
-        Ok(Action::MoveBufferToFloating {
-            buffer_id: parse_buffer_id(buffer_id)?,
-            geometry: spec.geometry,
-            title: spec.title,
-            focus: spec.focus,
+        with_call_position(ctx, || {
+            let spec = parse_floating_options(options)?;
+            Ok(Action::MoveBufferToFloating {
+                buffer_id: parse_buffer_id(buffer_id)?,
+                geometry: spec.geometry,
+                title: spec.title,
+                focus: spec.focus,
+            })
         })
     }
 
@@ -1193,10 +1333,16 @@ mod documented_action_api {
     /// action.send_bytes_current([0x1b, 0x5b, 0x41])
     /// ```
     #[rhai_fn(return_raw, name = "send_bytes_current")]
-    pub fn send_bytes_current(_: &mut ActionApi, bytes: Array) -> RhaiResultOf<Action> {
-        Ok(Action::SendBytes {
-            buffer_id: None,
-            bytes: parse_bytes(bytes)?,
+    pub fn send_bytes_current(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        bytes: Array,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SendBytes {
+                buffer_id: None,
+                bytes: parse_bytes(bytes)?,
+            })
         })
     }
 
@@ -1212,44 +1358,67 @@ mod documented_action_api {
     /// Send a string of bytes to a specific buffer.
     #[rhai_fn(return_raw, name = "send_bytes")]
     pub fn send_bytes_string(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         buffer_id: i64,
         bytes: &str,
     ) -> RhaiResultOf<Action> {
-        Ok(Action::SendBytes {
-            buffer_id: Some(parse_buffer_id(buffer_id)?),
-            bytes: bytes.as_bytes().to_vec(),
+        with_call_position(ctx, || {
+            Ok(Action::SendBytes {
+                buffer_id: Some(parse_buffer_id(buffer_id)?),
+                bytes: bytes.as_bytes().to_vec(),
+            })
         })
     }
 
     /// Send raw byte values to a specific buffer.
     #[rhai_fn(return_raw, name = "send_bytes")]
     pub fn send_bytes_array(
+        ctx: NativeCallContext,
         _: &mut ActionApi,
         buffer_id: i64,
         bytes: Array,
     ) -> RhaiResultOf<Action> {
-        Ok(Action::SendBytes {
-            buffer_id: Some(parse_buffer_id(buffer_id)?),
-            bytes: parse_bytes(bytes)?,
+        with_call_position(ctx, || {
+            Ok(Action::SendBytes {
+                buffer_id: Some(parse_buffer_id(buffer_id)?),
+                bytes: parse_bytes(bytes)?,
+            })
         })
     }
 
     /// Send a key notation sequence to the focused buffer.
     #[rhai_fn(return_raw, name = "send_keys_current")]
-    pub fn send_keys_current(_: &mut ActionApi, notation: &str) -> RhaiResultOf<Action> {
-        Ok(Action::SendKeys {
-            buffer_id: None,
-            keys: parse_key_sequence(notation).map_err(|error| runtime_error(error.to_string()))?,
+    pub fn send_keys_current(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        notation: &str,
+    ) -> RhaiResultOf<Action> {
+        let position = ctx.call_position();
+        with_call_position(ctx, || {
+            Ok(Action::SendKeys {
+                buffer_id: None,
+                keys: parse_key_sequence(notation)
+                    .map_err(|error| runtime_error_at(error.to_string(), position))?,
+            })
         })
     }
 
     /// Send a key notation sequence to a specific buffer.
     #[rhai_fn(return_raw, name = "send_keys")]
-    pub fn send_keys(_: &mut ActionApi, buffer_id: i64, notation: &str) -> RhaiResultOf<Action> {
-        Ok(Action::SendKeys {
-            buffer_id: Some(parse_buffer_id(buffer_id)?),
-            keys: parse_key_sequence(notation).map_err(|error| runtime_error(error.to_string()))?,
+    pub fn send_keys(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+        notation: &str,
+    ) -> RhaiResultOf<Action> {
+        let position = ctx.call_position();
+        with_call_position(ctx, || {
+            Ok(Action::SendKeys {
+                buffer_id: Some(parse_buffer_id(buffer_id)?),
+                keys: parse_key_sequence(notation)
+                    .map_err(|error| runtime_error_at(error.to_string(), position))?,
+            })
         })
     }
 
@@ -1395,10 +1564,17 @@ mod documented_action_api {
 
     /// Emit a client notification.
     #[rhai_fn(return_raw, name = "notify")]
-    pub fn notify(_: &mut ActionApi, level: &str, message: &str) -> RhaiResultOf<Action> {
-        Ok(Action::Notify {
-            level: parse_notify_level(level)?,
-            message: message.to_owned(),
+    pub fn notify(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        level: &str,
+        message: &str,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::Notify {
+                level: parse_notify_level(level)?,
+                message: message.to_owned(),
+            })
         })
     }
 
@@ -1415,8 +1591,9 @@ mod documented_action_api {
 #[export_module]
 mod documented_tree_api {
     use super::{
-        Array, Dynamic, Map, SplitDirection, TabSpec, TreeApi, TreeSpec, build_split, build_tabs,
-        parse_buffer_id, parse_buffer_spawn, parse_index, parse_sizes,
+        Array, Dynamic, Map, NativeCallContext, SplitDirection, TabSpec, TreeApi, TreeSpec,
+        build_split, build_tabs, parse_buffer_id, parse_buffer_spawn, parse_index, parse_sizes,
+        parse_split_direction, with_call_position,
     };
 
     /// Build a tree reference to the currently focused buffer.
@@ -1445,9 +1622,15 @@ mod documented_tree_api {
 
     /// Attach an existing buffer by id.
     #[rhai_fn(return_raw, name = "buffer_attach")]
-    pub fn buffer_attach(_: &mut TreeApi, buffer_id: i64) -> RhaiResultOf<TreeSpec> {
-        Ok(TreeSpec::BufferAttach {
-            buffer_id: parse_buffer_id(buffer_id)?,
+    pub fn buffer_attach(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        buffer_id: i64,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            Ok(TreeSpec::BufferAttach {
+                buffer_id: parse_buffer_id(buffer_id)?,
+            })
         })
     }
 
@@ -1463,18 +1646,31 @@ mod documented_tree_api {
     /// tree.buffer_spawn(["/bin/zsh"], #{ title: "shell" })
     /// ```
     #[rhai_fn(return_raw, name = "buffer_spawn")]
-    pub fn buffer_spawn_simple(_: &mut TreeApi, command: Array) -> RhaiResultOf<TreeSpec> {
-        Ok(TreeSpec::BufferSpawn(super::BufferSpawnSpec {
-            title: None,
-            command: super::parse_string_array(Dynamic::from(command))?,
-            cwd: None,
-            env: Default::default(),
-        }))
+    pub fn buffer_spawn_simple(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        command: Array,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            Ok(TreeSpec::BufferSpawn(super::BufferSpawnSpec {
+                title: None,
+                command: super::parse_string_array(Dynamic::from(command))?,
+                cwd: None,
+                env: Default::default(),
+            }))
+        })
     }
 
     #[rhai_fn(return_raw, name = "buffer_spawn")]
-    pub fn buffer_spawn(_: &mut TreeApi, command: Array, options: Map) -> RhaiResultOf<TreeSpec> {
-        Ok(TreeSpec::BufferSpawn(parse_buffer_spawn(command, options)?))
+    pub fn buffer_spawn(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        command: Array,
+        options: Map,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            Ok(TreeSpec::BufferSpawn(parse_buffer_spawn(command, options)?))
+        })
     }
 
     /// Build a single tab specification.
@@ -1488,47 +1684,74 @@ mod documented_tree_api {
 
     /// Build a tabs container with the first tab active.
     #[rhai_fn(return_raw, name = "tabs")]
-    pub fn tabs(_: &mut TreeApi, tabs: Array) -> RhaiResultOf<TreeSpec> {
-        build_tabs(tabs, 0)
+    pub fn tabs(ctx: NativeCallContext, _: &mut TreeApi, tabs: Array) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || build_tabs(tabs, 0))
     }
 
     /// Build a tabs container with an explicit active tab.
     #[rhai_fn(return_raw, name = "tabs_with_active")]
-    pub fn tabs_with_active(_: &mut TreeApi, tabs: Array, active: i64) -> RhaiResultOf<TreeSpec> {
-        build_tabs(tabs, parse_index(active, "active tab")?)
+    pub fn tabs_with_active(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        tabs: Array,
+        active: i64,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || build_tabs(tabs, parse_index(active, "active tab")?))
     }
 
     /// Build a horizontal split.
     #[rhai_fn(return_raw, name = "split_h")]
-    pub fn split_h(_: &mut TreeApi, children: Array) -> RhaiResultOf<TreeSpec> {
-        build_split(SplitDirection::Horizontal, children, Vec::new())
+    pub fn split_h(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        children: Array,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            build_split(SplitDirection::Horizontal, children, Vec::new())
+        })
     }
 
     /// Build a vertical split.
     #[rhai_fn(return_raw, name = "split_v")]
-    pub fn split_v(_: &mut TreeApi, children: Array) -> RhaiResultOf<TreeSpec> {
-        build_split(SplitDirection::Vertical, children, Vec::new())
+    pub fn split_v(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        children: Array,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            build_split(SplitDirection::Vertical, children, Vec::new())
+        })
     }
 
     /// Build a split with an explicit direction string.
     #[rhai_fn(return_raw, name = "split")]
-    pub fn split(_: &mut TreeApi, direction: &str, children: Array) -> RhaiResultOf<TreeSpec> {
-        build_split(parse_split_direction(direction)?, children, Vec::new())
+    pub fn split(
+        ctx: NativeCallContext,
+        _: &mut TreeApi,
+        direction: &str,
+        children: Array,
+    ) -> RhaiResultOf<TreeSpec> {
+        with_call_position(ctx, || {
+            build_split(parse_split_direction(direction)?, children, Vec::new())
+        })
     }
 
     /// Build a split with explicit sizes for each child.
     #[rhai_fn(return_raw, name = "split")]
     pub fn split_with_sizes(
+        ctx: NativeCallContext,
         _: &mut TreeApi,
         direction: &str,
         children: Array,
         sizes: Array,
     ) -> RhaiResultOf<TreeSpec> {
-        build_split(
-            parse_split_direction(direction)?,
-            children,
-            parse_sizes(sizes)?,
-        )
+        with_call_position(ctx, || {
+            build_split(
+                parse_split_direction(direction)?,
+                children,
+                parse_sizes(sizes)?,
+            )
+        })
     }
 }
 
@@ -1572,8 +1795,8 @@ mod documented_system_api {
 #[export_module]
 mod documented_ui_api {
     use super::{
-        Array, BarSegment, BarSpec, Map, StyleSpec, UiApi, parse_bar_segments,
-        parse_segment_options,
+        Array, BarSegment, BarSpec, Map, NativeCallContext, StyleSpec, UiApi, parse_bar_segments,
+        parse_segment_options, with_call_position,
     };
 
     /// Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
@@ -1596,25 +1819,36 @@ mod documented_ui_api {
     /// optional interaction target.
     #[rhai_fn(return_raw, name = "segment")]
     pub fn segment_with_options(
+        ctx: NativeCallContext,
         _: &mut UiApi,
         text: &str,
         options: Map,
     ) -> RhaiResultOf<BarSegment> {
-        let (style, target) = parse_segment_options(options)?;
-        Ok(BarSegment {
-            text: text.to_owned(),
-            style,
-            target,
+        with_call_position(ctx, || {
+            let (style, target) = parse_segment_options(options)?;
+            Ok(BarSegment {
+                text: text.to_owned(),
+                style,
+                target,
+            })
         })
     }
 
     /// Build a full bar specification from left, center, and right segments.
     #[rhai_fn(return_raw, name = "bar")]
-    pub fn bar(_: &mut UiApi, left: Array, center: Array, right: Array) -> RhaiResultOf<BarSpec> {
-        Ok(BarSpec {
-            left: parse_bar_segments(left)?,
-            center: parse_bar_segments(center)?,
-            right: parse_bar_segments(right)?,
+    pub fn bar(
+        ctx: NativeCallContext,
+        _: &mut UiApi,
+        left: Array,
+        center: Array,
+        right: Array,
+    ) -> RhaiResultOf<BarSpec> {
+        with_call_position(ctx, || {
+            Ok(BarSpec {
+                left: parse_bar_segments(left)?,
+                center: parse_bar_segments(center)?,
+                right: parse_bar_segments(right)?,
+            })
         })
     }
 }
@@ -1744,7 +1978,7 @@ struct ParsedFloatingOptions {
 }
 
 fn parse_floating_options(mut options: Map) -> ScriptResult<ParsedFloatingOptions> {
-    Ok(ParsedFloatingOptions {
+    let parsed = ParsedFloatingOptions {
         geometry: FloatingGeometrySpec {
             width: parse_floating_size(options.remove("width"))?
                 .unwrap_or(FloatingSize::Percent(50)),
@@ -1758,11 +1992,18 @@ fn parse_floating_options(mut options: Map) -> ScriptResult<ParsedFloatingOption
         title: parse_optional_string(options.remove("title"))?,
         focus: parse_bool_field(options.remove("focus"))?.unwrap_or(true),
         close_on_empty: parse_bool_field(options.remove("close_on_empty"))?.unwrap_or(true),
-    })
+    };
+    if !options.is_empty() {
+        return Err(runtime_error(format!(
+            "unknown floating option(s): {}",
+            unexpected_option_keys(&options)
+        )));
+    }
+    Ok(parsed)
 }
 
 fn parse_segment_options(mut options: Map) -> ScriptResult<(StyleSpec, Option<BarTarget>)> {
-    Ok((
+    let parsed = (
         StyleSpec {
             fg: parse_optional_color(options.remove("fg"))?,
             bg: parse_optional_color(options.remove("bg"))?,
@@ -1772,7 +2013,20 @@ fn parse_segment_options(mut options: Map) -> ScriptResult<(StyleSpec, Option<Ba
             dim: parse_bool_field(options.remove("dim"))?.unwrap_or(false),
         },
         parse_bar_target(options.remove("target"))?,
-    ))
+    );
+    if !options.is_empty() {
+        return Err(runtime_error(format!(
+            "unknown segment option(s): {}",
+            unexpected_option_keys(&options)
+        )));
+    }
+    Ok(parsed)
+}
+
+fn unexpected_option_keys(options: &Map) -> String {
+    let mut keys = options.keys().map(ToString::to_string).collect::<Vec<_>>();
+    keys.sort();
+    keys.join(", ")
 }
 
 fn parse_bar_target(value: Option<Dynamic>) -> ScriptResult<Option<BarTarget>> {
@@ -2125,8 +2379,20 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn with_call_position<T>(
+    ctx: NativeCallContext<'_>,
+    build: impl FnOnce() -> RhaiResultOf<T>,
+) -> RhaiResultOf<T> {
+    let position = ctx.call_position();
+    build().map_err(|error| runtime_error_at(error.to_string(), position))
+}
+
 fn runtime_error(message: impl Into<String>) -> Box<EvalAltResult> {
-    EvalAltResult::ErrorRuntime(message.into().into(), rhai::Position::NONE).into()
+    runtime_error_at(message, Position::NONE)
+}
+
+fn runtime_error_at(message: impl Into<String>, position: Position) -> Box<EvalAltResult> {
+    EvalAltResult::ErrorRuntime(message.into().into(), position).into()
 }
 
 #[cfg(test)]

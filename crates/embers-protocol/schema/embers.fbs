@@ -112,6 +112,7 @@ enum BufferStateWire : ubyte {
   Created = 0,
   Running = 1,
   Exited = 2,
+  Interrupted = 4,
 }
 
 enum NodeRecordKindWire : ubyte {

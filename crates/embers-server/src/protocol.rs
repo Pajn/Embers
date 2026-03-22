@@ -22,6 +22,11 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
     let (state, pid, exit_code) = match &buffer.state {
         BufferState::Created => (BufferRecordState::Created, None, None),
         BufferState::Running(running) => (BufferRecordState::Running, running.pid, None),
+        BufferState::Interrupted(interrupted) => (
+            BufferRecordState::Interrupted,
+            interrupted.last_known_pid,
+            None,
+        ),
         BufferState::Exited(exited) => (BufferRecordState::Exited, None, exited.exit_code),
     };
 

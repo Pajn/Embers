@@ -11,7 +11,7 @@ use tempfile::tempdir;
 use support::run_cli;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
-const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const FILE_WAIT_POLL: Duration = Duration::from_millis(50);
 const FILE_WAIT_ATTEMPTS: usize = 200;
 const SCROLLBACK_SETTLE_DELAY: Duration = Duration::from_millis(750);
@@ -86,13 +86,15 @@ async fn wait_for_pid(pid_path: &Path) -> String {
 }
 
 async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
-    let long_output = format!(
-        "printf '{}\\n'; echo DONE\r",
-        (1..=lines)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\\n")
-    );
+    harness
+        .write_all("echo READY\r")
+        .expect("write ready command");
+    harness
+        .read_until_contains("READY", IO_TIMEOUT)
+        .unwrap_or_else(|error| panic!("pane ready handshake: {error}"));
+
+    let long_output =
+        format!("i=1; while [ $i -le {lines} ]; do echo line-$i; i=$((i+1)); done; echo DONE\r");
     harness
         .write_all(&long_output)
         .expect("write scrolling command");

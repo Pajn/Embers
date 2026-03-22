@@ -8,7 +8,11 @@ use embers_core::{
 
 use crate::model::{
     Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+};
+use crate::persist::{
+    PersistedWorkspace, persisted_buffer, persisted_floating, persisted_node, persisted_session,
+    restored_buffer, restored_floating, restored_node, restored_session,
 };
 
 #[derive(Debug)]
@@ -40,6 +44,92 @@ impl ServerState {
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
             floating_ids: IdAllocator::new(1),
+        }
+    }
+
+    pub fn from_persisted(workspace: PersistedWorkspace) -> Result<Self> {
+        let PersistedWorkspace {
+            sessions: persisted_sessions,
+            buffers: persisted_buffers,
+            nodes: persisted_nodes,
+            floating: persisted_floating,
+            next_session_id,
+            next_buffer_id,
+            next_node_id,
+            next_floating_id,
+        } = workspace;
+
+        let mut sessions = BTreeMap::new();
+        for persisted_session in persisted_sessions {
+            let session = restored_session(persisted_session)?;
+            if sessions.insert(session.id, session).is_some() {
+                return Err(MuxError::internal(
+                    "duplicate session id found while loading persisted workspace",
+                ));
+            }
+        }
+
+        let mut buffers = BTreeMap::new();
+        for persisted_buffer in persisted_buffers {
+            let buffer = restored_buffer(persisted_buffer)?;
+            if buffers.insert(buffer.id, buffer).is_some() {
+                return Err(MuxError::internal(
+                    "duplicate buffer id found while loading persisted workspace",
+                ));
+            }
+        }
+
+        let mut nodes = BTreeMap::new();
+        for persisted_node in persisted_nodes {
+            let node = restored_node(persisted_node);
+            let node_id = node.id();
+            if nodes.insert(node_id, node).is_some() {
+                return Err(MuxError::internal(
+                    "duplicate node id found while loading persisted workspace",
+                ));
+            }
+        }
+
+        let mut floating = BTreeMap::new();
+        for persisted_window in persisted_floating {
+            let window = restored_floating(persisted_window);
+            if floating.insert(window.id, window).is_some() {
+                return Err(MuxError::internal(
+                    "duplicate floating id found while loading persisted workspace",
+                ));
+            }
+        }
+
+        let safe_next_session_id = next_id_after_max(sessions.keys().map(|id| id.0));
+        let safe_next_buffer_id = next_id_after_max(buffers.keys().map(|id| id.0));
+        let safe_next_node_id = next_id_after_max(nodes.keys().map(|id| id.0));
+        let safe_next_floating_id = next_id_after_max(floating.keys().map(|id| id.0));
+
+        let mut state = Self {
+            sessions,
+            buffers,
+            nodes,
+            floating,
+            session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
+            buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
+            node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
+            floating_ids: IdAllocator::new(next_floating_id.max(safe_next_floating_id)),
+        };
+        state.interrupt_unrecoverable_buffers();
+        state.validate()?;
+        Ok(state)
+    }
+
+    pub fn to_persisted(&self) -> PersistedWorkspace {
+        PersistedWorkspace {
+            sessions: self.sessions.values().map(persisted_session).collect(),
+            buffers: self.buffers.values().map(persisted_buffer).collect(),
+            nodes: self.nodes.values().map(persisted_node).collect(),
+            floating: self.floating.values().map(persisted_floating).collect(),
+            next_session_id: next_id_after_max(self.sessions.keys().map(|id| id.0)),
+            next_buffer_id: next_id_after_max(self.buffers.keys().map(|id| id.0)),
+            next_node_id: next_id_after_max(self.nodes.keys().map(|id| id.0)),
+            next_floating_id: next_id_after_max(self.floating.keys().map(|id| id.0)),
         }
     }
 
@@ -280,6 +370,34 @@ impl ServerState {
             exited_at: Timestamp::now(),
         });
         Ok(())
+    }
+
+    pub fn mark_buffer_interrupted(&mut self, buffer_id: BufferId) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        let last_known_pid = match &buffer.state {
+            BufferState::Running(running) => running.pid,
+            BufferState::Interrupted(interrupted) => interrupted.last_known_pid,
+            BufferState::Created | BufferState::Exited(_) => None,
+        };
+        buffer.state = BufferState::Interrupted(InterruptedBuffer { last_known_pid });
+        Ok(())
+    }
+
+    pub fn interrupt_unrecoverable_buffers(&mut self) {
+        for buffer in self.buffers.values_mut() {
+            buffer.state = match &buffer.state {
+                BufferState::Exited(exited) => BufferState::Exited(exited.clone()),
+                BufferState::Running(running) => BufferState::Interrupted(InterruptedBuffer {
+                    last_known_pid: running.pid,
+                }),
+                BufferState::Interrupted(interrupted) => {
+                    BufferState::Interrupted(interrupted.clone())
+                }
+                BufferState::Created => BufferState::Interrupted(InterruptedBuffer {
+                    last_known_pid: None,
+                }),
+            };
+        }
     }
 
     pub fn set_buffer_size(&mut self, buffer_id: BufferId, size: PtySize) -> Result<()> {
@@ -1965,5 +2083,16 @@ impl ServerState {
         self.floating
             .get_mut(&floating_id)
             .ok_or_else(|| MuxError::not_found(format!("unknown floating window {floating_id}")))
+    }
+}
+
+fn next_id_after_max(ids: impl Iterator<Item = u64>) -> u64 {
+    match ids.max() {
+        Some(max) => max.checked_add(1).unwrap_or_else(|| {
+            panic!(
+                "next_id_after_max allocator exhaustion: restored max id == u64::MAX, cannot allocate a new id"
+            )
+        }),
+        None => 1,
     }
 }
