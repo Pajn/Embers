@@ -19,7 +19,9 @@ pub use config::{
     default_config_path, discover_config, load_config_source,
 };
 pub use configured_client::ConfiguredClient;
-pub use controller::{Controller, KeyEvent};
+pub use controller::{
+    Controller, KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+};
 pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, InputResolution, InputState,

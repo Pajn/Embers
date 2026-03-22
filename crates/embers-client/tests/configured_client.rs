@@ -6,10 +6,11 @@ use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MuxClient,
     ScriptedTransport,
 };
-use embers_core::{RequestId, SessionId, Size};
+use embers_core::{BufferId, RequestId, SessionId, Size};
 use embers_protocol::{
-    ClientMessage, FocusChangedEvent, NodeRequest, OkResponse, ServerEvent, ServerResponse,
-    SessionRequest, SessionSnapshot, SessionSnapshotResponse,
+    ClientMessage, FocusChangedEvent, InputRequest, NodeRequest, OkResponse, ServerEvent,
+    ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
+    VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
@@ -42,6 +43,16 @@ fn session_snapshot_from_state(
         buffers,
         floating,
     }
+}
+
+fn visible_snapshot_from_state(
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+    request_id: RequestId,
+) -> VisibleSnapshotResponse {
+    let mut snapshot = state.snapshots.get(&buffer_id).unwrap().clone();
+    snapshot.request_id = request_id;
+    snapshot
 }
 
 #[tokio::test]
@@ -186,6 +197,126 @@ async fn reload_updates_live_bindings() {
         .unwrap();
 
     assert_eq!(configured.notifications(), ["right"]);
+}
+
+#[tokio::test]
+async fn paste_events_wrap_bytes_for_bracketed_paste_buffers() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .bracketed_paste = true;
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_paste(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            b"hello world".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[200~hello world\x1b[201~".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn focus_events_forward_when_program_requested_them() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .focus_reporting = true;
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_focus_event(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[I".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn focus_events_are_ignored_when_program_did_not_request_them() {
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_focus_event(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
 }
 
 #[tokio::test]

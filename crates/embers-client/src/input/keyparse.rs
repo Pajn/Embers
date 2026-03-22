@@ -13,6 +13,12 @@ pub enum KeyToken {
     Tab,
     Space,
     Leader,
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -97,6 +103,12 @@ fn parse_token(token: &str) -> Result<KeyToken, KeyParseError> {
         "bs" | "backspace" => Ok(KeyToken::Backspace),
         "tab" => Ok(KeyToken::Tab),
         "space" => Ok(KeyToken::Space),
+        "up" => Ok(KeyToken::Up),
+        "down" => Ok(KeyToken::Down),
+        "left" => Ok(KeyToken::Left),
+        "right" => Ok(KeyToken::Right),
+        "pageup" | "pgup" => Ok(KeyToken::PageUp),
+        "pagedown" | "pgdown" | "pgdn" => Ok(KeyToken::PageDown),
         _ => parse_modified_token(token),
     }
 }
@@ -131,12 +143,12 @@ fn single_char_token(token: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyParseError, KeyToken, expand_leader, parse_key_sequence};
+    use super::{expand_leader, parse_key_sequence, KeyParseError, KeyToken};
 
     #[test]
     fn parses_plain_and_modified_keys() {
         assert_eq!(
-            parse_key_sequence("ab<C-x><A-z><Enter><Esc><Tab><Space>").unwrap(),
+            parse_key_sequence("ab<C-x><A-z><Enter><Esc><Tab><Space><Up><PageDown>").unwrap(),
             vec![
                 KeyToken::Char('a'),
                 KeyToken::Char('b'),
@@ -146,6 +158,8 @@ mod tests {
                 KeyToken::Escape,
                 KeyToken::Tab,
                 KeyToken::Space,
+                KeyToken::Up,
+                KeyToken::PageDown,
             ]
         );
     }

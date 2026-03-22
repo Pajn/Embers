@@ -77,7 +77,8 @@ where
         match key {
             KeyEvent::Bytes(bytes) => {
                 let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                self.send_bytes_to_buffer(buffer_id, session_id, bytes).await?;
+                self.send_bytes_to_buffer(buffer_id, session_id, bytes)
+                    .await?;
                 Ok(())
             }
             other => {
@@ -89,8 +90,12 @@ where
                     token,
                 ) {
                     InputResolution::ExactMatch(binding) => {
-                        self.execute_actions(Some(session_id), Some(viewport), binding.target.clone())
-                            .await
+                        self.execute_actions(
+                            Some(session_id),
+                            Some(viewport),
+                            binding.target.clone(),
+                        )
+                        .await
                     }
                     InputResolution::PrefixMatch => Ok(()),
                     InputResolution::Unmatched {
@@ -112,6 +117,65 @@ where
                 }
             }
         }
+    }
+
+    pub async fn handle_paste(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        self.set_active_view(session_id, viewport);
+        if self.current_fallback_policy() != FallbackPolicy::Passthrough {
+            return Ok(());
+        }
+
+        let presentation = self.prepare_presentation(session_id, viewport).await?;
+        let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+        let bytes = if self
+            .client
+            .state()
+            .snapshots
+            .get(&buffer_id)
+            .is_some_and(|snapshot| snapshot.bracketed_paste)
+        {
+            let mut wrapped = b"\x1b[200~".to_vec();
+            wrapped.extend(bytes);
+            wrapped.extend_from_slice(b"\x1b[201~");
+            wrapped
+        } else {
+            bytes
+        };
+        self.send_bytes_to_buffer(buffer_id, session_id, bytes)
+            .await
+    }
+
+    pub async fn handle_focus_event(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        focused: bool,
+    ) -> Result<()> {
+        self.set_active_view(session_id, viewport);
+        let presentation = self.prepare_presentation(session_id, viewport).await?;
+        let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+        if !self
+            .client
+            .state()
+            .snapshots
+            .get(&buffer_id)
+            .is_some_and(|snapshot| snapshot.focus_reporting)
+        {
+            return Ok(());
+        }
+
+        let bytes = if focused {
+            b"\x1b[I".to_vec()
+        } else {
+            b"\x1b[O".to_vec()
+        };
+        self.send_bytes_to_buffer(buffer_id, session_id, bytes)
+            .await
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
@@ -148,7 +212,8 @@ where
                 .dispatch_event(&event_name, context)
             {
                 Ok(actions) if !actions.is_empty() => {
-                    self.execute_actions(session_id, self.viewport, actions).await?;
+                    self.execute_actions(session_id, self.viewport, actions)
+                        .await?;
                 }
                 Ok(_) => {}
                 Err(error) => self.record_notification(error.to_string()),
@@ -167,11 +232,8 @@ where
         let mut custom_bars = BTreeMap::<embers_core::NodeId, BarSpec>::new();
         let mut recorded_formatter_error = false;
         for tabs in &presentation.tab_bars {
-            let bar_context = TabBarContext::from_frame(
-                tabs,
-                self.input_state.current_mode(),
-                viewport.width,
-            );
+            let bar_context =
+                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width);
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
@@ -256,7 +318,9 @@ where
                     } else {
                         mode
                     };
-                    let actions = self.transition_mode(next_mode, session_id, viewport).await?;
+                    let actions = self
+                        .transition_mode(next_mode, session_id, viewport)
+                        .await?;
                     prepend_actions(&mut pending, actions);
                     Ok(())
                 }
@@ -344,7 +408,10 @@ where
             Action::ResizeDirection { .. } => Err(MuxError::invalid_input(
                 "resize actions are not implemented yet",
             )),
-            Action::SelectTab { tabs_node_id, index } => {
+            Action::SelectTab {
+                tabs_node_id,
+                index,
+            } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
                 if index >= tabs.tabs.len() {
                     return Err(MuxError::invalid_input(format!(
@@ -468,7 +535,8 @@ where
             }
             Action::SendBytes { buffer_id, bytes } => {
                 let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
-                self.send_bytes_to_buffer(buffer_id, session_id, bytes).await
+                self.send_bytes_to_buffer(buffer_id, session_id, bytes)
+                    .await
             }
             Action::CloseFloating { floating_id } => {
                 let floating_id = floating_id
@@ -500,7 +568,9 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let buffer_id = self.resolve_tree_buffer(session_id, presentation, child).await?;
+                let buffer_id = self
+                    .resolve_tree_buffer(session_id, presentation, child)
+                    .await?;
                 self.client
                     .request_message(ClientMessage::Node(NodeRequest::AddTab {
                         request_id: self.client.next_request_id(),
@@ -521,7 +591,9 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let buffer_id = self.resolve_tree_buffer(session_id, presentation, child).await?;
+                let buffer_id = self
+                    .resolve_tree_buffer(session_id, presentation, child)
+                    .await?;
                 self.client
                     .request_message(ClientMessage::Node(NodeRequest::AddTab {
                         request_id: self.client.next_request_id(),
@@ -540,7 +612,9 @@ where
                 let node_id = node_id
                     .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
                     .ok_or_else(|| MuxError::invalid_input("no focused node to replace"))?;
-                let buffer_id = self.resolve_tree_buffer(session_id, presentation, tree).await?;
+                let buffer_id = self
+                    .resolve_tree_buffer(session_id, presentation, tree)
+                    .await?;
                 self.client
                     .request_message(ClientMessage::Node(NodeRequest::MoveBufferToNode {
                         request_id: self.client.next_request_id(),
@@ -685,31 +759,35 @@ where
                 .find(|tabs| tabs.node_id == tabs_node_id)
                 .cloned()
                 .or_else(|| {
-                    self.client.state().nodes.get(&tabs_node_id).and_then(|node| {
-                        node.tabs.as_ref().map(|tabs| crate::TabsFrame {
-                            node_id: tabs_node_id,
-                            rect: embers_core::Rect::default(),
-                            tabs: tabs
-                                .tabs
-                                .iter()
-                                .enumerate()
-                                .map(|(index, tab)| crate::TabItem {
-                                    title: tab.title.clone(),
-                                    child_id: tab.child_id,
-                                    active: usize::try_from(tabs.active).ok() == Some(index),
-                                    activity: ActivityState::Idle,
-                                })
-                                .collect(),
-                            active: usize::try_from(tabs.active).unwrap_or(0),
-                            is_root: self
-                                .client
-                                .state()
-                                .sessions
-                                .values()
-                                .any(|session| session.root_node_id == tabs_node_id),
-                            floating_id: None,
+                    self.client
+                        .state()
+                        .nodes
+                        .get(&tabs_node_id)
+                        .and_then(|node| {
+                            node.tabs.as_ref().map(|tabs| crate::TabsFrame {
+                                node_id: tabs_node_id,
+                                rect: embers_core::Rect::default(),
+                                tabs: tabs
+                                    .tabs
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, tab)| crate::TabItem {
+                                        title: tab.title.clone(),
+                                        child_id: tab.child_id,
+                                        active: usize::try_from(tabs.active).ok() == Some(index),
+                                        activity: ActivityState::Idle,
+                                    })
+                                    .collect(),
+                                active: usize::try_from(tabs.active).unwrap_or(0),
+                                is_root: self
+                                    .client
+                                    .state()
+                                    .sessions
+                                    .values()
+                                    .any(|session| session.root_node_id == tabs_node_id),
+                                floating_id: None,
+                            })
                         })
-                    })
                 })
                 .ok_or_else(|| MuxError::invalid_input(format!("node {tabs_node_id} is not tabs"))),
             None => presentation
@@ -780,6 +858,16 @@ where
         self.viewport = Some(viewport);
     }
 
+    fn current_fallback_policy(&self) -> FallbackPolicy {
+        self.config
+            .active_script()
+            .loaded_config()
+            .modes
+            .get(self.input_state.current_mode())
+            .map(|mode| mode.fallback_policy)
+            .unwrap_or(FallbackPolicy::Ignore)
+    }
+
     async fn focus_buffer(&mut self, session_id: SessionId, buffer_id: BufferId) -> Result<()> {
         let node_id = self
             .client
@@ -791,7 +879,12 @@ where
 
         let mut selections = Vec::new();
         let mut child_id = node_id;
-        let mut parent_id = self.client.state().nodes.get(&node_id).and_then(|node| node.parent_id);
+        let mut parent_id = self
+            .client
+            .state()
+            .nodes
+            .get(&node_id)
+            .and_then(|node| node.parent_id);
         while let Some(current_parent) = parent_id {
             if let Some(tabs) = self
                 .client
@@ -903,6 +996,12 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Escape => Ok(KeyToken::Escape),
         KeyEvent::Ctrl(ch) => Ok(KeyToken::Ctrl(ch.to_ascii_lowercase())),
         KeyEvent::Alt(ch) => Ok(KeyToken::Alt(ch.to_ascii_lowercase())),
+        KeyEvent::Up => Ok(KeyToken::Up),
+        KeyEvent::Down => Ok(KeyToken::Down),
+        KeyEvent::Left => Ok(KeyToken::Left),
+        KeyEvent::Right => Ok(KeyToken::Right),
+        KeyEvent::PageUp => Ok(KeyToken::PageUp),
+        KeyEvent::PageDown => Ok(KeyToken::PageDown),
         KeyEvent::Bytes(_) => Err(MuxError::invalid_input("raw bytes are handled separately")),
     }
 }
@@ -925,6 +1024,12 @@ fn sequence_to_bytes(sequence: &[KeyToken]) -> Result<Vec<u8>> {
                 bytes.push(0x1b);
                 bytes.extend(sequence_to_bytes(&[KeyToken::Char(*ch)])?);
             }
+            KeyToken::Up => bytes.extend_from_slice(b"\x1b[A"),
+            KeyToken::Down => bytes.extend_from_slice(b"\x1b[B"),
+            KeyToken::Left => bytes.extend_from_slice(b"\x1b[D"),
+            KeyToken::Right => bytes.extend_from_slice(b"\x1b[C"),
+            KeyToken::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+            KeyToken::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
             KeyToken::Leader => {
                 return Err(MuxError::invalid_input(
                     "leader placeholders cannot be sent directly",
