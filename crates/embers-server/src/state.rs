@@ -8,7 +8,11 @@ use embers_core::{
 
 use crate::model::{
     Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+};
+use crate::persist::{
+    PersistedWorkspace, persisted_buffer, persisted_floating, persisted_node, persisted_session,
+    restored_buffer, restored_floating, restored_node, restored_session,
 };
 
 #[derive(Debug)]
@@ -40,6 +44,63 @@ impl ServerState {
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
             floating_ids: IdAllocator::new(1),
+        }
+    }
+
+    pub fn from_persisted(workspace: PersistedWorkspace) -> Result<Self> {
+        let mut state = Self {
+            sessions: workspace
+                .sessions
+                .into_iter()
+                .map(|session| {
+                    let session = restored_session(session);
+                    (session.id, session)
+                })
+                .collect(),
+            buffers: workspace
+                .buffers
+                .into_iter()
+                .map(|buffer| {
+                    let buffer = restored_buffer(buffer);
+                    (buffer.id, buffer)
+                })
+                .collect(),
+            nodes: workspace
+                .nodes
+                .into_iter()
+                .map(|node| {
+                    let node = restored_node(node);
+                    (node.id(), node)
+                })
+                .collect(),
+            floating: workspace
+                .floating
+                .into_iter()
+                .map(|floating| {
+                    let floating = restored_floating(floating);
+                    (floating.id, floating)
+                })
+                .collect(),
+            session_ids: IdAllocator::new(workspace.next_session_id),
+            buffer_ids: IdAllocator::new(workspace.next_buffer_id),
+            node_ids: IdAllocator::new(workspace.next_node_id),
+            floating_ids: IdAllocator::new(workspace.next_floating_id),
+        };
+        state.interrupt_unrecoverable_buffers();
+        state.validate()?;
+        Ok(state)
+    }
+
+    pub fn to_persisted(&self) -> PersistedWorkspace {
+        PersistedWorkspace {
+            sessions: self.sessions.values().map(persisted_session).collect(),
+            buffers: self.buffers.values().map(persisted_buffer).collect(),
+            nodes: self.nodes.values().map(persisted_node).collect(),
+            floating: self.floating.values().map(persisted_floating).collect(),
+            next_session_id: next_id_after_max(self.sessions.keys().map(|id| id.0)),
+            next_buffer_id: next_id_after_max(self.buffers.keys().map(|id| id.0)),
+            next_node_id: next_id_after_max(self.nodes.keys().map(|id| id.0)),
+            next_floating_id: next_id_after_max(self.floating.keys().map(|id| id.0)),
         }
     }
 
@@ -280,6 +341,23 @@ impl ServerState {
             exited_at: Timestamp::now(),
         });
         Ok(())
+    }
+
+    pub fn interrupt_unrecoverable_buffers(&mut self) {
+        for buffer in self.buffers.values_mut() {
+            buffer.state = match &buffer.state {
+                BufferState::Exited(exited) => BufferState::Exited(exited.clone()),
+                BufferState::Running(running) => BufferState::Interrupted(InterruptedBuffer {
+                    last_known_pid: running.pid,
+                }),
+                BufferState::Interrupted(interrupted) => {
+                    BufferState::Interrupted(interrupted.clone())
+                }
+                BufferState::Created => BufferState::Interrupted(InterruptedBuffer {
+                    last_known_pid: None,
+                }),
+            };
+        }
     }
 
     pub fn set_buffer_size(&mut self, buffer_id: BufferId, size: PtySize) -> Result<()> {
@@ -1966,4 +2044,8 @@ impl ServerState {
             .get_mut(&floating_id)
             .ok_or_else(|| MuxError::not_found(format!("unknown floating window {floating_id}")))
     }
+}
+
+fn next_id_after_max(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().unwrap_or(0).saturating_add(1)
 }

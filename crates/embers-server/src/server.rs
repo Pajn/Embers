@@ -52,7 +52,12 @@ impl Server {
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_socket_permissions(&self.config.socket_path)?;
         let socket_path = self.config.socket_path.clone();
-        let runtime = Arc::new(Runtime::new(self.config.buffer_env.clone()));
+        let restored_state = load_workspace(&self.config.workspace_path)?;
+        let runtime = Arc::new(Runtime::new(
+            restored_state.unwrap_or_default(),
+            self.config.workspace_path.clone(),
+            self.config.buffer_env.clone(),
+        ));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let join = tokio::spawn(async move {
@@ -100,6 +105,9 @@ impl Server {
                 }
             }
 
+            if let Err(error) = runtime.persist_workspace().await {
+                error!(%error, "failed to persist workspace during shutdown");
+            }
             runtime.shutdown_runtimes().await;
             Ok(())
         });
@@ -163,6 +171,7 @@ struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
+    workspace_path: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
@@ -241,11 +250,16 @@ impl BufferSurface {
 }
 
 impl Runtime {
-    fn new(buffer_env: BTreeMap<String, OsString>) -> Self {
+    fn new(
+        state: ServerState,
+        workspace_path: PathBuf,
+        buffer_env: BTreeMap<String, OsString>,
+    ) -> Self {
         Self {
-            state: Mutex::new(ServerState::new()),
+            state: Mutex::new(state),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
             buffer_surfaces: Mutex::new(BTreeMap::new()),
+            workspace_path,
             buffer_env,
             subscriptions: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
@@ -255,6 +269,11 @@ impl Runtime {
 }
 
 impl Runtime {
+    async fn persist_workspace(&self) -> Result<()> {
+        let state = self.state.lock().await;
+        save_workspace(&self.workspace_path, &state)
+    }
+
     async fn dispatch_request(
         self: &Arc<Self>,
         connection_id: u64,
@@ -1229,6 +1248,9 @@ impl Runtime {
             ))),
             BufferState::Running(_) => Err(MuxError::internal(format!(
                 "buffer {buffer_id} is marked running without an active runtime"
+            ))),
+            BufferState::Interrupted(_) => Err(MuxError::conflict(format!(
+                "buffer {buffer_id} was restored without a running runtime"
             ))),
             BufferState::Exited(_) => Err(MuxError::conflict(format!(
                 "buffer {buffer_id} has already exited"

@@ -335,6 +335,7 @@ impl ClientMessage {
 pub enum BufferRecordState {
     Created,
     Running,
+    Interrupted,
     Exited,
 }
 

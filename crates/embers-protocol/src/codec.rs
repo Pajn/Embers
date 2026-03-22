@@ -1554,6 +1554,7 @@ fn encode_buffer_record<'a>(
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
         BufferRecordState::Running => fb::BufferStateWire::Running,
+        BufferRecordState::Interrupted => fb::BufferStateWire::Interrupted,
         BufferRecordState::Exited => fb::BufferStateWire::Exited,
     };
 
@@ -2371,6 +2372,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
     let state = match record.state() {
         fb::BufferStateWire::Created => BufferRecordState::Created,
         fb::BufferStateWire::Running => BufferRecordState::Running,
+        fb::BufferStateWire::Interrupted => BufferRecordState::Interrupted,
         fb::BufferStateWire::Exited => BufferRecordState::Exited,
         _ => return Err(ProtocolError::InvalidMessage("unknown buffer state")),
     };
