@@ -2,6 +2,8 @@ mod support;
 
 use std::time::Duration;
 
+use embers_core::RequestId;
+use embers_protocol::{BufferRequest, ClientMessage, ServerResponse};
 use embers_test_support::{TestConnection, TestServer};
 use tokio::time::sleep;
 
@@ -123,6 +125,118 @@ async fn pane_commands_round_trip_through_cli() {
     run_cli(&server, ["kill-pane", "-t", &other_pane_id.to_string()]);
     let listed = run_cli(&server, ["list-panes"]);
     assert_eq!(stdout(&listed).trim().lines().count(), 1);
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_buffers_can_be_listed_and_attached_via_cli() {
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let split = run_cli(&server, ["split-window", "--", "/bin/sh"]);
+    let target_pane_id = stdout(&split)
+        .trim()
+        .parse::<u64>()
+        .expect("split-window returns pane id");
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let detached = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Create {
+            request_id: RequestId(1),
+            title: Some("detached-tools".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+        }))
+        .await
+        .expect("buffer create succeeds");
+    let detached_buffer_id = match detached {
+        ServerResponse::Buffer(response) => response.buffer.id,
+        other => panic!("expected buffer response, got {other:?}"),
+    };
+
+    let listed = run_cli(&server, ["list-buffers", "--detached"]);
+    assert!(
+        stdout(&listed)
+            .lines()
+            .any(|line| line.starts_with(&format!("{detached_buffer_id}\trunning\tdetached\t")))
+    );
+
+    run_cli(
+        &server,
+        [
+            "attach-buffer",
+            &detached_buffer_id.to_string(),
+            "-t",
+            &target_pane_id.to_string(),
+        ],
+    );
+
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let moved_leaf = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == embers_core::NodeId(target_pane_id))
+        .expect("target pane exists");
+    assert_eq!(
+        moved_leaf
+            .buffer_view
+            .as_ref()
+            .expect("target is buffer view")
+            .buffer_id,
+        detached_buffer_id
+    );
+
+    let listed = run_cli(&server, ["list-buffers", "--attached"]);
+    assert!(
+        stdout(&listed)
+            .lines()
+            .any(|line| line.starts_with(&format!(
+                "{detached_buffer_id}\trunning\tattached:{target_pane_id}\t"
+            )))
+    );
+
+    let buffers = connection
+        .request(&ClientMessage::Buffer(BufferRequest::List {
+            request_id: RequestId(2),
+            session_id: None,
+            attached_only: false,
+            detached_only: false,
+        }))
+        .await
+        .expect("buffer list succeeds");
+    let previous_buffer_id = match buffers {
+        ServerResponse::Buffers(response) => response
+            .buffers
+            .into_iter()
+            .find(|buffer| buffer.id != detached_buffer_id && buffer.attachment_node_id.is_none())
+            .map(|buffer| buffer.id)
+            .expect("previous pane buffer became detached"),
+        other => panic!("expected buffers response, got {other:?}"),
+    };
+
+    let detached_again = run_cli(&server, ["list-buffers", "--detached"]);
+    assert!(
+        stdout(&detached_again)
+            .lines()
+            .any(|line| line.starts_with(&format!("{previous_buffer_id}\trunning\tdetached\t")))
+    );
 
     server.shutdown().await.expect("shutdown server");
 }
