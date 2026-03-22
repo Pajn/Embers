@@ -1,9 +1,11 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use rhai::plugin::*;
 use rhai::{
-    CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, NativeCallContext,
-    Position,
+    Array, CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map,
+    NativeCallContext, Position,
 };
 
 use crate::config::ConfigOrigin;
@@ -20,10 +22,15 @@ use super::runtime::{
 use super::types::{
     LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
 };
-use super::{Action, Context, TabBarContext};
-
-type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
+use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
+
+thread_local! {
+    /// [`ACTIVE_REGISTRATION`] holds the current [`SharedRegistration`] for registration-time
+    /// Rhai callbacks on this thread. It is managed by [`with_active_registration`] and consumed
+    /// by [`clone_active_registration`].
+    static ACTIVE_REGISTRATION: RefCell<Option<SharedRegistration>> = const { RefCell::new(None) };
+}
 
 pub struct ScriptEngine {
     engine: Engine,
@@ -43,13 +50,13 @@ impl ScriptEngine {
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 256);
         engine.set_max_operations(1_000_000);
-        register_api(&mut engine, registration.clone());
+        register_api(&mut engine);
         register_runtime_api(&mut engine);
 
         let mut scope = registration_scope();
-        scope.push_constant("tabbar", TabbarApi::new(registration.clone()));
-        scope.push_constant("theme", ThemeApi::new(registration.clone()));
-        scope.push_constant("mouse", MouseApi::new(registration.clone()));
+        scope.push("tabbar", TabbarApi::new());
+        scope.push("theme", ThemeApi::new());
+        scope.push("mouse", MouseApi::new());
 
         if !builtins.is_empty() {
             let builtins_source = LoadedConfigSource {
@@ -61,18 +68,20 @@ impl ScriptEngine {
             let builtins_ast = engine
                 .compile(builtins)
                 .map_err(|error| ScriptError::compile(&builtins_source, error))?;
-            let _ = engine
-                .eval_ast_with_scope::<Dynamic>(&mut scope, &builtins_ast)
-                .map_err(|error| ScriptError::runtime(&builtins_source, error))?;
+            let _ = with_active_registration(&registration, || {
+                engine.eval_ast_with_scope::<Dynamic>(&mut scope, &builtins_ast)
+            })
+            .map_err(|error| ScriptError::runtime(&builtins_source, error))?;
         }
 
         let ast = engine
             .compile(&source.source)
             .map_err(|error| ScriptError::compile(source, error))?;
 
-        let _ = engine
-            .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
-            .map_err(|error| ScriptError::runtime(source, error))?;
+        let _ = with_active_registration(&registration, || {
+            engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
+        })
+        .map_err(|error| ScriptError::runtime(source, error))?;
 
         let loaded = registration
             .lock()
@@ -350,6 +359,50 @@ impl RegistrationState {
     }
 }
 
+/// Thread-local slot holding the current [`SharedRegistration`] while Rhai config callbacks run.
+///
+/// [`with_active_registration`] is responsible for setting [`ACTIVE_REGISTRATION`] before
+/// invoking registration-time API code and restoring the previous value afterward.
+fn with_active_registration<T>(
+    registration: &SharedRegistration,
+    callback: impl FnOnce() -> T,
+) -> T {
+    ACTIVE_REGISTRATION.with(|active| {
+        struct RestoreRegistration<'a> {
+            active: &'a RefCell<Option<SharedRegistration>>,
+            previous: Option<SharedRegistration>,
+        }
+
+        impl Drop for RestoreRegistration<'_> {
+            fn drop(&mut self) {
+                self.active.replace(self.previous.take());
+            }
+        }
+
+        let previous = active.replace(Some(registration.clone()));
+        let _restore = RestoreRegistration { active, previous };
+
+        callback()
+    })
+}
+
+/// Clone the [`SharedRegistration`] currently stored in [`ACTIVE_REGISTRATION`].
+///
+/// This expects an active registration scope to have been established by
+/// [`with_active_registration`]. Callers must use [`with_active_registration`] first, or
+/// otherwise guarantee that [`ACTIVE_REGISTRATION`] has been populated before calling
+/// [`clone_active_registration`].
+fn clone_active_registration(position: Position) -> ScriptResult<SharedRegistration> {
+    ACTIVE_REGISTRATION.with(|active| {
+        active.borrow().as_ref().cloned().ok_or_else(|| {
+            runtime_error(
+                "registration API called without an active registration state",
+                position,
+            )
+        })
+    })
+}
+
 fn validate_action_refs(
     source: &LoadedConfigSource,
     position: Position,
@@ -399,17 +452,16 @@ enum BindingOperation {
 }
 
 #[derive(Clone)]
-struct TabbarApi {
-    registration: SharedRegistration,
-}
+pub(crate) struct TabbarApi {}
 
 impl TabbarApi {
-    fn new(registration: SharedRegistration) -> Self {
-        Self { registration }
+    fn new() -> Self {
+        Self {}
     }
 
-    fn set_formatter(&mut self, position: Position, formatter: FnPtr) -> RhaiResult<()> {
-        let mut registration = self.registration.lock().expect("registration lock");
+    fn set_formatter(&self, position: Position, formatter: FnPtr) -> ScriptResult<()> {
+        let registration = clone_active_registration(position)?;
+        let mut registration = registration.lock().expect("registration lock");
         if registration.tab_bar_formatter.is_some() {
             return Err(runtime_error("tab bar formatter already defined", position));
         }
@@ -423,17 +475,16 @@ impl TabbarApi {
 }
 
 #[derive(Clone)]
-struct ThemeApi {
-    registration: SharedRegistration,
-}
+pub(crate) struct ThemeApi {}
 
 impl ThemeApi {
-    fn new(registration: SharedRegistration) -> Self {
-        Self { registration }
+    fn new() -> Self {
+        Self {}
     }
 
-    fn set_palette(&mut self, position: Position, palette: Map) -> RhaiResult<()> {
-        let mut registration = self.registration.lock().expect("registration lock");
+    fn set_palette(&self, position: Position, palette: Map) -> ScriptResult<()> {
+        let registration = clone_active_registration(position)?;
+        let mut registration = registration.lock().expect("registration lock");
         for (name, value) in palette {
             let Some(value) = value.try_cast::<ImmutableString>() else {
                 return Err(runtime_error(
@@ -456,260 +507,335 @@ impl ThemeApi {
 }
 
 #[derive(Clone)]
-struct MouseApi {
-    registration: SharedRegistration,
-}
+pub(crate) struct MouseApi {}
 
 impl MouseApi {
-    fn new(registration: SharedRegistration) -> Self {
-        Self { registration }
+    fn new() -> Self {
+        Self {}
     }
 
-    fn set_click_focus(&mut self, value: bool) {
-        self.registration
+    fn set_click_focus(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
             .lock()
             .expect("registration lock")
             .mouse
             .click_focus = value;
+        Ok(())
     }
 
-    fn set_click_forward(&mut self, value: bool) {
-        self.registration
+    fn set_click_forward(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
             .lock()
             .expect("registration lock")
             .mouse
             .click_forward = value;
+        Ok(())
     }
 
-    fn set_wheel_scroll(&mut self, value: bool) {
-        self.registration
+    fn set_wheel_scroll(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
             .lock()
             .expect("registration lock")
             .mouse
             .wheel_scroll = value;
+        Ok(())
     }
 
-    fn set_wheel_forward(&mut self, value: bool) {
-        self.registration
+    fn set_wheel_forward(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
             .lock()
             .expect("registration lock")
             .mouse
             .wheel_forward = value;
+        Ok(())
     }
 }
 
-fn register_api(engine: &mut Engine, registration: SharedRegistration) {
+#[export_module]
+mod registration_globals {
+    use super::*;
+
+    /// Set the leader sequence used in binding notations.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_leader("<C-a>");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:1
+    #[rhai_fn(return_raw, global, name = "set_leader")]
+    pub fn set_leader(ctx: NativeCallContext, notation: &str) -> RhaiResultOf<()> {
+        let sequence = parse_key_sequence(notation)
+            .map_err(|error| runtime_error(error.to_string(), ctx.call_position()))?;
+        let registration = clone_active_registration(ctx.call_position())?;
+        let mut registration = registration.lock().expect("registration lock");
+        if registration.leader.is_some() {
+            return Err(runtime_error(
+                "leader key is already defined",
+                ctx.call_position(),
+            ));
+        }
+        registration.leader = Some(sequence);
+        Ok(())
+    }
+
+    #[rhai_fn(return_raw, global, name = "define_mode")]
+    pub fn define_mode(ctx: NativeCallContext, mode_name: &str) -> RhaiResultOf<()> {
+        define_mode_impl(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode_name.into(),
+            Map::new(),
+        )
+    }
+
+    /// Define a custom input mode with hooks and fallback options.
+    ///
+    /// Supported options are `fallback`, `on_enter`, and `on_leave`.
+    ///
+    /// # rhai-autodocs:index:3
+    #[rhai_fn(return_raw, global, name = "define_mode")]
+    pub fn define_mode_with_options(
+        ctx: NativeCallContext,
+        mode_name: &str,
+        options: Map,
+    ) -> RhaiResultOf<()> {
+        define_mode_impl(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode_name.into(),
+            options,
+        )
+    }
+
+    /// Bind a key notation to an [`Action`], a string action name, or an array of actions.
+    ///
+    /// Use the `Action` overload for inline builders such as `action.focus_left()`, the string
+    /// overload for a named action registered with `define_action`, or an array to chain multiple
+    /// actions in sequence.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>ws", "workspace-split");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:4
+    #[rhai_fn(return_raw, global, name = "bind")]
+    pub fn bind_named(
+        ctx: NativeCallContext,
+        mode: &str,
+        notation: &str,
+        action_name: &str,
+    ) -> RhaiResultOf<()> {
+        register_binding(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode.into(),
+            notation.into(),
+            vec![Action::RunNamedAction {
+                name: action_name.to_owned(),
+            }],
+        )
+    }
+
+    #[rhai_fn(return_raw, global, name = "bind")]
+    pub fn bind_action(
+        ctx: NativeCallContext,
+        mode: &str,
+        notation: &str,
+        action: Action,
+    ) -> RhaiResultOf<()> {
+        register_binding(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode.into(),
+            notation.into(),
+            vec![action],
+        )
+    }
+
+    #[rhai_fn(return_raw, global, name = "bind")]
+    pub fn bind_actions(
+        ctx: NativeCallContext,
+        mode: &str,
+        notation: &str,
+        actions: Array,
+    ) -> RhaiResultOf<()> {
+        let target = actions
+            .into_iter()
+            .map(|action: Dynamic| {
+                action
+                    .try_cast::<Action>()
+                    .ok_or_else(|| runtime_error("bind expects Action values", ctx.call_position()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        register_binding(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode.into(),
+            notation.into(),
+            target,
+        )
+    }
+
+    /// Remove a previously bound key sequence.
+    ///
+    /// # rhai-autodocs:index:5
+    #[rhai_fn(return_raw, global, name = "unbind")]
+    pub fn unbind(ctx: NativeCallContext, mode: &str, notation: &str) -> RhaiResultOf<()> {
+        register_unbinding(
+            &clone_active_registration(ctx.call_position())?,
+            ctx.call_position(),
+            mode.into(),
+            notation.into(),
+        )
+    }
+
+    /// Register a function pointer as a named action callable from bindings.
+    ///
+    /// # rhai-autodocs:index:6
+    #[rhai_fn(return_raw, global, name = "define_action")]
+    pub fn define_action(ctx: NativeCallContext, name: &str, callback: FnPtr) -> RhaiResultOf<()> {
+        let registration = clone_active_registration(ctx.call_position())?;
+        let mut registration = registration.lock().expect("registration lock");
+        if registration.named_actions.contains_key(name) {
+            return Err(runtime_error(
+                format!("action '{name}' is already defined"),
+                ctx.call_position(),
+            ));
+        }
+        registration.named_actions.insert(
+            name.to_owned(),
+            checked_function_ref(callback, "named action", ctx.call_position())?,
+        );
+        Ok(())
+    }
+
+    /// Attach a callback to an emitted event such as `buffer_bell`.
+    ///
+    /// # rhai-autodocs:index:7
+    #[rhai_fn(return_raw, global, name = "on")]
+    pub fn on(ctx: NativeCallContext, event_name: &str, callback: FnPtr) -> RhaiResultOf<()> {
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .event_handlers
+            .entry(event_name.to_owned())
+            .or_default()
+            .push(checked_function_ref(
+                callback,
+                "event handler",
+                ctx.call_position(),
+            )?);
+        Ok(())
+    }
+}
+
+#[export_module]
+mod tabbar_registration_api {
+    use super::*;
+
+    /// Register the function used to format the tab bar.
+    ///
+    /// # rhai-autodocs:index:20
+    #[rhai_fn(return_raw, name = "set_formatter")]
+    pub fn set_formatter(
+        ctx: NativeCallContext,
+        tabbar: TabbarApi,
+        callback: FnPtr,
+    ) -> RhaiResultOf<()> {
+        tabbar.set_formatter(ctx.call_position(), callback)
+    }
+}
+
+#[export_module]
+mod theme_registration_api {
+    use super::*;
+
+    /// Add named colors to the theme palette.
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_palette")]
+    pub fn set_palette(ctx: NativeCallContext, theme: ThemeApi, palette: Map) -> RhaiResultOf<()> {
+        theme.set_palette(ctx.call_position(), palette)
+    }
+}
+
+#[export_module]
+mod mouse_registration_api {
+    use super::*;
+
+    /// Toggle focus-on-click behavior.
+    ///
+    /// # rhai-autodocs:index:22
+    #[rhai_fn(return_raw, name = "set_click_focus")]
+    pub fn set_click_focus(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_click_focus(ctx.call_position(), value)
+    }
+
+    /// Toggle forwarding mouse clicks into the focused buffer.
+    ///
+    /// # rhai-autodocs:index:23
+    #[rhai_fn(return_raw, name = "set_click_forward")]
+    pub fn set_click_forward(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_click_forward(ctx.call_position(), value)
+    }
+
+    /// Toggle client-side wheel scrolling.
+    ///
+    /// # rhai-autodocs:index:24
+    #[rhai_fn(return_raw, name = "set_wheel_scroll")]
+    pub fn set_wheel_scroll(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_wheel_scroll(ctx.call_position(), value)
+    }
+
+    /// Toggle wheel event forwarding into the focused buffer.
+    ///
+    /// # rhai-autodocs:index:25
+    #[rhai_fn(return_raw, name = "set_wheel_forward")]
+    pub fn set_wheel_forward(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_wheel_forward(ctx.call_position(), value)
+    }
+}
+
+fn register_api(engine: &mut Engine) {
     engine.register_type_with_name::<TabbarApi>("TabbarApi");
     engine.register_type_with_name::<ThemeApi>("ThemeApi");
     engine.register_type_with_name::<MouseApi>("MouseApi");
+    engine.register_global_module(rhai::exported_module!(registration_globals).into());
+    engine.register_global_module(rhai::exported_module!(tabbar_registration_api).into());
+    engine.register_global_module(rhai::exported_module!(theme_registration_api).into());
+    engine.register_global_module(rhai::exported_module!(mouse_registration_api).into());
+}
 
-    let leader_registration = registration.clone();
-    engine.register_fn(
-        "set_leader",
-        move |context: NativeCallContext, notation: ImmutableString| -> RhaiResult<()> {
-            let sequence = parse_key_sequence(notation.as_str())
-                .map_err(|error| runtime_error(error.to_string(), context.call_position()))?;
-            let mut registration = leader_registration.lock().expect("registration lock");
-            if registration.leader.is_some() {
-                return Err(runtime_error(
-                    "leader key is already defined",
-                    context.call_position(),
-                ));
-            }
-            registration.leader = Some(sequence);
-            Ok(())
-        },
-    );
+pub(crate) fn register_documented_registration_api(engine: &mut Engine) {
+    register_api(engine);
+}
 
-    let mode_registration = registration.clone();
-    engine.register_fn(
-        "define_mode",
-        move |context: NativeCallContext, mode_name: ImmutableString| -> RhaiResult<()> {
-            define_mode_impl(
-                &mode_registration,
-                context.call_position(),
-                mode_name,
-                Map::new(),
-            )
-        },
-    );
-
-    let mode_registration = registration.clone();
-    engine.register_fn(
-        "define_mode",
-        move |context: NativeCallContext,
-              mode_name: ImmutableString,
-              options: Map|
-              -> RhaiResult<()> {
-            define_mode_impl(
-                &mode_registration,
-                context.call_position(),
-                mode_name,
-                options,
-            )
-        },
-    );
-
-    let bind_registration = registration.clone();
-    engine.register_fn(
-        "bind",
-        move |context: NativeCallContext,
-              mode: ImmutableString,
-              notation: ImmutableString,
-              action_name: ImmutableString|
-              -> RhaiResult<()> {
-            register_binding(
-                &bind_registration,
-                context.call_position(),
-                mode,
-                notation,
-                vec![Action::RunNamedAction {
-                    name: action_name.to_string(),
-                }],
-            )
-        },
-    );
-
-    let unbind_registration = registration.clone();
-    engine.register_fn(
-        "unbind",
-        move |context: NativeCallContext,
-              mode: ImmutableString,
-              notation: ImmutableString|
-              -> RhaiResult<()> {
-            register_unbinding(
-                &unbind_registration,
-                context.call_position(),
-                mode,
-                notation,
-            )
-        },
-    );
-
-    let bind_registration = registration.clone();
-    engine.register_fn(
-        "bind",
-        move |context: NativeCallContext,
-              mode: ImmutableString,
-              notation: ImmutableString,
-              action: Action|
-              -> RhaiResult<()> {
-            register_binding(
-                &bind_registration,
-                context.call_position(),
-                mode,
-                notation,
-                vec![action],
-            )
-        },
-    );
-
-    let bind_registration = registration.clone();
-    engine.register_fn(
-        "bind",
-        move |context: NativeCallContext,
-              mode: ImmutableString,
-              notation: ImmutableString,
-              actions: rhai::Array|
-              -> RhaiResult<()> {
-            let target = actions
-                .into_iter()
-                .map(|action| {
-                    action.try_cast::<Action>().ok_or_else(|| {
-                        runtime_error("bind expects Action values", context.call_position())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            register_binding(
-                &bind_registration,
-                context.call_position(),
-                mode,
-                notation,
-                target,
-            )
-        },
-    );
-
-    let action_registration = registration.clone();
-    engine.register_fn(
-        "define_action",
-        move |context: NativeCallContext,
-              name: ImmutableString,
-              callback: FnPtr|
-              -> RhaiResult<()> {
-            let mut registration = action_registration.lock().expect("registration lock");
-            if registration.named_actions.contains_key(name.as_str()) {
-                return Err(runtime_error(
-                    format!("action '{name}' is already defined"),
-                    context.call_position(),
-                ));
-            }
-            registration.named_actions.insert(
-                name.into_owned(),
-                checked_function_ref(callback, "named action", context.call_position())?,
-            );
-            Ok(())
-        },
-    );
-
-    let handler_registration = registration.clone();
-    engine.register_fn(
-        "on",
-        move |context: NativeCallContext,
-              event_name: ImmutableString,
-              callback: FnPtr|
-              -> RhaiResult<()> {
-            handler_registration
-                .lock()
-                .expect("registration lock")
-                .event_handlers
-                .entry(event_name.into_owned())
-                .or_default()
-                .push(checked_function_ref(
-                    callback,
-                    "event handler",
-                    context.call_position(),
-                )?);
-            Ok(())
-        },
-    );
-
-    engine.register_fn(
-        "set_formatter",
-        |context: NativeCallContext, tabbar: &mut TabbarApi, callback: FnPtr| -> RhaiResult<()> {
-            tabbar.set_formatter(context.call_position(), callback)
-        },
-    );
-    engine.register_fn(
-        "set_palette",
-        |context: NativeCallContext, theme: &mut ThemeApi, palette: Map| -> RhaiResult<()> {
-            theme.set_palette(context.call_position(), palette)
-        },
-    );
-    engine.register_fn(
-        "set_click_focus",
-        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
-            mouse.set_click_focus(value);
-        },
-    );
-    engine.register_fn(
-        "set_click_forward",
-        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
-            mouse.set_click_forward(value);
-        },
-    );
-    engine.register_fn(
-        "set_wheel_scroll",
-        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
-            mouse.set_wheel_scroll(value);
-        },
-    );
-    engine.register_fn(
-        "set_wheel_forward",
-        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
-            mouse.set_wheel_forward(value);
-        },
-    );
+pub(crate) fn documentation_registration_scope() -> rhai::Scope<'static> {
+    let mut scope = registration_scope();
+    scope.push("tabbar", TabbarApi::new());
+    scope.push("theme", ThemeApi::new());
+    scope.push("mouse", MouseApi::new());
+    scope
 }
 
 fn define_mode_impl(
@@ -717,8 +843,8 @@ fn define_mode_impl(
     position: Position,
     mode_name: ImmutableString,
     mut options: Map,
-) -> RhaiResult<()> {
-    let fallback_policy = parse_fallback_policy(options.remove("fallback"))?;
+) -> ScriptResult<()> {
+    let fallback_policy = parse_fallback_policy(options.remove("fallback"), position)?;
     let on_enter =
         parse_optional_function_ref(options.remove("on_enter"), "mode on_enter", position)?;
     let on_leave =
@@ -754,7 +880,7 @@ fn register_binding(
     mode: ImmutableString,
     notation: ImmutableString,
     target: Vec<Action>,
-) -> RhaiResult<()> {
+) -> ScriptResult<()> {
     let raw_sequence = parse_key_sequence(notation.as_str())
         .map_err(|error| runtime_error(error.to_string(), position))?;
     registration
@@ -776,7 +902,7 @@ fn register_unbinding(
     position: Position,
     mode: ImmutableString,
     notation: ImmutableString,
-) -> RhaiResult<()> {
+) -> ScriptResult<()> {
     let raw_sequence = parse_key_sequence(notation.as_str())
         .map_err(|error| runtime_error(error.to_string(), position))?;
     registration
@@ -791,7 +917,10 @@ fn register_unbinding(
     Ok(())
 }
 
-fn parse_fallback_policy(value: Option<Dynamic>) -> RhaiResult<FallbackPolicy> {
+fn parse_fallback_policy(
+    value: Option<Dynamic>,
+    position: Position,
+) -> ScriptResult<FallbackPolicy> {
     let Some(value) = value else {
         return Ok(FallbackPolicy::Ignore);
     };
@@ -801,7 +930,7 @@ fn parse_fallback_policy(value: Option<Dynamic>) -> RhaiResult<FallbackPolicy> {
     let Some(value) = value.try_cast::<ImmutableString>() else {
         return Err(runtime_error(
             "mode fallback must be 'pass_to_buffer' or 'ignore'",
-            Position::NONE,
+            position,
         ));
     };
     match value.as_str() {
@@ -809,7 +938,7 @@ fn parse_fallback_policy(value: Option<Dynamic>) -> RhaiResult<FallbackPolicy> {
         "ignore" => Ok(FallbackPolicy::Ignore),
         other => Err(runtime_error(
             format!("unknown fallback policy '{other}'"),
-            Position::NONE,
+            position,
         )),
     }
 }
@@ -822,7 +951,7 @@ fn parse_optional_function_ref(
     value: Option<Dynamic>,
     role: &str,
     position: Position,
-) -> RhaiResult<Option<ScriptFunctionRef>> {
+) -> ScriptResult<Option<ScriptFunctionRef>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -842,7 +971,7 @@ fn checked_function_ref(
     callback: FnPtr,
     role: &str,
     position: Position,
-) -> RhaiResult<ScriptFunctionRef> {
+) -> ScriptResult<ScriptFunctionRef> {
     if callback.is_curried() {
         return Err(runtime_error(
             format!("{role} callbacks cannot capture curried arguments"),

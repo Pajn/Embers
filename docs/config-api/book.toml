@@ -1,0 +1,8 @@
+[book]
+title = "Embers Config API"
+language = "en"
+src = "."
+
+[output.html]
+default-theme = "light"
+additional-js = ["theme/rhai-autodocs-tabs.js", "theme/rhai-highlight.js"]

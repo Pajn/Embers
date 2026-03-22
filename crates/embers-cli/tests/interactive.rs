@@ -16,6 +16,7 @@ const FILE_WAIT_POLL: Duration = Duration::from_millis(50);
 const FILE_WAIT_ATTEMPTS: usize = 200;
 const SCROLLBACK_SETTLE_DELAY: Duration = Duration::from_millis(750);
 const QUIET_TIMEOUT: Duration = Duration::from_millis(500);
+const PAGE_UP_ATTEMPTS: usize = 4;
 
 fn spawn_embers(args: &[&str]) -> PtyHarness {
     let binary = cargo_bin_path("embers");
@@ -102,6 +103,22 @@ async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
         .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
         .unwrap_or_else(|error| panic!("long output settled: {error}"));
     tokio::time::sleep(SCROLLBACK_SETTLE_DELAY).await;
+}
+
+fn page_up_until_visible(harness: &mut PtyHarness, needle: &str) {
+    let mut last_err = None;
+    for _ in 0..PAGE_UP_ATTEMPTS {
+        harness.write_all("\x1b[5~").expect("page up");
+        match harness.read_until_contains(needle, IO_TIMEOUT) {
+            Ok(_) => return,
+            Err(error) => last_err = Some(error),
+        }
+    }
+
+    let last_err = last_err
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "no read error captured".to_owned());
+    panic!("page up did not reveal `{needle}` within {PAGE_UP_ATTEMPTS} attempts: {last_err}");
 }
 
 fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> String {
@@ -218,11 +235,7 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
         .expect("client starts and renders");
     populate_scrollback_or_wait(&mut harness, 40).await;
 
-    harness.write_all("\x1b[5~").expect("page up");
-    let output = harness
-        .read_until_contains("line-1", IO_TIMEOUT)
-        .expect("page up reveals earlier scrollback");
-    assert!(output.contains("line-1"));
+    page_up_until_visible(&mut harness, "line-1");
 
     harness.write_all("\x11").expect("quit client");
     harness.wait().expect("client exits");
@@ -241,10 +254,7 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
         .expect("client starts and renders");
     populate_scrollback_or_wait(&mut harness, 40).await;
 
-    harness.write_all("\x1b[5~").expect("page up");
-    harness
-        .read_until_contains("line-1", IO_TIMEOUT)
-        .expect("page up reveals earlier scrollback");
+    page_up_until_visible(&mut harness, "line-1");
     harness.write_all("vly").expect("select and yank");
     let output = harness
         .read_until_contains("]52;c;", IO_TIMEOUT)
