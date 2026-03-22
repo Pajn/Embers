@@ -1510,21 +1510,113 @@ impl Runtime {
                 }
                 layout_snapshot_response(&state, request_id, session_id)
             }
-            embers_protocol::NodeRequest::Zoom { request_id, .. }
-            | embers_protocol::NodeRequest::Unzoom { request_id, .. }
-            | embers_protocol::NodeRequest::ToggleZoom { request_id, .. }
-            | embers_protocol::NodeRequest::SwapSiblings { request_id, .. }
-            | embers_protocol::NodeRequest::BreakNode { request_id, .. }
-            | embers_protocol::NodeRequest::JoinBufferAtNode { request_id, .. }
-            | embers_protocol::NodeRequest::MoveNodeBefore { request_id, .. }
-            | embers_protocol::NodeRequest::MoveNodeAfter { request_id, .. } => (
-                error_response(
-                    Some(request_id),
-                    ErrorCode::Unsupported,
-                    "node ergonomics commands are not implemented yet",
-                ),
-                Vec::new(),
-            ),
+            embers_protocol::NodeRequest::Zoom {
+                request_id,
+                node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.zoom_node(node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::Unzoom {
+                request_id,
+                session_id,
+            } => match state.unzoom_session(session_id) {
+                Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            embers_protocol::NodeRequest::ToggleZoom {
+                request_id,
+                node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.toggle_zoom_node(node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::SwapSiblings {
+                request_id,
+                first_node_id,
+                second_node_id,
+            } => {
+                let session_id = match state.node(first_node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.swap_sibling_nodes(first_node_id, second_node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::BreakNode {
+                request_id,
+                node_id,
+                destination,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.break_node(
+                    node_id,
+                    matches!(destination, embers_protocol::NodeBreakDestination::Floating),
+                ) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::JoinBufferAtNode {
+                request_id,
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.join_buffer_at_node(node_id, buffer_id, placement) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::MoveNodeBefore {
+                request_id,
+                node_id,
+                sibling_node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.move_node_before(node_id, sibling_node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::MoveNodeAfter {
+                request_id,
+                node_id,
+                sibling_node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.move_node_after(node_id, sibling_node_id) {
+                    Ok(()) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
         }
     }
 

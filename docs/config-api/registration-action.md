@@ -3,6 +3,28 @@
 ```Namespace: global```
 
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> break_current_node </h2>
+
+```rust,ignore
+fn break_current_node(_: ActionApi, destination: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="break_current_node" id="link-break_current_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'break_current_node', 'Description')">
+Description
+</button>
+</div>
+
+<div group="break_current_node" id="break_current_node-Description" class="tabcontent"  style="display: block;" >
+Break the current node into a new tab or floating window.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> cancel_search </h2>
 
 ```rust,ignore
@@ -585,6 +607,28 @@ Insert a tab before the current tab.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> join_buffer_here </h2>
+
+```rust,ignore
+fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="join_buffer_here" id="link-join_buffer_here-Description"  class="tablinks active"
+    onclick="openTab(event, 'join_buffer_here', 'Description')">
+Description
+</button>
+</div>
+
+<div group="join_buffer_here" id="join_buffer_here-Description" class="tabcontent"  style="display: block;" >
+Join a buffer at the current node.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> kill_buffer </h2>
 
 ```rust,ignore
@@ -710,6 +754,50 @@ Move a buffer into a specific node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> move_current_node_before </h2>
+
+```rust,ignore
+fn move_current_node_before(_: ActionApi, sibling_node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="move_current_node_before" id="link-move_current_node_before-Description"  class="tablinks active"
+    onclick="openTab(event, 'move_current_node_before', 'Description')">
+Description
+</button>
+</div>
+
+<div group="move_current_node_before" id="move_current_node_before-Description" class="tabcontent"  style="display: block;" >
+Move the current node before a sibling.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> move_node_after </h2>
+
+```rust,ignore
+fn move_node_after(_: ActionApi, node_id: int, sibling_node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="move_node_after" id="link-move_node_after-Description"  class="tablinks active"
+    onclick="openTab(event, 'move_node_after', 'Description')">
+Description
+</button>
+</div>
+
+<div group="move_node_after" id="move_node_after-Description" class="tabcontent"  style="display: block;" >
+Move a node after a sibling.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> next_current_tabs </h2>
 
 ```rust,ignore
@@ -792,6 +880,28 @@ Description
 
 <div group="notify" id="notify-Description" class="tabcontent"  style="display: block;" >
 Emit a client notification.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> open_buffer_history </h2>
+
+```rust,ignore
+fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="open_buffer_history" id="link-open_buffer_history-Description"  class="tablinks active"
+    onclick="openTab(event, 'open_buffer_history', 'Description')">
+Description
+</button>
+</div>
+
+<div group="open_buffer_history" id="open_buffer_history-Description" class="tabcontent"  style="display: block;" >
+Open the history of a buffer in a new view.
 </div>
 
 </div>
@@ -1372,6 +1482,28 @@ Split the current node and attach the provided tree as the new sibling.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> swap_current_node </h2>
+
+```rust,ignore
+fn swap_current_node(_: ActionApi, second_node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="swap_current_node" id="link-swap_current_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'swap_current_node', 'Description')">
+Description
+</button>
+</div>
+
+<div group="swap_current_node" id="swap_current_node-Description" class="tabcontent"  style="display: block;" >
+Swap the current node with a sibling.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> toggle_mode </h2>
 
 ```rust,ignore
@@ -1394,6 +1526,50 @@ Toggle a named input mode.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> toggle_zoom_node </h2>
+
+```rust,ignore
+fn toggle_zoom_node(_: ActionApi, node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="toggle_zoom_node" id="link-toggle_zoom_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'toggle_zoom_node', 'Description')">
+Description
+</button>
+</div>
+
+<div group="toggle_zoom_node" id="toggle_zoom_node-Description" class="tabcontent"  style="display: block;" >
+Toggle zoom on a node.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> unzoom_current_session </h2>
+
+```rust,ignore
+fn unzoom_current_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="unzoom_current_session" id="link-unzoom_current_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'unzoom_current_session', 'Description')">
+Description
+</button>
+</div>
+
+<div group="unzoom_current_session" id="unzoom_current_session-Description" class="tabcontent"  style="display: block;" >
+Unzoom the current session.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> yank_selection </h2>
 
 ```rust,ignore
@@ -1410,6 +1586,28 @@ Description
 
 <div group="yank_selection" id="yank_selection-Description" class="tabcontent"  style="display: block;" >
 Copy the current selection into the clipboard.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> zoom_current_node </h2>
+
+```rust,ignore
+fn zoom_current_node(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="zoom_current_node" id="link-zoom_current_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'zoom_current_node', 'Description')">
+Description
+</button>
+</div>
+
+<div group="zoom_current_node" id="zoom_current_node-Description" class="tabcontent"  style="display: block;" >
+Zoom the current node.
 </div>
 
 </div>

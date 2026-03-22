@@ -7,6 +7,9 @@ use embers_client::{
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
+use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+};
 
 use crate::support::{SESSION_ID, demo_state};
 
@@ -46,6 +49,17 @@ fn action_helpers_roundtrip_to_typed_actions() {
             fn select_move_action(ctx) { action.select_move_left() }
             fn yank_action(ctx) { action.yank_selection() }
             fn notify_user_action(ctx) { action.notify("info", "hello") }
+            fn open_history_action(ctx) {
+                action.open_buffer_history(4, "visible", "floating")
+            }
+            fn zoom_action(ctx) { action.zoom_current_node() }
+            fn unzoom_action(ctx) { action.unzoom_current_session() }
+            fn toggle_zoom_action(ctx) { action.toggle_zoom_node(7) }
+            fn swap_nodes_action(ctx) { action.swap_current_node(8) }
+            fn break_node_action(ctx) { action.break_current_node("tab") }
+            fn join_buffer_action(ctx) { action.join_buffer_here(9, "tab-after") }
+            fn move_before_action(ctx) { action.move_current_node_before(10) }
+            fn move_after_action(ctx) { action.move_node_after(11, 12) }
 
             define_action("enter-copy", enter_copy_action);
             define_action("focus-left", focus_left_action);
@@ -67,6 +81,15 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("select-move", select_move_action);
             define_action("yank", yank_action);
             define_action("notify-user", notify_user_action);
+            define_action("open-history", open_history_action);
+            define_action("zoom", zoom_action);
+            define_action("unzoom", unzoom_action);
+            define_action("toggle-zoom", toggle_zoom_action);
+            define_action("swap-nodes", swap_nodes_action);
+            define_action("break-node", break_node_action);
+            define_action("join-buffer", join_buffer_action);
+            define_action("move-before", move_before_action);
+            define_action("move-after", move_after_action);
         "#,
     );
     let context = demo_context();
@@ -248,6 +271,78 @@ fn action_helpers_roundtrip_to_typed_actions() {
         vec![Action::Notify {
             level: NotifyLevel::Info,
             message: "hello".to_owned(),
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("open-history", demo_context())
+            .unwrap(),
+        vec![Action::OpenBufferHistory {
+            buffer_id: BufferId(4),
+            scope: BufferHistoryScope::Visible,
+            placement: BufferHistoryPlacement::Floating,
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("zoom", demo_context()).unwrap(),
+        vec![Action::ZoomNode { node_id: None }]
+    );
+    assert_eq!(
+        engine.run_named_action("unzoom", demo_context()).unwrap(),
+        vec![Action::UnzoomNode { session_id: None }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("toggle-zoom", demo_context())
+            .unwrap(),
+        vec![Action::ToggleZoomNode {
+            node_id: Some(NodeId(7)),
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("swap-nodes", demo_context())
+            .unwrap(),
+        vec![Action::SwapSiblingNodes {
+            first_node_id: None,
+            second_node_id: NodeId(8),
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("break-node", demo_context())
+            .unwrap(),
+        vec![Action::BreakNode {
+            node_id: None,
+            destination: NodeBreakDestination::Tab,
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("join-buffer", demo_context())
+            .unwrap(),
+        vec![Action::JoinBufferAtNode {
+            node_id: None,
+            buffer_id: BufferId(9),
+            placement: NodeJoinPlacement::TabAfter,
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("move-before", demo_context())
+            .unwrap(),
+        vec![Action::MoveNodeBefore {
+            node_id: None,
+            sibling_node_id: NodeId(10),
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("move-after", demo_context())
+            .unwrap(),
+        vec![Action::MoveNodeAfter {
+            node_id: Some(NodeId(11)),
+            sibling_node_id: NodeId(12),
         }]
     );
 }

@@ -133,9 +133,11 @@ pub async fn run(
             continue;
         }
 
-        match tokio::time::timeout(EVENT_POLL_INTERVAL, configured.process_next_event()).await {
-            Ok(result) => {
-                let event = result?;
+        match configured
+            .process_next_event_timeout(EVENT_POLL_INTERVAL)
+            .await?
+        {
+            Some(event) => {
                 match switched_session_id(&event, attached_client_id) {
                     SwitchedSession::Switched(next_session_id) => {
                         ensure_root_window(configured.client_mut(), next_session_id).await?;
@@ -149,7 +151,7 @@ pub async fn run(
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
-            Err(_) => {
+            None => {
                 continue;
             }
         }

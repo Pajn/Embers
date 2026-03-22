@@ -5,6 +5,7 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, IdAllocator, MuxError, NodeId, PtySize,
     Result, SessionId, SplitDirection, Timestamp,
 };
+use embers_protocol::NodeJoinPlacement;
 
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
@@ -1236,6 +1237,214 @@ impl ServerState {
         self.focus_leaf(target_session, target_leaf)
     }
 
+    pub fn zoom_node(&mut self, node_id: NodeId) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        self.session_mut(session_id)?.zoomed_node = Some(node_id);
+        Ok(())
+    }
+
+    pub fn unzoom_session(&mut self, session_id: SessionId) -> Result<()> {
+        self.session_mut(session_id)?.zoomed_node = None;
+        Ok(())
+    }
+
+    pub fn toggle_zoom_node(&mut self, node_id: NodeId) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        let next = if self.session(session_id)?.zoomed_node == Some(node_id) {
+            None
+        } else {
+            Some(node_id)
+        };
+        self.session_mut(session_id)?.zoomed_node = next;
+        Ok(())
+    }
+
+    pub fn swap_sibling_nodes(
+        &mut self,
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    ) -> Result<()> {
+        if first_node_id == second_node_id {
+            return Ok(());
+        }
+        let parent_id = self.shared_parent(first_node_id, second_node_id)?;
+        match self.node_mut(parent_id)? {
+            Node::Split(split) => {
+                let first = split
+                    .children
+                    .iter()
+                    .position(|child| *child == first_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {first_node_id} is not a child of split {parent_id}"
+                        ))
+                    })?;
+                let second = split
+                    .children
+                    .iter()
+                    .position(|child| *child == second_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {second_node_id} is not a child of split {parent_id}"
+                        ))
+                    })?;
+                split.children.swap(first, second);
+                split.sizes.swap(first, second);
+            }
+            Node::Tabs(tabs) => {
+                let first = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == first_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {first_node_id} is not a child of tabs {parent_id}"
+                        ))
+                    })?;
+                let second = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == second_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {second_node_id} is not a child of tabs {parent_id}"
+                        ))
+                    })?;
+                tabs.tabs.swap(first, second);
+                match tabs.active {
+                    active if active == first => tabs.active = second,
+                    active if active == second => tabs.active = first,
+                    _ => {}
+                }
+            }
+            Node::BufferView(_) => {
+                return Err(MuxError::invalid_input(
+                    "buffer views do not have sibling children",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn move_node_before(&mut self, node_id: NodeId, sibling_node_id: NodeId) -> Result<()> {
+        self.reorder_sibling_node(node_id, sibling_node_id, true)
+    }
+
+    pub fn move_node_after(&mut self, node_id: NodeId, sibling_node_id: NodeId) -> Result<()> {
+        self.reorder_sibling_node(node_id, sibling_node_id, false)
+    }
+
+    pub fn break_node(&mut self, node_id: NodeId, to_floating: bool) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        let title = self.default_tab_title(node_id)?;
+        let (old_parent, _) = self.detach_node_from_owner(node_id)?;
+
+        if to_floating {
+            self.create_floating_window_with_options(
+                session_id,
+                node_id,
+                FloatGeometry::new(10, 3, 100, 26),
+                Some(title),
+                true,
+                true,
+            )?;
+        } else {
+            let tabs_id = self
+                .nearest_tabs_ancestor(old_parent)?
+                .unwrap_or(self.ensure_root_tabs_container(session_id)?);
+            self.add_tab_sibling(tabs_id, title, node_id)?;
+        }
+
+        if let Some(parent_id) = old_parent {
+            self.normalize_upwards(parent_id)?;
+        }
+        self.normalize_zoomed_node(session_id)?;
+        Ok(())
+    }
+
+    pub fn join_buffer_at_node(
+        &mut self,
+        node_id: NodeId,
+        buffer_id: BufferId,
+        placement: NodeJoinPlacement,
+    ) -> Result<()> {
+        let target_session = self.node_session_id(node_id)?;
+        if let BufferAttachment::Attached(source_view) = self.buffer(buffer_id)?.attachment
+            && source_view != node_id
+        {
+            self.close_node(source_view)?;
+        }
+
+        let new_view = self.create_buffer_view(target_session, buffer_id)?;
+        let result = match placement {
+            NodeJoinPlacement::Left => self
+                .wrap_node_in_split(node_id, SplitDirection::Vertical, new_view, true)
+                .map(|_| ()),
+            NodeJoinPlacement::Right => self
+                .wrap_node_in_split(node_id, SplitDirection::Vertical, new_view, false)
+                .map(|_| ()),
+            NodeJoinPlacement::Up => self
+                .wrap_node_in_split(node_id, SplitDirection::Horizontal, new_view, true)
+                .map(|_| ()),
+            NodeJoinPlacement::Down => self
+                .wrap_node_in_split(node_id, SplitDirection::Horizontal, new_view, false)
+                .map(|_| ()),
+            NodeJoinPlacement::TabBefore | NodeJoinPlacement::TabAfter => {
+                let title = self.buffer(buffer_id)?.title.clone();
+                let tabs_id = if matches!(self.node(node_id)?, Node::Tabs(_)) {
+                    node_id
+                } else if matches!(
+                    self.node_parent(node_id)?
+                        .map(|id| self.node(id))
+                        .transpose()?,
+                    Some(Node::Tabs(_))
+                ) {
+                    self.node_parent(node_id)?.expect("checked parent exists")
+                } else {
+                    self.wrap_node_in_tabs(node_id, self.default_tab_title(node_id)?)?
+                };
+                let insert_index = {
+                    let tabs = match self.node(tabs_id)? {
+                        Node::Tabs(tabs) => tabs,
+                        _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+                    };
+                    if tabs_id == node_id {
+                        let active = tabs.active;
+                        match placement {
+                            NodeJoinPlacement::TabBefore => active,
+                            NodeJoinPlacement::TabAfter => active + 1,
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        let current = tabs
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.child == node_id)
+                            .ok_or_else(|| {
+                                MuxError::not_found(format!(
+                                    "node {node_id} is not a child of tabs {tabs_id}"
+                                ))
+                            })?;
+                        match placement {
+                            NodeJoinPlacement::TabBefore => current,
+                            NodeJoinPlacement::TabAfter => current + 1,
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+                self.add_tab_sibling_at(tabs_id, insert_index, title, new_view)
+                    .map(|_| ())
+            }
+        };
+
+        if let Err(error) = result {
+            self.discard_buffer_view(new_view);
+            return Err(error);
+        }
+        self.normalize_zoomed_node(target_session)?;
+        Ok(())
+    }
+
     pub fn detach_buffer(&mut self, buffer_id: BufferId) -> Result<()> {
         match self.buffer(buffer_id)?.attachment {
             BufferAttachment::Attached(node_id) => self.close_node(node_id),
@@ -1363,6 +1572,7 @@ impl ServerState {
             )));
         }
 
+        self.normalize_zoomed_node(session_id)?;
         self.heal_focus(session_id)
     }
 
@@ -1395,6 +1605,7 @@ impl ServerState {
         } else {
             self.heal_focus(session_id)?;
         }
+        self.normalize_zoomed_node(session_id)?;
         Ok(())
     }
 
@@ -1462,6 +1673,20 @@ impl ServerState {
                     )));
                 }
             }
+
+            if let Some(zoomed_node) = session.zoomed_node {
+                if !self.nodes.contains_key(&zoomed_node) {
+                    return Err(MuxError::conflict(format!(
+                        "zoomed node {zoomed_node} is missing from session {}",
+                        session.id
+                    )));
+                }
+                if self.node(zoomed_node)?.session_id() != session.id {
+                    return Err(MuxError::conflict(format!(
+                        "zoomed node {zoomed_node} belongs to the wrong session"
+                    )));
+                }
+            }
         }
 
         if seen.len() != self.nodes.len() {
@@ -1518,6 +1743,7 @@ impl ServerState {
             }),
         );
         self.session_mut(session_id)?.root_node = new_root;
+        self.session_mut(session_id)?.zoomed_node = None;
         self.heal_focus(session_id)
     }
 
@@ -1680,6 +1906,151 @@ impl ServerState {
     fn ensure_leaf_belongs_to(&self, node_id: NodeId, session_id: SessionId) -> Result<()> {
         self.ensure_node_belongs_to(node_id, session_id)?;
         self.ensure_leaf(node_id)
+    }
+
+    fn shared_parent(&self, first_node_id: NodeId, second_node_id: NodeId) -> Result<NodeId> {
+        if first_node_id == second_node_id {
+            return Err(MuxError::invalid_input(
+                "sibling operations require two distinct nodes",
+            ));
+        }
+        let first_parent = self.node_parent(first_node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {first_node_id} has no parent"))
+        })?;
+        let second_parent = self.node_parent(second_node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {second_node_id} has no parent"))
+        })?;
+        if first_parent != second_parent {
+            return Err(MuxError::conflict(
+                "node ergonomics are restricted to siblings with the same parent".to_owned(),
+            ));
+        }
+        Ok(first_parent)
+    }
+
+    fn reorder_sibling_node(
+        &mut self,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+        before: bool,
+    ) -> Result<()> {
+        if node_id == sibling_node_id {
+            return Ok(());
+        }
+        let parent_id = self.shared_parent(node_id, sibling_node_id)?;
+        match self.node_mut(parent_id)? {
+            Node::Split(split) => {
+                let from = split
+                    .children
+                    .iter()
+                    .position(|child| *child == node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("node {node_id} is not in split {parent_id}"))
+                    })?;
+                let target = split
+                    .children
+                    .iter()
+                    .position(|child| *child == sibling_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {sibling_node_id} is not in split {parent_id}"
+                        ))
+                    })?;
+                let child = split.children.remove(from);
+                let size = split.sizes.remove(from);
+                let mut insert_at = target;
+                if from < target {
+                    insert_at = insert_at.saturating_sub(1);
+                }
+                if !before {
+                    insert_at = insert_at.saturating_add(1);
+                }
+                split.children.insert(insert_at, child);
+                split.sizes.insert(insert_at, size);
+            }
+            Node::Tabs(tabs) => {
+                let from = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("node {node_id} is not in tabs {parent_id}"))
+                    })?;
+                let target = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == sibling_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {sibling_node_id} is not in tabs {parent_id}"
+                        ))
+                    })?;
+                let tab = tabs.tabs.remove(from);
+                let mut insert_at = target;
+                if from < target {
+                    insert_at = insert_at.saturating_sub(1);
+                }
+                if !before {
+                    insert_at = insert_at.saturating_add(1);
+                }
+                tabs.tabs.insert(insert_at, tab);
+                if tabs.active == from {
+                    tabs.active = insert_at;
+                } else if from < tabs.active && insert_at >= tabs.active {
+                    tabs.active = tabs.active.saturating_sub(1);
+                } else if from > tabs.active && insert_at <= tabs.active {
+                    tabs.active = tabs.active.saturating_add(1);
+                }
+            }
+            Node::BufferView(_) => {
+                return Err(MuxError::invalid_input(
+                    "buffer views do not have sibling children",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn detach_node_from_owner(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<(Option<NodeId>, Option<FloatingId>)> {
+        if self.is_session_root(node_id) {
+            return Err(MuxError::conflict(
+                "session root cannot be broken out of its owner".to_owned(),
+            ));
+        }
+        if let Some(parent_id) = self.node_parent(node_id)? {
+            self.remove_child(parent_id, node_id)?;
+            return Ok((Some(parent_id), None));
+        }
+        if let Some(floating_id) = self.floating_id_by_root(node_id) {
+            let _ = self.remove_floating_window(floating_id)?;
+            return Ok((None, Some(floating_id)));
+        }
+        Err(MuxError::invalid_input(format!(
+            "node {node_id} has no owning container"
+        )))
+    }
+
+    fn nearest_tabs_ancestor(&self, mut node_id: Option<NodeId>) -> Result<Option<NodeId>> {
+        while let Some(current) = node_id {
+            if matches!(self.node(current)?, Node::Tabs(_)) {
+                return Ok(Some(current));
+            }
+            node_id = self.node_parent(current)?;
+        }
+        Ok(None)
+    }
+
+    fn normalize_zoomed_node(&mut self, session_id: SessionId) -> Result<()> {
+        let keep = self.session(session_id)?.zoomed_node.filter(|node_id| {
+            self.nodes
+                .get(node_id)
+                .is_some_and(|node| node.session_id() == session_id)
+        });
+        self.session_mut(session_id)?.zoomed_node = keep;
+        Ok(())
     }
 
     fn is_session_root(&self, node_id: NodeId) -> bool {

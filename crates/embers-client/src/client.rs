@@ -121,6 +121,19 @@ where
         }
     }
 
+    pub async fn process_next_event_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerEvent>> {
+        let event = match tokio::time::timeout(timeout, self.transport.next_event()).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(None),
+        };
+        self.state.apply_event(&event);
+        self.resync_for_event(&event).await?;
+        Ok(Some(event))
+    }
+
     pub async fn resync_session(&mut self, session_id: SessionId) -> Result<()> {
         let response = self
             .transport

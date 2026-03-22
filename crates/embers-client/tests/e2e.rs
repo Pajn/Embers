@@ -637,30 +637,41 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
     let mut first_client = MuxClient::connect(server.socket_path())
         .await
         .expect("first client connects");
-    first_client
-        .resync_all_sessions()
-        .await
-        .expect("first client resyncs");
-    refresh_all_snapshots(&mut first_client).await;
-    let session_id = session_id_by_name(&first_client, "alpha");
-    let model = PresentationModel::project(
-        first_client.state(),
-        session_id,
-        Size {
-            width: 80,
-            height: 24,
-        },
-    )
-    .expect("projection succeeds");
-    let tabs = model
-        .tab_bars
-        .iter()
-        .find(|tabs| tabs.node_id == nested_tabs_id)
-        .expect("nested tabs frame exists");
-    assert!(
-        tabs.tabs
+    let mut saw_hidden_activity = false;
+    for _ in 0..10 {
+        first_client
+            .resync_all_sessions()
+            .await
+            .expect("first client resyncs");
+        refresh_all_snapshots(&mut first_client).await;
+        let session_id = session_id_by_name(&first_client, "alpha");
+        let model = PresentationModel::project(
+            first_client.state(),
+            session_id,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("projection succeeds");
+        let tabs = model
+            .tab_bars
+            .iter()
+            .find(|tabs| tabs.node_id == nested_tabs_id)
+            .expect("nested tabs frame exists");
+        if tabs
+            .tabs
             .iter()
             .any(|tab| tab.title == "bg" && tab.activity != ActivityState::Idle)
+        {
+            saw_hidden_activity = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw_hidden_activity,
+        "hidden tab activity should propagate before reconnect"
     );
 
     drop(first_client);

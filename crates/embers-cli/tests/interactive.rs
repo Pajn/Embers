@@ -404,6 +404,9 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     populate_scrollback_or_wait(&mut harness, 40).await;
 
     page_up_until_visible(&mut harness, "line-1");
+    harness
+        .wait_for_quiet(Duration::from_millis(200), IO_TIMEOUT)
+        .unwrap_or_else(|error| panic!("scrollback render settled: {error}"));
     harness.write_all("vly").expect("select and yank");
     let output = harness
         .read_until_contains("]52;c;", IO_TIMEOUT)
