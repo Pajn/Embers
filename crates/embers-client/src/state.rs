@@ -359,8 +359,6 @@ impl ClientState {
                     }
                 }
                 Some(state) => {
-                    let search_state = state.search_state.clone();
-                    let selection_state = state.selection_state.clone();
                     *state = BufferViewState {
                         buffer_id: buffer_view.buffer_id,
                         follow_output: buffer_view.follow_output,
@@ -369,8 +367,8 @@ impl ClientState {
                         total_line_count,
                         alternate_screen,
                         visible_lines: snapshot_lines,
-                        search_state,
-                        selection_state,
+                        search_state: None,
+                        selection_state: None,
                     };
                 }
                 None => {

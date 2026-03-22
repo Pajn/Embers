@@ -5,8 +5,9 @@ use std::fs;
 use std::path::Path;
 
 use embers_client::{
-    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseEvent,
-    MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
+    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent,
+    MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel,
+    ScriptedTransport,
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
@@ -749,7 +750,7 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: focused.rect.origin.y as u16,
+                row: (focused.rect.origin.y + 1) as u16,
                 column: focused.rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
@@ -794,7 +795,7 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: focused.rect.origin.y as u16,
+                row: (focused.rect.origin.y + 1) as u16,
                 column: focused.rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
@@ -808,6 +809,111 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
             request_id: RequestId(1),
             buffer_id: BufferId(4),
             bytes: b"\x1b[<64;1;1M".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn title_row_mouse_events_do_not_forward_to_programs() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .mouse_reporting = true;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+    let focused = presentation.focused_leaf().unwrap().clone();
+
+    let transport = FakeTransport::default();
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            MouseEvent {
+                row: focused.rect.origin.y as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
+async fn content_row_mouse_events_forward_with_content_relative_coordinates() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .mouse_reporting = true;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+    let focused = presentation.focused_leaf().unwrap().clone();
+
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            MouseEvent {
+                row: (focused.rect.origin.y + 1) as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[<0;1;1M".to_vec(),
         })
     );
 }
