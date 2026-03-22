@@ -10,6 +10,8 @@ alacritty_terminal = "0.25.1"
 embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
 portable-pty.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

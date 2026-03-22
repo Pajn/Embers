@@ -592,6 +592,7 @@ dependencies = [
 name = "embers-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -616,6 +617,8 @@ dependencies = [
  "embers-protocol",
  "portable-pty",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

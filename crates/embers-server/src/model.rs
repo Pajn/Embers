@@ -37,6 +37,11 @@ pub struct RunningBuffer {
     pub pid: Option<u32>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InterruptedBuffer {
+    pub last_known_pid: Option<u32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitedBuffer {
     pub exit_code: Option<i32>,
@@ -48,6 +53,7 @@ pub enum BufferState {
     #[default]
     Created,
     Running(RunningBuffer),
+    Interrupted(InterruptedBuffer),
     Exited(ExitedBuffer),
 }
 

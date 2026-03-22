@@ -190,6 +190,9 @@ const RUNTIME_PAGES: &[PageSpec<'_>] = &[
 ];
 
 pub fn generate_config_api_docs(output_dir: &Path) -> Result<(), Box<dyn Error>> {
+    if output_dir.exists() {
+        fs::remove_dir_all(output_dir)?;
+    }
     fs::create_dir_all(output_dir)?;
     let defs_dir = output_dir.join("defs");
     fs::create_dir_all(&defs_dir)?;
