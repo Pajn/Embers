@@ -18,7 +18,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
         r#"
             fn enter_copy_action(ctx) { action.enter_mode("copy") }
             fn focus_left_action(ctx) { action.focus_left() }
-            fn resize_right_action(ctx) { action.resize_right(2) }
             fn select_tab_action(ctx) { action.select_current_tabs(2) }
             fn split_tree_action(ctx) { action.split_with("horizontal", tree.buffer_current()) }
             fn replace_current_action(ctx) { action.replace_current_with(tree.buffer_attach(9)) }
@@ -46,7 +45,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
 
             define_action("enter-copy", enter_copy_action);
             define_action("focus-left", focus_left_action);
-            define_action("resize-right", resize_right_action);
             define_action("select-tab", select_tab_action);
             define_action("split-tree", split_tree_action);
             define_action("replace-current", replace_current_action);
@@ -82,15 +80,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
             .unwrap(),
         vec![Action::FocusDirection {
             direction: NavigationDirection::Left,
-        }]
-    );
-    assert_eq!(
-        engine
-            .run_named_action("resize-right", context.clone())
-            .unwrap(),
-        vec![Action::ResizeDirection {
-            direction: NavigationDirection::Right,
-            amount: 2,
         }]
     );
     assert_eq!(
@@ -238,66 +227,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
             message: "hello".to_owned(),
         }]
     );
-}
-
-#[test]
-fn unsupported_live_executor_actions_fail_when_actions_are_materialized() {
-    let engine = ScriptEngine::load(&LoadedConfigSource {
-        origin: ConfigOrigin::BuiltIn,
-        path: Some("unsupported-actions.rhai".into()),
-        source: r#"
-            fn wrap_split_action(ctx) {
-                action.wrap_current_in_split("vertical", tree.buffer_current())
-            }
-            fn wrap_tabs_action(ctx) {
-                action.wrap_current_in_tabs(tree.tabs_with_active([
-                    tree.tab("main", tree.current_node()),
-                    tree.tab("scratch", tree.buffer_empty())
-                ], 1))
-            }
-            fn replace_popup_action(ctx) {
-                action.replace_floating_root(tree.buffer_current())
-            }
-
-            define_action("wrap-split", wrap_split_action);
-            define_action("wrap-tabs", wrap_tabs_action);
-            define_action("replace-popup", replace_popup_action);
-        "#
-        .trim()
-        .to_owned(),
-        source_hash: 0,
-    })
-    .unwrap();
-
-    let error = engine
-        .run_named_action("wrap-split", demo_context())
-        .expect_err("unsupported live actions should fail before execution");
-
-    let message = error.to_string();
-    assert!(message.contains("not supported by the live executor"));
-    assert!(message.contains("WrapNodeInSplit"));
-}
-
-#[test]
-fn unsupported_live_executor_actions_are_rejected_inside_chains() {
-    let engine = load_engine(
-        r#"
-            fn nested(ctx) {
-                action.chain([
-                    action.noop(),
-                    action.wrap_current_in_split("vertical", tree.buffer_current())
-                ])
-            }
-
-            define_action("nested", nested);
-        "#,
-    );
-
-    let error = engine
-        .run_named_action("nested", demo_context())
-        .expect_err("nested unsupported live actions should fail before execution");
-
-    assert!(error.to_string().contains("WrapNodeInSplit"));
 }
 
 #[test]

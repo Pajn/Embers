@@ -21,10 +21,6 @@ pub enum Action {
     FocusDirection {
         direction: NavigationDirection,
     },
-    ResizeDirection {
-        direction: NavigationDirection,
-        amount: u16,
-    },
     SelectTab {
         tabs_node_id: Option<NodeId>,
         index: usize,
@@ -49,15 +45,6 @@ pub enum Action {
         node_id: Option<NodeId>,
         tree: TreeSpec,
     },
-    WrapNodeInSplit {
-        node_id: Option<NodeId>,
-        direction: SplitDirection,
-        sibling: TreeSpec,
-    },
-    WrapNodeInTabs {
-        node_id: Option<NodeId>,
-        tabs: TabsSpec,
-    },
     InsertTabAfter {
         tabs_node_id: Option<NodeId>,
         title: Option<String>,
@@ -70,10 +57,6 @@ pub enum Action {
     },
     OpenFloating {
         spec: FloatingSpec,
-    },
-    ReplaceFloatingRoot {
-        floating_id: Option<FloatingId>,
-        tree: TreeSpec,
     },
     CloseFloating {
         floating_id: Option<FloatingId>,
