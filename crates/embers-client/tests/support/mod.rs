@@ -5,9 +5,9 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, SplitDirection,
 };
 use embers_protocol::{
-    BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, FloatingRecord,
-    NodeRecord, NodeRecordKind, SessionRecord, SessionSnapshot, SplitRecord, TabRecord, TabsRecord,
-    VisibleSnapshotResponse,
+    BufferHistoryScope, BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord,
+    FloatingRecord, NodeRecord, NodeRecordKind, SessionRecord, SessionSnapshot, SplitRecord,
+    TabRecord, TabsRecord, VisibleSnapshotResponse,
 };
 
 pub const SESSION_ID: SessionId = SessionId(1);
@@ -317,7 +317,7 @@ fn buffer(
         attachment_node_id,
         read_only: false,
         helper_source_buffer_id: None,
-        helper_scope: None,
+        helper_scope: None::<BufferHistoryScope>,
         pty_size: PtySize::new(80, 24),
         activity,
         last_snapshot_seq: 0,

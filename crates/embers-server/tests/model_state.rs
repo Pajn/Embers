@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use embers_core::{BufferId, FloatGeometry, NodeId, SessionId, SplitDirection};
+use embers_protocol::NodeJoinPlacement;
 use embers_server::{BufferAttachment, Node, ServerState};
 use proptest::prelude::*;
 
@@ -310,6 +311,102 @@ fn public_detach_buffer_closes_live_views() {
         state.session(session_id).expect("session").focused_leaf,
         None
     );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn zoom_toggle_tracks_session_zoomed_node_and_clears_on_close() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+
+    state.toggle_zoom_node(leaf_id).expect("zoom leaf");
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        Some(leaf_id)
+    );
+
+    state.close_node(leaf_id).expect("close zoomed leaf");
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        None
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn swap_and_reorder_operate_only_on_siblings() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let second = new_buffer(&mut state, "second");
+    let third = new_buffer(&mut state, "third");
+    let split_id = state
+        .split_leaf_with_new_buffer(leaf_id, SplitDirection::Vertical, second)
+        .expect("split root");
+    let _second_leaf = attached_view(&state, second);
+    let third_leaf = state
+        .create_buffer_view(session_id, third)
+        .expect("third leaf");
+    state
+        .wrap_node_in_split(split_id, SplitDirection::Vertical, third_leaf, false)
+        .expect("wrap split with third leaf");
+
+    let root = root_tab_child(&state, session_id, 0);
+    let split = match state.node(root).expect("root split") {
+        Node::Split(split) => split.clone(),
+        other => panic!("expected split, got {other:?}"),
+    };
+    let first_child = split.children[0];
+    let second_child = split.children[1];
+
+    state
+        .swap_sibling_nodes(first_child, second_child)
+        .expect("swap siblings");
+    state
+        .move_node_before(first_child, second_child)
+        .expect("move sibling before");
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn break_node_to_floating_preserves_subtree_and_focuses_popup() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let buffer_id = new_buffer(&mut state, "beta");
+    state
+        .split_leaf_with_new_buffer(leaf_id, SplitDirection::Horizontal, buffer_id)
+        .expect("split root");
+    let new_leaf = attached_view(&state, buffer_id);
+
+    state.break_node(new_leaf, true).expect("break to floating");
+
+    let session = state.session(session_id).expect("session");
+    assert_eq!(session.floating.len(), 1);
+    let floating = state
+        .floating_window(session.floating[0])
+        .expect("floating exists");
+    assert_eq!(floating.root_node, new_leaf);
+    assert_eq!(session.focused_floating, Some(floating.id));
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn join_buffer_at_node_can_insert_tabs_and_splits() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let detached = new_buffer(&mut state, "tools");
+
+    state
+        .join_buffer_at_node(leaf_id, detached, NodeJoinPlacement::Right)
+        .expect("join right");
+    let root = root_tab_child(&state, session_id, 0);
+    assert!(matches!(state.node(root).expect("root"), Node::Split(_)));
+
+    let detached_again = state.create_buffer("logs", vec!["sh".to_owned()], None);
+    state
+        .join_buffer_at_node(root, detached_again, NodeJoinPlacement::TabAfter)
+        .expect("join after as tab");
+    let root = session_root(&state, session_id);
+    assert!(matches!(state.node(root).expect("root"), Node::Tabs(_)));
     state.validate().expect("state remains valid");
 }
 
