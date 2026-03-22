@@ -553,6 +553,7 @@ name = "embers-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "base64",
  "clap",
  "embers-client",
  "embers-core",
@@ -613,6 +614,7 @@ name = "embers-server"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "embers-core",
  "embers-protocol",
  "portable-pty",
@@ -632,6 +634,7 @@ dependencies = [
  "embers-core",
  "embers-protocol",
  "embers-server",
+ "libc",
  "portable-pty",
  "tempfile",
  "tokio",

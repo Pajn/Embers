@@ -1,14 +1,16 @@
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::geometry::PtySize;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorPosition {
     pub row: u16,
     pub col: u16,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     #[default]
     Block,
@@ -16,13 +18,13 @@ pub enum CursorShape {
     Beam,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CursorState {
     pub position: CursorPosition,
     pub shape: CursorShape,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalModes {
     pub alternate_screen: bool,
     pub mouse_reporting: bool,
@@ -30,7 +32,7 @@ pub struct TerminalModes {
     pub bracketed_paste: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotLine {
     pub text: String,
 }
@@ -43,7 +45,7 @@ impl From<&str> for SnapshotLine {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub sequence: u64,
     pub size: PtySize,

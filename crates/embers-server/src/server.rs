@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -30,9 +32,8 @@ use tracing::{debug, error, info};
 use crate::persist::{load_workspace, save_workspace};
 use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
 use crate::{
-    AlacrittyTerminalBackend, BackendDamage, BufferAttachment, BufferRuntimeCallbacks,
-    BufferRuntimeHandle, BufferState, RawByteRouter, ServerConfig, ServerState, TabEntry,
-    TerminalBackend,
+    BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeStatus,
+    BufferRuntimeUpdate, BufferState, ServerConfig, ServerState, TabEntry,
 };
 
 #[derive(Debug)]
@@ -51,14 +52,17 @@ impl Server {
         }
 
         let restored_state = load_workspace(&self.config.workspace_path)?;
-        let listener = UnixListener::bind(&self.config.socket_path)?;
-        set_socket_permissions(&self.config.socket_path)?;
         let socket_path = self.config.socket_path.clone();
         let runtime = Arc::new(Runtime::new(
             restored_state.unwrap_or_default(),
+            self.config.socket_path.clone(),
             self.config.workspace_path.clone(),
+            self.config.runtime_dir.clone(),
             self.config.buffer_env.clone(),
         ));
+        runtime.restore_buffer_runtimes().await?;
+        let listener = UnixListener::bind(&self.config.socket_path)?;
+        set_socket_permissions(&self.config.socket_path)?;
         let shutdown_signal = runtime.shutdown.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -276,8 +280,9 @@ struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     buffer_shutdown_intents: StdMutex<BTreeSet<BufferId>>,
-    buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
+    socket_path: PathBuf,
     workspace_path: PathBuf,
+    runtime_dir: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
@@ -286,21 +291,6 @@ struct Runtime {
     shutdown: ShutdownSignal,
     connection_tasks: TaskCounter,
     state_tasks: TaskCounter,
-}
-
-struct BufferSurface {
-    router: RawByteRouter,
-    backend: Box<dyn TerminalBackend>,
-    size: PtySize,
-}
-
-impl std::fmt::Debug for BufferSurface {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BufferSurface")
-            .field("size", &self.size)
-            .finish()
-    }
 }
 
 #[derive(Clone, Default)]
@@ -363,74 +353,21 @@ impl Drop for TaskTicket {
     }
 }
 
-impl BufferSurface {
-    fn new(size: PtySize) -> Self {
-        Self {
-            router: RawByteRouter,
-            backend: Box::new(AlacrittyTerminalBackend::new(size)),
-            size,
-        }
-    }
-
-    fn route_input(&mut self, bytes: Vec<u8>) -> Vec<u8> {
-        self.router.route_input(bytes)
-    }
-
-    fn route_output(&mut self, bytes: &[u8]) {
-        self.router.route_output(self.backend.as_mut(), bytes);
-    }
-
-    fn resize(&mut self, size: PtySize) {
-        self.size = size;
-        self.backend.resize(size);
-    }
-
-    fn capture_lines(&self) -> Vec<String> {
-        self.backend.capture_scrollback()
-    }
-
-    fn capture_visible_snapshot(
-        &self,
-        sequence: u64,
-        cwd: Option<PathBuf>,
-    ) -> embers_core::TerminalSnapshot {
-        self.backend.visible_snapshot(sequence, self.size, cwd)
-    }
-
-    fn capture_scrollback_slice(
-        &self,
-        start_line: u64,
-        line_count: u32,
-    ) -> crate::BackendScrollbackSlice {
-        self.backend
-            .capture_scrollback_slice(start_line, line_count)
-    }
-
-    fn metadata(&self) -> crate::BackendMetadata {
-        self.backend.metadata()
-    }
-
-    fn take_activity(&mut self) -> embers_core::ActivityState {
-        self.backend.take_activity()
-    }
-
-    fn damage(&mut self) -> BackendDamage {
-        self.backend.take_damage()
-    }
-}
-
 impl Runtime {
     fn new(
         state: ServerState,
+        socket_path: PathBuf,
         workspace_path: PathBuf,
+        runtime_dir: PathBuf,
         buffer_env: BTreeMap<String, OsString>,
     ) -> Self {
         Self {
             state: Mutex::new(state),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
             buffer_shutdown_intents: StdMutex::new(BTreeSet::new()),
-            buffer_surfaces: Mutex::new(BTreeMap::new()),
+            socket_path,
             workspace_path,
+            runtime_dir,
             buffer_env,
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
@@ -459,6 +396,99 @@ impl Runtime {
             .lock()
             .expect("buffer shutdown intent lock")
             .remove(&buffer_id)
+    }
+
+    fn runtime_socket_path(&self, buffer_id: BufferId) -> Result<PathBuf> {
+        let path = self
+            .runtime_dir
+            .join(format!("buffer-{}.sock", buffer_id.0));
+        validate_keeper_socket_path(&self.socket_path, &path)?;
+        Ok(path)
+    }
+
+    fn buffer_runtime_callbacks(self: &Arc<Self>) -> BufferRuntimeCallbacks {
+        let output_handle = tokio::runtime::Handle::current();
+        let exit_handle = output_handle.clone();
+        let output_runtime = self.clone();
+        let exit_runtime = self.clone();
+        let output_tasks = self.state_tasks.clone();
+        let exit_tasks = self.state_tasks.clone();
+
+        BufferRuntimeCallbacks {
+            on_output: Arc::new(move |buffer_id, update| {
+                let runtime = output_runtime.clone();
+                let task = output_tasks.enter();
+                std::mem::drop(output_handle.spawn(async move {
+                    let _task = task;
+                    runtime.record_buffer_update(buffer_id, update).await;
+                }));
+            }),
+            on_exit: Arc::new(move |buffer_id, exit_code| {
+                let runtime = exit_runtime.clone();
+                let task = exit_tasks.enter();
+                std::mem::drop(exit_handle.spawn(async move {
+                    let _task = task;
+                    runtime.record_buffer_exit(buffer_id, exit_code).await;
+                }));
+            }),
+        }
+    }
+
+    async fn restore_buffer_runtimes(self: &Arc<Self>) -> Result<()> {
+        let buffers = {
+            let state = self.state.lock().await;
+            state.buffers.values().cloned().collect::<Vec<_>>()
+        };
+
+        for buffer in buffers {
+            let Some(socket_path) = buffer.runtime_socket_path().cloned() else {
+                if matches!(buffer.state, BufferState::Running(_) | BufferState::Created) {
+                    let mut state = self.state.lock().await;
+                    let _ =
+                        state.mark_buffer_interrupted(buffer.id, buffer_pid_hint(&buffer.state));
+                }
+                continue;
+            };
+            if !socket_path.exists() {
+                debug!(
+                    %buffer.id,
+                    socket_path = %socket_path.display(),
+                    "skipping runtime restore because keeper socket is missing"
+                );
+                let mut state = self.state.lock().await;
+                let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                let _ = state.mark_buffer_interrupted(buffer.id, buffer_pid_hint(&buffer.state));
+                continue;
+            }
+
+            match self
+                .attach_buffer_runtime(buffer.id, socket_path.clone())
+                .await
+            {
+                Ok((runtime, status)) => {
+                    let mut state = self.state.lock().await;
+                    let _ =
+                        state.set_buffer_runtime_socket_path(buffer.id, Some(socket_path.clone()));
+                    apply_runtime_status(&mut state, buffer.id, &status);
+                    drop(state);
+                    self.buffer_runtimes.lock().await.insert(buffer.id, runtime);
+                }
+                Err(error) => {
+                    debug!(
+                        %buffer.id,
+                        socket_path = %socket_path.display(),
+                        %error,
+                        "failed to restore buffer runtime"
+                    );
+                    let mut state = self.state.lock().await;
+                    let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                    let _ =
+                        state.mark_buffer_interrupted(buffer.id, buffer_pid_hint(&buffer.state));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn register_client(
@@ -859,7 +889,6 @@ impl Runtime {
                 if let Err(error) = self.spawn_buffer_runtime(buffer_id).await {
                     let mut state = self.state.lock().await;
                     let _ = state.remove_buffer(buffer_id);
-                    self.buffer_surfaces.lock().await.remove(&buffer_id);
                     return (mux_error_response(Some(request_id), error), Vec::new());
                 }
 
@@ -986,7 +1015,7 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 force: _,
-            } => match self.running_buffer_runtime(buffer_id).await {
+            } => match self.buffer_runtime(buffer_id).await {
                 Ok(runtime) => match runtime.kill().await {
                     Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
@@ -1031,14 +1060,11 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 bytes,
-            } => match self.running_buffer_runtime(buffer_id).await {
-                Ok(runtime) => {
-                    let bytes = self.route_input_bytes(buffer_id, bytes).await;
-                    match runtime.write(bytes).await {
-                        Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
-                        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                    }
-                }
+            } => match self.buffer_runtime(buffer_id).await {
+                Ok(runtime) => match runtime.write(bytes).await {
+                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                },
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             InputRequest::Resize {
@@ -1047,7 +1073,7 @@ impl Runtime {
                 cols,
                 rows,
             } => {
-                let runtime = match self.running_buffer_runtime(buffer_id).await {
+                let runtime = match self.buffer_runtime(buffer_id).await {
                     Ok(runtime) => runtime,
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
@@ -1076,11 +1102,12 @@ impl Runtime {
                         return (mux_error_response(Some(request_id), error), Vec::new());
                     }
                 }
-                let damage = self.resize_surface(buffer_id, size).await;
 
                 (
                     ServerResponse::Ok(OkResponse { request_id }),
-                    render_events(buffer_id, damage),
+                    vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                        buffer_id,
+                    })],
                 )
             }
         }
@@ -1548,61 +1575,53 @@ impl Runtime {
             (buffer.command, buffer.cwd, buffer.pty_size, buffer.env)
         };
 
-        let output_handle = tokio::runtime::Handle::current();
-        let exit_handle = output_handle.clone();
-        let output_runtime = self.clone();
-        let exit_runtime = self.clone();
-        let output_tasks = self.state_tasks.clone();
-        let exit_tasks = self.state_tasks.clone();
         let mut buffer_env = self.buffer_env.clone();
         for (key, value) in env_hints {
             buffer_env.insert(key, OsString::from(value));
         }
         let runtime = BufferRuntimeHandle::spawn(
             buffer_id,
+            self.runtime_socket_path(buffer_id)?,
             &command,
             cwd.as_deref(),
             &buffer_env,
             size,
-            BufferRuntimeCallbacks {
-                on_output: Arc::new(move |buffer_id, bytes| {
-                    let runtime = output_runtime.clone();
-                    let _task = output_tasks.enter();
-                    std::mem::drop(output_handle.spawn(async move {
-                        let _task = _task;
-                        runtime.record_buffer_output(buffer_id, bytes).await;
-                    }));
-                }),
-                on_exit: Arc::new(move |buffer_id, exit_code| {
-                    let runtime = exit_runtime.clone();
-                    let _task = exit_tasks.enter();
-                    std::mem::drop(exit_handle.spawn(async move {
-                        let _task = _task;
-                        runtime.record_buffer_exit(buffer_id, exit_code).await;
-                    }));
-                }),
-            },
-        )?;
+            self.buffer_runtime_callbacks(),
+        )
+        .await?;
+        let status = runtime.status().await?;
 
         {
             let mut state = self.state.lock().await;
-            if let Err(error) = state.mark_buffer_running(buffer_id, runtime.pid()) {
+            if let Err(error) = state.mark_buffer_running(buffer_id, status.pid) {
                 let _ = runtime.kill().await;
                 let _ = runtime.join_threads().await;
                 return Err(error);
             }
+            state.set_buffer_runtime_socket_path(
+                buffer_id,
+                Some(runtime.socket_path().to_path_buf()),
+            )?;
+            apply_runtime_status(&mut state, buffer_id, &status);
         }
 
-        self.buffer_surfaces
-            .lock()
-            .await
-            .entry(buffer_id)
-            .or_insert_with(|| BufferSurface::new(size));
         self.buffer_runtimes.lock().await.insert(buffer_id, runtime);
         Ok(())
     }
 
-    async fn running_buffer_runtime(&self, buffer_id: BufferId) -> Result<BufferRuntimeHandle> {
+    async fn attach_buffer_runtime(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        socket_path: PathBuf,
+    ) -> Result<(BufferRuntimeHandle, BufferRuntimeStatus)> {
+        let runtime =
+            BufferRuntimeHandle::attach(buffer_id, socket_path, self.buffer_runtime_callbacks())
+                .await?;
+        let status = runtime.status().await?;
+        Ok((runtime, status))
+    }
+
+    async fn buffer_runtime(&self, buffer_id: BufferId) -> Result<BufferRuntimeHandle> {
         if let Some(runtime) = self.buffer_runtimes.lock().await.get(&buffer_id).cloned() {
             return Ok(runtime);
         }
@@ -1634,21 +1653,17 @@ impl Runtime {
             let state = self.state.lock().await;
             state.buffer(buffer_id)?.clone()
         };
-        let lines = self
-            .buffer_surfaces
-            .lock()
-            .await
-            .get(&buffer_id)
-            .map(BufferSurface::capture_lines)
-            .unwrap_or_default();
+        let runtime = self.buffer_runtime(buffer_id).await?;
+        let snapshot = runtime.capture_snapshot(buffer.cwd.clone()).await?;
+        self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
 
         Ok(SnapshotResponse {
             request_id,
             buffer_id,
-            sequence: buffer.last_snapshot_seq,
-            size: buffer.pty_size,
-            lines,
-            title: Some(buffer.title),
+            sequence: snapshot.sequence,
+            size: snapshot.size,
+            lines: snapshot.lines,
+            title: snapshot.title.or(Some(buffer.title)),
             cwd: buffer.cwd.map(|path| path.display().to_string()),
         })
     }
@@ -1662,13 +1677,9 @@ impl Runtime {
             let state = self.state.lock().await;
             state.buffer(buffer_id)?.clone()
         };
-        let snapshot = {
-            let mut surfaces = self.buffer_surfaces.lock().await;
-            surfaces
-                .entry(buffer_id)
-                .or_insert_with(|| BufferSurface::new(buffer.pty_size))
-                .capture_visible_snapshot(buffer.last_snapshot_seq, buffer.cwd.clone())
-        };
+        let runtime = self.buffer_runtime(buffer_id).await?;
+        let snapshot = runtime.capture_visible_snapshot(buffer.cwd.clone()).await?;
+        self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
 
         Ok(VisibleSnapshotResponse {
             request_id,
@@ -1695,17 +1706,11 @@ impl Runtime {
         start_line: u64,
         line_count: u32,
     ) -> Result<ScrollbackSliceResponse> {
-        let buffer = {
-            let state = self.state.lock().await;
-            state.buffer(buffer_id)?.clone()
-        };
-        let slice = {
-            let mut surfaces = self.buffer_surfaces.lock().await;
-            surfaces
-                .entry(buffer_id)
-                .or_insert_with(|| BufferSurface::new(buffer.pty_size))
-                .capture_scrollback_slice(start_line, line_count)
-        };
+        let runtime = self.buffer_runtime(buffer_id).await?;
+        let slice = runtime
+            .capture_scrollback_slice(start_line, line_count)
+            .await?;
+        self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
 
         Ok(ScrollbackSliceResponse {
             request_id,
@@ -1716,74 +1721,52 @@ impl Runtime {
         })
     }
 
-    async fn route_input_bytes(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Vec<u8> {
-        match self.buffer_surfaces.lock().await.get_mut(&buffer_id) {
-            Some(surface) => surface.route_input(bytes),
-            None => bytes,
-        }
-    }
-
-    async fn resize_surface(&self, buffer_id: BufferId, size: PtySize) -> BackendDamage {
-        let mut surfaces = self.buffer_surfaces.lock().await;
-        let surface = surfaces
-            .entry(buffer_id)
-            .or_insert_with(|| BufferSurface::new(size));
-        surface.resize(size);
-        surface.damage()
-    }
-
-    async fn record_buffer_output(&self, buffer_id: BufferId, bytes: Vec<u8>) {
-        let size = {
+    async fn record_buffer_update(&self, buffer_id: BufferId, update: BufferRuntimeUpdate) {
+        let updated = {
             let mut state = self.state.lock().await;
-            if let Err(error) = state.note_buffer_output(buffer_id) {
-                debug!(%buffer_id, %error, "dropping PTY output for unknown buffer");
+            let Some(buffer) = state.buffers.get_mut(&buffer_id) else {
                 return;
-            }
-            match state.buffer(buffer_id) {
-                Ok(buffer) => buffer.pty_size,
-                Err(error) => {
-                    debug!(%buffer_id, %error, "buffer disappeared while recording output");
-                    return;
+            };
+            if update.sequence <= buffer.last_snapshot_seq {
+                false
+            } else {
+                buffer.last_snapshot_seq = update.sequence;
+                buffer.activity = update.activity;
+                if let Some(title) = update.title {
+                    match title {
+                        Some(title) => buffer.title = title,
+                        None => buffer.title.clear(),
+                    }
                 }
+                true
             }
         };
 
-        let (metadata, activity, damage) = {
-            let mut surfaces = self.buffer_surfaces.lock().await;
-            let surface = surfaces
-                .entry(buffer_id)
-                .or_insert_with(|| BufferSurface::new(size));
-            surface.resize(size);
-            surface.route_output(&bytes);
-            (
-                surface.metadata(),
-                surface.take_activity(),
-                surface.damage(),
+        if updated {
+            self.broadcast(
+                vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                    buffer_id,
+                })],
+                &[],
             )
-        };
-
-        {
-            let mut state = self.state.lock().await;
-            if let Some(title) = metadata.title
-                && let Err(error) = state.set_buffer_title(buffer_id, title)
-            {
-                debug!(%buffer_id, %error, "failed to apply terminal title update");
-            }
-            if let Err(error) = state.set_buffer_activity(buffer_id, activity) {
-                debug!(%buffer_id, %error, "failed to apply buffer activity update");
-            }
+            .await;
         }
-
-        self.broadcast(render_events(buffer_id, damage), &[]).await;
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
-        let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
         let should_interrupt = self.take_buffer_shutdown_intent(buffer_id);
+        if should_interrupt {
+            let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
+            drop(runtime);
+        }
         let updated = {
             let mut state = self.state.lock().await;
             let result = if should_interrupt {
-                state.mark_buffer_interrupted(buffer_id)
+                let pid = state
+                    .buffers
+                    .get(&buffer_id)
+                    .and_then(|buffer| buffer_pid_hint(&buffer.state));
+                state.mark_buffer_interrupted(buffer_id, pid)
             } else {
                 state.mark_buffer_exited(buffer_id, exit_code)
             };
@@ -1796,12 +1779,6 @@ impl Runtime {
             }
         };
 
-        if let Some(runtime) = runtime
-            && let Err(error) = runtime.join_threads().await
-        {
-            debug!(%buffer_id, %error, "failed to join buffer runtime threads");
-        }
-
         if updated {
             self.broadcast(
                 vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
@@ -1811,6 +1788,27 @@ impl Runtime {
             )
             .await;
         }
+    }
+
+    async fn sync_buffer_runtime_status(
+        &self,
+        buffer_id: BufferId,
+        runtime: &BufferRuntimeHandle,
+    ) -> Result<()> {
+        let status = runtime.status().await?;
+        self.record_buffer_update(
+            buffer_id,
+            BufferRuntimeUpdate {
+                sequence: status.sequence,
+                activity: status.activity,
+                title: Some(status.title.clone()),
+            },
+        )
+        .await;
+        if !status.running {
+            self.record_buffer_exit(buffer_id, status.exit_code).await;
+        }
+        Ok(())
     }
 
     async fn shutdown_runtimes(&self) {
@@ -1829,13 +1827,11 @@ impl Runtime {
                 .collect()
         };
         for runtime in runtimes {
-            if let Err(error) = runtime.kill().await {
-                debug!(%error, "failed to kill buffer runtime during shutdown");
-            }
             if let Err(error) = runtime.join_threads().await {
                 debug!(%error, "failed to join buffer runtime threads during shutdown");
             }
         }
+        self.buffer_runtimes.lock().await.clear();
     }
 
     async fn broadcast(
@@ -2175,6 +2171,36 @@ fn set_socket_permissions(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Maximum Unix-domain socket path length in bytes for runtime keeper sockets.
+/// These values come from `sockaddr_un.sun_path`: macOS exposes 104 bytes per
+/// `unix(4)`, while other Unix/Linux platforms expose 108 bytes per `unix(7)`.
+/// `validate_keeper_socket_path` uses this limit to validate keeper socket
+/// paths derived from the server socket path before binding.
+#[cfg(target_os = "macos")]
+const UNIX_SOCKET_PATH_LIMIT: usize = 104;
+/// Maximum Unix-domain socket path length in bytes for runtime keeper sockets.
+/// These values come from `sockaddr_un.sun_path`: macOS exposes 104 bytes per
+/// `unix(4)`, while other Unix/Linux platforms expose 108 bytes per `unix(7)`.
+/// `validate_keeper_socket_path` uses this limit to validate keeper socket
+/// paths derived from the server socket path before binding.
+#[cfg(all(unix, not(target_os = "macos")))]
+const UNIX_SOCKET_PATH_LIMIT: usize = 108;
+
+fn validate_keeper_socket_path(server_socket_path: &Path, keeper_socket_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let len = keeper_socket_path.as_os_str().as_bytes().len();
+        if len > UNIX_SOCKET_PATH_LIMIT {
+            return Err(MuxError::invalid_input(format!(
+                "runtime keeper socket path is too long ({len} bytes, max {UNIX_SOCKET_PATH_LIMIT}): {} (runtime_dir derived from server socket {}). Use a shorter server socket path.",
+                keeper_socket_path.display(),
+                server_socket_path.display(),
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn protocol_tab_index(index: u32) -> Result<usize> {
     usize::try_from(index)
         .map_err(|_| MuxError::invalid_input(format!("tab index {index} exceeds platform limits")))
@@ -2254,24 +2280,48 @@ fn protocol_error_to_mux(error: ProtocolError) -> MuxError {
     MuxError::protocol(error.to_string())
 }
 
-fn render_events(buffer_id: BufferId, damage: BackendDamage) -> Vec<ServerEvent> {
-    match damage {
-        BackendDamage::None => Vec::new(),
-        BackendDamage::Full | BackendDamage::Partial(_) => {
-            vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
-                buffer_id,
-            })]
-        }
+fn apply_runtime_status(
+    state: &mut ServerState,
+    buffer_id: BufferId,
+    status: &BufferRuntimeStatus,
+) {
+    if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+        buffer.last_snapshot_seq = status.sequence;
+    }
+    if let Some(title) = &status.title {
+        let _ = state.set_buffer_title(buffer_id, title.clone());
+    }
+    let _ = state.set_buffer_activity(buffer_id, status.activity);
+    if status.running {
+        let _ = state.mark_buffer_running(buffer_id, status.pid);
+    } else {
+        let _ = state.mark_buffer_exited(buffer_id, status.exit_code);
+    }
+}
+
+fn buffer_pid_hint(state: &BufferState) -> Option<u32> {
+    match state {
+        BufferState::Running(running) => running.pid,
+        BufferState::Interrupted(interrupted) => interrupted.last_known_pid,
+        BufferState::Created | BufferState::Exited(_) => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixListener as StdUnixListener;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
-    use super::{Runtime, ShutdownSignal, wait_for_shutdown};
-    use crate::ServerState;
+    use embers_core::ActivityState;
+    use embers_protocol::{ServerEnvelope, ServerEvent};
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    use super::{Runtime, ShutdownSignal, Subscription, wait_for_shutdown};
+    use crate::{BufferRuntimeUpdate, BufferState, ServerState};
 
     use tokio::time::{Duration, timeout};
 
@@ -2290,7 +2340,9 @@ mod tests {
     fn buffer_shutdown_intents_are_consumed_per_buffer() {
         let runtime = Runtime::new(
             ServerState::new(),
+            PathBuf::from("server.sock"),
             PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
             BTreeMap::new(),
         );
         runtime
@@ -2302,5 +2354,198 @@ mod tests {
         assert!(runtime.take_buffer_shutdown_intent(embers_core::BufferId(1)));
         assert!(!runtime.take_buffer_shutdown_intent(embers_core::BufferId(1)));
         assert!(!runtime.take_buffer_shutdown_intent(embers_core::BufferId(2)));
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_ignores_stale_sequences() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer("current-title", vec!["/bin/sh".to_owned()], None);
+            let buffer = state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created");
+            buffer.last_snapshot_seq = 5;
+            buffer.activity = ActivityState::Activity;
+            buffer_id
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        runtime.subscriptions.lock().await.insert(
+            1,
+            Subscription {
+                connection_id: 1,
+                session_id: None,
+                sender,
+            },
+        );
+
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 5,
+                    activity: ActivityState::Bell,
+                    title: Some(Some("stale-title".to_owned())),
+                },
+            )
+            .await;
+
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.last_snapshot_seq, 5);
+        assert_eq!(buffer.activity, ActivityState::Activity);
+        assert_eq!(buffer.title, "current-title");
+        assert!(receiver.try_recv().is_err());
+
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Bell,
+                    title: Some(Some("fresh-title".to_owned())),
+                },
+            )
+            .await;
+
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.last_snapshot_seq, 6);
+        assert_eq!(buffer.activity, ActivityState::Bell);
+        assert_eq!(buffer.title, "fresh-title");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ServerEnvelope::Event(ServerEvent::RenderInvalidated(event)))
+                if event.buffer_id == buffer_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_clears_title() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer("current-title", vec!["/bin/sh".to_owned()], None);
+            let buffer = state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created");
+            buffer.last_snapshot_seq = 5;
+            buffer_id
+        };
+
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Idle,
+                    title: Some(None),
+                },
+            )
+            .await;
+
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.last_snapshot_seq, 6);
+        assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn restore_buffer_runtimes_clears_missing_socket_paths() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let buffer_id = state.create_buffer("buffer", vec!["/bin/sh".to_owned()], None);
+        state
+            .mark_buffer_running(buffer_id, Some(42))
+            .expect("mark running");
+        state
+            .set_buffer_runtime_socket_path(
+                buffer_id,
+                Some(tempdir.path().join("missing-runtime.sock")),
+            )
+            .expect("set runtime socket path");
+
+        let runtime = Arc::new(Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+        ));
+
+        runtime
+            .restore_buffer_runtimes()
+            .await
+            .expect("restore succeeds");
+
+        let state = runtime.state.lock().await;
+        let buffer = state.buffer(buffer_id).expect("buffer exists");
+        assert!(matches!(buffer.state, BufferState::Interrupted(_)));
+        assert_eq!(buffer.runtime_socket_path(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_buffer_runtimes_clears_unreachable_socket_paths() {
+        let tempdir = tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("stale-runtime.sock");
+        let listener = StdUnixListener::bind(&socket_path).expect("bind stale socket");
+        drop(listener);
+
+        let mut state = ServerState::new();
+        let buffer_id = state.create_buffer("buffer", vec!["/bin/sh".to_owned()], None);
+        state
+            .mark_buffer_running(buffer_id, Some(42))
+            .expect("mark running");
+        state
+            .set_buffer_runtime_socket_path(buffer_id, Some(socket_path.clone()))
+            .expect("set runtime socket path");
+
+        let runtime = Arc::new(Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+        ));
+
+        runtime
+            .restore_buffer_runtimes()
+            .await
+            .expect("restore succeeds");
+
+        let state = runtime.state.lock().await;
+        let buffer = state.buffer(buffer_id).expect("buffer exists");
+        assert!(matches!(buffer.state, BufferState::Interrupted(_)));
+        assert_eq!(buffer.runtime_socket_path(), None);
     }
 }

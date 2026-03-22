@@ -5,7 +5,7 @@ use embers_protocol::{
     BufferRecord, BufferRecordState, BufferRequest, ClientMessage, InputRequest, OkResponse,
     ServerResponse, SnapshotResponse,
 };
-use embers_test_support::{TestConnection, TestServer};
+use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
 
 async fn create_buffer(connection: &mut TestConnection, command: &[&str]) -> BufferRecord {
@@ -178,6 +178,7 @@ async fn wait_for_exit(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_buffers_accept_input_and_keep_running_after_detach_requests() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -215,6 +216,7 @@ async fn detached_buffers_accept_input_and_keep_running_after_detach_requests() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resize_and_kill_requests_update_buffer_state_and_preserve_capture() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -245,6 +247,7 @@ async fn resize_and_kill_requests_update_buffer_state_and_preserve_capture() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_preserves_scrollback_for_long_output() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -270,6 +273,7 @@ async fn capture_preserves_scrollback_for_long_output() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn visible_snapshot_surfaces_terminal_modes_and_cursor_metadata() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -305,6 +309,7 @@ async fn visible_snapshot_surfaces_terminal_modes_and_cursor_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scrollback_slice_returns_history_while_full_capture_stays_available() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await

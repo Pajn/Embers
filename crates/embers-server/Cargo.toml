@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 alacritty_terminal = "0.25.1"
+base64.workspace = true
 embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
 portable-pty.workspace = true

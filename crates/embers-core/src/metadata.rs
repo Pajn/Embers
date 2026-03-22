@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Timestamp(pub SystemTime);
 
 impl Timestamp {
@@ -16,7 +18,7 @@ impl Default for Timestamp {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivityState {
     #[default]
     Idle,
@@ -24,7 +26,7 @@ pub enum ActivityState {
     Bell,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntityMetadata {
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,

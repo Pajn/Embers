@@ -54,6 +54,8 @@ pub struct PersistedBuffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub runtime_socket_path: Option<PathBuf>,
     pub state: PersistedBufferState,
     pub attachment: PersistedBufferAttachment,
     pub pty_size: PtySize,
@@ -295,6 +297,7 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         command: buffer.command.clone(),
         cwd: buffer.cwd.clone(),
         env: buffer.env.clone(),
+        runtime_socket_path: buffer.runtime_socket_path().cloned(),
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
         pty_size: buffer.pty_size,
@@ -305,19 +308,21 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
 }
 
 pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
-    Ok(Buffer {
-        id: BufferId(buffer.id),
-        title: buffer.title,
-        command: buffer.command,
-        cwd: buffer.cwd,
-        env: buffer.env,
-        state: restored_buffer_state(buffer.state)?,
-        attachment: restored_buffer_attachment(buffer.attachment),
-        pty_size: buffer.pty_size,
-        activity: restored_activity(buffer.activity),
-        last_snapshot_seq: buffer.last_snapshot_seq,
-        created_at: timestamp_from_millis(buffer.created_at_ms)?,
-    })
+    let mut restored = Buffer::new(
+        BufferId(buffer.id),
+        buffer.title,
+        buffer.command,
+        buffer.cwd,
+        buffer.env,
+    );
+    restored.set_runtime_socket_path(buffer.runtime_socket_path);
+    restored.state = restored_buffer_state(buffer.state)?;
+    restored.attachment = restored_buffer_attachment(buffer.attachment);
+    restored.pty_size = buffer.pty_size;
+    restored.activity = restored_activity(buffer.activity);
+    restored.last_snapshot_seq = buffer.last_snapshot_seq;
+    restored.created_at = timestamp_from_millis(buffer.created_at_ms)?;
+    Ok(restored)
 }
 
 pub fn persisted_node(node: &Node) -> PersistedNode {
