@@ -5,9 +5,8 @@ use std::fs;
 use std::path::Path;
 
 use embers_client::{
-    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent,
-    MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel,
-    ScriptedTransport,
+    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseButton,
+    MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{

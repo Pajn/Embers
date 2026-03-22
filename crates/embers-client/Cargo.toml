@@ -22,7 +22,6 @@ unicode-width.workspace = true
 criterion.workspace = true
 embers-test-support = { path = "../embers-test-support" }
 tempfile.workspace = true
-tokio.workspace = true
 
 [[bench]]
 name = "search_yank"

@@ -124,3 +124,43 @@ fn alt_digit_is_ignored_without_focused_tabs_context() {
         None
     );
 }
+
+#[test]
+fn unbound_ctrl_key_is_forwarded_to_the_focused_buffer() {
+    let state = demo_state();
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
+
+    let request = Controller
+        .map_key(&presentation, RequestId(13), KeyEvent::Ctrl('z'))
+        .expect("input request");
+
+    assert_eq!(
+        request,
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(13),
+            buffer_id: FOCUSED_BUFFER_ID,
+            bytes: vec![0x1a],
+        })
+    );
+}
+
+#[test]
+fn unbound_alt_key_is_forwarded_to_the_focused_buffer() {
+    let state = demo_state();
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
+
+    let request = Controller
+        .map_key(&presentation, RequestId(14), KeyEvent::Alt('x'))
+        .expect("input request");
+
+    assert_eq!(
+        request,
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(14),
+            buffer_id: FOCUSED_BUFFER_ID,
+            bytes: vec![0x1b, b'x'],
+        })
+    );
+}

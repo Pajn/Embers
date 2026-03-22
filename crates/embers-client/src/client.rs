@@ -207,10 +207,16 @@ where
     async fn resync_for_event(&mut self, event: &ServerEvent) -> Result<()> {
         match event {
             ServerEvent::SessionCreated(event) => self.resync_session(event.session.id).await,
-            ServerEvent::NodeChanged(event) => self.resync_session(event.session_id).await,
-            ServerEvent::FloatingChanged(event) => self.resync_session(event.session_id).await,
-            ServerEvent::SessionClosed(_)
-            | ServerEvent::BufferCreated(_)
+            ServerEvent::NodeChanged(event) => {
+                self.resync_session(event.session_id).await?;
+                self.resync_detached_buffers().await
+            }
+            ServerEvent::FloatingChanged(event) => {
+                self.resync_session(event.session_id).await?;
+                self.resync_detached_buffers().await
+            }
+            ServerEvent::SessionClosed(_) => self.resync_detached_buffers().await,
+            ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_)
             | ServerEvent::RenderInvalidated(_) => Ok(()),

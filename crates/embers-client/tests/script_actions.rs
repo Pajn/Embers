@@ -23,15 +23,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
             fn split_tree_action(ctx) { action.split_with("horizontal", tree.buffer_current()) }
             fn replace_current_action(ctx) { action.replace_current_with(tree.buffer_attach(9)) }
             fn replace_node_action(ctx) { action.replace_node(7, tree.buffer_current()) }
-            fn wrap_split_action(ctx) {
-                action.wrap_current_in_split("vertical", tree.buffer_current())
-            }
-            fn wrap_tabs_action(ctx) {
-                action.wrap_current_in_tabs(tree.tabs_with_active([
-                    tree.tab("main", tree.current_node()),
-                    tree.tab("scratch", tree.buffer_empty())
-                ], 1))
-            }
             fn insert_tab_action(ctx) {
                 action.insert_tab_after_current("logs", tree.buffer_current())
             }
@@ -60,8 +51,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("split-tree", split_tree_action);
             define_action("replace-current", replace_current_action);
             define_action("replace-node", replace_node_action);
-            define_action("wrap-split", wrap_split_action);
-            define_action("wrap-tabs", wrap_tabs_action);
             define_action("insert-tab", insert_tab_action);
             define_action("open-popup", open_popup_action);
             define_action("detach-buffer", detach_buffer_action);
@@ -140,37 +129,6 @@ fn action_helpers_roundtrip_to_typed_actions() {
         vec![Action::ReplaceNode {
             node_id: Some(NodeId(7)),
             tree: TreeSpec::BufferCurrent,
-        }]
-    );
-    assert_eq!(
-        engine
-            .run_named_action("wrap-split", context.clone())
-            .unwrap(),
-        vec![Action::WrapNodeInSplit {
-            node_id: None,
-            direction: SplitDirection::Vertical,
-            sibling: TreeSpec::BufferCurrent,
-        }]
-    );
-    assert_eq!(
-        engine
-            .run_named_action("wrap-tabs", context.clone())
-            .unwrap(),
-        vec![Action::WrapNodeInTabs {
-            node_id: None,
-            tabs: TabsSpec {
-                tabs: vec![
-                    TabSpec {
-                        title: "main".to_owned(),
-                        tree: Box::new(TreeSpec::CurrentNode),
-                    },
-                    TabSpec {
-                        title: "scratch".to_owned(),
-                        tree: Box::new(TreeSpec::BufferEmpty),
-                    },
-                ],
-                active: 1,
-            },
         }]
     );
     assert_eq!(
@@ -280,6 +238,44 @@ fn action_helpers_roundtrip_to_typed_actions() {
             message: "hello".to_owned(),
         }]
     );
+}
+
+#[test]
+fn unsupported_live_executor_actions_fail_when_actions_are_materialized() {
+    let engine = ScriptEngine::load(&LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: Some("unsupported-actions.rhai".into()),
+        source: r#"
+            fn wrap_split_action(ctx) {
+                action.wrap_current_in_split("vertical", tree.buffer_current())
+            }
+            fn wrap_tabs_action(ctx) {
+                action.wrap_current_in_tabs(tree.tabs_with_active([
+                    tree.tab("main", tree.current_node()),
+                    tree.tab("scratch", tree.buffer_empty())
+                ], 1))
+            }
+            fn replace_popup_action(ctx) {
+                action.replace_floating_root(tree.buffer_current())
+            }
+
+            define_action("wrap-split", wrap_split_action);
+            define_action("wrap-tabs", wrap_tabs_action);
+            define_action("replace-popup", replace_popup_action);
+        "#
+        .trim()
+        .to_owned(),
+        source_hash: 0,
+    })
+    .unwrap();
+
+    let error = engine
+        .run_named_action("wrap-split", demo_context())
+        .expect_err("unsupported live actions should fail before execution");
+
+    let message = error.to_string();
+    assert!(message.contains("not supported by the live executor"));
+    assert!(message.contains("WrapNodeInSplit"));
 }
 
 #[test]

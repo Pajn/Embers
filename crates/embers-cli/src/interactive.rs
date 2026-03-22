@@ -18,7 +18,8 @@ const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
 const KEY_SEQUENCE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(2);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
-const TERMINAL_ENTER_BASE_SEQUENCE: &str = "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
+const TERMINAL_ENTER_BASE_SEQUENCE: &str =
+    "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
 const TERMINAL_ENABLE_MOUSE_SEQUENCE: &str = "\x1b[?1002h\x1b[?1006h";
 const TERMINAL_DISABLE_MOUSE_SEQUENCE: &str = "\x1b[?1006l\x1b[?1002l";
 
@@ -414,6 +415,10 @@ fn parse_csi_event(bytes: &[u8]) -> Option<TerminalEvent> {
         b"\x1b[B" => Some(TerminalEvent::Key(KeyEvent::Down)),
         b"\x1b[C" => Some(TerminalEvent::Key(KeyEvent::Right)),
         b"\x1b[D" => Some(TerminalEvent::Key(KeyEvent::Left)),
+        b"\x1b[1~" | b"\x1b[H" => Some(TerminalEvent::Key(KeyEvent::Home)),
+        b"\x1b[2~" => Some(TerminalEvent::Key(KeyEvent::Insert)),
+        b"\x1b[3~" => Some(TerminalEvent::Key(KeyEvent::Delete)),
+        b"\x1b[4~" | b"\x1b[F" => Some(TerminalEvent::Key(KeyEvent::End)),
         b"\x1b[5~" => Some(TerminalEvent::Key(KeyEvent::PageUp)),
         b"\x1b[6~" => Some(TerminalEvent::Key(KeyEvent::PageDown)),
         b"\x1b[I" => Some(TerminalEvent::Focus(true)),
@@ -453,7 +458,7 @@ fn parse_sgr_mouse(bytes: &[u8]) -> Option<MouseEvent> {
     } else if (code & 0b100000) != 0 {
         MouseEventKind::Drag(mouse_button(button_code)?)
     } else if suffix == "m" {
-        MouseEventKind::Release(mouse_button(button_code)?)
+        MouseEventKind::Release(mouse_button(button_code))
     } else {
         MouseEventKind::Press(mouse_button(button_code)?)
     };
@@ -602,8 +607,15 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))?;
-        stdout.flush()?;
+        match write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))
+            .and_then(|()| stdout.flush())
+        {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = set_terminal_mode(input_fd, &original_mode);
+                return Err(error.into());
+            }
+        }
 
         Ok(Self {
             input_fd,
@@ -678,7 +690,11 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = set_terminal_mode(self.input_fd, &self.original_mode);
         let mut stdout = io::stdout();
-        let _ = write!(stdout, "{}", terminal_exit_sequence(self.mouse_capture_enabled));
+        let _ = write!(
+            stdout,
+            "{}",
+            terminal_exit_sequence(self.mouse_capture_enabled)
+        );
         let _ = stdout.flush();
     }
 }
@@ -815,7 +831,23 @@ mod tests {
 
     #[test]
     fn parses_page_up_and_page_down_keys() {
-        with_pipe(b"\x1b[5~\x1b[6~", |fd| {
+        with_pipe(b"\x1b[1~\x1b[2~\x1b[3~\x1b[4~\x1b[5~\x1b[6~", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Home))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Insert))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Delete))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::End))
+            );
             assert_eq!(
                 read_terminal_event(fd).unwrap(),
                 Some(TerminalEvent::Key(KeyEvent::PageUp))
@@ -847,35 +879,47 @@ mod tests {
 
     #[test]
     fn parses_sgr_mouse_events() {
-        with_pipe(b"\x1b[<0;12;7M\x1b[<64;3;5M\x1b[<32;10;4M", |fd| {
-            assert_eq!(
-                read_terminal_event(fd).unwrap(),
-                Some(TerminalEvent::Mouse(MouseEvent {
-                    row: 6,
-                    column: 11,
-                    modifiers: MouseModifiers::default(),
-                    kind: MouseEventKind::Press(MouseButton::Left),
-                }))
-            );
-            assert_eq!(
-                read_terminal_event(fd).unwrap(),
-                Some(TerminalEvent::Mouse(MouseEvent {
-                    row: 4,
-                    column: 2,
-                    modifiers: MouseModifiers::default(),
-                    kind: MouseEventKind::WheelUp,
-                }))
-            );
-            assert_eq!(
-                read_terminal_event(fd).unwrap(),
-                Some(TerminalEvent::Mouse(MouseEvent {
-                    row: 3,
-                    column: 9,
-                    modifiers: MouseModifiers::default(),
-                    kind: MouseEventKind::Drag(MouseButton::Left),
-                }))
-            );
-        });
+        with_pipe(
+            b"\x1b[<0;12;7M\x1b[<64;3;5M\x1b[<32;10;4M\x1b[<3;10;4m",
+            |fd| {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Mouse(MouseEvent {
+                        row: 6,
+                        column: 11,
+                        modifiers: MouseModifiers::default(),
+                        kind: MouseEventKind::Press(MouseButton::Left),
+                    }))
+                );
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Mouse(MouseEvent {
+                        row: 4,
+                        column: 2,
+                        modifiers: MouseModifiers::default(),
+                        kind: MouseEventKind::WheelUp,
+                    }))
+                );
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Mouse(MouseEvent {
+                        row: 3,
+                        column: 9,
+                        modifiers: MouseModifiers::default(),
+                        kind: MouseEventKind::Drag(MouseButton::Left),
+                    }))
+                );
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Mouse(MouseEvent {
+                        row: 3,
+                        column: 9,
+                        modifiers: MouseModifiers::default(),
+                        kind: MouseEventKind::Release(None),
+                    }))
+                );
+            },
+        );
     }
 
     #[test]

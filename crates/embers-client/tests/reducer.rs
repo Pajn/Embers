@@ -368,9 +368,7 @@ fn rebinding_view_to_a_new_buffer_resets_search_and_selection_state() {
         .as_mut()
         .expect("buffer view")
         .buffer_id = BufferId(99);
-    rebound
-        .buffers
-        .retain(|buffer| buffer.id != BufferId(1));
+    rebound.buffers.retain(|buffer| buffer.id != BufferId(1));
     rebound.buffers.push(buffer(99, Some(11), "replacement"));
     state.apply_session_snapshot(rebound);
 
@@ -394,6 +392,18 @@ async fn process_next_event_resyncs_session_after_mutation() {
         ServerResponse::SessionSnapshot(SessionSnapshotResponse {
             request_id: RequestId(1),
             snapshot: session_snapshot(1, 1),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(2),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(2),
+            buffers: vec![],
         }),
     );
 

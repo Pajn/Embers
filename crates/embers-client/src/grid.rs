@@ -193,10 +193,9 @@ impl RenderGrid {
     }
 
     pub fn fill_rect(&mut self, rect: Rect, fill: char, style: CellStyle) {
-        if rect.size.width == 0 || rect.size.height == 0 {
+        let Some(rect) = self.clip_rect(rect) else {
             return;
-        }
-
+        };
         let x = clamp_i32_to_u16(rect.origin.x);
         let y = clamp_i32_to_u16(rect.origin.y);
         for row in 0..rect.size.height {
@@ -211,9 +210,9 @@ impl RenderGrid {
     }
 
     pub fn draw_box_styled(&mut self, rect: Rect, border: BorderStyle, style: CellStyle) {
-        if rect.size.width == 0 || rect.size.height == 0 {
+        let Some(rect) = self.clip_rect(rect) else {
             return;
-        }
+        };
 
         let x = clamp_i32_to_u16(rect.origin.x);
         let y = clamp_i32_to_u16(rect.origin.y);
@@ -248,6 +247,25 @@ impl RenderGrid {
                 style,
             );
         }
+    }
+
+    fn clip_rect(&self, rect: Rect) -> Option<Rect> {
+        let left = rect.origin.x.max(0);
+        let top = rect.origin.y.max(0);
+        let right = (rect.origin.x + i32::from(rect.size.width)).min(i32::from(self.width));
+        let bottom = (rect.origin.y + i32::from(rect.size.height)).min(i32::from(self.height));
+
+        if right <= left || bottom <= top {
+            return None;
+        }
+
+        Some(Rect {
+            origin: embers_core::Point { x: left, y: top },
+            size: embers_core::Size {
+                width: u16::try_from(right - left).unwrap_or(0),
+                height: u16::try_from(bottom - top).unwrap_or(0),
+            },
+        })
     }
 
     pub fn lines(&self) -> Vec<String> {
@@ -412,7 +430,7 @@ impl BorderStyle {
 #[cfg(test)]
 mod tests {
     use super::{CellStyle, Color, GridCursor, RenderGrid};
-    use embers_core::CursorShape;
+    use embers_core::{CursorShape, Point, Rect, Size};
 
     #[test]
     fn render_preserves_plain_text_rows() {
@@ -496,5 +514,23 @@ mod tests {
             shape: CursorShape::Block,
         }));
         assert_eq!(grid.cursor(), None);
+    }
+
+    #[test]
+    fn fill_rect_clips_negative_origin_to_visible_bounds() {
+        let mut grid = RenderGrid::new(4, 2);
+        grid.fill_rect(
+            Rect {
+                origin: Point { x: -1, y: 0 },
+                size: Size {
+                    width: 3,
+                    height: 1,
+                },
+            },
+            '#',
+            CellStyle::default(),
+        );
+
+        assert_eq!(grid.lines(), vec!["##  ".to_owned(), "    ".to_owned()]);
     }
 }

@@ -30,8 +30,8 @@ fn spawn_embers(args: &[&str]) -> PtyHarness {
 
 async fn shutdown_spawned_server(socket_path: &Path) {
     let pid_path = socket_path.with_extension("pid");
-    let pid = fs::read_to_string(&pid_path)
-        .unwrap_or_else(|error| panic!("read pid file {}: {error}", pid_path.display()))
+    let pid = wait_for_pid(&pid_path)
+        .await
         .trim()
         .parse::<i32>()
         .expect("pid parses");
@@ -64,6 +64,35 @@ async fn wait_for_socket(socket_path: &Path) {
     }
 
     panic!("timed out waiting for socket {}", socket_path.display());
+}
+
+async fn wait_for_pid(pid_path: &Path) -> String {
+    for _ in 0..50 {
+        if let Ok(pid) = fs::read_to_string(pid_path) {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("timed out waiting for pid file {}", pid_path.display());
+}
+
+async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
+    let long_output = format!(
+        "printf '{}\\n'; echo DONE\r",
+        (1..=lines)
+            .map(|index| format!("line-{index}"))
+            .collect::<Vec<_>>()
+            .join("\\n")
+    );
+    harness
+        .write_all(&long_output)
+        .expect("write scrolling command");
+    let final_line = format!("line-{}", lines.saturating_sub(1));
+    harness
+        .read_until_contains(&final_line, Duration::from_secs(10))
+        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> String {
@@ -178,20 +207,7 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
     harness
         .read_until_contains("[main]", Duration::from_secs(5))
         .expect("client starts and renders");
-    let long_output = format!(
-        "printf '{}\\n'; echo DONE\r",
-        (1..=40)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\\n")
-    );
-    harness
-        .write_all(&long_output)
-        .expect("write scrolling command");
-    harness
-        .read_until_contains("line-39", Duration::from_secs(10))
-        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    populate_scrollback_or_wait(&mut harness, 40).await;
 
     harness.write_all("\x1b[5~").expect("page up");
     let output = harness
@@ -214,20 +230,7 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     harness
         .read_until_contains("[main]", Duration::from_secs(5))
         .expect("client starts and renders");
-    let long_output = format!(
-        "printf '{}\\n'; echo DONE\r",
-        (1..=40)
-            .map(|index| format!("line-{index}"))
-            .collect::<Vec<_>>()
-            .join("\\n")
-    );
-    harness
-        .write_all(&long_output)
-        .expect("write scrolling command");
-    harness
-        .read_until_contains("line-39", Duration::from_secs(10))
-        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    populate_scrollback_or_wait(&mut harness, 40).await;
 
     harness.write_all("\x1b[5~").expect("page up");
     harness
