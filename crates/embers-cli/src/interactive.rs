@@ -5,7 +5,8 @@ use std::thread;
 use std::time::Duration;
 
 use embers_client::{
-    ConfigManager, ConfiguredClient, KeyEvent, MuxClient, RenderGrid, SocketTransport,
+    ConfigManager, ConfiguredClient, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
+    MouseModifiers, MuxClient, RenderGrid, SocketTransport,
 };
 use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerResponse, SessionRequest};
@@ -16,6 +17,9 @@ const DEFAULT_SESSION_NAME: &str = "main";
 const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
 const KEY_SEQUENCE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(2);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+const TERMINAL_ENTER_SEQUENCE: &str = "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
+const TERMINAL_EXIT_SEQUENCE: &str = "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l\x1b[?1004l\x1b[?1049l";
 
 pub async fn run(
     socket_path: PathBuf,
@@ -64,6 +68,19 @@ pub async fn run(
                     configured.handle_key(session_id, viewport, key).await?;
                     dirty = true;
                 }
+                Ok(TerminalEvent::Paste(bytes)) => {
+                    let viewport = content_viewport(terminal_size);
+                    configured.handle_paste(session_id, viewport, bytes).await?;
+                    dirty = true;
+                }
+                Ok(TerminalEvent::Focus(focused)) => {
+                    let viewport = content_viewport(terminal_size);
+                    configured
+                        .handle_focus_event(session_id, viewport, focused)
+                        .await?;
+                    dirty = true;
+                }
+                Ok(TerminalEvent::Mouse(_)) => {}
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
                     return Err(MuxError::transport(message));
@@ -199,9 +216,7 @@ fn session_has_root_window(
         .ok_or_else(|| {
             MuxError::not_found(format!("node {} is not cached", session.root_node_id))
         })?;
-    let tabs = root
-        .tabs
-        .as_ref();
+    let tabs = root.tabs.as_ref();
     Ok(tabs.map_or(true, |tabs| !tabs.tabs.is_empty()))
 }
 
@@ -272,8 +287,12 @@ fn status_line(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
+    Paste(Vec<u8>),
+    Focus(bool),
     InputClosed,
     InputError(String),
 }
@@ -290,9 +309,9 @@ fn spawn_input_thread(
             let fd = stdin_lock.as_raw_fd();
             let _stdin_lock = stdin_lock;
             loop {
-                match read_key_event(fd) {
-                    Ok(Some(key)) => {
-                        if tx.send(TerminalEvent::Key(key)).is_err() {
+                match read_terminal_event(fd) {
+                    Ok(Some(event)) => {
+                        if tx.send(event).is_err() {
                             break;
                         }
                     }
@@ -310,34 +329,164 @@ fn spawn_input_thread(
         .map_err(|error| MuxError::internal(format!("failed to spawn input thread: {error}")))
 }
 
-fn read_key_event(fd: libc::c_int) -> Result<Option<KeyEvent>> {
+fn read_terminal_event(fd: libc::c_int) -> Result<Option<TerminalEvent>> {
     let Some(first) = read_byte(fd)? else {
         return Ok(None);
     };
     let event = match first {
-        b'\r' | b'\n' => KeyEvent::Enter,
-        b'\t' => KeyEvent::Tab,
-        0x7f | 0x08 => KeyEvent::Backspace,
-        0x1b => read_escape_key(fd)?,
-        0x01..=0x1a => KeyEvent::Ctrl(char::from(b'a' + first - 1)),
-        0x20..=0x7e => KeyEvent::Char(char::from(first)),
-        other => decode_utf8_key(fd, other)?,
+        b'\r' | b'\n' => TerminalEvent::Key(KeyEvent::Enter),
+        b'\t' => TerminalEvent::Key(KeyEvent::Tab),
+        0x7f | 0x08 => TerminalEvent::Key(KeyEvent::Backspace),
+        0x1b => read_escape_event(fd)?,
+        0x01..=0x1a => TerminalEvent::Key(KeyEvent::Ctrl(char::from(b'a' + first - 1))),
+        0x20..=0x7e => TerminalEvent::Key(KeyEvent::Char(char::from(first))),
+        other => TerminalEvent::Key(decode_utf8_key(fd, other)?),
     };
     Ok(Some(event))
 }
 
-fn read_escape_key(fd: libc::c_int) -> Result<KeyEvent> {
+fn read_escape_event(fd: libc::c_int) -> Result<TerminalEvent> {
     let Some(next) = read_optional_byte(fd, KEY_SEQUENCE_TIMEOUT)? else {
-        return Ok(KeyEvent::Escape);
+        return Ok(TerminalEvent::Key(KeyEvent::Escape));
     };
-    let mut bytes = vec![0x1b, next];
-    while let Some(extra) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? {
-        bytes.push(extra);
+
+    match next {
+        b'[' => read_csi_event(fd),
+        b'O' => read_ss3_event(fd),
+        byte if byte.is_ascii() => Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(byte)))),
+        other => {
+            let mut bytes = vec![0x1b, other];
+            while let Some(extra) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? {
+                bytes.push(extra);
+            }
+            Ok(TerminalEvent::Key(KeyEvent::Bytes(bytes)))
+        }
     }
-    if bytes.len() == 2 && bytes[1].is_ascii() {
-        return Ok(KeyEvent::Alt(char::from(bytes[1])));
+}
+
+fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
+    let bytes = read_control_sequence(fd, b'[')?;
+    if bytes == b"\x1b[200~" {
+        return Ok(TerminalEvent::Paste(read_bracketed_paste(fd)?));
     }
-    Ok(KeyEvent::Bytes(bytes))
+    Ok(parse_csi_event(&bytes).unwrap_or(TerminalEvent::Key(KeyEvent::Bytes(bytes))))
+}
+
+fn read_ss3_event(fd: libc::c_int) -> Result<TerminalEvent> {
+    let mut bytes = vec![0x1b, b'O'];
+    let Some(final_byte) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? else {
+        return Ok(TerminalEvent::Key(KeyEvent::Bytes(bytes)));
+    };
+    bytes.push(final_byte);
+    let key = match final_byte {
+        b'A' => Some(KeyEvent::Up),
+        b'B' => Some(KeyEvent::Down),
+        b'C' => Some(KeyEvent::Right),
+        b'D' => Some(KeyEvent::Left),
+        _ => None,
+    };
+    Ok(match key {
+        Some(key) => TerminalEvent::Key(key),
+        None => TerminalEvent::Key(KeyEvent::Bytes(bytes)),
+    })
+}
+
+fn read_control_sequence(fd: libc::c_int, introducer: u8) -> Result<Vec<u8>> {
+    let mut bytes = vec![0x1b, introducer];
+    while let Some(next) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? {
+        bytes.push(next);
+        if is_csi_final_byte(next) {
+            break;
+        }
+    }
+    Ok(bytes)
+}
+
+fn is_csi_final_byte(byte: u8) -> bool {
+    (0x40..=0x7e).contains(&byte)
+}
+
+fn parse_csi_event(bytes: &[u8]) -> Option<TerminalEvent> {
+    match bytes {
+        b"\x1b[A" => Some(TerminalEvent::Key(KeyEvent::Up)),
+        b"\x1b[B" => Some(TerminalEvent::Key(KeyEvent::Down)),
+        b"\x1b[C" => Some(TerminalEvent::Key(KeyEvent::Right)),
+        b"\x1b[D" => Some(TerminalEvent::Key(KeyEvent::Left)),
+        b"\x1b[5~" => Some(TerminalEvent::Key(KeyEvent::PageUp)),
+        b"\x1b[6~" => Some(TerminalEvent::Key(KeyEvent::PageDown)),
+        b"\x1b[I" => Some(TerminalEvent::Focus(true)),
+        b"\x1b[O" => Some(TerminalEvent::Focus(false)),
+        _ => parse_sgr_mouse(bytes).map(TerminalEvent::Mouse),
+    }
+}
+
+fn parse_sgr_mouse(bytes: &[u8]) -> Option<MouseEvent> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let body = text.strip_prefix("\x1b[<")?;
+    let (payload, suffix) = body.split_at(body.len().checked_sub(1)?);
+    if suffix != "M" && suffix != "m" {
+        return None;
+    }
+
+    let mut parts = payload.split(';');
+    let code = parts.next()?.parse::<u16>().ok()?;
+    let column = parts.next()?.parse::<u16>().ok()?.saturating_sub(1);
+    let row = parts.next()?.parse::<u16>().ok()?.saturating_sub(1);
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let modifiers = MouseModifiers {
+        shift: (code & 0b00100) != 0,
+        alt: (code & 0b01000) != 0,
+        ctrl: (code & 0b10000) != 0,
+    };
+    let button_code = code & 0b11;
+    let kind = if (code & 0b1_000000) != 0 {
+        match button_code {
+            0 => MouseEventKind::WheelUp,
+            1 => MouseEventKind::WheelDown,
+            _ => return None,
+        }
+    } else if (code & 0b100000) != 0 {
+        MouseEventKind::Drag(mouse_button(button_code)?)
+    } else if suffix == "m" {
+        MouseEventKind::Release(mouse_button(button_code)?)
+    } else {
+        MouseEventKind::Press(mouse_button(button_code)?)
+    };
+
+    Some(MouseEvent {
+        row,
+        column,
+        modifiers,
+        kind,
+    })
+}
+
+fn mouse_button(code: u16) -> Option<MouseButton> {
+    match code {
+        0 => Some(MouseButton::Left),
+        1 => Some(MouseButton::Middle),
+        2 => Some(MouseButton::Right),
+        _ => None,
+    }
+}
+
+fn read_bracketed_paste(fd: libc::c_int) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        let Some(next) = read_byte(fd)? else {
+            break;
+        };
+        bytes.push(next);
+        if bytes.ends_with(BRACKETED_PASTE_END) {
+            let new_len = bytes.len() - BRACKETED_PASTE_END.len();
+            bytes.truncate(new_len);
+            break;
+        }
+    }
+    Ok(bytes)
 }
 
 fn decode_utf8_key(fd: libc::c_int, first: u8) -> Result<KeyEvent> {
@@ -450,7 +599,7 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        write!(stdout, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")?;
+        write!(stdout, "{TERMINAL_ENTER_SEQUENCE}")?;
         stdout.flush()?;
 
         Ok(Self {
@@ -496,7 +645,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = set_terminal_mode(self.input_fd, &self.original_mode);
         let mut stdout = io::stdout();
-        let _ = write!(stdout, "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?1049l");
+        let _ = write!(stdout, "{TERMINAL_EXIT_SEQUENCE}");
         let _ = stdout.flush();
     }
 }
@@ -573,5 +722,117 @@ fn cursor_shape_code(shape: CursorShape) -> u8 {
         CursorShape::Block => 2,
         CursorShape::Underline => 4,
         CursorShape::Beam => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        TERMINAL_ENTER_SEQUENCE, TERMINAL_EXIT_SEQUENCE, TerminalEvent, read_terminal_event,
+    };
+    use embers_client::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
+
+    fn with_pipe<T>(bytes: &[u8], test: impl FnOnce(libc::c_int) -> T) -> T {
+        let mut fds = [0; 2];
+        // SAFETY: pipe writes two valid file descriptors into the provided array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        // SAFETY: write_fd is valid and bytes points to a readable buffer of the requested size.
+        let written = unsafe { libc::write(write_fd, bytes.as_ptr().cast(), bytes.len()) };
+        assert_eq!(written, bytes.len() as isize);
+        // SAFETY: write_fd/read_fd are valid file descriptors from pipe.
+        unsafe {
+            libc::close(write_fd);
+        }
+        let result = test(read_fd);
+        // SAFETY: read_fd is valid until explicitly closed here.
+        unsafe {
+            libc::close(read_fd);
+        }
+        result
+    }
+
+    #[test]
+    fn parses_page_up_and_page_down_keys() {
+        with_pipe(b"\x1b[5~\x1b[6~", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::PageUp))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::PageDown))
+            );
+        });
+    }
+
+    #[test]
+    fn parses_arrow_and_focus_events() {
+        with_pipe(b"\x1b[A\x1b[I\x1b[O", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Up))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Focus(true))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Focus(false))
+            );
+        });
+    }
+
+    #[test]
+    fn parses_sgr_mouse_events() {
+        with_pipe(b"\x1b[<0;12;7M\x1b[<64;3;5M\x1b[<32;10;4M", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Mouse(MouseEvent {
+                    row: 6,
+                    column: 11,
+                    modifiers: MouseModifiers::default(),
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Mouse(MouseEvent {
+                    row: 4,
+                    column: 2,
+                    modifiers: MouseModifiers::default(),
+                    kind: MouseEventKind::WheelUp,
+                }))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Mouse(MouseEvent {
+                    row: 3,
+                    column: 9,
+                    modifiers: MouseModifiers::default(),
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                }))
+            );
+        });
+    }
+
+    #[test]
+    fn parses_bracketed_paste_payloads() {
+        with_pipe(b"\x1b[200~hello\nworld\x1b[201~", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Paste(b"hello\nworld".to_vec()))
+            );
+        });
+    }
+
+    #[test]
+    fn terminal_guard_sequences_enable_focus_and_paste_modes() {
+        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1004h"));
+        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?2004h"));
+        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1004l"));
+        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?2004l"));
     }
 }

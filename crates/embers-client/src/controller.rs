@@ -13,6 +13,43 @@ pub enum KeyEvent {
     Escape,
     Ctrl(char),
     Alt(char),
+    Up,
+    Down,
+    Left,
+    Right,
+    PageUp,
+    PageDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Press(MouseButton),
+    Release(MouseButton),
+    Drag(MouseButton),
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub row: u16,
+    pub column: u16,
+    pub modifiers: MouseModifiers,
+    pub kind: MouseEventKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,6 +111,12 @@ impl Controller {
             KeyEvent::Tab => input_request(presentation, request_id, b"\t".to_vec()),
             KeyEvent::Enter => input_request(presentation, request_id, b"\r".to_vec()),
             KeyEvent::Backspace => input_request(presentation, request_id, vec![0x7f]),
+            KeyEvent::Up => input_request(presentation, request_id, b"\x1b[A".to_vec()),
+            KeyEvent::Down => input_request(presentation, request_id, b"\x1b[B".to_vec()),
+            KeyEvent::Right => input_request(presentation, request_id, b"\x1b[C".to_vec()),
+            KeyEvent::Left => input_request(presentation, request_id, b"\x1b[D".to_vec()),
+            KeyEvent::PageUp => input_request(presentation, request_id, b"\x1b[5~".to_vec()),
+            KeyEvent::PageDown => input_request(presentation, request_id, b"\x1b[6~".to_vec()),
             KeyEvent::Alt(_) | KeyEvent::Bytes(_) => None,
         }
     }
