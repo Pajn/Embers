@@ -90,6 +90,12 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    #[command(name = "rename-session")]
+    RenameSession {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        name: String,
+    },
     #[command(name = "list-buffers")]
     ListBuffers {
         #[arg(short = 't', long = "target")]
@@ -254,6 +260,17 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     request_id: new_request_id(),
                     session_id: session.id,
                     force,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::RenameSession { target, name } => {
+            let session = connection.resolve_session_record(target.as_deref()).await?;
+            connection
+                .request(ClientMessage::Session(SessionRequest::Rename {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                    name,
                 }))
                 .await?;
             Ok(String::new())

@@ -30,7 +30,7 @@ pub use types::{
     FocusChangedEvent, InputRequest, NodeChangedEvent, NodeRecord, NodeRecordKind, NodeRequest,
     OkResponse, PingRequest, PingResponse, RenderInvalidatedEvent, ScrollbackSliceResponse,
     ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent,
-    SessionRecord, SessionRequest, SessionSnapshot, SessionSnapshotResponse, SessionsResponse,
-    SnapshotResponse, SplitRecord, SubscribeRequest, SubscriptionAckResponse, TabRecord,
-    TabsRecord, UnsubscribeRequest, VisibleSnapshotResponse,
+    SessionRecord, SessionRenamedEvent, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
+    SessionsResponse, SnapshotResponse, SplitRecord, SubscribeRequest, SubscriptionAckResponse,
+    TabRecord, TabsRecord, UnsubscribeRequest, VisibleSnapshotResponse,
 };

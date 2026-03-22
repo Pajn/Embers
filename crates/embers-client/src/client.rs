@@ -216,6 +216,11 @@ where
                 self.resync_detached_buffers().await
             }
             ServerEvent::SessionClosed(_) => self.resync_detached_buffers().await,
+            ServerEvent::SessionRenamed(event) => {
+                self.state
+                    .apply_event(&ServerEvent::SessionRenamed(event.clone()));
+                self.resync_session(event.session_id).await
+            }
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_)

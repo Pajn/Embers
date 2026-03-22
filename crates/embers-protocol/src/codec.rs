@@ -192,6 +192,18 @@ fn encode_session_request<'a>(
             *force,
             0,
         ),
+        SessionRequest::Rename {
+            session_id, name, ..
+        } => (
+            fb::SessionOp::Rename,
+            (*session_id).into(),
+            0,
+            0,
+            Some(name.as_str()),
+            None,
+            false,
+            0,
+        ),
         SessionRequest::AddRootTab {
             session_id,
             title,
@@ -1402,6 +1414,25 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::SessionRenamed(e) => {
+            let name = builder.create_string(&e.name);
+            let event = fb::SessionRenamedEvent::create(
+                builder,
+                &fb::SessionRenamedEventArgs {
+                    session_id: e.session_id.into(),
+                    name: Some(name),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::SessionRenamedEvent,
+                    session_renamed_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::BufferCreated(e) => {
             let buffer = encode_buffer_record(builder, &e.buffer);
             let event = fb::BufferCreatedEvent::create(
@@ -1763,6 +1794,11 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     request_id,
                     session_id: SessionId(req.session_id()),
                     force: req.force(),
+                },
+                fb::SessionOp::Rename => SessionRequest::Rename {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                    name: required(req.name(), "session_request.name")?.to_owned(),
                 },
                 fb::SessionOp::AddRootTab => SessionRequest::AddRootTab {
                     request_id,
@@ -2265,6 +2301,16 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::SessionRenamedEvent => {
+            let event = required(envelope.session_renamed_event(), "session_renamed_event")?;
+            let name = required(event.name(), "session_renamed_event.name")?;
+            Ok(ServerEnvelope::Event(ServerEvent::SessionRenamed(
+                SessionRenamedEvent {
+                    session_id: SessionId(event.session_id()),
+                    name: name.to_owned(),
+                },
+            )))
+        }
         fb::MessageKind::BufferCreatedEvent => {
             let event = required(envelope.buffer_created_event(), "buffer_created_event")?;
             let buffer = required(event.buffer(), "buffer_created_event.buffer")?;
@@ -2661,6 +2707,113 @@ mod tests {
         assert!(matches!(
             error,
             ProtocolError::InvalidMessage("node_record.tabs.tabs")
+        ));
+    }
+
+    #[test]
+    fn encode_decode_session_renamed_event_roundtrip() {
+        let original = ServerEnvelope::Event(ServerEvent::SessionRenamed(SessionRenamedEvent {
+            session_id: SessionId(123),
+            name: "my-session".to_string(),
+        }));
+
+        let encoded = encode_server_envelope(&original).expect("encode should succeed");
+
+        let decoded = decode_server_envelope(&encoded).expect("decode should succeed");
+
+        let ServerEnvelope::Event(ServerEvent::SessionRenamed(decoded_event)) = decoded else {
+            panic!(
+                "expected ServerEnvelope::Event(ServerEvent::SessionRenamed), got {:?}",
+                decoded
+            );
+        };
+
+        assert_eq!(decoded_event.session_id, SessionId(123));
+        assert_eq!(decoded_event.name, "my-session");
+    }
+
+    #[test]
+    fn encode_decode_session_rename_roundtrip() {
+        let _builder = FlatBufferBuilder::new();
+
+        // Create a SessionRequest::Rename
+        let original = SessionRequest::Rename {
+            request_id: RequestId(42),
+            session_id: SessionId(123),
+            name: "my-session".to_string(),
+        };
+
+        // Encode it
+        let encoded = encode_client_message(&ClientMessage::Session(original.clone()))
+            .expect("encode should succeed");
+
+        // Decode it back
+        let decoded = decode_client_message(&encoded).expect("decode should succeed");
+
+        // Verify round-trip
+        let ClientMessage::Session(SessionRequest::Rename {
+            request_id: decoded_req_id,
+            session_id: decoded_session_id,
+            name: decoded_name,
+        }) = &decoded
+        else {
+            panic!("expected SessionRequest::Rename, got {:?}", decoded);
+        };
+
+        // Also extract fields from original for comparison
+        let SessionRequest::Rename {
+            request_id: orig_req_id,
+            session_id: orig_session_id,
+            name: orig_name,
+            ..
+        } = &original
+        else {
+            panic!("expected SessionRequest::Rename, got {:?}", original);
+        };
+
+        assert_eq!(decoded_req_id, orig_req_id);
+        assert_eq!(decoded_session_id, orig_session_id);
+        assert_eq!(decoded_name, orig_name);
+    }
+
+    #[test]
+    fn decode_session_rename_rejects_missing_name() {
+        let mut builder = FlatBufferBuilder::new();
+
+        // Construct the wire Rename payload WITHOUT a name field
+        let session_req = fb::SessionRequest::create(
+            &mut builder,
+            &fb::SessionRequestArgs {
+                op: fb::SessionOp::Rename,
+                session_id: 123,
+                buffer_id: 0,
+                child_node_id: 0,
+                name: None, // Missing name!
+                title: None,
+                force: false,
+                index: 0,
+            },
+        );
+
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 42,
+                kind: fb::MessageKind::SessionRequest,
+                session_request: Some(session_req),
+                ..Default::default()
+            },
+        );
+
+        builder.finish(envelope, Some("EMBR"));
+
+        // Decode should fail with the expected error
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("missing name should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessage("session_request.name")
         ));
     }
 }

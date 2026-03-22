@@ -15,10 +15,10 @@ use embers_protocol::{
     ClientMessage, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
     FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
     ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRequest,
-    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
-    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
-    write_frame_no_flush,
+    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
+    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
+    SubscriptionAckResponse, VisibleSnapshotResponse, decode_client_message,
+    encode_server_envelope, read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -534,6 +534,29 @@ impl Runtime {
                         session_id,
                     })],
                 ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            SessionRequest::Rename {
+                request_id,
+                session_id,
+                name,
+            } => match state.rename_session(session_id, name) {
+                Ok(()) => match session_snapshot(&state, session_id) {
+                    Ok(snapshot) => {
+                        let name = snapshot.session.name.clone();
+                        (
+                            ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                                request_id,
+                                snapshot,
+                            }),
+                            vec![ServerEvent::SessionRenamed(SessionRenamedEvent {
+                                session_id,
+                                name,
+                            })],
+                        )
+                    }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                },
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             SessionRequest::AddRootTab {

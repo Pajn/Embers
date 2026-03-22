@@ -1138,6 +1138,7 @@ where
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
+            | ServerEvent::SessionRenamed(_)
             | ServerEvent::NodeChanged(_)
             | ServerEvent::FloatingChanged(_)
             | ServerEvent::FocusChanged(_) => None,
@@ -2279,6 +2280,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
     match event {
         ServerEvent::SessionCreated(_) => "session_created",
         ServerEvent::SessionClosed(_) => "session_closed",
+        ServerEvent::SessionRenamed(_) => "session_renamed",
         ServerEvent::BufferCreated(_) => "buffer_created",
         ServerEvent::BufferDetached(_) => "buffer_detached",
         ServerEvent::NodeChanged(_) => "node_changed",
@@ -2298,6 +2300,13 @@ fn event_info(name: &str, event: &ServerEvent) -> EventInfo {
             floating_id: None,
         },
         ServerEvent::SessionClosed(event) => EventInfo {
+            name: name.to_owned(),
+            session_id: Some(event.session_id),
+            buffer_id: None,
+            node_id: None,
+            floating_id: None,
+        },
+        ServerEvent::SessionRenamed(event) => EventInfo {
             name: name.to_owned(),
             session_id: Some(event.session_id),
             buffer_id: None,
