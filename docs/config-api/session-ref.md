@@ -11,7 +11,7 @@ fn floating(session: SessionRef) -> Array
 
 <div>
 <div class="tab">
-<button group="floating" id="link-floating-Description"  class="tablinks active" 
+<button group="floating" id="link-floating-Description"  class="tablinks active"
     onclick="openTab(event, 'floating', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn id(session: SessionRef) -> int
 
 <div>
 <div class="tab">
-<button group="id" id="link-id-Description"  class="tablinks active" 
+<button group="id" id="link-id-Description"  class="tablinks active"
     onclick="openTab(event, 'id', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn name(session: SessionRef) -> String
 
 <div>
 <div class="tab">
-<button group="name" id="link-name-Description"  class="tablinks active" 
+<button group="name" id="link-name-Description"  class="tablinks active"
     onclick="openTab(event, 'name', 'Description')">
 Description
 </button>
@@ -77,7 +77,7 @@ fn root_node(session: SessionRef) -> int
 
 <div>
 <div class="tab">
-<button group="root_node" id="link-root_node-Description"  class="tablinks active" 
+<button group="root_node" id="link-root_node-Description"  class="tablinks active"
     onclick="openTab(event, 'root_node', 'Description')">
 Description
 </button>

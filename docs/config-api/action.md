@@ -11,7 +11,7 @@ fn cancel_search(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="cancel_search" id="link-cancel_search-Description"  class="tablinks active" 
+<button group="cancel_search" id="link-cancel_search-Description"  class="tablinks active"
     onclick="openTab(event, 'cancel_search', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn cancel_selection(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="cancel_selection" id="link-cancel_selection-Description"  class="tablinks active" 
+<button group="cancel_selection" id="link-cancel_selection-Description"  class="tablinks active"
     onclick="openTab(event, 'cancel_selection', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn chain(_: ActionApi, actions: Array) -> Action
 
 <div>
 <div class="tab">
-<button group="chain" id="link-chain-Description"  class="tablinks active" 
+<button group="chain" id="link-chain-Description"  class="tablinks active"
     onclick="openTab(event, 'chain', 'Description')">
 Description
 </button>
@@ -77,7 +77,7 @@ fn clear_pending_keys(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="clear_pending_keys" id="link-clear_pending_keys-Description"  class="tablinks active" 
+<button group="clear_pending_keys" id="link-clear_pending_keys-Description"  class="tablinks active"
     onclick="openTab(event, 'clear_pending_keys', 'Description')">
 Description
 </button>
@@ -99,7 +99,7 @@ fn close_floating(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="close_floating" id="link-close_floating-Description"  class="tablinks active" 
+<button group="close_floating" id="link-close_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'close_floating', 'Description')">
 Description
 </button>
@@ -121,7 +121,7 @@ fn close_floating_id(_: ActionApi, floating_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="close_floating_id" id="link-close_floating_id-Description"  class="tablinks active" 
+<button group="close_floating_id" id="link-close_floating_id-Description"  class="tablinks active"
     onclick="openTab(event, 'close_floating_id', 'Description')">
 Description
 </button>
@@ -143,7 +143,7 @@ fn close_node(_: ActionApi, node_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="close_node" id="link-close_node-Description"  class="tablinks active" 
+<button group="close_node" id="link-close_node-Description"  class="tablinks active"
     onclick="openTab(event, 'close_node', 'Description')">
 Description
 </button>
@@ -165,7 +165,7 @@ fn close_view(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="close_view" id="link-close_view-Description"  class="tablinks active" 
+<button group="close_view" id="link-close_view-Description"  class="tablinks active"
     onclick="openTab(event, 'close_view', 'Description')">
 Description
 </button>
@@ -187,7 +187,7 @@ fn copy_selection(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="copy_selection" id="link-copy_selection-Description"  class="tablinks active" 
+<button group="copy_selection" id="link-copy_selection-Description"  class="tablinks active"
     onclick="openTab(event, 'copy_selection', 'Description')">
 Description
 </button>
@@ -209,7 +209,7 @@ fn detach_buffer(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="detach_buffer" id="link-detach_buffer-Description"  class="tablinks active" 
+<button group="detach_buffer" id="link-detach_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'detach_buffer', 'Description')">
 Description
 </button>
@@ -231,7 +231,7 @@ fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="detach_buffer_id" id="link-detach_buffer_id-Description"  class="tablinks active" 
+<button group="detach_buffer_id" id="link-detach_buffer_id-Description"  class="tablinks active"
     onclick="openTab(event, 'detach_buffer_id', 'Description')">
 Description
 </button>
@@ -253,7 +253,7 @@ fn enter_mode(_: ActionApi, mode: String) -> Action
 
 <div>
 <div class="tab">
-<button group="enter_mode" id="link-enter_mode-Description"  class="tablinks active" 
+<button group="enter_mode" id="link-enter_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'enter_mode', 'Description')">
 Description
 </button>
@@ -275,7 +275,7 @@ fn enter_search_mode(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="enter_search_mode" id="link-enter_search_mode-Description"  class="tablinks active" 
+<button group="enter_search_mode" id="link-enter_search_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'enter_search_mode', 'Description')">
 Description
 </button>
@@ -297,7 +297,7 @@ fn enter_select_block(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="enter_select_block" id="link-enter_select_block-Description"  class="tablinks active" 
+<button group="enter_select_block" id="link-enter_select_block-Description"  class="tablinks active"
     onclick="openTab(event, 'enter_select_block', 'Description')">
 Description
 </button>
@@ -319,7 +319,7 @@ fn enter_select_char(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="enter_select_char" id="link-enter_select_char-Description"  class="tablinks active" 
+<button group="enter_select_char" id="link-enter_select_char-Description"  class="tablinks active"
     onclick="openTab(event, 'enter_select_char', 'Description')">
 Description
 </button>
@@ -341,7 +341,7 @@ fn enter_select_line(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="enter_select_line" id="link-enter_select_line-Description"  class="tablinks active" 
+<button group="enter_select_line" id="link-enter_select_line-Description"  class="tablinks active"
     onclick="openTab(event, 'enter_select_line', 'Description')">
 Description
 </button>
@@ -363,7 +363,7 @@ fn focus_buffer(_: ActionApi, buffer_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="focus_buffer" id="link-focus_buffer-Description"  class="tablinks active" 
+<button group="focus_buffer" id="link-focus_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'focus_buffer', 'Description')">
 Description
 </button>
@@ -385,7 +385,7 @@ fn focus_down(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="focus_down" id="link-focus_down-Description"  class="tablinks active" 
+<button group="focus_down" id="link-focus_down-Description"  class="tablinks active"
     onclick="openTab(event, 'focus_down', 'Description')">
 Description
 </button>
@@ -407,11 +407,11 @@ fn focus_left(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="focus_left" id="link-focus_left-Description"  class="tablinks active" 
+<button group="focus_left" id="link-focus_left-Description"  class="tablinks active"
     onclick="openTab(event, 'focus_left', 'Description')">
 Description
 </button>
-<button group="focus_left" id="link-focus_left-Example"  class="tablinks" 
+<button group="focus_left" id="link-focus_left-Example"  class="tablinks"
     onclick="openTab(event, 'focus_left', 'Example')">
 Example
 </button>
@@ -439,7 +439,7 @@ fn focus_right(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="focus_right" id="link-focus_right-Description"  class="tablinks active" 
+<button group="focus_right" id="link-focus_right-Description"  class="tablinks active"
     onclick="openTab(event, 'focus_right', 'Description')">
 Description
 </button>
@@ -461,7 +461,7 @@ fn focus_up(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="focus_up" id="link-focus_up-Description"  class="tablinks active" 
+<button group="focus_up" id="link-focus_up-Description"  class="tablinks active"
     onclick="openTab(event, 'focus_up', 'Description')">
 Description
 </button>
@@ -483,7 +483,7 @@ fn follow_output(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="follow_output" id="link-follow_output-Description"  class="tablinks active" 
+<button group="follow_output" id="link-follow_output-Description"  class="tablinks active"
     onclick="openTab(event, 'follow_output', 'Description')">
 Description
 </button>
@@ -505,7 +505,7 @@ fn insert_tab_after(_: ActionApi, tabs_node_id: int, title: String, tree: TreeSp
 
 <div>
 <div class="tab">
-<button group="insert_tab_after" id="link-insert_tab_after-Description"  class="tablinks active" 
+<button group="insert_tab_after" id="link-insert_tab_after-Description"  class="tablinks active"
     onclick="openTab(event, 'insert_tab_after', 'Description')">
 Description
 </button>
@@ -527,7 +527,7 @@ fn insert_tab_after_current(_: ActionApi, title: String, tree: TreeSpec) -> Acti
 
 <div>
 <div class="tab">
-<button group="insert_tab_after_current" id="link-insert_tab_after_current-Description"  class="tablinks active" 
+<button group="insert_tab_after_current" id="link-insert_tab_after_current-Description"  class="tablinks active"
     onclick="openTab(event, 'insert_tab_after_current', 'Description')">
 Description
 </button>
@@ -549,7 +549,7 @@ fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: String, tree: TreeS
 
 <div>
 <div class="tab">
-<button group="insert_tab_before" id="link-insert_tab_before-Description"  class="tablinks active" 
+<button group="insert_tab_before" id="link-insert_tab_before-Description"  class="tablinks active"
     onclick="openTab(event, 'insert_tab_before', 'Description')">
 Description
 </button>
@@ -571,7 +571,7 @@ fn insert_tab_before_current(_: ActionApi, title: String, tree: TreeSpec) -> Act
 
 <div>
 <div class="tab">
-<button group="insert_tab_before_current" id="link-insert_tab_before_current-Description"  class="tablinks active" 
+<button group="insert_tab_before_current" id="link-insert_tab_before_current-Description"  class="tablinks active"
     onclick="openTab(event, 'insert_tab_before_current', 'Description')">
 Description
 </button>
@@ -593,7 +593,7 @@ fn kill_buffer(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="kill_buffer" id="link-kill_buffer-Description"  class="tablinks active" 
+<button group="kill_buffer" id="link-kill_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'kill_buffer', 'Description')">
 Description
 </button>
@@ -615,7 +615,7 @@ fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="kill_buffer_id" id="link-kill_buffer_id-Description"  class="tablinks active" 
+<button group="kill_buffer_id" id="link-kill_buffer_id-Description"  class="tablinks active"
     onclick="openTab(event, 'kill_buffer_id', 'Description')">
 Description
 </button>
@@ -637,7 +637,7 @@ fn leave_mode(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="leave_mode" id="link-leave_mode-Description"  class="tablinks active" 
+<button group="leave_mode" id="link-leave_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'leave_mode', 'Description')">
 Description
 </button>
@@ -659,11 +659,11 @@ fn move_buffer_to_floating(_: ActionApi, buffer_id: int, options: Map) -> Action
 
 <div>
 <div class="tab">
-<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Description"  class="tablinks active" 
+<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'move_buffer_to_floating', 'Description')">
 Description
 </button>
-<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Options"  class="tablinks" 
+<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Options"  class="tablinks"
     onclick="openTab(event, 'move_buffer_to_floating', 'Options')">
 Options
 </button>
@@ -696,7 +696,7 @@ fn move_buffer_to_node(_: ActionApi, buffer_id: int, node_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="move_buffer_to_node" id="link-move_buffer_to_node-Description"  class="tablinks active" 
+<button group="move_buffer_to_node" id="link-move_buffer_to_node-Description"  class="tablinks active"
     onclick="openTab(event, 'move_buffer_to_node', 'Description')">
 Description
 </button>
@@ -718,7 +718,7 @@ fn next_current_tabs(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="next_current_tabs" id="link-next_current_tabs-Description"  class="tablinks active" 
+<button group="next_current_tabs" id="link-next_current_tabs-Description"  class="tablinks active"
     onclick="openTab(event, 'next_current_tabs', 'Description')">
 Description
 </button>
@@ -740,7 +740,7 @@ fn next_tab(_: ActionApi, tabs_node_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="next_tab" id="link-next_tab-Description"  class="tablinks active" 
+<button group="next_tab" id="link-next_tab-Description"  class="tablinks active"
     onclick="openTab(event, 'next_tab', 'Description')">
 Description
 </button>
@@ -762,7 +762,7 @@ fn noop(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="noop" id="link-noop-Description"  class="tablinks active" 
+<button group="noop" id="link-noop-Description"  class="tablinks active"
     onclick="openTab(event, 'noop', 'Description')">
 Description
 </button>
@@ -784,7 +784,7 @@ fn notify(_: ActionApi, level: String, message: String) -> Action
 
 <div>
 <div class="tab">
-<button group="notify" id="link-notify-Description"  class="tablinks active" 
+<button group="notify" id="link-notify-Description"  class="tablinks active"
     onclick="openTab(event, 'notify', 'Description')">
 Description
 </button>
@@ -806,7 +806,7 @@ fn open_floating(_: ActionApi, tree: TreeSpec, options: Map) -> Action
 
 <div>
 <div class="tab">
-<button group="open_floating" id="link-open_floating-Description"  class="tablinks active" 
+<button group="open_floating" id="link-open_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'open_floating', 'Description')">
 Description
 </button>
@@ -828,7 +828,7 @@ fn prev_current_tabs(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="prev_current_tabs" id="link-prev_current_tabs-Description"  class="tablinks active" 
+<button group="prev_current_tabs" id="link-prev_current_tabs-Description"  class="tablinks active"
     onclick="openTab(event, 'prev_current_tabs', 'Description')">
 Description
 </button>
@@ -850,7 +850,7 @@ fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="prev_tab" id="link-prev_tab-Description"  class="tablinks active" 
+<button group="prev_tab" id="link-prev_tab-Description"  class="tablinks active"
     onclick="openTab(event, 'prev_tab', 'Description')">
 Description
 </button>
@@ -872,7 +872,7 @@ fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action
 
 <div>
 <div class="tab">
-<button group="replace_current_with" id="link-replace_current_with-Description"  class="tablinks active" 
+<button group="replace_current_with" id="link-replace_current_with-Description"  class="tablinks active"
     onclick="openTab(event, 'replace_current_with', 'Description')">
 Description
 </button>
@@ -894,7 +894,7 @@ fn replace_node(_: ActionApi, node_id: int, tree: TreeSpec) -> Action
 
 <div>
 <div class="tab">
-<button group="replace_node" id="link-replace_node-Description"  class="tablinks active" 
+<button group="replace_node" id="link-replace_node-Description"  class="tablinks active"
     onclick="openTab(event, 'replace_node', 'Description')">
 Description
 </button>
@@ -916,7 +916,7 @@ fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action
 
 <div>
 <div class="tab">
-<button group="reveal_buffer" id="link-reveal_buffer-Description"  class="tablinks active" 
+<button group="reveal_buffer" id="link-reveal_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'reveal_buffer', 'Description')">
 Description
 </button>
@@ -938,7 +938,7 @@ fn run_named_action(_: ActionApi, name: String) -> Action
 
 <div>
 <div class="tab">
-<button group="run_named_action" id="link-run_named_action-Description"  class="tablinks active" 
+<button group="run_named_action" id="link-run_named_action-Description"  class="tablinks active"
     onclick="openTab(event, 'run_named_action', 'Description')">
 Description
 </button>
@@ -960,7 +960,7 @@ fn scroll_line_down(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_line_down" id="link-scroll_line_down-Description"  class="tablinks active" 
+<button group="scroll_line_down" id="link-scroll_line_down-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_line_down', 'Description')">
 Description
 </button>
@@ -982,7 +982,7 @@ fn scroll_line_up(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_line_up" id="link-scroll_line_up-Description"  class="tablinks active" 
+<button group="scroll_line_up" id="link-scroll_line_up-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_line_up', 'Description')">
 Description
 </button>
@@ -1004,7 +1004,7 @@ fn scroll_page_down(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_page_down" id="link-scroll_page_down-Description"  class="tablinks active" 
+<button group="scroll_page_down" id="link-scroll_page_down-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_page_down', 'Description')">
 Description
 </button>
@@ -1026,7 +1026,7 @@ fn scroll_page_up(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_page_up" id="link-scroll_page_up-Description"  class="tablinks active" 
+<button group="scroll_page_up" id="link-scroll_page_up-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_page_up', 'Description')">
 Description
 </button>
@@ -1048,7 +1048,7 @@ fn scroll_to_bottom(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_to_bottom" id="link-scroll_to_bottom-Description"  class="tablinks active" 
+<button group="scroll_to_bottom" id="link-scroll_to_bottom-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_to_bottom', 'Description')">
 Description
 </button>
@@ -1070,7 +1070,7 @@ fn scroll_to_top(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="scroll_to_top" id="link-scroll_to_top-Description"  class="tablinks active" 
+<button group="scroll_to_top" id="link-scroll_to_top-Description"  class="tablinks active"
     onclick="openTab(event, 'scroll_to_top', 'Description')">
 Description
 </button>
@@ -1092,7 +1092,7 @@ fn search_next(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="search_next" id="link-search_next-Description"  class="tablinks active" 
+<button group="search_next" id="link-search_next-Description"  class="tablinks active"
     onclick="openTab(event, 'search_next', 'Description')">
 Description
 </button>
@@ -1114,7 +1114,7 @@ fn search_prev(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="search_prev" id="link-search_prev-Description"  class="tablinks active" 
+<button group="search_prev" id="link-search_prev-Description"  class="tablinks active"
     onclick="openTab(event, 'search_prev', 'Description')">
 Description
 </button>
@@ -1136,7 +1136,7 @@ fn select_current_tabs(_: ActionApi, index: int) -> Action
 
 <div>
 <div class="tab">
-<button group="select_current_tabs" id="link-select_current_tabs-Description"  class="tablinks active" 
+<button group="select_current_tabs" id="link-select_current_tabs-Description"  class="tablinks active"
     onclick="openTab(event, 'select_current_tabs', 'Description')">
 Description
 </button>
@@ -1158,7 +1158,7 @@ fn select_move_down(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="select_move_down" id="link-select_move_down-Description"  class="tablinks active" 
+<button group="select_move_down" id="link-select_move_down-Description"  class="tablinks active"
     onclick="openTab(event, 'select_move_down', 'Description')">
 Description
 </button>
@@ -1180,7 +1180,7 @@ fn select_move_left(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="select_move_left" id="link-select_move_left-Description"  class="tablinks active" 
+<button group="select_move_left" id="link-select_move_left-Description"  class="tablinks active"
     onclick="openTab(event, 'select_move_left', 'Description')">
 Description
 </button>
@@ -1202,7 +1202,7 @@ fn select_move_right(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="select_move_right" id="link-select_move_right-Description"  class="tablinks active" 
+<button group="select_move_right" id="link-select_move_right-Description"  class="tablinks active"
     onclick="openTab(event, 'select_move_right', 'Description')">
 Description
 </button>
@@ -1224,7 +1224,7 @@ fn select_move_up(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="select_move_up" id="link-select_move_up-Description"  class="tablinks active" 
+<button group="select_move_up" id="link-select_move_up-Description"  class="tablinks active"
     onclick="openTab(event, 'select_move_up', 'Description')">
 Description
 </button>
@@ -1246,7 +1246,7 @@ fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action
 
 <div>
 <div class="tab">
-<button group="select_tab" id="link-select_tab-Description"  class="tablinks active" 
+<button group="select_tab" id="link-select_tab-Description"  class="tablinks active"
     onclick="openTab(event, 'select_tab', 'Description')">
 Description
 </button>
@@ -1269,7 +1269,7 @@ fn send_bytes(_: ActionApi, buffer_id: int, bytes: Array) -> Action
 
 <div>
 <div class="tab">
-<button group="send_bytes" id="link-send_bytes-Description"  class="tablinks active" 
+<button group="send_bytes" id="link-send_bytes-Description"  class="tablinks active"
     onclick="openTab(event, 'send_bytes', 'Description')">
 Description
 </button>
@@ -1292,7 +1292,7 @@ fn send_bytes_current(_: ActionApi, bytes: Array) -> Action
 
 <div>
 <div class="tab">
-<button group="send_bytes_current" id="link-send_bytes_current-Description"  class="tablinks active" 
+<button group="send_bytes_current" id="link-send_bytes_current-Description"  class="tablinks active"
     onclick="openTab(event, 'send_bytes_current', 'Description')">
 Description
 </button>
@@ -1314,7 +1314,7 @@ fn send_keys(_: ActionApi, buffer_id: int, notation: String) -> Action
 
 <div>
 <div class="tab">
-<button group="send_keys" id="link-send_keys-Description"  class="tablinks active" 
+<button group="send_keys" id="link-send_keys-Description"  class="tablinks active"
     onclick="openTab(event, 'send_keys', 'Description')">
 Description
 </button>
@@ -1336,7 +1336,7 @@ fn send_keys_current(_: ActionApi, notation: String) -> Action
 
 <div>
 <div class="tab">
-<button group="send_keys_current" id="link-send_keys_current-Description"  class="tablinks active" 
+<button group="send_keys_current" id="link-send_keys_current-Description"  class="tablinks active"
     onclick="openTab(event, 'send_keys_current', 'Description')">
 Description
 </button>
@@ -1358,7 +1358,7 @@ fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action
 
 <div>
 <div class="tab">
-<button group="split_with" id="link-split_with-Description"  class="tablinks active" 
+<button group="split_with" id="link-split_with-Description"  class="tablinks active"
     onclick="openTab(event, 'split_with', 'Description')">
 Description
 </button>
@@ -1380,7 +1380,7 @@ fn toggle_mode(_: ActionApi, mode: String) -> Action
 
 <div>
 <div class="tab">
-<button group="toggle_mode" id="link-toggle_mode-Description"  class="tablinks active" 
+<button group="toggle_mode" id="link-toggle_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'toggle_mode', 'Description')">
 Description
 </button>
@@ -1402,7 +1402,7 @@ fn yank_selection(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="yank_selection" id="link-yank_selection-Description"  class="tablinks active" 
+<button group="yank_selection" id="link-yank_selection-Description"  class="tablinks active"
     onclick="openTab(event, 'yank_selection', 'Description')">
 Description
 </button>

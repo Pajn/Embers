@@ -11,11 +11,11 @@ fn current_buffer(context: Context) -> ?
 
 <div>
 <div class="tab">
-<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active" 
+<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'current_buffer', 'Description')">
 Description
 </button>
-<button group="current_buffer" id="link-current_buffer-Example"  class="tablinks" 
+<button group="current_buffer" id="link-current_buffer-Example"  class="tablinks"
     onclick="openTab(event, 'current_buffer', 'Example')">
 Example
 </button>
@@ -48,7 +48,7 @@ fn current_floating(context: Context) -> ?
 
 <div>
 <div class="tab">
-<button group="current_floating" id="link-current_floating-Description"  class="tablinks active" 
+<button group="current_floating" id="link-current_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'current_floating', 'Description')">
 Description
 </button>
@@ -72,7 +72,7 @@ fn current_mode(context: Context) -> String
 
 <div>
 <div class="tab">
-<button group="current_mode" id="link-current_mode-Description"  class="tablinks active" 
+<button group="current_mode" id="link-current_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'current_mode', 'Description')">
 Description
 </button>
@@ -94,7 +94,7 @@ fn current_node(context: Context) -> ?
 
 <div>
 <div class="tab">
-<button group="current_node" id="link-current_node-Description"  class="tablinks active" 
+<button group="current_node" id="link-current_node-Description"  class="tablinks active"
     onclick="openTab(event, 'current_node', 'Description')">
 Description
 </button>
@@ -118,7 +118,7 @@ fn current_session(context: Context) -> ?
 
 <div>
 <div class="tab">
-<button group="current_session" id="link-current_session-Description"  class="tablinks active" 
+<button group="current_session" id="link-current_session-Description"  class="tablinks active"
     onclick="openTab(event, 'current_session', 'Description')">
 Description
 </button>
@@ -142,7 +142,7 @@ fn detached_buffers(context: Context) -> Array
 
 <div>
 <div class="tab">
-<button group="detached_buffers" id="link-detached_buffers-Description"  class="tablinks active" 
+<button group="detached_buffers" id="link-detached_buffers-Description"  class="tablinks active"
     onclick="openTab(event, 'detached_buffers', 'Description')">
 Description
 </button>
@@ -164,7 +164,7 @@ fn event(context: Context) -> ?
 
 <div>
 <div class="tab">
-<button group="event" id="link-event-Description"  class="tablinks active" 
+<button group="event" id="link-event-Description"  class="tablinks active"
     onclick="openTab(event, 'event', 'Description')">
 Description
 </button>
@@ -188,7 +188,7 @@ fn find_buffer(context: Context, buffer_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_buffer" id="link-find_buffer-Description"  class="tablinks active" 
+<button group="find_buffer" id="link-find_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'find_buffer', 'Description')">
 Description
 </button>
@@ -212,7 +212,7 @@ fn find_floating(context: Context, floating_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_floating" id="link-find_floating-Description"  class="tablinks active" 
+<button group="find_floating" id="link-find_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'find_floating', 'Description')">
 Description
 </button>
@@ -236,7 +236,7 @@ fn find_node(context: Context, node_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_node" id="link-find_node-Description"  class="tablinks active" 
+<button group="find_node" id="link-find_node-Description"  class="tablinks active"
     onclick="openTab(event, 'find_node', 'Description')">
 Description
 </button>
@@ -260,7 +260,7 @@ fn sessions(context: Context) -> Array
 
 <div>
 <div class="tab">
-<button group="sessions" id="link-sessions-Description"  class="tablinks active" 
+<button group="sessions" id="link-sessions-Description"  class="tablinks active"
     onclick="openTab(event, 'sessions', 'Description')">
 Description
 </button>
@@ -282,7 +282,7 @@ fn visible_buffers(context: Context) -> Array
 
 <div>
 <div class="tab">
-<button group="visible_buffers" id="link-visible_buffers-Description"  class="tablinks active" 
+<button group="visible_buffers" id="link-visible_buffers-Description"  class="tablinks active"
     onclick="openTab(event, 'visible_buffers', 'Description')">
 Description
 </button>

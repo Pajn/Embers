@@ -1,10 +1,11 @@
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use embers_core::{BufferId, IdAllocator, MuxError, RequestId, Result, SessionId};
 use embers_protocol::{
-    BufferRequest, ClientMessage, ScrollbackSliceResponse, ServerEvent, ServerResponse,
-    SessionRequest, SnapshotResponse, SubscribeRequest,
+    BufferRequest, ClientMessage, ClientRecord, ClientRequest, ScrollbackSliceResponse,
+    ServerEvent, ServerResponse, SessionRequest, SnapshotResponse, SubscribeRequest,
 };
 
 use crate::socket_transport::SocketTransport;
@@ -15,6 +16,7 @@ use crate::transport::Transport;
 pub struct MuxClient<T> {
     transport: T,
     request_ids: IdAllocator<RequestId>,
+    client_id: Cell<Option<u64>>,
     state: ClientState,
 }
 
@@ -26,6 +28,7 @@ where
         Self {
             transport,
             request_ids: IdAllocator::new(1),
+            client_id: Cell::new(None),
             state: ClientState::default(),
         }
     }
@@ -66,11 +69,56 @@ where
         }
     }
 
+    pub async fn current_client(&self) -> Result<ClientRecord> {
+        match self
+            .request_message(ClientMessage::Client(ClientRequest::Get {
+                request_id: self.next_request_id(),
+                client_id: None,
+            }))
+            .await?
+        {
+            ServerResponse::Client(response) => {
+                self.client_id.set(Some(response.client.id));
+                Ok(response.client)
+            }
+            other => Err(MuxError::protocol(format!(
+                "expected client response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn switch_current_session(&self, session_id: SessionId) -> Result<ClientRecord> {
+        match self
+            .request_message(ClientMessage::Client(ClientRequest::Switch {
+                request_id: self.next_request_id(),
+                client_id: None,
+                session_id,
+            }))
+            .await?
+        {
+            ServerResponse::Client(response) => {
+                self.client_id.set(Some(response.client.id));
+                Ok(response.client)
+            }
+            other => Err(MuxError::protocol(format!(
+                "expected client response, got {other:?}"
+            ))),
+        }
+    }
+
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
         let event = self.transport.next_event().await?;
         self.state.apply_event(&event);
         self.resync_for_event(&event).await?;
         Ok(event)
+    }
+
+    async fn own_client_id(&self) -> Result<u64> {
+        if let Some(client_id) = self.client_id.get() {
+            Ok(client_id)
+        } else {
+            Ok(self.current_client().await?.id)
+        }
     }
 
     pub async fn resync_session(&mut self, session_id: SessionId) -> Result<()> {
@@ -220,6 +268,15 @@ where
                 self.state
                     .apply_event(&ServerEvent::SessionRenamed(event.clone()));
                 self.resync_session(event.session_id).await
+            }
+            ServerEvent::ClientChanged(event) => {
+                if event.client.id != self.own_client_id().await? {
+                    return Ok(());
+                }
+                if let Some(session_id) = event.client.current_session_id {
+                    self.resync_session(session_id).await?;
+                }
+                Ok(())
             }
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)

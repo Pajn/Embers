@@ -12,7 +12,8 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferRequest, BufferResponse, BuffersResponse,
-    ClientMessage, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
+    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
+    ClientsResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
     FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
     ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
     ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
@@ -76,6 +77,11 @@ impl Server {
                         let connection_id = runtime.next_connection_id.fetch_add(1, Ordering::Relaxed);
                         let (reader, writer) = stream.into_split();
                         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+                        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+                        let (stopped_tx, stopped_rx) = oneshot::channel();
+                        runtime
+                            .register_client(connection_id, shutdown_tx, stopped_rx)
+                            .await;
 
                         let write_runtime = runtime.clone();
                         let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
@@ -83,29 +89,54 @@ impl Server {
                         let connection_task = runtime.connection_tasks.enter();
                         let read_handle = tokio::spawn(async move {
                             let _connection_task = connection_task;
-                            if let Err(error) =
-                                handle_connection(read_runtime, connection_id, reader, outbound_tx)
-                                    .await
-                            {
-                                error!(%error, connection_id, "connection failed");
-                            }
+                            handle_connection(
+                                read_runtime,
+                                connection_id,
+                                reader,
+                                outbound_tx,
+                                shutdown_rx,
+                            )
+                            .await
                         });
                         tokio::spawn(async move {
-                            if let Err(error) = read_handle.await {
-                                error!(%error, connection_id, "read_loop panicked");
-                            }
-
-                            write_handle.abort();
-                            match write_handle.await {
-                                Ok(Ok(())) => {}
+                            let exit = match read_handle.await {
+                                Ok(Ok(exit)) => exit,
                                 Ok(Err(error)) => {
-                                    error!(%error, connection_id, "write_loop failed");
+                                    error!(%error, connection_id, "connection failed");
+                                    ConnectionExit::Closed
                                 }
-                                Err(error) if error.is_cancelled() => {}
                                 Err(error) => {
-                                    error!(%error, connection_id, "write_loop panicked");
+                                    error!(%error, connection_id, "read_loop panicked");
+                                    ConnectionExit::Closed
                                 }
-                            }
+                            };
+                            let _ = stopped_tx.send(());
+
+                            match exit {
+                                ConnectionExit::SelfDetached => match write_handle.await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => {
+                                        error!(%error, connection_id, "write_loop failed");
+                                    }
+                                    Err(error) if error.is_cancelled() => {}
+                                    Err(error) => {
+                                        error!(%error, connection_id, "write_loop panicked");
+                                    }
+                                },
+                                ConnectionExit::Closed => {
+                                    write_handle.abort();
+                                    match write_handle.await {
+                                        Ok(Ok(())) => {}
+                                        Ok(Err(error)) => {
+                                            error!(%error, connection_id, "write_loop failed");
+                                        }
+                                        Err(error) if error.is_cancelled() => {}
+                                        Err(error) => {
+                                            error!(%error, connection_id, "write_loop panicked");
+                                        }
+                                    }
+                                }
+                            };
                             write_runtime.cleanup_connection(connection_id).await;
                         });
                     }
@@ -220,6 +251,26 @@ struct Subscription {
     sender: mpsc::UnboundedSender<ServerEnvelope>,
 }
 
+struct ClientConnection {
+    current_session_id: Option<embers_core::SessionId>,
+    shutdown: Option<oneshot::Sender<()>>,
+    stopped: Option<oneshot::Receiver<()>>,
+}
+
+impl std::fmt::Debug for ClientConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientConnection")
+            .field("current_session_id", &self.current_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+struct DetachedClient {
+    shutdown: Option<oneshot::Sender<()>>,
+    stopped: Option<oneshot::Receiver<()>>,
+}
+
 #[derive(Debug)]
 struct Runtime {
     state: Mutex<ServerState>,
@@ -229,6 +280,7 @@ struct Runtime {
     workspace_path: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
+    clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
     shutdown: ShutdownSignal,
@@ -381,6 +433,7 @@ impl Runtime {
             workspace_path,
             buffer_env,
             subscriptions: Mutex::new(BTreeMap::new()),
+            clients: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
             shutdown: ShutdownSignal::new(),
@@ -408,12 +461,32 @@ impl Runtime {
             .remove(&buffer_id)
     }
 
+    async fn register_client(
+        &self,
+        connection_id: u64,
+        shutdown: oneshot::Sender<()>,
+        stopped: oneshot::Receiver<()>,
+    ) {
+        self.clients.lock().await.insert(
+            connection_id,
+            ClientConnection {
+                current_session_id: None,
+                shutdown: Some(shutdown),
+                stopped: Some(stopped),
+            },
+        );
+    }
+
     async fn dispatch_request(
         self: &Arc<Self>,
         connection_id: u64,
         outbound: &mpsc::UnboundedSender<ServerEnvelope>,
         request: ClientMessage,
-    ) -> (ServerResponse, Vec<ServerEvent>) {
+    ) -> (
+        ServerResponse,
+        Vec<ServerEvent>,
+        Option<oneshot::Sender<()>>,
+    ) {
         match request {
             ClientMessage::Ping(request) => (
                 ServerResponse::Pong(PingResponse {
@@ -421,12 +494,28 @@ impl Runtime {
                     payload: request.payload,
                 }),
                 Vec::new(),
+                None,
             ),
-            ClientMessage::Session(request) => self.dispatch_session(request).await,
-            ClientMessage::Buffer(request) => self.dispatch_buffer(request).await,
-            ClientMessage::Node(request) => self.dispatch_node(request).await,
-            ClientMessage::Floating(request) => self.dispatch_floating(request).await,
-            ClientMessage::Input(request) => self.dispatch_input(request).await,
+            ClientMessage::Session(request) => {
+                let (resp, events) = self.dispatch_session(request).await;
+                (resp, events, None)
+            }
+            ClientMessage::Buffer(request) => {
+                let (resp, events) = self.dispatch_buffer(request).await;
+                (resp, events, None)
+            }
+            ClientMessage::Node(request) => {
+                let (resp, events) = self.dispatch_node(request).await;
+                (resp, events, None)
+            }
+            ClientMessage::Floating(request) => {
+                let (resp, events) = self.dispatch_floating(request).await;
+                (resp, events, None)
+            }
+            ClientMessage::Input(request) => {
+                let (resp, events) = self.dispatch_input(request).await;
+                (resp, events, None)
+            }
             ClientMessage::Subscribe(request) => {
                 let subscription_id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
                 self.subscriptions.lock().await.insert(
@@ -443,6 +532,7 @@ impl Runtime {
                         subscription_id,
                     }),
                     Vec::new(),
+                    None,
                 )
             }
             ClientMessage::Unsubscribe(request) => {
@@ -455,6 +545,7 @@ impl Runtime {
                                 request_id: request.request_id,
                             }),
                             Vec::new(),
+                            None,
                         )
                     }
                     Some(_) => (
@@ -467,6 +558,7 @@ impl Runtime {
                             ),
                         ),
                         Vec::new(),
+                        None,
                     ),
                     None => (
                         error_response(
@@ -475,6 +567,110 @@ impl Runtime {
                             format!("unknown subscription {}", request.subscription_id),
                         ),
                         Vec::new(),
+                        None,
+                    ),
+                }
+            }
+            ClientMessage::Client(request) => self.dispatch_client(connection_id, request).await,
+        }
+    }
+
+    async fn dispatch_client(
+        &self,
+        connection_id: u64,
+        request: ClientRequest,
+    ) -> (
+        ServerResponse,
+        Vec<ServerEvent>,
+        Option<oneshot::Sender<()>>,
+    ) {
+        match request {
+            ClientRequest::List { request_id } => (
+                ServerResponse::Clients(ClientsResponse {
+                    request_id,
+                    clients: self.list_clients().await,
+                }),
+                Vec::new(),
+                None,
+            ),
+            ClientRequest::Get {
+                request_id,
+                client_id,
+            } => {
+                let target_id = client_id.map(|id| id.get()).unwrap_or(connection_id);
+                match self.client_record(target_id).await {
+                    Some(client) => (
+                        ServerResponse::Client(ClientResponse { request_id, client }),
+                        Vec::new(),
+                        None,
+                    ),
+                    None => (
+                        error_response(
+                            Some(request_id),
+                            ErrorCode::NotFound,
+                            format!("unknown client {}", target_id),
+                        ),
+                        Vec::new(),
+                        None,
+                    ),
+                }
+            }
+            ClientRequest::Detach {
+                request_id,
+                client_id,
+            } => {
+                let target_id = client_id.map(|id| id.get()).unwrap_or(connection_id);
+                let is_self_detach = target_id == connection_id;
+                match self.detach_client(target_id).await {
+                    Ok(detached) => match (is_self_detach, detached) {
+                        (true, DetachedClient { shutdown, .. }) => (
+                            ServerResponse::Ok(OkResponse { request_id }),
+                            Vec::new(),
+                            shutdown,
+                        ),
+                        (
+                            false,
+                            DetachedClient {
+                                shutdown,
+                                mut stopped,
+                            },
+                        ) => {
+                            if let Some(shutdown) = shutdown {
+                                let _ = shutdown.send(());
+                            }
+                            if let Some(stopped) = stopped.take() {
+                                let _ = stopped.await;
+                            }
+                            (
+                                ServerResponse::Ok(OkResponse { request_id }),
+                                Vec::new(),
+                                None,
+                            )
+                        }
+                    },
+                    Err(error) => (
+                        mux_error_response(Some(request_id), error),
+                        Vec::new(),
+                        None,
+                    ),
+                }
+            }
+            ClientRequest::Switch {
+                request_id,
+                client_id,
+                session_id,
+            } => {
+                let target_id = client_id.map(|id| id.get()).unwrap_or(connection_id);
+                match self.set_client_session(target_id, Some(session_id)).await {
+                    Ok((client, event)) => (
+                        ServerResponse::Client(ClientResponse { request_id, client }),
+                        vec![event],
+                        None,
+                    ),
+                    Err(error) => (
+                        mux_error_response(Some(request_id), error),
+                        Vec::new(),
+                        None,
                     ),
                 }
             }
@@ -527,15 +723,23 @@ impl Runtime {
                 request_id,
                 session_id,
                 force: _,
-            } => match state.close_session(session_id) {
-                Ok(()) => (
-                    ServerResponse::Ok(OkResponse { request_id }),
-                    vec![ServerEvent::SessionClosed(SessionClosedEvent {
-                        session_id,
-                    })],
-                ),
-                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-            },
+            } => {
+                let changed_clients = {
+                    let mut clients = self.clients.lock().await;
+                    match state.close_session(session_id) {
+                        Ok(()) => Self::clear_client_session(&mut clients, session_id),
+                        Err(error) => {
+                            return (mux_error_response(Some(request_id), error), Vec::new());
+                        }
+                    }
+                };
+                drop(state);
+                let mut events = vec![ServerEvent::SessionClosed(SessionClosedEvent {
+                    session_id,
+                })];
+                events.extend(self.client_changed_events(changed_clients).await);
+                (ServerResponse::Ok(OkResponse { request_id }), events)
+            }
             SessionRequest::Rename {
                 request_id,
                 session_id,
@@ -1570,7 +1774,7 @@ impl Runtime {
             }
         }
 
-        self.broadcast(render_events(buffer_id, damage)).await;
+        self.broadcast(render_events(buffer_id, damage), &[]).await;
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
@@ -1599,9 +1803,12 @@ impl Runtime {
         }
 
         if updated {
-            self.broadcast(vec![ServerEvent::RenderInvalidated(
-                RenderInvalidatedEvent { buffer_id },
-            )])
+            self.broadcast(
+                vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                    buffer_id,
+                })],
+                &[],
+            )
             .await;
         }
     }
@@ -1631,32 +1838,191 @@ impl Runtime {
         }
     }
 
-    async fn broadcast(&self, events: Vec<ServerEvent>) {
-        if events.is_empty() {
+    async fn broadcast(
+        &self,
+        events: Vec<ServerEvent>,
+        retired_session_ids: &[embers_core::SessionId],
+    ) {
+        if events.is_empty() && retired_session_ids.is_empty() {
             return;
         }
 
         let mut subscriptions = self.subscriptions.lock().await;
-        subscriptions.retain(|_, subscription| {
-            for event in &events {
-                let event_matches = event.session_id().is_none()
-                    || subscription.session_id.is_none()
-                    || subscription.session_id == event.session_id();
+        if !events.is_empty() {
+            subscriptions.retain(|_, subscription| {
+                for event in &events {
+                    let event_session_ids = event.all_session_ids();
+                    let event_matches = event_session_ids.is_empty()
+                        || subscription.session_id.is_none()
+                        || subscription
+                            .session_id
+                            .is_some_and(|session_id| event_session_ids.contains(&session_id));
 
-                if event_matches
-                    && subscription
-                        .sender
-                        .send(ServerEnvelope::Event(event.clone()))
-                        .is_err()
-                {
-                    return false;
+                    if event_matches
+                        && subscription
+                            .sender
+                            .send(ServerEnvelope::Event(event.clone()))
+                            .is_err()
+                    {
+                        return false;
+                    }
                 }
+                true
+            });
+        }
+
+        if !retired_session_ids.is_empty() {
+            let retired_session_ids = retired_session_ids.iter().copied().collect::<BTreeSet<_>>();
+            subscriptions.retain(|_, subscription| {
+                !matches!(
+                    subscription.session_id,
+                    Some(session_id) if retired_session_ids.contains(&session_id)
+                )
+            });
+        }
+    }
+
+    async fn list_clients(&self) -> Vec<ClientRecord> {
+        let clients = self.clients.lock().await;
+        let subscriptions = self.subscriptions.lock().await;
+        let mut records = clients
+            .iter()
+            .map(|(&client_id, client)| {
+                let mut subscribed_all_sessions = false;
+                let mut subscribed_session_ids = Vec::new();
+                for subscription in subscriptions.values() {
+                    if subscription.connection_id != client_id {
+                        continue;
+                    }
+                    match subscription.session_id {
+                        Some(session_id) => subscribed_session_ids.push(session_id),
+                        None => subscribed_all_sessions = true,
+                    }
+                }
+                subscribed_session_ids.sort_by_key(|session_id| session_id.0);
+                subscribed_session_ids.dedup();
+                ClientRecord {
+                    id: client_id,
+                    current_session_id: client.current_session_id,
+                    subscribed_all_sessions,
+                    subscribed_session_ids,
+                }
+            })
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.id);
+        records
+    }
+
+    async fn client_record(&self, client_id: u64) -> Option<ClientRecord> {
+        let clients = self.clients.lock().await;
+        let current_session_id = clients.get(&client_id)?.current_session_id;
+        let subscriptions = self.subscriptions.lock().await;
+        let mut subscribed_all_sessions = false;
+        let mut subscribed_session_ids = Vec::new();
+        for subscription in subscriptions.values() {
+            if subscription.connection_id != client_id {
+                continue;
             }
-            true
+            match subscription.session_id {
+                Some(session_id) => subscribed_session_ids.push(session_id),
+                None => subscribed_all_sessions = true,
+            }
+        }
+        subscribed_session_ids.sort_by_key(|session_id| session_id.0);
+        subscribed_session_ids.dedup();
+        Some(ClientRecord {
+            id: client_id,
+            current_session_id,
+            subscribed_all_sessions,
+            subscribed_session_ids,
+        })
+    }
+
+    async fn detach_client(&self, client_id: u64) -> Result<DetachedClient> {
+        let detached = {
+            let mut clients = self.clients.lock().await;
+            let Some(mut client) = clients.remove(&client_id) else {
+                return Err(MuxError::not_found(format!(
+                    "client {client_id} was not found"
+                )));
+            };
+            DetachedClient {
+                shutdown: client.shutdown.take(),
+                stopped: client.stopped.take(),
+            }
+        };
+        self.subscriptions
+            .lock()
+            .await
+            .retain(|_, subscription| subscription.connection_id != client_id);
+        Ok(detached)
+    }
+
+    async fn set_client_session(
+        &self,
+        client_id: u64,
+        session_id: Option<embers_core::SessionId>,
+    ) -> Result<(ClientRecord, ServerEvent)> {
+        let previous_session_id = {
+            let state = self.state.lock().await;
+            if let Some(session_id) = session_id
+                && !state.sessions.contains_key(&session_id)
+            {
+                return Err(MuxError::not_found(format!(
+                    "session {session_id} was not found"
+                )));
+            }
+            let mut clients = self.clients.lock().await;
+            let client = clients
+                .get_mut(&client_id)
+                .ok_or_else(|| MuxError::not_found(format!("client {client_id} was not found")))?;
+            let previous = client.current_session_id;
+            client.current_session_id = session_id;
+            previous
+        };
+        let record = self
+            .client_record(client_id)
+            .await
+            .ok_or_else(|| MuxError::not_found(format!("client {client_id} was not found")))?;
+        let event = ServerEvent::ClientChanged(ClientChangedEvent {
+            client: record.clone(),
+            previous_session_id,
         });
+        Ok((record, event))
+    }
+
+    fn clear_client_session(
+        clients: &mut BTreeMap<u64, ClientConnection>,
+        session_id: embers_core::SessionId,
+    ) -> Vec<(u64, Option<embers_core::SessionId>)> {
+        let mut changed = Vec::new();
+        for (&client_id, client) in clients.iter_mut() {
+            if client.current_session_id == Some(session_id) {
+                client.current_session_id = None;
+                changed.push((client_id, Some(session_id)));
+            }
+        }
+        changed
+    }
+
+    async fn client_changed_events(
+        &self,
+        changed: Vec<(u64, Option<embers_core::SessionId>)>,
+    ) -> Vec<ServerEvent> {
+        let mut events = Vec::new();
+        for (client_id, previous_session_id) in changed {
+            if let Some(client) = self.client_record(client_id).await {
+                events.push(ServerEvent::ClientChanged(ClientChangedEvent {
+                    client,
+                    previous_session_id,
+                }));
+            }
+        }
+        events
     }
 
     async fn cleanup_connection(&self, connection_id: u64) {
+        self.clients.lock().await.remove(&connection_id);
         self.subscriptions
             .lock()
             .await
@@ -1664,25 +2030,44 @@ impl Runtime {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectionExit {
+    Closed,
+    SelfDetached,
+}
+
+fn closed_session_ids(events: &[ServerEvent]) -> Vec<embers_core::SessionId> {
+    let mut session_ids = BTreeSet::new();
+    for event in events {
+        if let ServerEvent::SessionClosed(event) = event {
+            session_ids.insert(event.session_id);
+        }
+    }
+    session_ids.into_iter().collect()
+}
+
 async fn handle_connection(
     runtime: Arc<Runtime>,
     connection_id: u64,
     mut reader: OwnedReadHalf,
     outbound: mpsc::UnboundedSender<ServerEnvelope>,
-) -> Result<()> {
+    mut shutdown: oneshot::Receiver<()>,
+) -> Result<ConnectionExit> {
     let mut server_shutdown = runtime.shutdown.subscribe();
     loop {
         let frame = tokio::select! {
             _ = wait_for_shutdown(&mut server_shutdown) => {
-                runtime.cleanup_connection(connection_id).await;
-                return Ok(());
+                return Ok(ConnectionExit::Closed);
+            }
+            _ = &mut shutdown => {
+                debug!(connection_id, "client detach requested");
+                return Ok(ConnectionExit::Closed);
             }
             frame = read_frame(&mut reader) => frame.map_err(protocol_error_to_mux)?,
         };
         let Some(frame) = frame else {
             debug!(connection_id, "client disconnected");
-            runtime.cleanup_connection(connection_id).await;
-            return Ok(());
+            return Ok(ConnectionExit::Closed);
         };
 
         if frame.frame_type != FrameType::Request {
@@ -1733,14 +2118,21 @@ async fn handle_connection(
 
         let span = request_span("handle_request", request.request_id());
         let _entered = span.enter();
-        let (response, events) = runtime
+        let (response, events, deferred_shutdown) = runtime
             .dispatch_request(connection_id, &outbound, request)
             .await;
 
         if outbound.send(ServerEnvelope::Response(response)).is_err() {
             return Err(MuxError::transport("connection writer closed"));
         }
-        runtime.broadcast(events).await;
+        let retired_session_ids = closed_session_ids(&events);
+        runtime.broadcast(events, &retired_session_ids).await;
+
+        // Handle self-detach: trigger shutdown after response is sent
+        if let Some(shutdown) = deferred_shutdown {
+            let _ = shutdown.send(());
+            return Ok(ConnectionExit::SelfDetached);
+        }
     }
 }
 

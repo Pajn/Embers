@@ -379,6 +379,11 @@ fn buffer_id(event: EventInfo) -> ?;
 /// Return child node ids.
 fn children(node: NodeRef) -> array;
 
+/// Return the client id attached to an event, or `()`.
+///
+/// ReturnType: `int | ()`
+fn client_id(event: EventInfo) -> ?;
+
 /// Return the original command vector.
 fn command(buffer: BufferRef) -> array;
 
@@ -516,6 +521,11 @@ fn parent(node: NodeRef) -> ?;
 ///
 /// ReturnType: `int | ()`
 fn pid(buffer: BufferRef) -> ?;
+
+/// Return the previous session id attached to an event, or `()`.
+///
+/// ReturnType: `int | ()`
+fn previous_session_id(event: EventInfo) -> ?;
 
 /// Return the detected process name, if any.
 ///

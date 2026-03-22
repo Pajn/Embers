@@ -11,7 +11,7 @@ fn activity(buffer: BufferRef) -> String
 
 <div>
 <div class="tab">
-<button group="activity" id="link-activity-Description"  class="tablinks active" 
+<button group="activity" id="link-activity-Description"  class="tablinks active"
     onclick="openTab(event, 'activity', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn command(buffer: BufferRef) -> Array
 
 <div>
 <div class="tab">
-<button group="command" id="link-command-Description"  class="tablinks active" 
+<button group="command" id="link-command-Description"  class="tablinks active"
     onclick="openTab(event, 'command', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn cwd(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="cwd" id="link-cwd-Description"  class="tablinks active" 
+<button group="cwd" id="link-cwd-Description"  class="tablinks active"
     onclick="openTab(event, 'cwd', 'Description')">
 Description
 </button>
@@ -79,7 +79,7 @@ fn env_hint(buffer: BufferRef, key: String) -> ?
 
 <div>
 <div class="tab">
-<button group="env_hint" id="link-env_hint-Description"  class="tablinks active" 
+<button group="env_hint" id="link-env_hint-Description"  class="tablinks active"
     onclick="openTab(event, 'env_hint', 'Description')">
 Description
 </button>
@@ -103,7 +103,7 @@ fn exit_code(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="exit_code" id="link-exit_code-Description"  class="tablinks active" 
+<button group="exit_code" id="link-exit_code-Description"  class="tablinks active"
     onclick="openTab(event, 'exit_code', 'Description')">
 Description
 </button>
@@ -127,11 +127,11 @@ fn history_text(buffer: BufferRef) -> String
 
 <div>
 <div class="tab">
-<button group="history_text" id="link-history_text-Description"  class="tablinks active" 
+<button group="history_text" id="link-history_text-Description"  class="tablinks active"
     onclick="openTab(event, 'history_text', 'Description')">
 Description
 </button>
-<button group="history_text" id="link-history_text-Example"  class="tablinks" 
+<button group="history_text" id="link-history_text-Example"  class="tablinks"
     onclick="openTab(event, 'history_text', 'Example')">
 Example
 </button>
@@ -162,7 +162,7 @@ fn id(buffer: BufferRef) -> int
 
 <div>
 <div class="tab">
-<button group="id" id="link-id-Description"  class="tablinks active" 
+<button group="id" id="link-id-Description"  class="tablinks active"
     onclick="openTab(event, 'id', 'Description')">
 Description
 </button>
@@ -184,7 +184,7 @@ fn is_attached(buffer: BufferRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_attached" id="link-is_attached-Description"  class="tablinks active" 
+<button group="is_attached" id="link-is_attached-Description"  class="tablinks active"
     onclick="openTab(event, 'is_attached', 'Description')">
 Description
 </button>
@@ -206,7 +206,7 @@ fn is_detached(buffer: BufferRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_detached" id="link-is_detached-Description"  class="tablinks active" 
+<button group="is_detached" id="link-is_detached-Description"  class="tablinks active"
     onclick="openTab(event, 'is_detached', 'Description')">
 Description
 </button>
@@ -228,7 +228,7 @@ fn is_running(buffer: BufferRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_running" id="link-is_running-Description"  class="tablinks active" 
+<button group="is_running" id="link-is_running-Description"  class="tablinks active"
     onclick="openTab(event, 'is_running', 'Description')">
 Description
 </button>
@@ -250,7 +250,7 @@ fn is_visible(buffer: BufferRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_visible" id="link-is_visible-Description"  class="tablinks active" 
+<button group="is_visible" id="link-is_visible-Description"  class="tablinks active"
     onclick="openTab(event, 'is_visible', 'Description')">
 Description
 </button>
@@ -272,7 +272,7 @@ fn node_id(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="node_id" id="link-node_id-Description"  class="tablinks active" 
+<button group="node_id" id="link-node_id-Description"  class="tablinks active"
     onclick="openTab(event, 'node_id', 'Description')">
 Description
 </button>
@@ -296,7 +296,7 @@ fn pid(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="pid" id="link-pid-Description"  class="tablinks active" 
+<button group="pid" id="link-pid-Description"  class="tablinks active"
     onclick="openTab(event, 'pid', 'Description')">
 Description
 </button>
@@ -320,7 +320,7 @@ fn process_name(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="process_name" id="link-process_name-Description"  class="tablinks active" 
+<button group="process_name" id="link-process_name-Description"  class="tablinks active"
     onclick="openTab(event, 'process_name', 'Description')">
 Description
 </button>
@@ -344,7 +344,7 @@ fn session_id(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="session_id" id="link-session_id-Description"  class="tablinks active" 
+<button group="session_id" id="link-session_id-Description"  class="tablinks active"
     onclick="openTab(event, 'session_id', 'Description')">
 Description
 </button>
@@ -368,7 +368,7 @@ fn snapshot_text(buffer: BufferRef, limit: int) -> String
 
 <div>
 <div class="tab">
-<button group="snapshot_text" id="link-snapshot_text-Description"  class="tablinks active" 
+<button group="snapshot_text" id="link-snapshot_text-Description"  class="tablinks active"
     onclick="openTab(event, 'snapshot_text', 'Description')">
 Description
 </button>
@@ -390,7 +390,7 @@ fn title(buffer: BufferRef) -> String
 
 <div>
 <div class="tab">
-<button group="title" id="link-title-Description"  class="tablinks active" 
+<button group="title" id="link-title-Description"  class="tablinks active"
     onclick="openTab(event, 'title', 'Description')">
 Description
 </button>
@@ -412,7 +412,7 @@ fn tty_path(buffer: BufferRef) -> ?
 
 <div>
 <div class="tab">
-<button group="tty_path" id="link-tty_path-Description"  class="tablinks active" 
+<button group="tty_path" id="link-tty_path-Description"  class="tablinks active"
     onclick="openTab(event, 'tty_path', 'Description')">
 Description
 </button>

@@ -285,9 +285,24 @@ fn write_page_set(
             .get(page.title)
             .cloned()
             .ok_or_else(|| format!("missing rendered page for {}", page.title))?;
-        fs::write(output_dir.join(page.file), content)?;
+        fs::write(
+            output_dir.join(page.file),
+            trim_trailing_whitespace(&content),
+        )?;
     }
     Ok(())
+}
+
+fn trim_trailing_whitespace(content: &str) -> String {
+    let mut trimmed = content
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if content.ends_with('\n') {
+        trimmed.push('\n');
+    }
+    trimmed
 }
 
 fn filter_item_for_page(item: &Item, page: &PageSpec<'_>) -> Option<Item> {

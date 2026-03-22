@@ -6,7 +6,7 @@ use embers_core::PtySize;
 use embers_test_support::{PtyHarness, TestServer, cargo_bin, cargo_bin_path};
 use tempfile::tempdir;
 
-use crate::support::run_cli;
+use crate::support::{run_cli, stdout};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -140,6 +140,29 @@ fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> 
     output
 }
 
+fn first_client_id(output: &str) -> u64 {
+    output
+        .lines()
+        .find_map(|line| {
+            let mut columns = line.split('\t');
+            let client_id = columns.next()?;
+            let current_session = columns.next()?;
+            if current_session == "-" {
+                return None;
+            }
+            Some(client_id)
+        })
+        .expect("attached client row present")
+        .parse::<u64>()
+        .expect("client id parses")
+}
+
+#[test]
+fn first_client_id_finds_attached_row() {
+    let output = "10\t-\t-\n42\t1:main\tall\n";
+    assert_eq!(first_client_id(output), 42);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
     let tempdir = tempdir().expect("tempdir");
@@ -220,6 +243,60 @@ async fn attach_subcommand_connects_to_running_server() {
 
     harness.write_all("\x11").expect("quit attached client");
     harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_commands_can_switch_and_detach_a_live_attached_client() {
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    run_cli(&server, ["new-session", "ops"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "ops",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let mut harness = spawn_embers(&["attach", "--socket", &socket_arg, "-t", "main"]);
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders main");
+
+    let clients = run_cli(&server, ["list-clients"]);
+    let client_id = first_client_id(&stdout(&clients));
+
+    run_cli(
+        &server,
+        ["switch-client", &client_id.to_string(), "-t", "ops"],
+    );
+    harness
+        .read_until_contains("[ops]", IO_TIMEOUT)
+        .expect("switch-client retargets the live client");
+
+    run_cli(&server, ["detach-client", &client_id.to_string()]);
+    harness.wait().expect("client exits after detach");
+
     server.shutdown().await.expect("shutdown server");
 }
 

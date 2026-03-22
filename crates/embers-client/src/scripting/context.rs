@@ -300,6 +300,8 @@ impl Context {
 pub struct EventInfo {
     pub name: String,
     pub session_id: Option<SessionId>,
+    pub previous_session_id: Option<SessionId>,
+    pub client_id: Option<u64>,
     pub buffer_id: Option<BufferId>,
     pub node_id: Option<NodeId>,
     pub floating_id: Option<FloatingId>,

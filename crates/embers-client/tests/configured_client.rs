@@ -8,11 +8,11 @@ use embers_client::{
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
-    BufferCreatedEvent, BufferRecord, BufferRecordState, BufferViewRecord, ClientMessage,
-    FocusChangedEvent, InputRequest, NodeRecord, NodeRecordKind, NodeRequest, OkResponse,
-    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
-    VisibleSnapshotResponse,
+    BufferCreatedEvent, BufferRecord, BufferRecordState, BufferViewRecord, ClientChangedEvent,
+    ClientMessage, ClientRecord, ClientRequest, ClientResponse, FocusChangedEvent, InputRequest,
+    NodeRecord, NodeRecordKind, NodeRequest, OkResponse, RenderInvalidatedEvent,
+    ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord, SessionRequest,
+    SessionSnapshot, SessionSnapshotResponse, SnapshotResponse, VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
@@ -1304,4 +1304,116 @@ async fn event_context_keeps_session_without_an_active_view() {
 
     assert!(matches!(event, ServerEvent::FocusChanged(_)));
     assert_eq!(configured.notifications(), ["demo"]);
+}
+
+#[tokio::test]
+async fn client_changed_event_metadata_includes_client_and_previous_session() {
+    let transport = ScriptedTransport::default();
+    let state = second_session_state();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 77,
+            current_session_id: Some(SECOND_SESSION_ID),
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SESSION_ID),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 77,
+                current_session_id: Some(SECOND_SESSION_ID),
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(2),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(2),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_client_changed(ctx) {
+                let event = ctx.event();
+                if event.client_id() == 77
+                    && event.previous_session_id() == 1
+                    && event.session_id() == 2
+                {
+                    action.notify("info", "client switch")
+                }
+            }
+            on("client_changed", on_client_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::ClientChanged(_)));
+    assert_eq!(configured.notifications(), ["client switch"]);
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn detached_client_changed_hooks_have_no_current_session() {
+    let transport = ScriptedTransport::default();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 77,
+            current_session_id: None,
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SESSION_ID),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 77,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_client_changed(ctx) {
+                let event = ctx.event();
+                if event.previous_session_id() == 1 && ctx.current_session() == () {
+                    action.notify("info", "detached")
+                }
+            }
+            on("client_changed", on_client_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::ClientChanged(_)));
+    assert_eq!(configured.notifications(), ["detached"]);
+    transport.assert_exhausted().expect("all requests consumed");
 }

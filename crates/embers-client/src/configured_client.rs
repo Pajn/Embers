@@ -1142,6 +1142,7 @@ where
             | ServerEvent::NodeChanged(_)
             | ServerEvent::FloatingChanged(_)
             | ServerEvent::FocusChanged(_) => None,
+            ServerEvent::ClientChanged(event) => event.client.current_session_id,
         })
     }
 
@@ -2287,73 +2288,46 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::FloatingChanged(_) => "floating_changed",
         ServerEvent::FocusChanged(_) => "focus_changed",
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
+        ServerEvent::ClientChanged(_) => "client_changed",
     }
 }
 
 fn event_info(name: &str, event: &ServerEvent) -> EventInfo {
+    let mut info = base_event_info(name);
     match event {
-        ServerEvent::SessionCreated(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session.id),
-            buffer_id: None,
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::SessionClosed(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session_id),
-            buffer_id: None,
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::SessionRenamed(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session_id),
-            buffer_id: None,
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::BufferCreated(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: None,
-            buffer_id: Some(event.buffer.id),
-            node_id: event.buffer.attachment_node_id,
-            floating_id: None,
-        },
-        ServerEvent::BufferDetached(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: None,
-            buffer_id: Some(event.buffer_id),
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::NodeChanged(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session_id),
-            buffer_id: None,
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::FloatingChanged(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session_id),
-            buffer_id: None,
-            node_id: None,
-            floating_id: None,
-        },
-        ServerEvent::FocusChanged(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: Some(event.session_id),
-            buffer_id: None,
-            node_id: event.focused_leaf_id,
-            floating_id: event.focused_floating_id,
-        },
-        ServerEvent::RenderInvalidated(event) => EventInfo {
-            name: name.to_owned(),
-            session_id: None,
-            buffer_id: Some(event.buffer_id),
-            node_id: None,
-            floating_id: None,
-        },
+        ServerEvent::SessionCreated(event) => info.session_id = Some(event.session.id),
+        ServerEvent::SessionClosed(event) => info.session_id = Some(event.session_id),
+        ServerEvent::SessionRenamed(event) => info.session_id = Some(event.session_id),
+        ServerEvent::BufferCreated(event) => {
+            info.buffer_id = Some(event.buffer.id);
+            info.node_id = event.buffer.attachment_node_id;
+        }
+        ServerEvent::BufferDetached(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::NodeChanged(event) => info.session_id = Some(event.session_id),
+        ServerEvent::FloatingChanged(event) => info.session_id = Some(event.session_id),
+        ServerEvent::FocusChanged(event) => {
+            info.session_id = Some(event.session_id);
+            info.node_id = event.focused_leaf_id;
+            info.floating_id = event.focused_floating_id;
+        }
+        ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::ClientChanged(event) => {
+            info.session_id = event.client.current_session_id;
+            info.previous_session_id = event.previous_session_id;
+            info.client_id = Some(event.client.id);
+        }
+    }
+    info
+}
+
+fn base_event_info(name: &str) -> EventInfo {
+    EventInfo {
+        name: name.to_owned(),
+        session_id: None,
+        previous_session_id: None,
+        client_id: None,
+        buffer_id: None,
+        node_id: None,
+        floating_id: None,
     }
 }

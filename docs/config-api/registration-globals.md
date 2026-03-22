@@ -13,11 +13,11 @@ fn bind(mode: String, notation: String, actions: Array)
 
 <div>
 <div class="tab">
-<button group="bind" id="link-bind-Description"  class="tablinks active" 
+<button group="bind" id="link-bind-Description"  class="tablinks active"
     onclick="openTab(event, 'bind', 'Description')">
 Description
 </button>
-<button group="bind" id="link-bind-Example"  class="tablinks" 
+<button group="bind" id="link-bind-Example"  class="tablinks"
     onclick="openTab(event, 'bind', 'Example')">
 Example
 </button>
@@ -50,7 +50,7 @@ fn define_action(name: String, callback: FnPtr)
 
 <div>
 <div class="tab">
-<button group="define_action" id="link-define_action-Description"  class="tablinks active" 
+<button group="define_action" id="link-define_action-Description"  class="tablinks active"
     onclick="openTab(event, 'define_action', 'Description')">
 Description
 </button>
@@ -74,7 +74,7 @@ fn define_mode(mode_name: String, options: Map)
 
 <div>
 <div class="tab">
-<button group="define_mode" id="link-define_mode-Description"  class="tablinks active" 
+<button group="define_mode" id="link-define_mode-Description"  class="tablinks active"
     onclick="openTab(event, 'define_mode', 'Description')">
 Description
 </button>
@@ -99,7 +99,7 @@ fn on(event_name: String, callback: FnPtr)
 
 <div>
 <div class="tab">
-<button group="on" id="link-on-Description"  class="tablinks active" 
+<button group="on" id="link-on-Description"  class="tablinks active"
     onclick="openTab(event, 'on', 'Description')">
 Description
 </button>
@@ -122,11 +122,11 @@ fn set_leader(notation: String)
 
 <div>
 <div class="tab">
-<button group="set_leader" id="link-set_leader-Description"  class="tablinks active" 
+<button group="set_leader" id="link-set_leader-Description"  class="tablinks active"
     onclick="openTab(event, 'set_leader', 'Description')">
 Description
 </button>
-<button group="set_leader" id="link-set_leader-Example"  class="tablinks" 
+<button group="set_leader" id="link-set_leader-Example"  class="tablinks"
     onclick="openTab(event, 'set_leader', 'Example')">
 Example
 </button>
@@ -155,7 +155,7 @@ fn unbind(mode: String, notation: String)
 
 <div>
 <div class="tab">
-<button group="unbind" id="link-unbind-Description"  class="tablinks active" 
+<button group="unbind" id="link-unbind-Description"  class="tablinks active"
     onclick="openTab(event, 'unbind', 'Description')">
 Description
 </button>

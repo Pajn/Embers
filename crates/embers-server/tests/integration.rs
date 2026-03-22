@@ -1,5 +1,6 @@
 mod buffer_lifecycle;
 mod buffer_move;
+mod client_sessions;
 mod floating_windows;
 mod model_state;
 mod nested_tabs;

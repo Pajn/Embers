@@ -55,6 +55,8 @@ fn repository_config_bell_handler_moves_hidden_buffer_to_floating() {
                 demo_context().with_event(EventInfo {
                     name: "buffer_bell".to_owned(),
                     session_id: Some(SESSION_ID),
+                    previous_session_id: None,
+                    client_id: None,
                     buffer_id: Some(BufferId(3)),
                     node_id: None,
                     floating_id: None,

@@ -7,8 +7,9 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferDetachedEvent, BufferRecord, BufferRecordState, BufferViewRecord, BuffersResponse,
-    ClientMessage, FloatingChangedEvent, FloatingRecord, FocusChangedEvent, NodeChangedEvent,
-    NodeRecord, NodeRecordKind, RenderInvalidatedEvent, ServerEvent, ServerResponse, SessionRecord,
+    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
+    FloatingChangedEvent, FloatingRecord, FocusChangedEvent, NodeChangedEvent, NodeRecord,
+    NodeRecordKind, RenderInvalidatedEvent, ServerEvent, ServerResponse, SessionRecord,
     SessionRequest, SessionSnapshot, SessionSnapshotResponse, SplitRecord, TabRecord, TabsRecord,
     VisibleSnapshotResponse,
 };
@@ -428,6 +429,101 @@ async fn process_next_event_resyncs_session_after_mutation() {
             .map(|tabs| tabs.active),
         Some(1)
     );
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn process_next_event_resyncs_target_session_after_client_changed() {
+    let transport = ScriptedTransport::default();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 42,
+            current_session_id: Some(SessionId(1)),
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SessionId(9)),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 42,
+                current_session_id: Some(SessionId(1)),
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(2),
+            session_id: SessionId(1),
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(2),
+            snapshot: session_snapshot(1, 1),
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    let event = client
+        .process_next_event()
+        .await
+        .expect("event is processed");
+
+    assert!(matches!(event, ServerEvent::ClientChanged(_)));
+    assert_eq!(
+        client
+            .state()
+            .sessions
+            .get(&SessionId(1))
+            .map(|session| session.id),
+        Some(SessionId(1))
+    );
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn process_next_event_ignores_client_changed_for_other_client() {
+    let transport = ScriptedTransport::default();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 99,
+            current_session_id: Some(SessionId(1)),
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SessionId(9)),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 42,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    let event = client
+        .process_next_event()
+        .await
+        .expect("event is processed");
+
+    assert!(matches!(event, ServerEvent::ClientChanged(_)));
+    assert!(!client.state().sessions.contains_key(&SessionId(1)));
     transport.assert_exhausted().expect("all requests consumed");
 }
 

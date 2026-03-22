@@ -11,7 +11,7 @@ fn set_formatter(tabbar: TabbarApi, callback: FnPtr)
 
 <div>
 <div class="tab">
-<button group="set_formatter" id="link-set_formatter-Description"  class="tablinks active" 
+<button group="set_formatter" id="link-set_formatter-Description"  class="tablinks active"
     onclick="openTab(event, 'set_formatter', 'Description')">
 Description
 </button>

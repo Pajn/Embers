@@ -11,7 +11,7 @@ fn buffer_count(tab: TabInfo) -> int
 
 <div>
 <div class="tab">
-<button group="buffer_count" id="link-buffer_count-Description"  class="tablinks active" 
+<button group="buffer_count" id="link-buffer_count-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer_count', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn has_activity(tab: TabInfo) -> bool
 
 <div>
 <div class="tab">
-<button group="has_activity" id="link-has_activity-Description"  class="tablinks active" 
+<button group="has_activity" id="link-has_activity-Description"  class="tablinks active"
     onclick="openTab(event, 'has_activity', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn has_bell(tab: TabInfo) -> bool
 
 <div>
 <div class="tab">
-<button group="has_bell" id="link-has_bell-Description"  class="tablinks active" 
+<button group="has_bell" id="link-has_bell-Description"  class="tablinks active"
     onclick="openTab(event, 'has_bell', 'Description')">
 Description
 </button>
@@ -77,7 +77,7 @@ fn index(tab: TabInfo) -> int
 
 <div>
 <div class="tab">
-<button group="index" id="link-index-Description"  class="tablinks active" 
+<button group="index" id="link-index-Description"  class="tablinks active"
     onclick="openTab(event, 'index', 'Description')">
 Description
 </button>
@@ -99,7 +99,7 @@ fn is_active(tab: TabInfo) -> bool
 
 <div>
 <div class="tab">
-<button group="is_active" id="link-is_active-Description"  class="tablinks active" 
+<button group="is_active" id="link-is_active-Description"  class="tablinks active"
     onclick="openTab(event, 'is_active', 'Description')">
 Description
 </button>
@@ -121,7 +121,7 @@ fn title(tab: TabInfo) -> String
 
 <div>
 <div class="tab">
-<button group="title" id="link-title-Description"  class="tablinks active" 
+<button group="title" id="link-title-Description"  class="tablinks active"
     onclick="openTab(event, 'title', 'Description')">
 Description
 </button>

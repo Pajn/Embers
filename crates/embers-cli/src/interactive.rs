@@ -9,7 +9,7 @@ use embers_client::{
     MouseModifiers, MuxClient, RenderGrid, SocketTransport,
 };
 use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
-use embers_protocol::{BufferRequest, ClientMessage, ServerResponse, SessionRequest};
+use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -29,9 +29,12 @@ pub async fn run(
     config_path: Option<PathBuf>,
 ) -> Result<()> {
     let mut client = MuxClient::connect(&socket_path).await?;
+    let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
-    let mut session_id = ensure_session_ready(&mut client, requested_target.as_deref()).await?;
+    let initial_session_id = ensure_session_ready(&mut client, requested_target.as_deref()).await?;
+    client.switch_current_session(initial_session_id).await?;
+    let mut session_id = Some(initial_session_id);
     let config = ConfigManager::from_process(config_path)
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     let mut configured = ConfiguredClient::new(client, config);
@@ -45,22 +48,29 @@ pub async fn run(
     loop {
         if dirty {
             terminal.sync_mouse_capture(mouse_capture_enabled(&configured))?;
-            if !configured
-                .client()
-                .state()
-                .sessions
-                .contains_key(&session_id)
-            {
-                session_id =
-                    ensure_session_ready(configured.client_mut(), requested_target.as_deref())
-                        .await?;
-            }
             terminal_size = terminal.size()?;
             let viewport = content_viewport(terminal_size);
-            let grid = configured.render_session(session_id, viewport).await?;
             terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-            let status = configured.status_line(session_id, &socket_path);
-            terminal.render(&grid, terminal_size, Some(&status))?;
+            if let Some(active_session_id) = session_id
+                && !configured
+                    .client()
+                    .state()
+                    .sessions
+                    .contains_key(&active_session_id)
+            {
+                session_id = None;
+            }
+
+            if let Some(active_session_id) = session_id {
+                let grid = configured
+                    .render_session(active_session_id, viewport)
+                    .await?;
+                let status = configured.status_line(active_session_id, &socket_path);
+                terminal.render(&grid, terminal_size, Some(&status))?;
+            } else {
+                let grid = RenderGrid::new(viewport.width, viewport.height);
+                terminal.render(&grid, terminal_size, Some("detached"))?;
+            }
             dirty = false;
         }
 
@@ -68,30 +78,44 @@ pub async fn run(
             match input_rx.try_recv() {
                 Ok(TerminalEvent::Key(KeyEvent::Ctrl('q'))) => return Ok(()),
                 Ok(TerminalEvent::Key(key)) => {
-                    let viewport = content_viewport(terminal_size);
-                    configured.handle_key(session_id, viewport, key).await?;
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_key(active_session_id, viewport, key)
+                            .await?;
+                        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
                 }
                 Ok(TerminalEvent::Paste(bytes)) => {
-                    let viewport = content_viewport(terminal_size);
-                    configured.handle_paste(session_id, viewport, bytes).await?;
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_paste(active_session_id, viewport, bytes)
+                            .await?;
+                        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
                 }
                 Ok(TerminalEvent::Focus(focused)) => {
-                    let viewport = content_viewport(terminal_size);
-                    configured
-                        .handle_focus_event(session_id, viewport, focused)
-                        .await?;
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_focus_event(active_session_id, viewport, focused)
+                            .await?;
+                        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
                 }
                 Ok(TerminalEvent::Mouse(mouse)) => {
-                    let viewport = content_viewport(terminal_size);
-                    configured.handle_mouse(session_id, viewport, mouse).await?;
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_mouse(active_session_id, viewport, mouse)
+                            .await?;
+                        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
                 }
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
@@ -111,7 +135,17 @@ pub async fn run(
 
         match tokio::time::timeout(EVENT_POLL_INTERVAL, configured.process_next_event()).await {
             Ok(result) => {
-                result?;
+                let event = result?;
+                match switched_session_id(&event, attached_client_id) {
+                    SwitchedSession::Switched(next_session_id) => {
+                        ensure_root_window(configured.client_mut(), next_session_id).await?;
+                        session_id = Some(next_session_id);
+                    }
+                    SwitchedSession::Detached => {
+                        session_id = None;
+                    }
+                    SwitchedSession::Ignore => {}
+                }
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
@@ -119,6 +153,64 @@ pub async fn run(
                 continue;
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SwitchedSession {
+    Ignore,
+    Detached,
+    Switched(SessionId),
+}
+
+fn switched_session_id(event: &ServerEvent, attached_client_id: u64) -> SwitchedSession {
+    match event {
+        ServerEvent::ClientChanged(event) if event.client.id == attached_client_id => {
+            match event.client.current_session_id {
+                Some(session_id) => SwitchedSession::Switched(session_id),
+                None => SwitchedSession::Detached,
+            }
+        }
+        _ => SwitchedSession::Ignore,
+    }
+}
+
+#[cfg(test)]
+mod client_switch_tests {
+    use super::{SwitchedSession, switched_session_id};
+    use embers_core::SessionId;
+    use embers_protocol::{ClientChangedEvent, ClientRecord, ServerEvent};
+
+    #[test]
+    fn switched_session_id_uses_attached_client_only() {
+        let event = ServerEvent::ClientChanged(ClientChangedEvent {
+            client: ClientRecord {
+                id: 7,
+                current_session_id: Some(SessionId(3)),
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+            previous_session_id: Some(SessionId(2)),
+        });
+        assert_eq!(
+            switched_session_id(&event, 7),
+            SwitchedSession::Switched(SessionId(3))
+        );
+        assert_eq!(switched_session_id(&event, 9), SwitchedSession::Ignore);
+    }
+
+    #[test]
+    fn switched_session_id_reports_detach_for_attached_client() {
+        let event = ServerEvent::ClientChanged(ClientChangedEvent {
+            client: ClientRecord {
+                id: 7,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+            previous_session_id: Some(SessionId(2)),
+        });
+        assert_eq!(switched_session_id(&event, 7), SwitchedSession::Detached);
     }
 }
 

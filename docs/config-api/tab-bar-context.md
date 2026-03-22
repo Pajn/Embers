@@ -11,7 +11,7 @@ fn active_index(bar: TabBarContext) -> int
 
 <div>
 <div class="tab">
-<button group="active_index" id="link-active_index-Description"  class="tablinks active" 
+<button group="active_index" id="link-active_index-Description"  class="tablinks active"
     onclick="openTab(event, 'active_index', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn is_root(bar: TabBarContext) -> bool
 
 <div>
 <div class="tab">
-<button group="is_root" id="link-is_root-Description"  class="tablinks active" 
+<button group="is_root" id="link-is_root-Description"  class="tablinks active"
     onclick="openTab(event, 'is_root', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn mode(bar: TabBarContext) -> String
 
 <div>
 <div class="tab">
-<button group="mode" id="link-mode-Description"  class="tablinks active" 
+<button group="mode" id="link-mode-Description"  class="tablinks active"
     onclick="openTab(event, 'mode', 'Description')">
 Description
 </button>
@@ -77,7 +77,7 @@ fn node_id(bar: TabBarContext) -> int
 
 <div>
 <div class="tab">
-<button group="node_id" id="link-node_id-Description"  class="tablinks active" 
+<button group="node_id" id="link-node_id-Description"  class="tablinks active"
     onclick="openTab(event, 'node_id', 'Description')">
 Description
 </button>
@@ -99,7 +99,7 @@ fn tabs(bar: TabBarContext) -> Array
 
 <div>
 <div class="tab">
-<button group="tabs" id="link-tabs-Description"  class="tablinks active" 
+<button group="tabs" id="link-tabs-Description"  class="tablinks active"
     onclick="openTab(event, 'tabs', 'Description')">
 Description
 </button>
@@ -121,7 +121,7 @@ fn viewport_width(bar: TabBarContext) -> int
 
 <div>
 <div class="tab">
-<button group="viewport_width" id="link-viewport_width-Description"  class="tablinks active" 
+<button group="viewport_width" id="link-viewport_width-Description"  class="tablinks active"
     onclick="openTab(event, 'viewport_width', 'Description')">
 Description
 </button>
