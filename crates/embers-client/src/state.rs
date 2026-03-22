@@ -295,8 +295,7 @@ impl ClientState {
                         .is_some_and(|view| view.buffer_id == buffer_id)
             })
             .map(|node| node.id)
-            .collect::<Vec<_>>();
-        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         self.sync_view_states_for_nodes(&node_ids);
     }
 

@@ -1,7 +1,7 @@
 mod support;
 
 use embers_client::PresentationModel;
-use embers_core::{Size, SplitDirection};
+use embers_core::{FloatGeometry, Size, SplitDirection};
 
 use support::{
     FLOATING_BOTTOM_LEAF_ID, FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID,
@@ -97,6 +97,34 @@ fn projects_split_in_floating_window() {
         .find(|divider| divider.floating_id == Some(FLOATING_ID))
         .expect("floating split divider exists");
     assert_eq!(floating_divider.direction, SplitDirection::Horizontal);
+}
+
+#[test]
+fn floating_windows_can_start_on_the_top_row() {
+    let mut state = demo_state();
+    state
+        .floating
+        .get_mut(&FLOATING_ID)
+        .expect("floating window exists")
+        .geometry = FloatGeometry::new(0, 0, 20, 7);
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+
+    let floating = presentation
+        .floating
+        .iter()
+        .find(|window| window.floating_id == FLOATING_ID)
+        .expect("floating window exists");
+    assert_eq!(floating.rect.origin.y, 0);
+    assert_eq!(floating.rect.size.height, 7);
 }
 
 #[test]

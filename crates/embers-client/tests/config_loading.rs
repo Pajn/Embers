@@ -47,7 +47,12 @@ fn explicit_override_wins_when_starting_manager() {
 
 #[test]
 fn manager_uses_builtin_config_when_no_files_exist() {
-    let manager = ConfigManager::load(ConfigDiscoveryOptions::default()).unwrap();
+    let manager = ConfigManager::load(ConfigDiscoveryOptions {
+        explicit_path: None,
+        env_path: None,
+        standard_config_path: None,
+    })
+    .unwrap();
 
     assert_eq!(manager.active_source().origin, ConfigOrigin::BuiltIn);
     assert_eq!(manager.active_source().source, BUILTIN_CONFIG_SOURCE);

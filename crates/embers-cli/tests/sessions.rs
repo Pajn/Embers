@@ -19,6 +19,7 @@ async fn shutdown_spawned_server(socket_path: &Path) {
         .trim()
         .parse::<i32>()
         .expect("pid parses");
+    assert!(pid > 0, "invalid pid: {pid}");
 
     // SAFETY: pid comes from our own pid file and SIGTERM targets that specific process.
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };

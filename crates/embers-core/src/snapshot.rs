@@ -8,8 +8,9 @@ pub struct CursorPosition {
     pub col: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CursorShape {
+    #[default]
     Block,
     Underline,
     Beam,

@@ -312,7 +312,7 @@ impl RegistrationState {
             }
         }
 
-        for (mode_name, hooks) in &self.mode_hooks {
+        for mode_name in self.mode_hooks.keys() {
             if !modes.contains_key(mode_name) {
                 return Err(ScriptError::validation(
                     source,
@@ -320,14 +320,6 @@ impl RegistrationState {
                     format!("mode hooks reference unknown mode '{mode_name}'"),
                 ));
             }
-            if let Some(on_enter) = &hooks.on_enter
-                && !self.named_actions.values().any(|action| action == on_enter)
-            {
-                // Mode hooks are direct function refs, so no named-action validation is needed.
-            }
-            if let Some(on_leave) = &hooks.on_leave
-                && !self.named_actions.values().any(|action| action == on_leave)
-            {}
         }
 
         Ok(LoadedConfig {

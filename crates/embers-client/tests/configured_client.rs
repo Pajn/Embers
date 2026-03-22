@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -7,15 +8,21 @@ use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseEvent,
     MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
 };
-use embers_core::{BufferId, RequestId, SessionId, Size};
+use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
-    ClientMessage, FocusChangedEvent, InputRequest, NodeRequest, OkResponse,
-    ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRequest, SessionSnapshot,
-    SessionSnapshotResponse, SnapshotResponse, VisibleSnapshotResponse,
+    BufferCreatedEvent, BufferRecord, BufferRecordState, BufferViewRecord, ClientMessage,
+    FocusChangedEvent, InputRequest, NodeRecord, NodeRecordKind, NodeRequest, OkResponse,
+    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
+    VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
 use support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
+
+const SECOND_SESSION_ID: SessionId = SessionId(2);
+const SECOND_ROOT_ID: NodeId = NodeId(200);
+const SECOND_BUFFER_ID: BufferId = BufferId(70);
 
 fn manager_from_source(source: &str) -> (ConfigManager, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
@@ -86,6 +93,76 @@ fn snapshot_response(
         title: None,
         cwd: None,
     }
+}
+
+fn second_session_state() -> embers_client::ClientState {
+    let mut state = demo_state();
+    state.sessions.insert(
+        SECOND_SESSION_ID,
+        SessionRecord {
+            id: SECOND_SESSION_ID,
+            name: "other".to_owned(),
+            root_node_id: SECOND_ROOT_ID,
+            floating_ids: Vec::new(),
+            focused_leaf_id: Some(SECOND_ROOT_ID),
+            focused_floating_id: None,
+        },
+    );
+    state.nodes.insert(
+        SECOND_ROOT_ID,
+        NodeRecord {
+            id: SECOND_ROOT_ID,
+            session_id: SECOND_SESSION_ID,
+            parent_id: None,
+            kind: NodeRecordKind::BufferView,
+            buffer_view: Some(BufferViewRecord {
+                buffer_id: SECOND_BUFFER_ID,
+                focused: true,
+                zoomed: false,
+                follow_output: true,
+                last_render_size: PtySize::new(80, 20),
+            }),
+            split: None,
+            tabs: None,
+        },
+    );
+    state.buffers.insert(
+        SECOND_BUFFER_ID,
+        BufferRecord {
+            id: SECOND_BUFFER_ID,
+            title: "other pane".to_owned(),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            state: BufferRecordState::Running,
+            pid: None,
+            attachment_node_id: Some(SECOND_ROOT_ID),
+            pty_size: PtySize::new(80, 20),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 1,
+            exit_code: None,
+            env: BTreeMap::new(),
+        },
+    );
+    state.snapshots.insert(
+        SECOND_BUFFER_ID,
+        VisibleSnapshotResponse {
+            request_id: RequestId(0),
+            buffer_id: SECOND_BUFFER_ID,
+            sequence: 1,
+            size: PtySize::new(80, 20),
+            lines: vec!["other pane".to_owned()],
+            title: Some("other pane".to_owned()),
+            cwd: None,
+            viewport_top_line: 0,
+            total_lines: 1,
+            alternate_screen: false,
+            mouse_reporting: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor: None,
+        },
+    );
+    state
 }
 
 #[tokio::test]
@@ -672,7 +749,7 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
+                row: focused.rect.origin.y as u16,
                 column: focused.rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
@@ -717,7 +794,7 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
+                row: focused.rect.origin.y as u16,
                 column: focused.rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
@@ -733,6 +810,93 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
             bytes: b"\x1b[<64;1;1M".to_vec(),
         })
     );
+}
+
+#[tokio::test]
+async fn render_invalidated_events_use_their_buffer_session_context() {
+    let state = second_session_state();
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(1)),
+    ));
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_render(ctx) { action.notify("info", ctx.current_session().name()) }
+            on("render_invalidated", on_render);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
+    assert_eq!(configured.notifications(), ["other"]);
+}
+
+#[tokio::test]
+async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::BufferCreated(BufferCreatedEvent {
+        buffer: BufferRecord {
+            id: BufferId(71),
+            title: "detached".to_owned(),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            state: BufferRecordState::Running,
+            pid: None,
+            attachment_node_id: None,
+            pty_size: PtySize::new(80, 20),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            exit_code: None,
+            env: BTreeMap::new(),
+        },
+    }));
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_buffer(ctx) {
+                if ctx.current_session() == () {
+                    action.notify("info", "none")
+                } else {
+                    action.notify("info", ctx.current_session().name())
+                }
+            }
+            on("buffer_created", on_buffer);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+    configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::BufferCreated(_)));
+    assert_eq!(configured.notifications(), ["none"]);
 }
 
 #[tokio::test]

@@ -335,16 +335,8 @@ impl BufferRef {
         if limit == 0 {
             return String::new();
         }
-        self.snapshot_lines
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n")
+        let start = self.snapshot_lines.len().saturating_sub(limit);
+        self.snapshot_lines[start..].join("\n")
     }
 
     pub fn history_text(&self) -> String {
@@ -426,7 +418,7 @@ impl TabBarContext {
                         ActivityState::Activity | ActivityState::Bell
                     ),
                     has_bell: matches!(tab.activity, ActivityState::Bell),
-                    buffer_count: 1,
+                    buffer_count: tab.buffer_count,
                 })
                 .collect(),
         }

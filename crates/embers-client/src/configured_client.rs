@@ -9,8 +9,8 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
 };
 use embers_protocol::{
-    BufferRequest, BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest,
-    ServerEvent, ServerResponse,
+    BufferRecord, BufferRequest, BufferResponse, ClientMessage, FloatingRequest, InputRequest,
+    NodeRequest, ServerEvent, ServerResponse,
 };
 
 use crate::RenderGrid;
@@ -234,7 +234,7 @@ where
         let settings = self.config.active_script().loaded_config().mouse;
         let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
         let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
-        let point_in_content = point.y > target_leaf.rect.origin.y;
+        let point_in_content = point.y >= target_leaf.rect.origin.y;
 
         match event.kind {
             MouseEventKind::WheelUp | MouseEventKind::WheelDown => {
@@ -308,10 +308,7 @@ where
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
         }
 
-        let session_id = self
-            .active_session_id
-            .or_else(|| event.session_id())
-            .or_else(|| self.client.state().sessions.keys().next().copied());
+        let session_id = self.event_session_id(&event);
         let mut event_names = vec![event_name(&event).to_owned()];
         if let ServerEvent::RenderInvalidated(render) = &event
             && self
@@ -952,6 +949,10 @@ where
                                         child_id: tab.child_id,
                                         active: usize::try_from(tabs.active).ok() == Some(index),
                                         activity: ActivityState::Idle,
+                                        buffer_count: crate::presentation::subtree_buffer_count(
+                                            self.client.state(),
+                                            tab.child_id,
+                                        ),
                                     })
                                     .collect(),
                                 active: usize::try_from(tabs.active).unwrap_or(0),
@@ -1028,6 +1029,52 @@ where
         } else {
             context
         }
+    }
+
+    fn event_session_id(&self, event: &ServerEvent) -> Option<SessionId> {
+        event.session_id().or_else(|| match event {
+            ServerEvent::BufferCreated(event) => self.session_id_for_buffer_record(&event.buffer),
+            ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::SessionCreated(_)
+            | ServerEvent::SessionClosed(_)
+            | ServerEvent::NodeChanged(_)
+            | ServerEvent::FloatingChanged(_)
+            | ServerEvent::FocusChanged(_) => None,
+        })
+    }
+
+    fn session_id_for_buffer_record(&self, buffer: &BufferRecord) -> Option<SessionId> {
+        buffer
+            .attachment_node_id
+            .and_then(|node_id| self.session_id_for_node(node_id))
+            .or_else(|| self.session_id_for_buffer(buffer.id))
+    }
+
+    fn session_id_for_buffer(&self, buffer_id: BufferId) -> Option<SessionId> {
+        let state = self.client.state();
+        state
+            .buffers
+            .get(&buffer_id)
+            .and_then(|buffer| buffer.attachment_node_id)
+            .and_then(|node_id| state.nodes.get(&node_id))
+            .map(|node| node.session_id)
+            .or_else(|| {
+                state.nodes.values().find_map(|node| {
+                    node.buffer_view
+                        .as_ref()
+                        .filter(|view| view.buffer_id == buffer_id)
+                        .map(|_| node.session_id)
+                })
+            })
+    }
+
+    fn session_id_for_node(&self, node_id: NodeId) -> Option<SessionId> {
+        self.client
+            .state()
+            .nodes
+            .get(&node_id)
+            .map(|node| node.session_id)
     }
 
     fn set_active_view(&mut self, session_id: SessionId, viewport: Size) {
@@ -1896,10 +1943,9 @@ fn encode_mouse_event(leaf: &LeafFrame, event: MouseEvent) -> Result<Vec<u8>> {
         .column
         .checked_sub(origin_x)
         .ok_or_else(|| MuxError::invalid_input("mouse event fell outside pane bounds"))?;
-    let content_origin_y = origin_y.saturating_add(1);
     let local_row = event
         .row
-        .checked_sub(content_origin_y)
+        .checked_sub(origin_y)
         .ok_or_else(|| MuxError::invalid_input("mouse event fell outside pane content"))?;
 
     let mut code = 0_u16;
@@ -1999,7 +2045,7 @@ fn resolve_floating_size(size: FloatingSize, max: u16) -> u16 {
         FloatingSize::Cells(cells) => cells.min(max.max(1)),
         FloatingSize::Percent(percent) => {
             let max = u32::from(max.max(1));
-            let percent = u32::from(percent.max(1));
+            let percent = u32::from(percent.clamp(1, 100));
             ((max * percent) / 100).max(1) as u16
         }
     }

@@ -554,28 +554,22 @@ fn default_runtime_dir() -> PathBuf {
     }
     #[cfg(unix)]
     {
-        let run_user_dir = PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() }));
+        let run_user_dir = PathBuf::from(format!("/run/user/{}", effective_uid()));
         if run_user_dir.is_dir() {
             return run_user_dir.join("embers");
         }
     }
-    PathBuf::from("/tmp").join(format!("embers-{}", current_user_label()))
+    PathBuf::from("/tmp").join(format!("embers-{}", effective_uid()))
 }
 
-fn current_user_label() -> String {
-    std::env::var("USER")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "user".to_owned())
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    0
 }
 
 fn pid_path(socket_path: &Path) -> PathBuf {
