@@ -126,38 +126,6 @@ fn smart_nav_right(ctx) {
     }
 }
 
-fn smart_resize_left(ctx) {
-    if is_nvim_buffer(ctx) {
-        action.send_bytes_current([27, 104])
-    } else {
-        action.resize_left(3)
-    }
-}
-
-fn smart_resize_down(ctx) {
-    if is_nvim_buffer(ctx) {
-        action.send_bytes_current([27, 106])
-    } else {
-        action.resize_down(3)
-    }
-}
-
-fn smart_resize_up(ctx) {
-    if is_nvim_buffer(ctx) {
-        action.send_bytes_current([27, 107])
-    } else {
-        action.resize_up(3)
-    }
-}
-
-fn smart_resize_right(ctx) {
-    if is_nvim_buffer(ctx) {
-        action.send_bytes_current([27, 108])
-    } else {
-        action.resize_right(3)
-    }
-}
-
 fn split_below(ctx) {
     // tmux split-window -v creates a top/bottom split.
     action.split_with("horizontal", shell_tree(ctx, tree, "shell"))
@@ -321,10 +289,6 @@ define_action("smart-nav-left", smart_nav_left);
 define_action("smart-nav-down", smart_nav_down);
 define_action("smart-nav-up", smart_nav_up);
 define_action("smart-nav-right", smart_nav_right);
-define_action("smart-resize-left", smart_resize_left);
-define_action("smart-resize-down", smart_resize_down);
-define_action("smart-resize-up", smart_resize_up);
-define_action("smart-resize-right", smart_resize_right);
 define_action("split-below", split_below);
 define_action("split-right", split_right);
 define_action("new-shell-tab", new_shell_tab);
@@ -340,10 +304,6 @@ bind("normal", "<C-h>", "smart-nav-left");
 bind("normal", "<C-j>", "smart-nav-down");
 bind("normal", "<C-k>", "smart-nav-up");
 bind("normal", "<C-l>", "smart-nav-right");
-bind("normal", "<M-h>", "smart-resize-left");
-bind("normal", "<M-j>", "smart-resize-down");
-bind("normal", "<M-k>", "smart-resize-up");
-bind("normal", "<M-l>", "smart-resize-right");
 bind("copy", "<C-h>", "smart-nav-left");
 bind("copy", "<C-j>", "smart-nav-down");
 bind("copy", "<C-k>", "smart-nav-up");

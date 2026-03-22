@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 env:
@@ -36,8 +38,20 @@ jobs:
           sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install mdBook
+        run: cargo install mdbook --version 0.5.2 --locked
       - name: Run unit and integration tests
         run: cargo test --workspace
+      - name: Regenerate config API docs
+        run: cargo gen-docs
+      - name: Verify checked-in config API docs
+        run: |
+          status="$(git status --porcelain -- docs/config-api)"
+          if [ -n "$status" ]; then
+            echo "Config API docs are out of date after regeneration:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
 
   pty-smoke:
     runs-on: ubuntu-latest

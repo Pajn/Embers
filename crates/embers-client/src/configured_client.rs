@@ -540,9 +540,6 @@ where
                 };
                 self.focus_node(session_id, node_id).await
             }
-            Action::ResizeDirection { .. } => Err(MuxError::invalid_input(
-                "resize actions are not implemented yet",
-            )),
             Action::ScrollLineUp => {
                 let leaf = self.focused_leaf(presentation)?;
                 self.scroll_view_by(leaf.node_id, -1).await
@@ -893,11 +890,6 @@ where
             Action::FocusBuffer { buffer_id } | Action::RevealBuffer { buffer_id } => {
                 self.focus_buffer(session_id, buffer_id).await
             }
-            Action::ReplaceFloatingRoot { .. }
-            | Action::WrapNodeInSplit { .. }
-            | Action::WrapNodeInTabs { .. } => Err(MuxError::invalid_input(format!(
-                "action '{action:?}' is not supported by the live executor yet"
-            ))),
             other => Err(MuxError::invalid_input(format!(
                 "action '{other:?}' is not supported by the live executor yet"
             ))),

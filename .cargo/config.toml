@@ -1,0 +1,2 @@
+[alias]
+gen-docs = "run -p embers-client --bin gen-docs --"

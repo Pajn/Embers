@@ -26,6 +26,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
+use crate::persist::{load_workspace, save_workspace};
 use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
 use crate::{
     AlacrittyTerminalBackend, BackendDamage, BufferAttachment, BufferRuntimeCallbacks,
