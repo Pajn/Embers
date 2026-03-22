@@ -90,6 +90,21 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    #[command(name = "list-buffers")]
+    ListBuffers {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(long, conflicts_with = "detached")]
+        attached: bool,
+        #[arg(long, conflicts_with = "attached")]
+        detached: bool,
+    },
+    #[command(name = "attach-buffer")]
+    AttachBuffer {
+        buffer_id: u64,
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
     #[command(name = "new-window")]
     NewWindow {
         #[arg(short = 't', long = "target")]
@@ -241,6 +256,42 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     force,
                 }))
                 .await?;
+            Ok(String::new())
+        }
+        Command::ListBuffers {
+            target,
+            attached,
+            detached,
+        } => {
+            let session_id = match target {
+                Some(target) => Some(connection.resolve_session_record(Some(&target)).await?.id),
+                None => None,
+            };
+            let response = connection
+                .request(ClientMessage::Buffer(BufferRequest::List {
+                    request_id: new_request_id(),
+                    session_id,
+                    attached_only: attached,
+                    detached_only: detached,
+                }))
+                .await?;
+            match response {
+                ServerResponse::Buffers(response) => Ok(format_buffers(&response.buffers)),
+                other => Err(MuxError::protocol(format!(
+                    "unexpected response to list-buffers: {other:?}"
+                ))),
+            }
+        }
+        Command::AttachBuffer { buffer_id, target } => {
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let response = connection
+                .request(ClientMessage::Node(NodeRequest::MoveBufferToNode {
+                    request_id: new_request_id(),
+                    buffer_id: BufferId(buffer_id),
+                    target_leaf_node_id: pane.leaf_id,
+                }))
+                .await?;
+            expect_session_snapshot(response, "attach-buffer")?;
             Ok(String::new())
         }
         Command::NewWindow {
@@ -1122,6 +1173,26 @@ fn format_sessions(sessions: &[SessionRecord]) -> String {
         .join("\n")
 }
 
+fn format_buffers(buffers: &[embers_protocol::BufferRecord]) -> String {
+    buffers
+        .iter()
+        .map(|buffer| {
+            let attachment = buffer
+                .attachment_node_id
+                .map(|node_id| format!("attached:{node_id}"))
+                .unwrap_or_else(|| "detached".to_owned());
+            format!(
+                "{}\t{}\t{}\t{}",
+                buffer.id,
+                buffer_state_label(buffer.state),
+                attachment,
+                buffer.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
     if let Some((_, tabs)) = root_tabs(snapshot)? {
         Ok(tabs
@@ -1351,6 +1422,15 @@ fn split_scoped_target(target: Option<&str>) -> (Option<String>, Option<String>)
             }
         }
         None => (None, None),
+    }
+}
+
+fn buffer_state_label(state: embers_protocol::BufferRecordState) -> &'static str {
+    match state {
+        embers_protocol::BufferRecordState::Created => "created",
+        embers_protocol::BufferRecordState::Running => "running",
+        embers_protocol::BufferRecordState::Interrupted => "interrupted",
+        embers_protocol::BufferRecordState::Exited => "exited",
     }
 }
 
