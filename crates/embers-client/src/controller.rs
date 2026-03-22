@@ -17,6 +17,10 @@ pub enum KeyEvent {
     Down,
     Left,
     Right,
+    Home,
+    End,
+    Insert,
+    Delete,
     PageUp,
     PageDown,
 }
@@ -38,7 +42,7 @@ pub struct MouseModifiers {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseEventKind {
     Press(MouseButton),
-    Release(MouseButton),
+    Release(Option<MouseButton>),
     Drag(MouseButton),
     WheelUp,
     WheelDown,
@@ -64,19 +68,25 @@ impl Controller {
     ) -> Option<ClientMessage> {
         match key {
             KeyEvent::Ctrl(ch) => {
-                let direction = match ch.to_ascii_lowercase() {
-                    'h' => NavigationDirection::Left,
-                    'j' => NavigationDirection::Down,
-                    'k' => NavigationDirection::Up,
-                    'l' => NavigationDirection::Right,
-                    _ => return None,
-                };
+                let ch = ch.to_ascii_lowercase();
+                match ch {
+                    'h' | 'j' | 'k' | 'l' => {
+                        let direction = match ch {
+                            'h' => NavigationDirection::Left,
+                            'j' => NavigationDirection::Down,
+                            'k' => NavigationDirection::Up,
+                            'l' => NavigationDirection::Right,
+                            _ => unreachable!(),
+                        };
 
-                Some(ClientMessage::Node(NodeRequest::Focus {
-                    request_id,
-                    session_id: presentation.session_id,
-                    node_id: presentation.focus_target(direction)?,
-                }))
+                        Some(ClientMessage::Node(NodeRequest::Focus {
+                            request_id,
+                            session_id: presentation.session_id,
+                            node_id: presentation.focus_target(direction)?,
+                        }))
+                    }
+                    _ => input_request(presentation, request_id, vec![ctrl_byte(ch)?]),
+                }
             }
             KeyEvent::Alt(ch) if ('1'..='9').contains(&ch) => {
                 let index = ch.to_digit(10)?.saturating_sub(1);
@@ -91,6 +101,12 @@ impl Controller {
                     tabs_node_id: tabs.node_id,
                     index,
                 }))
+            }
+            KeyEvent::Alt(ch) => {
+                let mut encoded = [0; 4];
+                let mut bytes = vec![0x1b];
+                bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+                input_request(presentation, request_id, bytes)
             }
             KeyEvent::Escape => {
                 if let Some(floating_id) = presentation.focused_floating_id() {
@@ -115,11 +131,20 @@ impl Controller {
             KeyEvent::Down => input_request(presentation, request_id, b"\x1b[B".to_vec()),
             KeyEvent::Right => input_request(presentation, request_id, b"\x1b[C".to_vec()),
             KeyEvent::Left => input_request(presentation, request_id, b"\x1b[D".to_vec()),
+            KeyEvent::Home => input_request(presentation, request_id, b"\x1b[H".to_vec()),
+            KeyEvent::End => input_request(presentation, request_id, b"\x1b[F".to_vec()),
+            KeyEvent::Insert => input_request(presentation, request_id, b"\x1b[2~".to_vec()),
+            KeyEvent::Delete => input_request(presentation, request_id, b"\x1b[3~".to_vec()),
             KeyEvent::PageUp => input_request(presentation, request_id, b"\x1b[5~".to_vec()),
             KeyEvent::PageDown => input_request(presentation, request_id, b"\x1b[6~".to_vec()),
-            KeyEvent::Alt(_) | KeyEvent::Bytes(_) => None,
+            KeyEvent::Bytes(_) => None,
         }
     }
+}
+
+fn ctrl_byte(ch: char) -> Option<u8> {
+    ch.is_ascii()
+        .then_some((ch.to_ascii_lowercase() as u8) & 0x1f)
 }
 
 fn input_request(

@@ -14,8 +14,8 @@ use support::{cli_command, run_cli, stdout};
 
 async fn shutdown_spawned_server(socket_path: &Path) {
     let pid_path = socket_path.with_extension("pid");
-    let pid = fs::read_to_string(&pid_path)
-        .unwrap_or_else(|error| panic!("read pid file {}: {error}", pid_path.display()))
+    let pid = wait_for_pid(&pid_path)
+        .await
         .trim()
         .parse::<i32>()
         .expect("pid parses");
@@ -48,6 +48,17 @@ async fn wait_for_socket(socket_path: &Path) {
     }
 
     panic!("timed out waiting for socket {}", socket_path.display());
+}
+
+async fn wait_for_pid(pid_path: &Path) -> String {
+    for _ in 0..50 {
+        if let Ok(pid) = fs::read_to_string(pid_path) {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("timed out waiting for pid file {}", pid_path.display());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

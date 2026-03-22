@@ -3,7 +3,7 @@ mod interactive;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -509,6 +509,7 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
 
 pub async fn run(cli: Cli) -> Result<()> {
     let socket = resolve_socket_path(cli.socket.as_deref());
+    validate_runtime_socket_parent(&socket)?;
 
     match cli.command {
         None => {
@@ -577,6 +578,9 @@ fn pid_path(socket_path: &Path) -> PathBuf {
 }
 
 async fn server_is_available(socket_path: &Path) -> bool {
+    if validate_runtime_socket_parent(socket_path).is_err() {
+        return false;
+    }
     CliConnection::connect(socket_path).await.is_ok()
 }
 
@@ -652,7 +656,50 @@ fn ensure_socket_parent(socket_path: &Path) -> Result<()> {
 fn ensure_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        validate_private_dir(path)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_socket_parent(socket_path: &Path) -> Result<()> {
+    let Some(parent) = socket_path.parent() else {
+        return Ok(());
+    };
+    if parent != default_runtime_dir().as_path() || !parent.exists() {
+        return Ok(());
+    }
+    validate_private_dir(parent)
+}
+
+#[cfg(unix)]
+fn validate_private_dir(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(MuxError::invalid_input(format!(
+            "runtime directory {} is not a directory",
+            path.display()
+        )));
+    }
+    if metadata.uid() != effective_uid() {
+        return Err(MuxError::invalid_input(format!(
+            "runtime directory {} is not owned by uid {}",
+            path.display(),
+            effective_uid()
+        )));
+    }
+    if metadata.permissions().mode() & 0o777 != 0o700 {
+        return Err(MuxError::invalid_input(format!(
+            "runtime directory {} must have mode 0700",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_private_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 

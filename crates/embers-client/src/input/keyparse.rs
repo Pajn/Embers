@@ -17,6 +17,10 @@ pub enum KeyToken {
     Down,
     Left,
     Right,
+    Home,
+    End,
+    Insert,
+    Delete,
     PageUp,
     PageDown,
 }
@@ -107,6 +111,10 @@ fn parse_token(token: &str) -> Result<KeyToken, KeyParseError> {
         "down" => Ok(KeyToken::Down),
         "left" => Ok(KeyToken::Left),
         "right" => Ok(KeyToken::Right),
+        "home" => Ok(KeyToken::Home),
+        "end" => Ok(KeyToken::End),
+        "ins" | "insert" => Ok(KeyToken::Insert),
+        "del" | "delete" => Ok(KeyToken::Delete),
         "pageup" | "pgup" => Ok(KeyToken::PageUp),
         "pagedown" | "pgdown" | "pgdn" => Ok(KeyToken::PageDown),
         _ => parse_modified_token(token),
@@ -148,7 +156,10 @@ mod tests {
     #[test]
     fn parses_plain_and_modified_keys() {
         assert_eq!(
-            parse_key_sequence("ab<C-x><A-z><Enter><Esc><Tab><Space><Up><PageDown>").unwrap(),
+            parse_key_sequence(
+                "ab<C-x><A-z><Enter><Esc><Tab><Space><Home><Insert><Delete><End><Up><PageDown>",
+            )
+            .unwrap(),
             vec![
                 KeyToken::Char('a'),
                 KeyToken::Char('b'),
@@ -158,6 +169,10 @@ mod tests {
                 KeyToken::Escape,
                 KeyToken::Tab,
                 KeyToken::Space,
+                KeyToken::Home,
+                KeyToken::Insert,
+                KeyToken::Delete,
+                KeyToken::End,
                 KeyToken::Up,
                 KeyToken::PageDown,
             ]

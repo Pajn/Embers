@@ -39,6 +39,27 @@ struct SearchPrompt {
     query: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedTreeBuffer {
+    Existing(BufferId),
+    NewlySpawned(BufferId),
+}
+
+impl ResolvedTreeBuffer {
+    fn id(self) -> BufferId {
+        match self {
+            Self::Existing(buffer_id) | Self::NewlySpawned(buffer_id) => buffer_id,
+        }
+    }
+
+    fn created_by_helper(self) -> Option<BufferId> {
+        match self {
+            Self::Existing(_) => None,
+            Self::NewlySpawned(buffer_id) => Some(buffer_id),
+        }
+    }
+}
+
 pub struct ConfiguredClient<T> {
     client: MuxClient<T>,
     config: ConfigManager,
@@ -648,35 +669,51 @@ where
                 let focused_leaf = presentation
                     .focused_leaf()
                     .ok_or_else(|| MuxError::invalid_input("no focused leaf to split"))?;
-                let buffer_id = self
+                let buffer = self
                     .resolve_tree_buffer(session_id, presentation, new_child)
                     .await?;
-                self.client
+                let result = self
+                    .client
                     .request_message(ClientMessage::Node(NodeRequest::Split {
                         request_id: self.client.next_request_id(),
                         leaf_node_id: focused_leaf.node_id,
                         direction,
-                        new_buffer_id: buffer_id,
+                        new_buffer_id: buffer.id(),
                     }))
-                    .await?;
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "split pane",
+                    result,
+                )
+                .await?;
                 self.client.resync_all_sessions().await
             }
             Action::OpenFloating { spec } => {
-                let buffer_id = self
+                let buffer = self
                     .resolve_tree_buffer(session_id, presentation, spec.tree)
                     .await?;
-                self.client
+                let result = self
+                    .client
                     .request_message(ClientMessage::Floating(FloatingRequest::Create {
                         request_id: self.client.next_request_id(),
                         session_id,
                         root_node_id: None,
-                        buffer_id: Some(buffer_id),
+                        buffer_id: Some(buffer.id()),
                         geometry: resolve_floating_geometry(spec.geometry, viewport),
                         title: spec.title,
                         focus: spec.focus,
                         close_on_empty: spec.close_on_empty,
                     }))
-                    .await?;
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "open floating window",
+                    result,
+                )
+                .await?;
                 self.client.resync_all_sessions().await
             }
             Action::DetachBuffer { buffer_id } => {
@@ -740,21 +777,29 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let buffer_id = self
+                let buffer = self
                     .resolve_tree_buffer(session_id, presentation, child)
                     .await?;
-                self.client
+                let result = self
+                    .client
                     .request_message(ClientMessage::Node(NodeRequest::AddTab {
                         request_id: self.client.next_request_id(),
                         tabs_node_id: tabs.node_id,
                         title: title.unwrap_or_else(|| "tab".to_owned()),
-                        buffer_id: Some(buffer_id),
+                        buffer_id: Some(buffer.id()),
                         child_node_id: None,
                         index: u32::try_from(tabs.active.saturating_add(1)).map_err(|_| {
                             MuxError::invalid_input("tab index exceeds protocol limits")
                         })?,
                     }))
-                    .await?;
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "insert tab",
+                    result,
+                )
+                .await?;
                 self.client.resync_all_sessions().await
             }
             Action::InsertTabBefore {
@@ -763,37 +808,53 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let buffer_id = self
+                let buffer = self
                     .resolve_tree_buffer(session_id, presentation, child)
                     .await?;
-                self.client
+                let result = self
+                    .client
                     .request_message(ClientMessage::Node(NodeRequest::AddTab {
                         request_id: self.client.next_request_id(),
                         tabs_node_id: tabs.node_id,
                         title: title.unwrap_or_else(|| "tab".to_owned()),
-                        buffer_id: Some(buffer_id),
+                        buffer_id: Some(buffer.id()),
                         child_node_id: None,
                         index: u32::try_from(tabs.active).map_err(|_| {
                             MuxError::invalid_input("tab index exceeds protocol limits")
                         })?,
                     }))
-                    .await?;
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "insert tab",
+                    result,
+                )
+                .await?;
                 self.client.resync_all_sessions().await
             }
             Action::ReplaceNode { node_id, tree } => {
                 let node_id = node_id
                     .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
                     .ok_or_else(|| MuxError::invalid_input("no focused node to replace"))?;
-                let buffer_id = self
+                let buffer = self
                     .resolve_tree_buffer(session_id, presentation, tree)
                     .await?;
-                self.client
+                let result = self
+                    .client
                     .request_message(ClientMessage::Node(NodeRequest::MoveBufferToNode {
                         request_id: self.client.next_request_id(),
-                        buffer_id,
+                        buffer_id: buffer.id(),
                         target_leaf_node_id: node_id,
                     }))
-                    .await?;
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "replace node buffer",
+                    result,
+                )
+                .await?;
                 self.client.resync_all_sessions().await
             }
             Action::MoveBufferToNode { buffer_id, node_id } => {
@@ -845,22 +906,26 @@ where
         _session_id: SessionId,
         presentation: &PresentationModel,
         tree: TreeSpec,
-    ) -> Result<BufferId> {
+    ) -> Result<ResolvedTreeBuffer> {
         match tree {
             TreeSpec::BufferCurrent => presentation
                 .focused_buffer_id()
+                .map(ResolvedTreeBuffer::Existing)
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
-            TreeSpec::BufferAttach { buffer_id } => Ok(buffer_id),
-            TreeSpec::BufferSpawn(spec) => self.create_buffer(spec).await,
-            TreeSpec::BufferEmpty => {
-                self.create_buffer(crate::scripting::BufferSpawnSpec {
+            TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
+            TreeSpec::BufferSpawn(spec) => self
+                .create_buffer(spec)
+                .await
+                .map(ResolvedTreeBuffer::NewlySpawned),
+            TreeSpec::BufferEmpty => self
+                .create_buffer(crate::scripting::BufferSpawnSpec {
                     title: Some("shell".to_owned()),
                     command: default_shell_command(),
                     cwd: None,
                     env: Default::default(),
                 })
                 .await
-            }
+                .map(ResolvedTreeBuffer::NewlySpawned),
             other => Err(MuxError::invalid_input(format!(
                 "tree '{other:?}' is not supported by the live executor yet"
             ))),
@@ -884,6 +949,40 @@ where
             other => Err(MuxError::protocol(format!(
                 "expected buffer response, got {other:?}"
             ))),
+        }
+    }
+
+    async fn rollback_created_buffer(&mut self, buffer_id: BufferId, operation: &str) {
+        if let Err(error) = self
+            .client
+            .request_message(ClientMessage::Buffer(BufferRequest::Detach {
+                request_id: self.client.next_request_id(),
+                buffer_id,
+            }))
+            .await
+        {
+            warn!(
+                %buffer_id,
+                %error,
+                operation,
+                "failed to detach created buffer during rollback"
+            );
+        }
+        if let Err(error) = self
+            .client
+            .request_message(ClientMessage::Buffer(BufferRequest::Kill {
+                request_id: self.client.next_request_id(),
+                buffer_id,
+                force: true,
+            }))
+            .await
+        {
+            warn!(
+                %buffer_id,
+                %error,
+                operation,
+                "failed to kill created buffer during rollback"
+            );
         }
     }
 
@@ -1368,6 +1467,10 @@ where
             | KeyEvent::Down
             | KeyEvent::Left
             | KeyEvent::Right
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Insert
+            | KeyEvent::Delete
             | KeyEvent::PageUp
             | KeyEvent::PageDown => Ok(()),
         }
@@ -1980,7 +2083,7 @@ fn encode_mouse_event(leaf: &LeafFrame, event: MouseEvent) -> Result<Vec<u8>> {
             'M'
         }
         MouseEventKind::Release(button) => {
-            code |= mouse_button_code(button);
+            code |= button.map(mouse_button_code).unwrap_or(0b11);
             'm'
         }
         MouseEventKind::Drag(button) => {
@@ -2096,6 +2199,10 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Down => Ok(KeyToken::Down),
         KeyEvent::Left => Ok(KeyToken::Left),
         KeyEvent::Right => Ok(KeyToken::Right),
+        KeyEvent::Home => Ok(KeyToken::Home),
+        KeyEvent::End => Ok(KeyToken::End),
+        KeyEvent::Insert => Ok(KeyToken::Insert),
+        KeyEvent::Delete => Ok(KeyToken::Delete),
         KeyEvent::PageUp => Ok(KeyToken::PageUp),
         KeyEvent::PageDown => Ok(KeyToken::PageDown),
         KeyEvent::Bytes(_) => Err(MuxError::invalid_input("raw bytes are handled separately")),
@@ -2124,6 +2231,10 @@ fn sequence_to_bytes(sequence: &[KeyToken]) -> Result<Vec<u8>> {
             KeyToken::Down => bytes.extend_from_slice(b"\x1b[B"),
             KeyToken::Left => bytes.extend_from_slice(b"\x1b[D"),
             KeyToken::Right => bytes.extend_from_slice(b"\x1b[C"),
+            KeyToken::Home => bytes.extend_from_slice(b"\x1b[H"),
+            KeyToken::End => bytes.extend_from_slice(b"\x1b[F"),
+            KeyToken::Insert => bytes.extend_from_slice(b"\x1b[2~"),
+            KeyToken::Delete => bytes.extend_from_slice(b"\x1b[3~"),
             KeyToken::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
             KeyToken::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
             KeyToken::Leader => {
@@ -2141,6 +2252,28 @@ fn ctrl_byte(ch: char) -> Result<u8> {
         return Err(MuxError::invalid_input("control keys must be ASCII"));
     }
     Ok((ch.to_ascii_lowercase() as u8) & 0x1f)
+}
+
+async fn rollback_created_buffer_on_error<T, U>(
+    configured: &mut ConfiguredClient<U>,
+    buffer_id: Option<BufferId>,
+    operation: &str,
+    result: Result<T>,
+) -> Result<T>
+where
+    U: Transport,
+{
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            if let Some(buffer_id) = buffer_id {
+                configured
+                    .rollback_created_buffer(buffer_id, operation)
+                    .await;
+            }
+            Err(error)
+        }
+    }
 }
 
 fn event_name(event: &ServerEvent) -> &'static str {

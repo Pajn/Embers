@@ -443,7 +443,7 @@ fn split_rects(
         return Vec::new();
     }
 
-    let divider_count = child_count.saturating_sub(1) as u16;
+    let divider_count = u16::try_from(child_count.saturating_sub(1)).unwrap_or(u16::MAX);
     let available = match direction {
         SplitDirection::Horizontal => rect.size.height.saturating_sub(divider_count),
         SplitDirection::Vertical => rect.size.width.saturating_sub(divider_count),
@@ -579,27 +579,14 @@ fn inset_top(rect: Rect, amount: u16) -> Rect {
 }
 
 fn inset_border(rect: Rect) -> Rect {
-    if rect.size.width <= 2 || rect.size.height <= 2 {
-        return Rect {
-            origin: Point {
-                x: rect.origin.x + 1,
-                y: rect.origin.y + 1,
-            },
-            size: Size {
-                width: rect.size.width.saturating_sub(2),
-                height: rect.size.height.saturating_sub(2),
-            },
-        };
-    }
-
     Rect {
         origin: Point {
             x: rect.origin.x + 1,
             y: rect.origin.y + 1,
         },
         size: Size {
-            width: rect.size.width - 2,
-            height: rect.size.height - 2,
+            width: rect.size.width.saturating_sub(2),
+            height: rect.size.height.saturating_sub(2),
         },
     }
 }

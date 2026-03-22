@@ -1,4 +1,6 @@
 use std::convert::TryFrom;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use embers_core::{BufferId, FloatingId, NodeId, Rect, SplitDirection};
@@ -103,17 +105,35 @@ pub fn registration_scope() -> Scope<'static> {
 }
 
 pub fn normalize_actions(result: Dynamic) -> Result<Vec<Action>, String> {
-    if result.is_unit() {
-        return Ok(Vec::new());
-    }
-    if let Some(action) = result.clone().try_cast::<Action>() {
-        return Ok(vec![action]);
-    }
-    if let Some(actions) = result.try_cast::<Array>() {
-        return parse_action_array(actions).map_err(|error| error.to_string());
+    let actions = if result.is_unit() {
+        Vec::new()
+    } else if let Some(action) = result.clone().try_cast::<Action>() {
+        vec![action]
+    } else if let Some(actions) = result.try_cast::<Array>() {
+        parse_action_array(actions).map_err(|error| error.to_string())?
+    } else {
+        return Err("script must return Action, [Action], or ()".to_owned());
+    };
+
+    validate_live_actions(&actions)?;
+    Ok(actions)
+}
+
+fn validate_live_actions(actions: &[Action]) -> Result<(), String> {
+    for action in actions {
+        match action {
+            Action::ReplaceFloatingRoot { .. }
+            | Action::WrapNodeInSplit { .. }
+            | Action::WrapNodeInTabs { .. } => {
+                return Err(format!(
+                    "action '{action:?}' is not supported by the live executor"
+                ));
+            }
+            _ => {}
+        }
     }
 
-    Err("script must return Action, [Action], or ()".to_owned())
+    Ok(())
 }
 
 pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
@@ -1549,9 +1569,20 @@ fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path) {
         let candidate = entry.join(name);
-        if candidate.is_file() {
+        let metadata = candidate.metadata().ok()?;
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        if metadata.permissions().mode() & 0o111 == 0 {
+            continue;
+        }
+        #[cfg(not(unix))]
+        {
             return Some(candidate);
         }
+        #[cfg(unix)]
+        return Some(candidate);
     }
     None
 }
