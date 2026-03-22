@@ -45,7 +45,10 @@ fn create_string_vector<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     values: &[String],
 ) -> flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>> {
-    let strings: Vec<_> = values.iter().map(|value| builder.create_string(value)).collect();
+    let strings: Vec<_> = values
+        .iter()
+        .map(|value| builder.create_string(value))
+        .collect();
     builder.create_vector(&strings)
 }
 
@@ -472,6 +475,26 @@ fn encode_node_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &NodeRequest,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+    type EncodedNodeRequest<'a> = (
+        fb::NodeOp,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        Option<&'a str>,
+        u32,
+        u32,
+        fb::SplitDirectionWire,
+        Option<&'a Vec<u16>>,
+        Option<Vec<u64>>,
+        Option<Vec<String>>,
+        bool,
+    );
+
     let (
         op,
         session_id,
@@ -490,25 +513,7 @@ fn encode_node_request<'a>(
         child_node_ids_vec,
         titles_vec,
         insert_before,
-    ): (
-        fb::NodeOp,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        Option<&str>,
-        u32,
-        u32,
-        fb::SplitDirectionWire,
-        Option<&Vec<u16>>,
-        Option<Vec<u64>>,
-        Option<Vec<String>>,
-        bool,
-    ) = match req {
+    ): EncodedNodeRequest<'_> = match req {
         NodeRequest::GetTree { session_id, .. } => (
             fb::NodeOp::GetTree,
             (*session_id).into(),
@@ -874,7 +879,17 @@ fn encode_floating_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &FloatingRequest,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
-    let (op, floating_id, session_id, root_node_id, buffer_id, title_str, geom, focus, close_on_empty) = match req {
+    let (
+        op,
+        floating_id,
+        session_id,
+        root_node_id,
+        buffer_id,
+        title_str,
+        geom,
+        focus,
+        close_on_empty,
+    ) = match req {
         FloatingRequest::Create {
             session_id,
             root_node_id,
@@ -1289,7 +1304,10 @@ fn encode_server_response<'a>(
             let cwd = r.cwd.as_ref().map(|c| builder.create_string(c));
             let lines_vec: Vec<_> = r.lines.iter().map(|l| builder.create_string(l)).collect();
             let lines = builder.create_vector(&lines_vec);
-            let cursor = r.cursor.as_ref().map(|cursor| encode_cursor_state(builder, cursor));
+            let cursor = r
+                .cursor
+                .as_ref()
+                .map(|cursor| encode_cursor_state(builder, cursor));
             let snapshot = fb::VisibleSnapshotResponse::create(
                 builder,
                 &fb::VisibleSnapshotResponseArgs {
@@ -1778,11 +1796,8 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::BufferOp::Create => {
                     let command = required(req.command(), "buffer_request.command")?;
                     let command_vec: Vec<String> = command.iter().map(|s| s.to_owned()).collect();
-                    let env = decode_string_map(
-                        req.env_keys(),
-                        req.env_values(),
-                        "buffer_request.env",
-                    )?;
+                    let env =
+                        decode_string_map(req.env_keys(), req.env_values(), "buffer_request.env")?;
                     BufferRequest::Create {
                         request_id,
                         title: req.title().map(|t| t.to_owned()),
@@ -1858,13 +1873,11 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         fb::SplitDirectionWire::Vertical => SplitDirection::Vertical,
                         _ => return Err(ProtocolError::InvalidMessage("unknown split direction")),
                     };
-                    let child_node_ids = required(
-                        req.child_node_ids(),
-                        "node_request.child_node_ids",
-                    )?
-                    .iter()
-                    .map(NodeId)
-                    .collect();
+                    let child_node_ids =
+                        required(req.child_node_ids(), "node_request.child_node_ids")?
+                            .iter()
+                            .map(NodeId)
+                            .collect();
                     let sizes = req
                         .sizes()
                         .map(|sizes| sizes.iter().collect())
@@ -1878,13 +1891,11 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     }
                 }
                 fb::NodeOp::CreateTabs => {
-                    let child_node_ids = required(
-                        req.child_node_ids(),
-                        "node_request.child_node_ids",
-                    )?
-                    .iter()
-                    .map(NodeId)
-                    .collect();
+                    let child_node_ids =
+                        required(req.child_node_ids(), "node_request.child_node_ids")?
+                            .iter()
+                            .map(NodeId)
+                            .collect();
                     let titles = required(req.titles(), "node_request.titles")?
                         .iter()
                         .map(|title| title.to_owned())
@@ -2194,10 +2205,7 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
             )?;
             let lines = required(resp.lines(), "visible_snapshot_response.lines")?;
             let lines_vec: Vec<String> = lines.iter().map(|l| l.to_owned()).collect();
-            let cursor = resp
-                .cursor()
-                .map(decode_cursor_state)
-                .transpose()?;
+            let cursor = resp.cursor().map(decode_cursor_state).transpose()?;
             Ok(ServerEnvelope::Response(ServerResponse::VisibleSnapshot(
                 VisibleSnapshotResponse {
                     request_id: RequestId(envelope.request_id()),
@@ -2405,46 +2413,54 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
 }
 
 fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolError> {
-    let kind = match record.kind() {
-        fb::NodeRecordKindWire::BufferView => NodeRecordKind::BufferView,
-        fb::NodeRecordKindWire::Split => NodeRecordKind::Split,
-        fb::NodeRecordKindWire::Tabs => NodeRecordKind::Tabs,
-        _ => return Err(ProtocolError::InvalidMessage("unknown node kind")),
-    };
-
-    let buffer_view = record.buffer_view().map(|bv| BufferViewRecord {
-        buffer_id: BufferId(bv.buffer_id()),
-        focused: bv.focused(),
-        zoomed: bv.zoomed(),
-        follow_output: bv.follow_output(),
-        last_render_size: PtySize {
-            cols: bv.last_render_cols(),
-            rows: bv.last_render_rows(),
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-    });
-
-    let split = record.split().and_then(|split| {
-        let child_ids_fb = split.child_ids()?;
-        let child_ids: Vec<NodeId> = child_ids_fb.iter().map(NodeId).collect();
-        let sizes_fb = split.sizes()?;
-        let sizes: Vec<u16> = sizes_fb.iter().collect();
-        let direction = match split.direction() {
-            fb::SplitDirectionWire::Horizontal => SplitDirection::Horizontal,
-            fb::SplitDirectionWire::Vertical => SplitDirection::Vertical,
-            _ => return None,
-        };
-        Some(SplitRecord {
-            direction,
-            child_ids,
-            sizes,
-        })
-    });
-
-    let tabs = record
-        .tabs()
-        .map(|tabs| -> Result<TabsRecord, ProtocolError> {
+    let (kind, buffer_view, split, tabs) = match record.kind() {
+        fb::NodeRecordKindWire::BufferView => {
+            let buffer_view = required(record.buffer_view(), "node_record.buffer_view")?;
+            (
+                NodeRecordKind::BufferView,
+                Some(BufferViewRecord {
+                    buffer_id: BufferId(buffer_view.buffer_id()),
+                    focused: buffer_view.focused(),
+                    zoomed: buffer_view.zoomed(),
+                    follow_output: buffer_view.follow_output(),
+                    last_render_size: PtySize {
+                        cols: buffer_view.last_render_cols(),
+                        rows: buffer_view.last_render_rows(),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                }),
+                None,
+                None,
+            )
+        }
+        fb::NodeRecordKindWire::Split => {
+            let split = required(record.split(), "node_record.split")?;
+            let child_ids = required(split.child_ids(), "node_record.split.child_ids")?
+                .iter()
+                .map(NodeId)
+                .collect();
+            let sizes = required(split.sizes(), "node_record.split.sizes")?
+                .iter()
+                .collect();
+            let direction = match split.direction() {
+                fb::SplitDirectionWire::Horizontal => SplitDirection::Horizontal,
+                fb::SplitDirectionWire::Vertical => SplitDirection::Vertical,
+                _ => return Err(ProtocolError::InvalidMessage("node_record.split.direction")),
+            };
+            (
+                NodeRecordKind::Split,
+                None,
+                Some(SplitRecord {
+                    direction,
+                    child_ids,
+                    sizes,
+                }),
+                None,
+            )
+        }
+        fb::NodeRecordKindWire::Tabs => {
+            let tabs = required(record.tabs(), "node_record.tabs")?;
             let tabs_fb = required(tabs.tabs(), "node_record.tabs.tabs")?;
             let tabs_vec = tabs_fb
                 .iter()
@@ -2455,12 +2471,18 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
                     })
                 })
                 .collect::<Result<Vec<_>, ProtocolError>>()?;
-            Ok(TabsRecord {
-                active: tabs.active(),
-                tabs: tabs_vec,
-            })
-        })
-        .transpose()?;
+            (
+                NodeRecordKind::Tabs,
+                None,
+                None,
+                Some(TabsRecord {
+                    active: tabs.active(),
+                    tabs: tabs_vec,
+                }),
+            )
+        }
+        _ => return Err(ProtocolError::InvalidMessage("unknown node kind")),
+    };
 
     Ok(NodeRecord {
         id: NodeId(record.id()),
@@ -2543,5 +2565,100 @@ fn decode_error_code(code: fb::ErrorCodeWire) -> ErrorCode {
         fb::ErrorCodeWire::Timeout => ErrorCode::Timeout,
         fb::ErrorCodeWire::Internal => ErrorCode::Internal,
         _ => ErrorCode::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use flatbuffers::FlatBufferBuilder;
+
+    use super::*;
+
+    #[test]
+    fn decode_node_record_rejects_missing_buffer_view_payload() {
+        let mut builder = FlatBufferBuilder::new();
+        let node = fb::NodeRecord::create(
+            &mut builder,
+            &fb::NodeRecordArgs {
+                id: 1,
+                session_id: 1,
+                kind: fb::NodeRecordKindWire::BufferView,
+                ..Default::default()
+            },
+        );
+        builder.finish(node, None);
+
+        let record =
+            flatbuffers::root::<fb::NodeRecord>(builder.finished_data()).expect("node record root");
+        let error = decode_node_record(record).expect_err("missing payload should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessage("node_record.buffer_view")
+        ));
+    }
+
+    #[test]
+    fn decode_node_record_rejects_split_without_children() {
+        let mut builder = FlatBufferBuilder::new();
+        let split = fb::SplitRecord::create(
+            &mut builder,
+            &fb::SplitRecordArgs {
+                direction: fb::SplitDirectionWire::Vertical,
+                ..Default::default()
+            },
+        );
+        let node = fb::NodeRecord::create(
+            &mut builder,
+            &fb::NodeRecordArgs {
+                id: 2,
+                session_id: 1,
+                kind: fb::NodeRecordKindWire::Split,
+                split: Some(split),
+                ..Default::default()
+            },
+        );
+        builder.finish(node, None);
+
+        let record =
+            flatbuffers::root::<fb::NodeRecord>(builder.finished_data()).expect("node record root");
+        let error = decode_node_record(record).expect_err("missing child ids should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessage("node_record.split.child_ids")
+        ));
+    }
+
+    #[test]
+    fn decode_node_record_rejects_tabs_without_tab_entries() {
+        let mut builder = FlatBufferBuilder::new();
+        let tabs = fb::TabsRecord::create(
+            &mut builder,
+            &fb::TabsRecordArgs {
+                active: 0,
+                ..Default::default()
+            },
+        );
+        let node = fb::NodeRecord::create(
+            &mut builder,
+            &fb::NodeRecordArgs {
+                id: 3,
+                session_id: 1,
+                kind: fb::NodeRecordKindWire::Tabs,
+                tabs: Some(tabs),
+                ..Default::default()
+            },
+        );
+        builder.finish(node, None);
+
+        let record =
+            flatbuffers::root::<fb::NodeRecord>(builder.finished_data()).expect("node record root");
+        let error = decode_node_record(record).expect_err("missing tabs should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessage("node_record.tabs.tabs")
+        ));
     }
 }

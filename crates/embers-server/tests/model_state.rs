@@ -102,12 +102,16 @@ fn apply_random_op(state: &mut ServerState, session_id: SessionId, selector: u8,
             }
         }
         3 => {
-            if let Some(root) = root_tabs && tab_count > 0 {
+            if let Some(root) = root_tabs
+                && tab_count > 0
+            {
                 let _ = state.switch_tab(root, usize::from(arg) % tab_count);
             }
         }
         4 => {
-            if let Some(root) = root_tabs && tab_count > 0 {
+            if let Some(root) = root_tabs
+                && tab_count > 0
+            {
                 let _ = state.close_tab(root, usize::from(arg) % tab_count);
             }
         }
@@ -377,6 +381,133 @@ fn floating_ownership_validation_detects_parented_root() {
 
     let error = state.validate().expect_err("validation should fail");
     assert!(error.to_string().contains(&floating_id.to_string()));
+}
+
+#[test]
+fn create_buffer_view_rolls_back_when_attach_fails() {
+    let mut state = ServerState::new();
+    let (session_id, buffer_id, _) = seed_single_leaf_session(&mut state, "alpha");
+    let node_count = state.nodes.len();
+
+    let error = state
+        .create_buffer_view(session_id, buffer_id)
+        .expect_err("attached buffers cannot create a second view");
+
+    assert!(matches!(error, embers_core::MuxError::Conflict(_)));
+    assert_eq!(state.nodes.len(), node_count);
+    assert_eq!(
+        attached_view(&state, buffer_id),
+        root_tab_child(&state, session_id, 0)
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn focus_leaf_rejects_detached_leaves_without_mutating_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, detached_leaf) = new_leaf(&mut state, session_id, "detached");
+
+    let error = state
+        .focus_leaf(session_id, detached_leaf)
+        .expect_err("detached leaf should not be focusable");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+}
+
+#[test]
+fn focus_leaf_rejects_hidden_floating_leaves_without_mutating_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, floating_leaf) = new_leaf(&mut state, session_id, "popup");
+    let floating_id = state
+        .create_floating_window_with_options(
+            session_id,
+            floating_leaf,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("popup".to_owned()),
+            false,
+            true,
+        )
+        .expect("create floating window");
+    state
+        .floating
+        .get_mut(&floating_id)
+        .expect("floating exists")
+        .visible = false;
+
+    let error = state
+        .focus_leaf(session_id, floating_leaf)
+        .expect_err("hidden floating leaf should not be focusable");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_floating,
+        None
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn add_tab_from_buffer_rolls_back_when_hidden_floating_cannot_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (popup_buffer, popup_leaf) = new_leaf(&mut state, session_id, "popup");
+    let floating_id = state
+        .create_floating_window_with_options(
+            session_id,
+            popup_leaf,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("popup".to_owned()),
+            false,
+            true,
+        )
+        .expect("create floating window");
+    let tabs_id = state
+        .wrap_node_in_tabs(popup_leaf, "popup")
+        .expect("wrap popup leaf in tabs");
+    state
+        .floating
+        .get_mut(&floating_id)
+        .expect("floating exists")
+        .visible = false;
+
+    let added_buffer = new_buffer(&mut state, "extra");
+    let node_count = state.nodes.len();
+
+    let error = state
+        .add_tab_from_buffer(tabs_id, "extra", added_buffer)
+        .expect_err("hidden floating tabs should reject focus");
+
+    assert!(matches!(error, embers_core::MuxError::InvalidInput(_)));
+    assert_eq!(state.nodes.len(), node_count);
+    assert_eq!(
+        state
+            .buffer(added_buffer)
+            .expect("buffer exists")
+            .attachment,
+        BufferAttachment::Detached
+    );
+    assert_eq!(
+        state
+            .buffer(popup_buffer)
+            .expect("buffer exists")
+            .attachment,
+        BufferAttachment::Attached(popup_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    state.validate().expect("state remains valid");
 }
 
 #[test]

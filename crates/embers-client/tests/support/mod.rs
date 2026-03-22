@@ -17,6 +17,7 @@ pub const LEFT_LEAF_ID: NodeId = NodeId(21);
 pub const NESTED_TABS_ID: NodeId = NodeId(30);
 pub const HIDDEN_NESTED_LEAF_ID: NodeId = NodeId(31);
 pub const FOCUSED_LEAF_ID: NodeId = NodeId(32);
+pub const FOCUSED_BUFFER_ID: BufferId = BufferId(4);
 pub const FLOATING_ID: FloatingId = FloatingId(90);
 pub const FLOATING_SPLIT_ID: NodeId = NodeId(40);
 pub const FLOATING_TOP_LEAF_ID: NodeId = NodeId(41);
@@ -74,13 +75,7 @@ pub fn root_split_state() -> ClientState {
 
 fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnapshot {
     let (focused_floating_id, focused_leaf_id) = focused_floating
-        .map(|(floating_id, leaf_id)| {
-            if floating_id.0 == 0 {
-                (None, Some(leaf_id))
-            } else {
-                (Some(floating_id), Some(leaf_id))
-            }
-        })
+        .map(|(floating_id, leaf_id)| (Some(floating_id), Some(leaf_id)))
         .unwrap_or((None, Some(FOCUSED_LEAF_ID)));
 
     SessionSnapshot {
@@ -151,7 +146,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                 }),
             },
             buffer_view_node(HIDDEN_NESTED_LEAF_ID, Some(NESTED_TABS_ID), BufferId(3)),
-            buffer_view_node(FOCUSED_LEAF_ID, Some(NESTED_TABS_ID), BufferId(4)),
+            buffer_view_node(FOCUSED_LEAF_ID, Some(NESTED_TABS_ID), FOCUSED_BUFFER_ID),
             NodeRecord {
                 id: FLOATING_SPLIT_ID,
                 session_id: SESSION_ID,
@@ -253,7 +248,11 @@ fn root_split_snapshot() -> SessionSnapshot {
                 }),
                 tabs: None,
             },
-            buffer_view_node(ROOT_SPLIT_LEFT_LEAF_ID, Some(ROOT_ONLY_SPLIT_ID), BufferId(7)),
+            buffer_view_node(
+                ROOT_SPLIT_LEFT_LEAF_ID,
+                Some(ROOT_ONLY_SPLIT_ID),
+                BufferId(7),
+            ),
             buffer_view_node(
                 ROOT_SPLIT_RIGHT_LEAF_ID,
                 Some(ROOT_ONLY_SPLIT_ID),

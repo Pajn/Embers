@@ -358,10 +358,12 @@ fn render_search_overlay(
         let line = &lines[usize::from(relative_row)];
         overlay_display_range(
             grid,
-            x,
-            y.saturating_add(relative_row),
-            width,
-            line,
+            OverlayLine {
+                x,
+                y: y.saturating_add(relative_row),
+                width,
+                text: line,
+            },
             search_match.start_column,
             search_match.end_column,
             if index == active_index {
@@ -394,10 +396,12 @@ fn render_selection_overlay(
         };
         overlay_display_range(
             grid,
-            x,
-            y.saturating_add(row_u16),
-            width,
-            line,
+            OverlayLine {
+                x,
+                y: y.saturating_add(row_u16),
+                width,
+                text: line,
+            },
             start_column,
             end_column,
             selection_style(),
@@ -464,27 +468,31 @@ fn ordered_points(left: SelectionPoint, right: SelectionPoint) -> (SelectionPoin
     }
 }
 
-fn overlay_display_range(
-    grid: &mut RenderGrid,
+struct OverlayLine<'a> {
     x: u16,
     y: u16,
     width: u16,
-    line: &str,
+    text: &'a str,
+}
+
+fn overlay_display_range(
+    grid: &mut RenderGrid,
+    line: OverlayLine<'_>,
     start_column: u16,
     end_column: u16,
     style: CellStyle,
 ) {
-    if start_column >= end_column || width == 0 {
+    if start_column >= end_column || line.width == 0 {
         return;
     }
 
-    let visible_end = end_column.min(width);
+    let visible_end = end_column.min(line.width);
     let mut column = 0_u16;
-    for grapheme in UnicodeSegmentation::graphemes(line, true) {
+    for grapheme in UnicodeSegmentation::graphemes(line.text, true) {
         let grapheme_width = display_width(grapheme).max(1);
         let next_column = column.saturating_add(grapheme_width);
         if next_column > start_column && column < visible_end {
-            grid.put_str_styled(x.saturating_add(column), y, grapheme, style);
+            grid.put_str_styled(line.x.saturating_add(column), line.y, grapheme, style);
         }
         column = next_column;
         if column >= visible_end {
@@ -493,7 +501,7 @@ fn overlay_display_range(
     }
 
     for column in column.max(start_column)..visible_end {
-        grid.put_char_styled(x.saturating_add(column), y, ' ', style);
+        grid.put_char_styled(line.x.saturating_add(column), line.y, ' ', style);
     }
 }
 

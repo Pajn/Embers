@@ -23,7 +23,10 @@ fn projects_nested_tabs_in_split_and_tracks_focus_path() {
     )
     .expect("projection succeeds");
 
-    let root_tabs = presentation.root_tabs.as_ref().expect("root tabs are visible");
+    let root_tabs = presentation
+        .root_tabs
+        .as_ref()
+        .expect("root tabs are visible");
     assert_eq!(root_tabs.node_id, ROOT_TABS_ID);
     assert_eq!(root_tabs.tabs.len(), 2);
     assert_eq!(

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use embers_core::{BufferId, MuxError, Result, SessionId, new_request_id};
 use embers_protocol::{
-    BufferRequest, ClientMessage, PingRequest, ProtocolClient, ServerEnvelope, ServerEvent,
-    ScrollbackSliceResponse, ServerResponse, SessionRequest, SessionSnapshot, SnapshotResponse,
+    BufferRequest, ClientMessage, PingRequest, ProtocolClient, ScrollbackSliceResponse,
+    ServerEnvelope, ServerEvent, ServerResponse, SessionRequest, SessionSnapshot, SnapshotResponse,
     SubscribeRequest, UnsubscribeRequest, VisibleSnapshotResponse,
 };
 

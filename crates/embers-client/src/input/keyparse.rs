@@ -143,7 +143,7 @@ fn single_char_token(token: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_leader, parse_key_sequence, KeyParseError, KeyToken};
+    use super::{KeyParseError, KeyToken, expand_leader, parse_key_sequence};
 
     #[test]
     fn parses_plain_and_modified_keys() {

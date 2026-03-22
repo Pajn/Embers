@@ -229,7 +229,7 @@ fn session_has_root_window(
             MuxError::not_found(format!("node {} is not cached", session.root_node_id))
         })?;
     let tabs = root.tabs.as_ref();
-    Ok(tabs.map_or(true, |tabs| !tabs.tabs.is_empty()))
+    Ok(tabs.is_none_or(|tabs| !tabs.tabs.is_empty()))
 }
 
 async fn create_buffer(

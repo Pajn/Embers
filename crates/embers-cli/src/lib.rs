@@ -19,6 +19,7 @@ use embers_protocol::{
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
+use tracing::warn;
 
 #[derive(Debug, Parser)]
 #[command(name = "embers", about = "headless terminal multiplexer for embers")]
@@ -261,8 +262,21 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     buffer_id: Some(buffer.buffer.id),
                     child_node_id: None,
                 }))
-                .await?;
-            let snapshot = expect_session_snapshot(response, "new-window")?;
+                .await;
+            let response = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "new-window",
+                response,
+            )
+            .await?;
+            let snapshot = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "new-window",
+                expect_session_snapshot(response, "new-window"),
+            )
+            .await?;
             let (index, title) = active_root_window(&snapshot)?;
             Ok(format!("{index}\t{title}"))
         }
@@ -329,8 +343,21 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     direction,
                     new_buffer_id: buffer.buffer.id,
                 }))
-                .await?;
-            let snapshot = expect_session_snapshot(response, "split-window")?;
+                .await;
+            let response = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "split-window",
+                response,
+            )
+            .await?;
+            let snapshot = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "split-window",
+                expect_session_snapshot(response, "split-window"),
+            )
+            .await?;
             let focused_leaf = snapshot.session.focused_leaf_id.ok_or_else(|| {
                 MuxError::protocol("split-window response did not include focused leaf")
             })?;
@@ -450,8 +477,21 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     focus: true,
                     close_on_empty: true,
                 }))
-                .await?;
-            let popup = expect_floating(response, "display-popup")?;
+                .await;
+            let response = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "display-popup",
+                response,
+            )
+            .await?;
+            let popup = rollback_created_buffer_on_error(
+                &mut connection,
+                buffer.buffer.id,
+                "display-popup",
+                expect_floating(response, "display-popup"),
+            )
+            .await?;
             Ok(popup.id.to_string())
         }
         Command::KillPopup { target } => {
@@ -486,6 +526,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Command::Serve) => run_server(socket).await,
         Some(command) => {
+            ensure_server_process(&socket).await?;
             let output = execute(&socket, command).await?;
             if !output.is_empty() {
                 println!("{output}");
@@ -760,6 +801,38 @@ impl CliConnection {
         }
     }
 
+    async fn rollback_created_buffer(&mut self, buffer_id: BufferId, operation: &str) {
+        if let Err(error) = self
+            .request(ClientMessage::Buffer(BufferRequest::Detach {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await
+        {
+            warn!(
+                %buffer_id,
+                %error,
+                operation,
+                "failed to detach created buffer during rollback"
+            );
+        }
+        if let Err(error) = self
+            .request(ClientMessage::Buffer(BufferRequest::Kill {
+                request_id: new_request_id(),
+                buffer_id,
+                force: true,
+            }))
+            .await
+        {
+            warn!(
+                %buffer_id,
+                %error,
+                operation,
+                "failed to kill created buffer during rollback"
+            );
+        }
+    }
+
     async fn resolve_session_record(&mut self, target: Option<&str>) -> Result<SessionRecord> {
         let sessions = self.list_sessions().await?;
         match target {
@@ -875,6 +948,23 @@ impl CliConnection {
         }
 
         Err(MuxError::not_found(format!("pane {pane_id} was not found")))
+    }
+}
+
+async fn rollback_created_buffer_on_error<T>(
+    connection: &mut CliConnection,
+    buffer_id: BufferId,
+    operation: &str,
+    result: Result<T>,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            connection
+                .rollback_created_buffer(buffer_id, operation)
+                .await;
+            Err(error)
+        }
     }
 }
 
