@@ -226,6 +226,13 @@ fn buffer_detach_focus_and_invalidation_events_update_cache() {
             .and_then(|session| session.focused_leaf_id),
         Some(NodeId(24))
     );
+    assert_eq!(
+        state
+            .floating
+            .get(&embers_core::FloatingId(90))
+            .map(|floating| floating.focused),
+        Some(true)
+    );
     assert!(state.invalidated_buffers.contains(&BufferId(5)));
 }
 

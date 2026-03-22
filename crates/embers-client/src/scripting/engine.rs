@@ -712,6 +712,13 @@ fn define_mode_impl(
         parse_optional_function_ref(options.remove("on_enter"), "mode on_enter", position)?;
     let on_leave =
         parse_optional_function_ref(options.remove("on_leave"), "mode on_leave", position)?;
+    if !options.is_empty() {
+        let unknown = options.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(runtime_error(
+            format!("unknown mode option(s): {unknown}"),
+            position,
+        ));
+    }
 
     let mut registration = registration.lock().expect("registration lock");
     if registration.custom_modes.contains_key(mode_name.as_str()) {

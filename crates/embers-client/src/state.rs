@@ -204,6 +204,11 @@ impl ClientState {
                 if let Some(session) = self.sessions.get_mut(&event.session_id) {
                     session.focused_leaf_id = event.focused_leaf_id;
                     session.focused_floating_id = event.focused_floating_id;
+                    for floating_id in &session.floating_ids {
+                        if let Some(floating) = self.floating.get_mut(floating_id) {
+                            floating.focused = Some(*floating_id) == event.focused_floating_id;
+                        }
+                    }
                 }
             }
             ServerEvent::RenderInvalidated(event) => {

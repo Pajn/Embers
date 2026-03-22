@@ -22,21 +22,30 @@ pub struct Context {
 
 impl Context {
     pub fn from_state(state: &ClientState, presentation: Option<&PresentationModel>) -> Self {
-        Self::from_state_with_mode(state, presentation, NORMAL_MODE)
+        Self::from_state_with_mode(state, presentation, NORMAL_MODE, None, None, None, None)
     }
 
     pub fn from_state_with_mode(
         state: &ClientState,
         presentation: Option<&PresentationModel>,
         current_mode: impl Into<String>,
+        current_session_id: Option<SessionId>,
+        current_node_id: Option<NodeId>,
+        current_buffer_id: Option<BufferId>,
+        current_floating_id: Option<FloatingId>,
     ) -> Self {
         let current_mode = current_mode.into();
-        let current_session_id = presentation.map(|presentation| presentation.session_id);
-        let current_node_id = presentation
-            .and_then(|presentation| presentation.focused_leaf())
-            .map(|leaf| leaf.node_id);
-        let current_buffer_id = presentation.and_then(PresentationModel::focused_buffer_id);
-        let current_floating_id = presentation.and_then(PresentationModel::focused_floating_id);
+        let current_session_id =
+            current_session_id.or_else(|| presentation.map(|presentation| presentation.session_id));
+        let current_node_id = current_node_id.or_else(|| {
+            presentation
+                .and_then(|presentation| presentation.focused_leaf())
+                .map(|leaf| leaf.node_id)
+        });
+        let current_buffer_id = current_buffer_id
+            .or_else(|| presentation.and_then(PresentationModel::focused_buffer_id));
+        let current_floating_id = current_floating_id
+            .or_else(|| presentation.and_then(PresentationModel::focused_floating_id));
 
         let visible_buffer_ids = presentation
             .map(|presentation| {

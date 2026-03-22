@@ -31,6 +31,7 @@ use crate::state::{SearchMatch, SearchState, SelectionKind, SelectionPoint, Sele
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
+const MAX_EXPANDED_ACTIONS: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
@@ -401,12 +402,12 @@ where
         actions: Vec<Action>,
     ) -> Result<()> {
         let mut pending = VecDeque::from(actions);
+        let mut expansions = 0usize;
         while let Some(action) = pending.pop_front() {
             let result = match action {
                 Action::Noop => Ok(()),
                 Action::Chain(actions) => {
-                    prepend_actions(&mut pending, actions);
-                    Ok(())
+                    prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::RunNamedAction { name } => {
                     match self
@@ -415,23 +416,20 @@ where
                         .run_named_action(&name, self.context_for(session_id, viewport, None))
                     {
                         Ok(actions) => {
-                            prepend_actions(&mut pending, actions);
-                            Ok(())
+                            prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                         }
                         Err(error) => Err(MuxError::invalid_input(error.to_string())),
                     }
                 }
                 Action::EnterMode { mode } => {
                     let actions = self.transition_mode(mode, session_id, viewport).await?;
-                    prepend_actions(&mut pending, actions);
-                    Ok(())
+                    prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::LeaveMode => {
                     let actions = self
                         .transition_mode(NORMAL_MODE.to_owned(), session_id, viewport)
                         .await?;
-                    prepend_actions(&mut pending, actions);
-                    Ok(())
+                    prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::ToggleMode { mode } => {
                     let next_mode = if self.input_state.current_mode() == mode {
@@ -442,8 +440,7 @@ where
                     let actions = self
                         .transition_mode(next_mode, session_id, viewport)
                         .await?;
-                    prepend_actions(&mut pending, actions);
-                    Ok(())
+                    prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::ClearPendingKeys => {
                     self.input_state.clear_pending();
@@ -1016,12 +1013,20 @@ where
                 self.client.state(),
                 Some(&presentation),
                 self.input_state.current_mode(),
+                None,
+                None,
+                None,
+                None,
             )
         } else {
             Context::from_state_with_mode(
                 self.client.state(),
                 None,
                 self.input_state.current_mode(),
+                session_id,
+                None,
+                None,
+                None,
             )
         };
         if let Some(event) = event {
@@ -2010,6 +2015,19 @@ fn prepend_actions(pending: &mut VecDeque<Action>, actions: Vec<Action>) {
     for action in actions.into_iter().rev() {
         pending.push_front(action);
     }
+}
+
+fn prepend_actions_with_limit(
+    pending: &mut VecDeque<Action>,
+    actions: Vec<Action>,
+    expansions: &mut usize,
+) -> Result<()> {
+    *expansions = expansions.saturating_add(actions.len());
+    if *expansions > MAX_EXPANDED_ACTIONS {
+        return Err(MuxError::invalid_input("action expansion limit reached"));
+    }
+    prepend_actions(pending, actions);
+    Ok(())
 }
 
 fn format_notification(level: NotifyLevel, message: &str) -> String {

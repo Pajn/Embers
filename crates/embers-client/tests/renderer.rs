@@ -94,6 +94,7 @@ fn renderer_emits_styles_and_tracks_cursor_position() {
         grid.cursor(),
         Some(embers_client::GridCursor {
             x: focused_leaf.rect.origin.x as u16 + 3,
+            // +1 for the tab/header row above the leaf and +1 for the cursor's row within it.
             y: focused_leaf.rect.origin.y as u16 + 1 + 1,
             shape: CursorShape::Beam,
         })
