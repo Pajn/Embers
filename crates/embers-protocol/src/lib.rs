@@ -25,7 +25,8 @@ pub use framing::{
 };
 pub use types::{
     BufferCreatedEvent, BufferDetachedEvent, BufferRecord, BufferRecordState, BufferRequest,
-    BufferResponse, BufferViewRecord, BuffersResponse, ClientMessage, ErrorResponse,
+    BufferResponse, BufferViewRecord, BuffersResponse, ClientChangedEvent, ClientMessage,
+    ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
     FloatingChangedEvent, FloatingListResponse, FloatingRecord, FloatingRequest, FloatingResponse,
     FocusChangedEvent, InputRequest, NodeChangedEvent, NodeRecord, NodeRecordKind, NodeRequest,
     OkResponse, PingRequest, PingResponse, RenderInvalidatedEvent, ScrollbackSliceResponse,

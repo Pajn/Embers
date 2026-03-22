@@ -11,7 +11,7 @@ fn current_buffer(mux: MuxApi) -> ?
 
 <div>
 <div class="tab">
-<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active" 
+<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'current_buffer', 'Description')">
 Description
 </button>
@@ -35,7 +35,7 @@ fn current_floating(mux: MuxApi) -> ?
 
 <div>
 <div class="tab">
-<button group="current_floating" id="link-current_floating-Description"  class="tablinks active" 
+<button group="current_floating" id="link-current_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'current_floating', 'Description')">
 Description
 </button>
@@ -59,7 +59,7 @@ fn current_node(mux: MuxApi) -> ?
 
 <div>
 <div class="tab">
-<button group="current_node" id="link-current_node-Description"  class="tablinks active" 
+<button group="current_node" id="link-current_node-Description"  class="tablinks active"
     onclick="openTab(event, 'current_node', 'Description')">
 Description
 </button>
@@ -83,7 +83,7 @@ fn current_session(mux: MuxApi) -> ?
 
 <div>
 <div class="tab">
-<button group="current_session" id="link-current_session-Description"  class="tablinks active" 
+<button group="current_session" id="link-current_session-Description"  class="tablinks active"
     onclick="openTab(event, 'current_session', 'Description')">
 Description
 </button>
@@ -107,7 +107,7 @@ fn detached_buffers(mux: MuxApi) -> Array
 
 <div>
 <div class="tab">
-<button group="detached_buffers" id="link-detached_buffers-Description"  class="tablinks active" 
+<button group="detached_buffers" id="link-detached_buffers-Description"  class="tablinks active"
     onclick="openTab(event, 'detached_buffers', 'Description')">
 Description
 </button>
@@ -129,7 +129,7 @@ fn find_buffer(mux: MuxApi, buffer_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_buffer" id="link-find_buffer-Description"  class="tablinks active" 
+<button group="find_buffer" id="link-find_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'find_buffer', 'Description')">
 Description
 </button>
@@ -153,7 +153,7 @@ fn find_floating(mux: MuxApi, floating_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_floating" id="link-find_floating-Description"  class="tablinks active" 
+<button group="find_floating" id="link-find_floating-Description"  class="tablinks active"
     onclick="openTab(event, 'find_floating', 'Description')">
 Description
 </button>
@@ -177,7 +177,7 @@ fn find_node(mux: MuxApi, node_id: int) -> ?
 
 <div>
 <div class="tab">
-<button group="find_node" id="link-find_node-Description"  class="tablinks active" 
+<button group="find_node" id="link-find_node-Description"  class="tablinks active"
     onclick="openTab(event, 'find_node', 'Description')">
 Description
 </button>
@@ -201,7 +201,7 @@ fn sessions(mux: MuxApi) -> Array
 
 <div>
 <div class="tab">
-<button group="sessions" id="link-sessions-Description"  class="tablinks active" 
+<button group="sessions" id="link-sessions-Description"  class="tablinks active"
     onclick="openTab(event, 'sessions', 'Description')">
 Description
 </button>
@@ -223,7 +223,7 @@ fn visible_buffers(mux: MuxApi) -> Array
 
 <div>
 <div class="tab">
-<button group="visible_buffers" id="link-visible_buffers-Description"  class="tablinks active" 
+<button group="visible_buffers" id="link-visible_buffers-Description"  class="tablinks active"
     onclick="openTab(event, 'visible_buffers', 'Description')">
 Description
 </button>

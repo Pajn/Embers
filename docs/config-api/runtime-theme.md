@@ -11,7 +11,7 @@ fn color(theme: ThemeRuntimeApi, name: String) -> ?
 
 <div>
 <div class="tab">
-<button group="color" id="link-color-Description"  class="tablinks active" 
+<button group="color" id="link-color-Description"  class="tablinks active"
     onclick="openTab(event, 'color', 'Description')">
 Description
 </button>

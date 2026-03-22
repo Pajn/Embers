@@ -11,7 +11,7 @@ fn env(_: SystemApi, name: String) -> ?
 
 <div>
 <div class="tab">
-<button group="env" id="link-env-Description"  class="tablinks active" 
+<button group="env" id="link-env-Description"  class="tablinks active"
     onclick="openTab(event, 'env', 'Description')">
 Description
 </button>
@@ -35,7 +35,7 @@ fn now(_: SystemApi) -> int
 
 <div>
 <div class="tab">
-<button group="now" id="link-now-Description"  class="tablinks active" 
+<button group="now" id="link-now-Description"  class="tablinks active"
     onclick="openTab(event, 'now', 'Description')">
 Description
 </button>
@@ -57,7 +57,7 @@ fn which(_: SystemApi, name: String) -> ?
 
 <div>
 <div class="tab">
-<button group="which" id="link-which-Description"  class="tablinks active" 
+<button group="which" id="link-which-Description"  class="tablinks active"
     onclick="openTab(event, 'which', 'Description')">
 Description
 </button>

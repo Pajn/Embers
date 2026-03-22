@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
@@ -311,6 +312,37 @@ pub struct UnsubscribeRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientRequest {
+    List {
+        request_id: RequestId,
+    },
+    Get {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+    },
+    Detach {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+    },
+    Switch {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+        session_id: SessionId,
+    },
+}
+
+impl ClientRequest {
+    pub fn request_id(&self) -> RequestId {
+        match self {
+            Self::List { request_id }
+            | Self::Get { request_id, .. }
+            | Self::Detach { request_id, .. }
+            | Self::Switch { request_id, .. } => *request_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
     Ping(PingRequest),
     Session(SessionRequest),
@@ -320,6 +352,7 @@ pub enum ClientMessage {
     Input(InputRequest),
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
+    Client(ClientRequest),
 }
 
 impl ClientMessage {
@@ -333,6 +366,7 @@ impl ClientMessage {
             Self::Input(request) => request.request_id(),
             Self::Subscribe(request) => request.request_id,
             Self::Unsubscribe(request) => request.request_id,
+            Self::Client(request) => request.request_id(),
         }
     }
 }
@@ -430,6 +464,14 @@ pub struct FloatingRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientRecord {
+    pub id: u64,
+    pub current_session_id: Option<SessionId>,
+    pub subscribed_all_sessions: bool,
+    pub subscribed_session_ids: Vec<SessionId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub session: SessionRecord,
     pub nodes: Vec<NodeRecord>,
@@ -491,6 +533,18 @@ pub struct SubscriptionAckResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientsResponse {
+    pub request_id: RequestId,
+    pub clients: Vec<ClientRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientResponse {
+    pub request_id: RequestId,
+    pub client: ClientRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotResponse {
     pub request_id: RequestId,
     pub buffer_id: BufferId,
@@ -540,6 +594,8 @@ pub enum ServerResponse {
     FloatingList(FloatingListResponse),
     Floating(FloatingResponse),
     SubscriptionAck(SubscriptionAckResponse),
+    Clients(ClientsResponse),
+    Client(ClientResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -558,6 +614,8 @@ impl ServerResponse {
             Self::FloatingList(response) => Some(response.request_id),
             Self::Floating(response) => Some(response.request_id),
             Self::SubscriptionAck(response) => Some(response.request_id),
+            Self::Clients(response) => Some(response.request_id),
+            Self::Client(response) => Some(response.request_id),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),
@@ -615,6 +673,12 @@ pub struct SessionRenamedEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientChangedEvent {
+    pub client: ClientRecord,
+    pub previous_session_id: Option<SessionId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerEvent {
     SessionCreated(SessionCreatedEvent),
     SessionClosed(SessionClosedEvent),
@@ -625,6 +689,7 @@ pub enum ServerEvent {
     FloatingChanged(FloatingChangedEvent),
     FocusChanged(FocusChangedEvent),
     RenderInvalidated(RenderInvalidatedEvent),
+    ClientChanged(ClientChangedEvent),
 }
 
 impl ServerEvent {
@@ -639,6 +704,23 @@ impl ServerEvent {
             Self::FloatingChanged(event) => Some(event.session_id),
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
+            Self::ClientChanged(event) => event.client.current_session_id,
+        }
+    }
+
+    pub fn all_session_ids(&self) -> Vec<SessionId> {
+        match self {
+            Self::ClientChanged(event) => {
+                let mut ids = Vec::new();
+                if let Some(prev) = event.previous_session_id {
+                    ids.push(prev);
+                }
+                if let Some(curr) = event.client.current_session_id {
+                    ids.push(curr);
+                }
+                ids
+            }
+            _ => self.session_id().into_iter().collect(),
         }
     }
 }

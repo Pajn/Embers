@@ -11,7 +11,7 @@ fn set_palette(theme: ThemeApi, palette: Map)
 
 <div>
 <div class="tab">
-<button group="set_palette" id="link-set_palette-Description"  class="tablinks active" 
+<button group="set_palette" id="link-set_palette-Description"  class="tablinks active"
     onclick="openTab(event, 'set_palette', 'Description')">
 Description
 </button>

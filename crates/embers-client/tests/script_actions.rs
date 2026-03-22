@@ -363,6 +363,8 @@ fn event_handlers_can_inspect_visibility_and_session_relationships() {
                 demo_context().with_event(EventInfo {
                     name: "buffer_bell".to_owned(),
                     session_id: Some(SESSION_ID),
+                    previous_session_id: None,
+                    client_id: None,
                     buffer_id: Some(BufferId(4)),
                     node_id: None,
                     floating_id: Some(FloatingId(90)),

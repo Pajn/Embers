@@ -11,7 +11,7 @@ fn geometry(floating: FloatingRef) -> Map
 
 <div>
 <div class="tab">
-<button group="geometry" id="link-geometry-Description"  class="tablinks active" 
+<button group="geometry" id="link-geometry-Description"  class="tablinks active"
     onclick="openTab(event, 'geometry', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn id(floating: FloatingRef) -> int
 
 <div>
 <div class="tab">
-<button group="id" id="link-id-Description"  class="tablinks active" 
+<button group="id" id="link-id-Description"  class="tablinks active"
     onclick="openTab(event, 'id', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn is_focused(floating: FloatingRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_focused" id="link-is_focused-Description"  class="tablinks active" 
+<button group="is_focused" id="link-is_focused-Description"  class="tablinks active"
     onclick="openTab(event, 'is_focused', 'Description')">
 Description
 </button>
@@ -77,7 +77,7 @@ fn is_visible(floating: FloatingRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_visible" id="link-is_visible-Description"  class="tablinks active" 
+<button group="is_visible" id="link-is_visible-Description"  class="tablinks active"
     onclick="openTab(event, 'is_visible', 'Description')">
 Description
 </button>
@@ -99,7 +99,7 @@ fn root_node(floating: FloatingRef) -> int
 
 <div>
 <div class="tab">
-<button group="root_node" id="link-root_node-Description"  class="tablinks active" 
+<button group="root_node" id="link-root_node-Description"  class="tablinks active"
     onclick="openTab(event, 'root_node', 'Description')">
 Description
 </button>
@@ -121,7 +121,7 @@ fn session_id(floating: FloatingRef) -> int
 
 <div>
 <div class="tab">
-<button group="session_id" id="link-session_id-Description"  class="tablinks active" 
+<button group="session_id" id="link-session_id-Description"  class="tablinks active"
     onclick="openTab(event, 'session_id', 'Description')">
 Description
 </button>
@@ -143,7 +143,7 @@ fn title(floating: FloatingRef) -> ?
 
 <div>
 <div class="tab">
-<button group="title" id="link-title-Description"  class="tablinks active" 
+<button group="title" id="link-title-Description"  class="tablinks active"
     onclick="openTab(event, 'title', 'Description')">
 Description
 </button>

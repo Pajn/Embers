@@ -11,7 +11,7 @@ fn active_tab_index(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="active_tab_index" id="link-active_tab_index-Description"  class="tablinks active" 
+<button group="active_tab_index" id="link-active_tab_index-Description"  class="tablinks active"
     onclick="openTab(event, 'active_tab_index', 'Description')">
 Description
 </button>
@@ -35,7 +35,7 @@ fn buffer(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="buffer" id="link-buffer-Description"  class="tablinks active" 
+<button group="buffer" id="link-buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer', 'Description')">
 Description
 </button>
@@ -59,7 +59,7 @@ fn children(node: NodeRef) -> Array
 
 <div>
 <div class="tab">
-<button group="children" id="link-children-Description"  class="tablinks active" 
+<button group="children" id="link-children-Description"  class="tablinks active"
     onclick="openTab(event, 'children', 'Description')">
 Description
 </button>
@@ -81,7 +81,7 @@ fn geometry(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="geometry" id="link-geometry-Description"  class="tablinks active" 
+<button group="geometry" id="link-geometry-Description"  class="tablinks active"
     onclick="openTab(event, 'geometry', 'Description')">
 Description
 </button>
@@ -105,7 +105,7 @@ fn id(node: NodeRef) -> int
 
 <div>
 <div class="tab">
-<button group="id" id="link-id-Description"  class="tablinks active" 
+<button group="id" id="link-id-Description"  class="tablinks active"
     onclick="openTab(event, 'id', 'Description')">
 Description
 </button>
@@ -127,7 +127,7 @@ fn is_floating_root(node: NodeRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_floating_root" id="link-is_floating_root-Description"  class="tablinks active" 
+<button group="is_floating_root" id="link-is_floating_root-Description"  class="tablinks active"
     onclick="openTab(event, 'is_floating_root', 'Description')">
 Description
 </button>
@@ -149,7 +149,7 @@ fn is_focused(node: NodeRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_focused" id="link-is_focused-Description"  class="tablinks active" 
+<button group="is_focused" id="link-is_focused-Description"  class="tablinks active"
     onclick="openTab(event, 'is_focused', 'Description')">
 Description
 </button>
@@ -171,7 +171,7 @@ fn is_root(node: NodeRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_root" id="link-is_root-Description"  class="tablinks active" 
+<button group="is_root" id="link-is_root-Description"  class="tablinks active"
     onclick="openTab(event, 'is_root', 'Description')">
 Description
 </button>
@@ -193,7 +193,7 @@ fn is_visible(node: NodeRef) -> bool
 
 <div>
 <div class="tab">
-<button group="is_visible" id="link-is_visible-Description"  class="tablinks active" 
+<button group="is_visible" id="link-is_visible-Description"  class="tablinks active"
     onclick="openTab(event, 'is_visible', 'Description')">
 Description
 </button>
@@ -215,7 +215,7 @@ fn kind(node: NodeRef) -> String
 
 <div>
 <div class="tab">
-<button group="kind" id="link-kind-Description"  class="tablinks active" 
+<button group="kind" id="link-kind-Description"  class="tablinks active"
     onclick="openTab(event, 'kind', 'Description')">
 Description
 </button>
@@ -237,7 +237,7 @@ fn parent(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="parent" id="link-parent-Description"  class="tablinks active" 
+<button group="parent" id="link-parent-Description"  class="tablinks active"
     onclick="openTab(event, 'parent', 'Description')">
 Description
 </button>
@@ -261,7 +261,7 @@ fn session_id(node: NodeRef) -> int
 
 <div>
 <div class="tab">
-<button group="session_id" id="link-session_id-Description"  class="tablinks active" 
+<button group="session_id" id="link-session_id-Description"  class="tablinks active"
     onclick="openTab(event, 'session_id', 'Description')">
 Description
 </button>
@@ -283,7 +283,7 @@ fn split_direction(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="split_direction" id="link-split_direction-Description"  class="tablinks active" 
+<button group="split_direction" id="link-split_direction-Description"  class="tablinks active"
     onclick="openTab(event, 'split_direction', 'Description')">
 Description
 </button>
@@ -307,7 +307,7 @@ fn split_weights(node: NodeRef) -> ?
 
 <div>
 <div class="tab">
-<button group="split_weights" id="link-split_weights-Description"  class="tablinks active" 
+<button group="split_weights" id="link-split_weights-Description"  class="tablinks active"
     onclick="openTab(event, 'split_weights', 'Description')">
 Description
 </button>
@@ -331,7 +331,7 @@ fn tab_titles(node: NodeRef) -> Array
 
 <div>
 <div class="tab">
-<button group="tab_titles" id="link-tab_titles-Description"  class="tablinks active" 
+<button group="tab_titles" id="link-tab_titles-Description"  class="tablinks active"
     onclick="openTab(event, 'tab_titles', 'Description')">
 Description
 </button>

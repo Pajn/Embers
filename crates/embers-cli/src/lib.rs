@@ -2,6 +2,7 @@ mod interactive;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroU64;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -13,9 +14,9 @@ use embers_core::{
     new_request_id,
 };
 use embers_protocol::{
-    BufferRequest, BufferResponse, ClientMessage, FloatingRecord, FloatingRequest,
-    FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SnapshotResponse,
+    BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord,
+    FloatingRequest, FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse,
+    SessionRecord, SessionRequest, SessionSnapshot, SnapshotResponse,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -110,6 +111,16 @@ pub enum Command {
         buffer_id: u64,
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+    },
+    #[command(name = "list-clients")]
+    ListClients,
+    #[command(name = "detach-client")]
+    DetachClient { client_id: u64 },
+    #[command(name = "switch-client")]
+    SwitchClient {
+        client_id: u64,
+        #[arg(short = 't', long = "target")]
+        target: String,
     },
     #[command(name = "new-window")]
     NewWindow {
@@ -310,6 +321,40 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 .await?;
             expect_session_snapshot(response, "attach-buffer")?;
             Ok(String::new())
+        }
+        Command::ListClients => {
+            let sessions = connection.list_sessions().await?;
+            let clients = connection.list_clients().await?;
+            Ok(format_clients(&clients, &sessions))
+        }
+        Command::DetachClient { client_id } => {
+            let client_id = NonZeroU64::new(client_id)
+                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            connection
+                .request(ClientMessage::Client(ClientRequest::Detach {
+                    request_id: new_request_id(),
+                    client_id: Some(client_id),
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::SwitchClient { client_id, target } => {
+            let client_id = NonZeroU64::new(client_id)
+                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let session = connection.resolve_session_record(Some(&target)).await?;
+            match connection
+                .request(ClientMessage::Client(ClientRequest::Switch {
+                    request_id: new_request_id(),
+                    client_id: Some(client_id),
+                    session_id: session.id,
+                }))
+                .await?
+            {
+                ServerResponse::Client(_) => Ok(String::new()),
+                other => Err(MuxError::protocol(format!(
+                    "unexpected response to switch-client: {other:?}"
+                ))),
+            }
         }
         Command::NewWindow {
             target,
@@ -922,6 +967,20 @@ impl CliConnection {
         }
     }
 
+    async fn list_clients(&mut self) -> Result<Vec<ClientRecord>> {
+        match self
+            .request(ClientMessage::Client(ClientRequest::List {
+                request_id: new_request_id(),
+            }))
+            .await?
+        {
+            ServerResponse::Clients(response) => Ok(response.clients),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to list-clients: {other:?}"
+            ))),
+        }
+    }
+
     async fn session_snapshot(&mut self, session_id: SessionId) -> Result<SessionSnapshot> {
         match self
             .request(ClientMessage::Session(SessionRequest::Get {
@@ -1208,6 +1267,40 @@ fn format_buffers(buffers: &[embers_protocol::BufferRecord]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_clients(clients: &[ClientRecord], sessions: &[SessionRecord]) -> String {
+    clients
+        .iter()
+        .map(|client| {
+            let current = client
+                .current_session_id
+                .map(|session_id| session_label(sessions, session_id))
+                .unwrap_or_else(|| "-".to_owned());
+            let scope = if client.subscribed_all_sessions {
+                "all".to_owned()
+            } else if client.subscribed_session_ids.is_empty() {
+                "-".to_owned()
+            } else {
+                client
+                    .subscribed_session_ids
+                    .iter()
+                    .map(|session_id| session_label(sessions, *session_id))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            format!("{}\t{}\t{}", client.id, current, scope)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
+    sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .map(|session| format!("{}:{}", session.id, session.name))
+        .unwrap_or_else(|| session_id.to_string())
 }
 
 fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {

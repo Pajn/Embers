@@ -328,6 +328,25 @@ mod documented_ref_api {
             .unwrap_or(Dynamic::UNIT)
     }
 
+    /// Return the previous session id attached to an event, or `()`.
+    ///
+    /// ReturnType: `int | ()`
+    #[rhai_fn(name = "previous_session_id")]
+    pub fn event_previous_session_id(event: &mut EventInfo) -> Dynamic {
+        event
+            .previous_session_id
+            .map(|session_id| dynamic_u64(session_id.0))
+            .unwrap_or(Dynamic::UNIT)
+    }
+
+    /// Return the client id attached to an event, or `()`.
+    ///
+    /// ReturnType: `int | ()`
+    #[rhai_fn(name = "client_id")]
+    pub fn event_client_id(event: &mut EventInfo) -> Dynamic {
+        event.client_id.map(dynamic_u64).unwrap_or(Dynamic::UNIT)
+    }
+
     /// Return the event name.
     #[rhai_fn(name = "name")]
     pub fn event_name(event: &mut EventInfo) -> String {

@@ -11,7 +11,7 @@ fn bar(_: UiApi, left: Array, center: Array, right: Array) -> BarSpec
 
 <div>
 <div class="tab">
-<button group="bar" id="link-bar-Description"  class="tablinks active" 
+<button group="bar" id="link-bar-Description"  class="tablinks active"
     onclick="openTab(event, 'bar', 'Description')">
 Description
 </button>
@@ -34,7 +34,7 @@ fn segment(_: UiApi, text: String, options: Map) -> BarSegment
 
 <div>
 <div class="tab">
-<button group="segment" id="link-segment-Description"  class="tablinks active" 
+<button group="segment" id="link-segment-Description"  class="tablinks active"
     onclick="openTab(event, 'segment', 'Description')">
 Description
 </button>

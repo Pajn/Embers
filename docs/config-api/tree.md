@@ -11,7 +11,7 @@ fn buffer_attach(_: TreeApi, buffer_id: int) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="buffer_attach" id="link-buffer_attach-Description"  class="tablinks active" 
+<button group="buffer_attach" id="link-buffer_attach-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer_attach', 'Description')">
 Description
 </button>
@@ -33,7 +33,7 @@ fn buffer_current(_: TreeApi) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="buffer_current" id="link-buffer_current-Description"  class="tablinks active" 
+<button group="buffer_current" id="link-buffer_current-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer_current', 'Description')">
 Description
 </button>
@@ -55,7 +55,7 @@ fn buffer_empty(_: TreeApi) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="buffer_empty" id="link-buffer_empty-Description"  class="tablinks active" 
+<button group="buffer_empty" id="link-buffer_empty-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer_empty', 'Description')">
 Description
 </button>
@@ -78,11 +78,11 @@ fn buffer_spawn(_: TreeApi, command: Array, options: Map) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="buffer_spawn" id="link-buffer_spawn-Description"  class="tablinks active" 
+<button group="buffer_spawn" id="link-buffer_spawn-Description"  class="tablinks active"
     onclick="openTab(event, 'buffer_spawn', 'Description')">
 Description
 </button>
-<button group="buffer_spawn" id="link-buffer_spawn-Example"  class="tablinks" 
+<button group="buffer_spawn" id="link-buffer_spawn-Example"  class="tablinks"
     onclick="openTab(event, 'buffer_spawn', 'Example')">
 Example
 </button>
@@ -113,7 +113,7 @@ fn current_buffer(_: TreeApi) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active" 
+<button group="current_buffer" id="link-current_buffer-Description"  class="tablinks active"
     onclick="openTab(event, 'current_buffer', 'Description')">
 Description
 </button>
@@ -135,7 +135,7 @@ fn current_node(_: TreeApi) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="current_node" id="link-current_node-Description"  class="tablinks active" 
+<button group="current_node" id="link-current_node-Description"  class="tablinks active"
     onclick="openTab(event, 'current_node', 'Description')">
 Description
 </button>
@@ -158,7 +158,7 @@ fn split(_: TreeApi, direction: String, children: Array, sizes: Array) -> TreeSp
 
 <div>
 <div class="tab">
-<button group="split" id="link-split-Description"  class="tablinks active" 
+<button group="split" id="link-split-Description"  class="tablinks active"
     onclick="openTab(event, 'split', 'Description')">
 Description
 </button>
@@ -180,7 +180,7 @@ fn split_h(_: TreeApi, children: Array) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="split_h" id="link-split_h-Description"  class="tablinks active" 
+<button group="split_h" id="link-split_h-Description"  class="tablinks active"
     onclick="openTab(event, 'split_h', 'Description')">
 Description
 </button>
@@ -202,7 +202,7 @@ fn split_v(_: TreeApi, children: Array) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="split_v" id="link-split_v-Description"  class="tablinks active" 
+<button group="split_v" id="link-split_v-Description"  class="tablinks active"
     onclick="openTab(event, 'split_v', 'Description')">
 Description
 </button>
@@ -224,7 +224,7 @@ fn tab(_: TreeApi, title: String, tree: TreeSpec) -> TabSpec
 
 <div>
 <div class="tab">
-<button group="tab" id="link-tab-Description"  class="tablinks active" 
+<button group="tab" id="link-tab-Description"  class="tablinks active"
     onclick="openTab(event, 'tab', 'Description')">
 Description
 </button>
@@ -246,7 +246,7 @@ fn tabs(_: TreeApi, tabs: Array) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="tabs" id="link-tabs-Description"  class="tablinks active" 
+<button group="tabs" id="link-tabs-Description"  class="tablinks active"
     onclick="openTab(event, 'tabs', 'Description')">
 Description
 </button>
@@ -268,7 +268,7 @@ fn tabs_with_active(_: TreeApi, tabs: Array, active: int) -> TreeSpec
 
 <div>
 <div class="tab">
-<button group="tabs_with_active" id="link-tabs_with_active-Description"  class="tablinks active" 
+<button group="tabs_with_active" id="link-tabs_with_active-Description"  class="tablinks active"
     onclick="openTab(event, 'tabs_with_active', 'Description')">
 Description
 </button>

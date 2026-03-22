@@ -11,7 +11,7 @@ fn set_click_focus(mouse: MouseApi, value: bool)
 
 <div>
 <div class="tab">
-<button group="set_click_focus" id="link-set_click_focus-Description"  class="tablinks active" 
+<button group="set_click_focus" id="link-set_click_focus-Description"  class="tablinks active"
     onclick="openTab(event, 'set_click_focus', 'Description')">
 Description
 </button>
@@ -34,7 +34,7 @@ fn set_click_forward(mouse: MouseApi, value: bool)
 
 <div>
 <div class="tab">
-<button group="set_click_forward" id="link-set_click_forward-Description"  class="tablinks active" 
+<button group="set_click_forward" id="link-set_click_forward-Description"  class="tablinks active"
     onclick="openTab(event, 'set_click_forward', 'Description')">
 Description
 </button>
@@ -57,7 +57,7 @@ fn set_wheel_forward(mouse: MouseApi, value: bool)
 
 <div>
 <div class="tab">
-<button group="set_wheel_forward" id="link-set_wheel_forward-Description"  class="tablinks active" 
+<button group="set_wheel_forward" id="link-set_wheel_forward-Description"  class="tablinks active"
     onclick="openTab(event, 'set_wheel_forward', 'Description')">
 Description
 </button>
@@ -80,7 +80,7 @@ fn set_wheel_scroll(mouse: MouseApi, value: bool)
 
 <div>
 <div class="tab">
-<button group="set_wheel_scroll" id="link-set_wheel_scroll-Description"  class="tablinks active" 
+<button group="set_wheel_scroll" id="link-set_wheel_scroll-Description"  class="tablinks active"
     onclick="openTab(event, 'set_wheel_scroll', 'Description')">
 Description
 </button>

@@ -10,6 +10,7 @@ enum MessageKind : ubyte {
   InputRequest = 6,
   SubscribeRequest = 7,
   UnsubscribeRequest = 8,
+  ClientRequest = 9,
 
   PingResponse = 20,
   OkResponse = 21,
@@ -24,6 +25,8 @@ enum MessageKind : ubyte {
   SnapshotResponse = 30,
   VisibleSnapshotResponse = 31,
   ScrollbackSliceResponse = 32,
+  ClientsResponse = 33,
+  ClientResponse = 34,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -34,6 +37,7 @@ enum MessageKind : ubyte {
   FocusChangedEvent = 46,
   RenderInvalidatedEvent = 47,
   SessionRenamedEvent = 48,
+  ClientChangedEvent = 49,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -97,6 +101,13 @@ enum FloatingOp : ubyte {
 enum InputOp : ubyte {
   Send = 0,
   Resize = 1,
+}
+
+enum ClientOp : ubyte {
+  List = 0,
+  Get = 1,
+  Detach = 2,
+  Switch = 3,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -209,6 +220,12 @@ table SubscribeRequest {
 
 table UnsubscribeRequest {
   subscription_id:ulong;
+}
+
+table ClientRequest {
+  op:ClientOp = List;
+  client_id:ulong = 0;
+  session_id:ulong = 0;
 }
 
 table PingResponse {
@@ -334,6 +351,21 @@ table SubscriptionAckResponse {
   subscription_id:ulong;
 }
 
+table ClientRecord {
+  id:ulong;
+  current_session_id:ulong = 0;
+  subscribed_all_sessions:bool = false;
+  subscribed_session_ids:[ulong];
+}
+
+table ClientsResponse {
+  clients:[ClientRecord];
+}
+
+table ClientResponse {
+  client:ClientRecord;
+}
+
 table CursorState {
   row:ushort = 0;
   col:ushort = 0;
@@ -382,11 +414,6 @@ table SessionClosedEvent {
   session_id:ulong;
 }
 
-table SessionRenamedEvent {
-  session_id:ulong;
-  name:string;
-}
-
 table BufferCreatedEvent {
   buffer:BufferRecord;
 }
@@ -412,6 +439,16 @@ table FocusChangedEvent {
 
 table RenderInvalidatedEvent {
   buffer_id:ulong;
+}
+
+table SessionRenamedEvent {
+  session_id:ulong;
+  name:string;
+}
+
+table ClientChangedEvent {
+  client:ClientRecord;
+  previous_session_id:ulong = 0;
 }
 
 table Envelope {
@@ -449,6 +486,10 @@ table Envelope {
   focus_changed_event:FocusChangedEvent;
   render_invalidated_event:RenderInvalidatedEvent;
   session_renamed_event:SessionRenamedEvent;
+  client_changed_event:ClientChangedEvent;
+  client_request:ClientRequest;
+  clients_response:ClientsResponse;
+  client_response:ClientResponse;
 }
 
 root_type Envelope;

@@ -126,6 +126,7 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
         ClientMessage::Input(req) => encode_input_request(&mut builder, req),
         ClientMessage::Subscribe(req) => encode_subscribe_request(&mut builder, req),
         ClientMessage::Unsubscribe(req) => encode_unsubscribe_request(&mut builder, req),
+        ClientMessage::Client(req) => encode_client_request(&mut builder, req),
     };
 
     builder.finish(envelope, Some("EMBR"));
@@ -149,6 +150,53 @@ fn encode_ping_request<'a>(
             request_id: req.request_id.into(),
             kind: fb::MessageKind::PingRequest,
             ping_request: Some(ping_request),
+            ..Default::default()
+        },
+    )
+}
+
+fn encode_client_request<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    req: &ClientRequest,
+) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+    let (op, client_id, session_id) = match req {
+        ClientRequest::List { .. } => (fb::ClientOp::List, 0, 0),
+        ClientRequest::Get { client_id, .. } => (
+            fb::ClientOp::Get,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            0,
+        ),
+        ClientRequest::Detach { client_id, .. } => (
+            fb::ClientOp::Detach,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            0,
+        ),
+        ClientRequest::Switch {
+            client_id,
+            session_id,
+            ..
+        } => (
+            fb::ClientOp::Switch,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            (*session_id).into(),
+        ),
+    };
+
+    let client_req = fb::ClientRequest::create(
+        builder,
+        &fb::ClientRequestArgs {
+            op,
+            client_id,
+            session_id,
+        },
+    );
+
+    fb::Envelope::create(
+        builder,
+        &fb::EnvelopeArgs {
+            request_id: req.request_id().into(),
+            kind: fb::MessageKind::ClientRequest,
+            client_request: Some(client_req),
             ..Default::default()
         },
     )
@@ -1284,6 +1332,47 @@ fn encode_server_response<'a>(
                 },
             )
         }
+        ServerResponse::Clients(r) => {
+            let clients_vec: Vec<_> = r
+                .clients
+                .iter()
+                .map(|client| encode_client_record(builder, client))
+                .collect();
+            let clients = builder.create_vector(&clients_vec);
+            let response = fb::ClientsResponse::create(
+                builder,
+                &fb::ClientsResponseArgs {
+                    clients: Some(clients),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::ClientsResponse,
+                    clients_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerResponse::Client(r) => {
+            let client = encode_client_record(builder, &r.client);
+            let response = fb::ClientResponse::create(
+                builder,
+                &fb::ClientResponseArgs {
+                    client: Some(client),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::ClientResponse,
+                    client_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::Snapshot(r) => {
             let title = r.title.as_ref().map(|t| builder.create_string(t));
             let cwd = r.cwd.as_ref().map(|c| builder.create_string(c));
@@ -1539,6 +1628,25 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::ClientChanged(e) => {
+            let client = encode_client_record(builder, &e.client);
+            let event = fb::ClientChangedEvent::create(
+                builder,
+                &fb::ClientChangedEventArgs {
+                    client: Some(client),
+                    previous_session_id: e.previous_session_id.map(|id| id.into()).unwrap_or(0),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::ClientChangedEvent,
+                    client_changed_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
     }
 }
 
@@ -1721,6 +1829,28 @@ fn encode_floating_record<'a>(
             focused: record.focused,
             visible: record.visible,
             close_on_empty: record.close_on_empty,
+        },
+    )
+}
+
+fn encode_client_record<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    record: &ClientRecord,
+) -> flatbuffers::WIPOffset<fb::ClientRecord<'a>> {
+    let subscribed_session_ids: Vec<u64> = record
+        .subscribed_session_ids
+        .iter()
+        .map(|session_id| (*session_id).into())
+        .collect();
+    let subscribed_session_ids = builder.create_vector(&subscribed_session_ids);
+
+    fb::ClientRecord::create(
+        builder,
+        &fb::ClientRecordArgs {
+            id: record.id,
+            current_session_id: record.current_session_id.map(|id| id.into()).unwrap_or(0),
+            subscribed_all_sessions: record.subscribed_all_sessions,
+            subscribed_session_ids: Some(subscribed_session_ids),
         },
     )
 }
@@ -2094,6 +2224,35 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 subscription_id: req.subscription_id(),
             }))
         }
+        fb::MessageKind::ClientRequest => {
+            let req = required(envelope.client_request(), "client_request")?;
+            let client_id = std::num::NonZeroU64::new(req.client_id());
+            let request = match req.op() {
+                fb::ClientOp::List => ClientRequest::List { request_id },
+                fb::ClientOp::Get => ClientRequest::Get {
+                    request_id,
+                    client_id,
+                },
+                fb::ClientOp::Detach => ClientRequest::Detach {
+                    request_id,
+                    client_id,
+                },
+                fb::ClientOp::Switch => {
+                    if req.session_id() == 0 {
+                        return Err(ProtocolError::InvalidMessage(
+                            "Switch request requires a non-zero session_id",
+                        ));
+                    }
+                    ClientRequest::Switch {
+                        request_id,
+                        client_id,
+                        session_id: SessionId(req.session_id()),
+                    }
+                }
+                _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
+            };
+            Ok(ClientMessage::Client(request))
+        }
         other => Err(ProtocolError::InvalidMessageOwned(format!(
             "unexpected client message kind: {:?}",
             other
@@ -2211,6 +2370,27 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 SubscriptionAckResponse {
                     request_id: RequestId(envelope.request_id()),
                     subscription_id: resp.subscription_id(),
+                },
+            )))
+        }
+        fb::MessageKind::ClientsResponse => {
+            let resp = required(envelope.clients_response(), "clients_response")?;
+            let clients = required(resp.clients(), "clients_response.clients")?;
+            let clients_vec: Result<Vec<_>, _> = clients.iter().map(decode_client_record).collect();
+            Ok(ServerEnvelope::Response(ServerResponse::Clients(
+                ClientsResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    clients: clients_vec?,
+                },
+            )))
+        }
+        fb::MessageKind::ClientResponse => {
+            let resp = required(envelope.client_response(), "client_response")?;
+            let client = required(resp.client(), "client_response.client")?;
+            Ok(ServerEnvelope::Response(ServerResponse::Client(
+                ClientResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    client: decode_client_record(client)?,
                 },
             )))
         }
@@ -2375,6 +2555,20 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
             Ok(ServerEnvelope::Event(ServerEvent::RenderInvalidated(
                 RenderInvalidatedEvent {
                     buffer_id: BufferId(event.buffer_id()),
+                },
+            )))
+        }
+        fb::MessageKind::ClientChangedEvent => {
+            let event = required(envelope.client_changed_event(), "client_changed_event")?;
+            let client = required(event.client(), "client_changed_event.client")?;
+            Ok(ServerEnvelope::Event(ServerEvent::ClientChanged(
+                ClientChangedEvent {
+                    client: decode_client_record(client)?,
+                    previous_session_id: if event.previous_session_id() == 0 {
+                        None
+                    } else {
+                        Some(SessionId(event.previous_session_id()))
+                    },
                 },
             )))
         }
@@ -2565,6 +2759,34 @@ fn decode_floating_record(record: fb::FloatingRecord) -> Result<FloatingRecord, 
     })
 }
 
+fn decode_client_record(record: fb::ClientRecord) -> Result<ClientRecord, ProtocolError> {
+    if record.id() == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(
+            "client_record.id must be non-zero".to_owned(),
+        ));
+    }
+    let subscribed_session_ids_fb = required(
+        record.subscribed_session_ids(),
+        "client_record.subscribed_session_ids",
+    )?;
+    let mut subscribed_session_ids = Vec::with_capacity(subscribed_session_ids_fb.len());
+    for session_id in subscribed_session_ids_fb.iter() {
+        if session_id == 0 {
+            return Err(ProtocolError::InvalidMessageOwned(
+                "client_record.subscribed_session_ids entries must be non-zero".to_owned(),
+            ));
+        }
+        subscribed_session_ids.push(SessionId(session_id));
+    }
+    Ok(ClientRecord {
+        id: record.id(),
+        current_session_id: (record.current_session_id() != 0)
+            .then(|| SessionId(record.current_session_id())),
+        subscribed_all_sessions: record.subscribed_all_sessions(),
+        subscribed_session_ids,
+    })
+}
+
 fn decode_session_snapshot(
     snapshot: fb::SessionSnapshot,
 ) -> Result<SessionSnapshot, ProtocolError> {
@@ -2618,6 +2840,8 @@ fn decode_error_code(code: fb::ErrorCodeWire) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use flatbuffers::FlatBufferBuilder;
 
     use super::*;
@@ -2708,6 +2932,89 @@ mod tests {
             error,
             ProtocolError::InvalidMessage("node_record.tabs.tabs")
         ));
+    }
+
+    #[test]
+    fn decode_client_record_rejects_zero_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let subscribed_session_ids = builder.create_vector(&[1_u64]);
+        let record = fb::ClientRecord::create(
+            &mut builder,
+            &fb::ClientRecordArgs {
+                id: 0,
+                current_session_id: 0,
+                subscribed_all_sessions: false,
+                subscribed_session_ids: Some(subscribed_session_ids),
+            },
+        );
+        builder.finish(record, None);
+
+        let record = flatbuffers::root::<fb::ClientRecord>(builder.finished_data())
+            .expect("client record root");
+        let error = decode_client_record(record).expect_err("zero client id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "client_record.id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_client_record_rejects_zero_subscribed_session_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let subscribed_session_ids = builder.create_vector(&[1_u64, 0_u64, 3_u64]);
+        let record = fb::ClientRecord::create(
+            &mut builder,
+            &fb::ClientRecordArgs {
+                id: 44,
+                current_session_id: 0,
+                subscribed_all_sessions: false,
+                subscribed_session_ids: Some(subscribed_session_ids),
+            },
+        );
+        builder.finish(record, None);
+
+        let record = flatbuffers::root::<fb::ClientRecord>(builder.finished_data())
+            .expect("client record root");
+        let error =
+            decode_client_record(record).expect_err("zero subscribed session id should reject");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "client_record.subscribed_session_ids entries must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_client_record_keeps_zero_current_session_id_optional() {
+        let mut builder = FlatBufferBuilder::new();
+        let subscribed_session_ids = builder.create_vector(&[5_u64]);
+        let record = fb::ClientRecord::create(
+            &mut builder,
+            &fb::ClientRecordArgs {
+                id: 44,
+                current_session_id: 0,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: Some(subscribed_session_ids),
+            },
+        );
+        builder.finish(record, None);
+
+        let record = flatbuffers::root::<fb::ClientRecord>(builder.finished_data())
+            .expect("client record root");
+        let decoded = decode_client_record(record).expect("zero current session id stays optional");
+
+        assert_eq!(
+            decoded,
+            ClientRecord {
+                id: 44,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![SessionId(5)],
+            }
+        );
     }
 
     #[test]
@@ -2815,5 +3122,76 @@ mod tests {
             error,
             ProtocolError::InvalidMessage("session_request.name")
         ));
+    }
+
+    #[test]
+    fn encode_decode_client_get_none_roundtrip() {
+        let original = ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(7),
+            client_id: None,
+        });
+
+        let encoded = encode_client_message(&original).expect("encode should succeed");
+        let decoded = decode_client_message(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn encode_decode_client_switch_some_roundtrip() {
+        let original = ClientMessage::Client(ClientRequest::Switch {
+            request_id: RequestId(11),
+            client_id: Some(NonZeroU64::new(42).expect("non-zero client id")),
+            session_id: SessionId(99),
+        });
+
+        let encoded = encode_client_message(&original).expect("encode should succeed");
+        let decoded = decode_client_message(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn encode_decode_clients_response_roundtrip() {
+        let original = ServerEnvelope::Response(ServerResponse::Clients(ClientsResponse {
+            request_id: RequestId(19),
+            clients: vec![
+                ClientRecord {
+                    id: 1,
+                    current_session_id: None,
+                    subscribed_all_sessions: false,
+                    subscribed_session_ids: Vec::new(),
+                },
+                ClientRecord {
+                    id: 2,
+                    current_session_id: Some(SessionId(5)),
+                    subscribed_all_sessions: true,
+                    subscribed_session_ids: vec![SessionId(5), SessionId(9)],
+                },
+            ],
+        }));
+
+        let encoded = encode_server_envelope(&original).expect("encode should succeed");
+        let decoded = decode_server_envelope(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn encode_decode_client_changed_event_roundtrip() {
+        let original = ServerEnvelope::Event(ServerEvent::ClientChanged(ClientChangedEvent {
+            client: ClientRecord {
+                id: 44,
+                current_session_id: None,
+                subscribed_all_sessions: false,
+                subscribed_session_ids: Vec::new(),
+            },
+            previous_session_id: None,
+        }));
+
+        let encoded = encode_server_envelope(&original).expect("encode should succeed");
+        let decoded = decode_server_envelope(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded, original);
     }
 }
