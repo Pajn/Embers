@@ -70,17 +70,37 @@ async fn session_commands_round_trip_through_cli() {
     assert_eq!(stdout(&listed).trim(), "1\talpha");
 
     cli_command(&server)
-        .arg("has-session")
+        .arg("rename-session")
         .arg("-t")
         .arg("alpha")
+        .arg("ops")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    let listed = run_cli(&server, ["list-sessions"]);
+    assert_eq!(stdout(&listed).trim(), "1\tops");
+
+    cli_command(&server)
+        .arg("has-session")
+        .arg("-t")
+        .arg("ops")
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
 
     cli_command(&server)
-        .arg("kill-session")
+        .arg("has-session")
         .arg("-t")
         .arg("alpha")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("session 'alpha' was not found"));
+
+    cli_command(&server)
+        .arg("kill-session")
+        .arg("-t")
+        .arg("ops")
         .assert()
         .success()
         .stdout(predicate::str::is_empty());

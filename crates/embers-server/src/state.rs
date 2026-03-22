@@ -289,6 +289,17 @@ impl ServerState {
         Ok(())
     }
 
+    pub fn rename_session(&mut self, session_id: SessionId, name: impl Into<String>) -> Result<()> {
+        let name = name.into().trim().to_string();
+        if name.is_empty() {
+            return Err(MuxError::invalid_input(
+                "session name cannot be empty or whitespace",
+            ));
+        }
+        self.session_mut(session_id)?.name = name;
+        Ok(())
+    }
+
     pub fn create_session(&mut self, name: impl Into<String>) -> SessionId {
         let session_id = self.session_ids.next();
         let root_node = self.node_ids.next();

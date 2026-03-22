@@ -33,6 +33,7 @@ enum MessageKind : ubyte {
   FloatingChangedEvent = 45,
   FocusChangedEvent = 46,
   RenderInvalidatedEvent = 47,
+  SessionRenamedEvent = 48,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -56,6 +57,7 @@ enum SessionOp : ubyte {
   SelectRootTab = 5,
   RenameRootTab = 6,
   CloseRootTab = 7,
+  Rename = 8,
 }
 
 enum BufferOp : ubyte {
@@ -380,6 +382,11 @@ table SessionClosedEvent {
   session_id:ulong;
 }
 
+table SessionRenamedEvent {
+  session_id:ulong;
+  name:string;
+}
+
 table BufferCreatedEvent {
   buffer:BufferRecord;
 }
@@ -441,6 +448,7 @@ table Envelope {
   floating_changed_event:FloatingChangedEvent;
   focus_changed_event:FocusChangedEvent;
   render_invalidated_event:RenderInvalidatedEvent;
+  session_renamed_event:SessionRenamedEvent;
 }
 
 root_type Envelope;

@@ -35,6 +35,11 @@ pub enum SessionRequest {
         session_id: SessionId,
         force: bool,
     },
+    Rename {
+        request_id: RequestId,
+        session_id: SessionId,
+        name: String,
+    },
     AddRootTab {
         request_id: RequestId,
         session_id: SessionId,
@@ -67,6 +72,7 @@ impl SessionRequest {
             | Self::List { request_id }
             | Self::Get { request_id, .. }
             | Self::Close { request_id, .. }
+            | Self::Rename { request_id, .. }
             | Self::AddRootTab { request_id, .. }
             | Self::SelectRootTab { request_id, .. }
             | Self::RenameRootTab { request_id, .. }
@@ -603,9 +609,16 @@ pub struct RenderInvalidatedEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRenamedEvent {
+    pub session_id: SessionId,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerEvent {
     SessionCreated(SessionCreatedEvent),
     SessionClosed(SessionClosedEvent),
+    SessionRenamed(SessionRenamedEvent),
     BufferCreated(BufferCreatedEvent),
     BufferDetached(BufferDetachedEvent),
     NodeChanged(NodeChangedEvent),
@@ -619,6 +632,7 @@ impl ServerEvent {
         match self {
             Self::SessionCreated(event) => Some(event.session.id),
             Self::SessionClosed(event) => Some(event.session_id),
+            Self::SessionRenamed(event) => Some(event.session_id),
             Self::BufferCreated(_) => None,
             Self::BufferDetached(_) => None,
             Self::NodeChanged(event) => Some(event.session_id),

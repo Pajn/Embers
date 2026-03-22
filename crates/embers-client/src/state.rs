@@ -190,6 +190,13 @@ impl ClientState {
                 self.dirty_sessions.insert(event.session.id);
             }
             ServerEvent::SessionClosed(event) => self.remove_session(event.session_id),
+            ServerEvent::SessionRenamed(event) => {
+                if let Some(session) = self.sessions.get_mut(&event.session_id) {
+                    session.name = event.name.clone();
+                } else {
+                    self.dirty_sessions.insert(event.session_id);
+                }
+            }
             ServerEvent::BufferCreated(event) => {
                 self.buffers.insert(event.buffer.id, event.buffer.clone());
             }
