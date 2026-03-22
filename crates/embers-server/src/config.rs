@@ -8,6 +8,7 @@ pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
 pub struct ServerConfig {
     pub socket_path: PathBuf,
     pub workspace_path: PathBuf,
+    pub runtime_dir: PathBuf,
     pub buffer_env: BTreeMap<String, OsString>,
 }
 
@@ -19,9 +20,11 @@ impl ServerConfig {
             socket_path.as_os_str().to_owned(),
         );
         let workspace_path = socket_path.with_extension("workspace.json");
+        let runtime_dir = socket_path.with_extension("runtimes");
         Self {
             socket_path,
             workspace_path,
+            runtime_dir,
             buffer_env,
         }
     }

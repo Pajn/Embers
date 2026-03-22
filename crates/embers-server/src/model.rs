@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use embers_core::{
@@ -17,13 +18,14 @@ pub struct Session {
     pub created_at: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Buffer {
     pub id: BufferId,
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    runtime_socket_path: Option<PathBuf>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
     pub pty_size: PtySize,
@@ -31,6 +33,76 @@ pub struct Buffer {
     pub last_snapshot_seq: u64,
     pub created_at: Timestamp,
 }
+
+impl Buffer {
+    pub(crate) fn new(
+        id: BufferId,
+        title: impl Into<String>,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            command,
+            cwd,
+            env,
+            runtime_socket_path: None,
+            state: BufferState::Created,
+            attachment: BufferAttachment::Detached,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            created_at: Timestamp::now(),
+        }
+    }
+
+    pub(crate) fn runtime_socket_path(&self) -> Option<&PathBuf> {
+        self.runtime_socket_path.as_ref()
+    }
+
+    pub(crate) fn set_runtime_socket_path(&mut self, runtime_socket_path: Option<PathBuf>) {
+        self.runtime_socket_path = runtime_socket_path;
+    }
+}
+
+impl fmt::Debug for Buffer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Buffer")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("command", &self.command)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env)
+            .field("state", &self.state)
+            .field("attachment", &self.attachment)
+            .field("pty_size", &self.pty_size)
+            .field("activity", &self.activity)
+            .field("last_snapshot_seq", &self.last_snapshot_seq)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+impl PartialEq for Buffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.title == other.title
+            && self.command == other.command
+            && self.cwd == other.cwd
+            && self.env == other.env
+            && self.state == other.state
+            && self.attachment == other.attachment
+            && self.pty_size == other.pty_size
+            && self.activity == other.activity
+            && self.last_snapshot_seq == other.last_snapshot_seq
+            && self.created_at == other.created_at
+    }
+}
+
+impl Eq for Buffer {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunningBuffer {

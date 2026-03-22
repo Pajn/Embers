@@ -1,13 +1,19 @@
 mod interactive;
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroU64;
 #[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Result, SessionId, SplitDirection,
@@ -71,6 +77,21 @@ pub enum Command {
     },
     #[command(name = "__serve", hide = true)]
     Serve,
+    #[command(name = "__runtime-keeper", hide = true)]
+    RuntimeKeeper {
+        #[arg(long = "keeper-socket")]
+        keeper_socket: PathBuf,
+        #[arg(long)]
+        cols: u16,
+        #[arg(long)]
+        rows: u16,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long = "env", value_parser = parse_env_arg)]
+        env: Vec<(String, OsString)>,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
     Ping {
         #[arg(default_value = "phase0")]
         payload: String,
@@ -226,9 +247,9 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
 
     match command {
-        Command::Attach { .. } | Command::Serve => Err(MuxError::internal(
-            "interactive commands must be dispatched through run()",
-        )),
+        Command::Attach { .. } | Command::Serve | Command::RuntimeKeeper { .. } => Err(
+            MuxError::internal("interactive commands must be dispatched through run()"),
+        ),
         Command::Ping { payload } => {
             let response = connection
                 .request(ClientMessage::Ping(PingRequest {
@@ -621,31 +642,56 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
-    let socket = resolve_socket_path(cli.socket.as_deref());
-    validate_runtime_socket_parent(&socket)?;
+    let Cli {
+        socket,
+        config,
+        command,
+        ..
+    } = cli;
 
-    match cli.command {
-        None => {
-            ensure_server_process(&socket).await?;
-            interactive::run(socket, None, cli.config).await
-        }
-        Some(Command::Attach { target }) => {
-            if !server_is_available(&socket).await {
-                return Err(MuxError::not_found(format!(
-                    "no embers server is listening on {}",
-                    socket.display()
-                )));
+    match command {
+        Some(Command::RuntimeKeeper {
+            keeper_socket,
+            cols,
+            rows,
+            cwd,
+            env,
+            command,
+        }) => embers_server::run_runtime_keeper(embers_server::RuntimeKeeperCli {
+            socket_path: keeper_socket,
+            command,
+            cwd,
+            env: env.into_iter().collect(),
+            size: embers_core::PtySize::new(cols, rows),
+        }),
+        command => {
+            let socket = resolve_socket_path(socket.as_deref());
+            validate_runtime_socket_parent(&socket)?;
+
+            match command {
+                None => {
+                    ensure_server_process(&socket).await?;
+                    interactive::run(socket, None, config).await
+                }
+                Some(Command::Attach { target }) => {
+                    if !server_is_available(&socket).await {
+                        return Err(MuxError::not_found(format!(
+                            "no embers server is listening on {}",
+                            socket.display()
+                        )));
+                    }
+                    interactive::run(socket, target, config).await
+                }
+                Some(Command::Serve) => run_server(socket).await,
+                Some(command) => {
+                    ensure_server_process(&socket).await?;
+                    let output = execute(&socket, command).await?;
+                    if !output.is_empty() {
+                        println!("{output}");
+                    }
+                    Ok(())
+                }
             }
-            interactive::run(socket, target, cli.config).await
-        }
-        Some(Command::Serve) => run_server(socket).await,
-        Some(command) => {
-            ensure_server_process(&socket).await?;
-            let output = execute(&socket, command).await?;
-            if !output.is_empty() {
-                println!("{output}");
-            }
-            Ok(())
         }
     }
 }
@@ -674,6 +720,46 @@ fn default_runtime_dir() -> PathBuf {
         }
     }
     PathBuf::from("/tmp").join(format!("embers-{}", effective_uid()))
+}
+
+fn parse_env_arg(value: &str) -> std::result::Result<(String, OsString), String> {
+    let Some((key, env_value)) = value.split_once('=') else {
+        return Err("expected KEY=VALUE".to_owned());
+    };
+    if key.is_empty() {
+        return Err("environment key must not be empty".to_owned());
+    }
+    Ok((key.to_owned(), decode_runtime_keeper_env_value(env_value)?))
+}
+
+fn decode_runtime_keeper_env_value(value: &str) -> std::result::Result<OsString, String> {
+    let Some(encoded) = value.strip_prefix("base64:") else {
+        return Ok(OsString::from(value));
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("invalid base64 environment value: {error}"))?;
+    #[cfg(unix)]
+    {
+        Ok(OsString::from_vec(decoded))
+    }
+    #[cfg(windows)]
+    {
+        if decoded.len() % 2 != 0 {
+            return Err("invalid UTF-16LE environment value: odd-length byte sequence".to_owned());
+        }
+        let wide = decoded
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        Ok(OsString::from_wide(&wide))
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        String::from_utf8(decoded)
+            .map(OsString::from)
+            .map_err(|error| format!("invalid UTF-8 environment value: {error}"))
+    }
 }
 
 #[cfg(unix)]
@@ -1585,9 +1671,20 @@ fn default_title(command: &[String], fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use base64::Engine as _;
     use clap::Parser;
     use embers_core::NodeId;
     use embers_protocol::{TabRecord, TabsRecord};
+    #[cfg(windows)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::Path;
 
     use super::{Cli, resolve_window_index, split_scoped_required, split_scoped_target};
 
@@ -1612,6 +1709,59 @@ mod tests {
             }
             other => panic!("expected new-window command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_keeper_uses_distinct_keeper_socket_flag() {
+        let cli = Cli::try_parse_from([
+            "embers",
+            "__runtime-keeper",
+            "--socket",
+            "/tmp/global.sock",
+            "--keeper-socket",
+            "/tmp/keeper.sock",
+            "--cols",
+            "80",
+            "--rows",
+            "24",
+            "--",
+            "/bin/sh",
+        ])
+        .expect("cli parses");
+
+        assert_eq!(cli.socket.as_deref(), Some(Path::new("/tmp/global.sock")));
+        match cli.command {
+            Some(super::Command::RuntimeKeeper {
+                keeper_socket,
+                cols,
+                rows,
+                command,
+                ..
+            }) => {
+                assert_eq!(keeper_socket, Path::new("/tmp/keeper.sock"));
+                assert_eq!((cols, rows), (80, 24));
+                assert_eq!(command, vec!["/bin/sh"]);
+            }
+            other => panic!("expected runtime keeper command, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_keeper_env_values_decode_base64_losslessly() {
+        let (key, value) = super::parse_env_arg("KEY=base64:AP8=").expect("env parses");
+        assert_eq!(key, "KEY");
+        assert_eq!(value, OsString::from_vec(vec![0, 255]));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_keeper_env_values_decode_utf16le_losslessly() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0x00, 0xD8, 0x61, 0x00]);
+        let (key, value) =
+            super::parse_env_arg(&format!("KEY=base64:{encoded}")).expect("env parses");
+        assert_eq!(key, "KEY");
+        assert_eq!(value, OsString::from_wide(&[0xD800, 0x0061]));
     }
 
     #[test]

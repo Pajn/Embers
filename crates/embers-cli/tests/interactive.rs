@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use embers_core::PtySize;
-use embers_test_support::{PtyHarness, TestServer, cargo_bin, cargo_bin_path};
+use embers_test_support::{PtyHarness, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path};
 use tempfile::tempdir;
 
 use crate::support::{run_cli, stdout};
@@ -165,6 +165,7 @@ fn first_client_id_finds_attached_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
@@ -204,6 +205,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_subcommand_connects_to_running_server() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
@@ -248,6 +250,7 @@ async fn attach_subcommand_connects_to_running_server() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_commands_can_switch_and_detach_a_live_attached_client() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "main"]);
@@ -302,6 +305,7 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_up_enters_local_scrollback_and_shows_indicator() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
@@ -321,6 +325,7 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_selection_yank_emits_osc52_clipboard_sequence() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();

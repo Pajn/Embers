@@ -18,6 +18,7 @@ name = "embers-cli"
 path = "src/bin/embers-cli.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 embers-client = { path = "../embers-client" }
 embers-core = { path = "../embers-core" }

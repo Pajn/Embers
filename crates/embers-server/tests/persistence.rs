@@ -1,7 +1,7 @@
 use embers_core::{BufferId, RequestId, init_test_tracing};
 use embers_protocol::{
-    BufferRecordState, BufferRequest, BufferResponse, BuffersResponse, ClientMessage,
-    ProtocolClient, ServerResponse, SessionRequest, SessionSnapshotResponse,
+    BufferRecordState, BufferRequest, BufferResponse, BuffersResponse, ClientMessage, InputRequest,
+    ProtocolClient, ServerResponse, SessionRequest, SessionSnapshotResponse, SnapshotResponse,
 };
 use embers_server::{Server, ServerConfig};
 use tempfile::tempdir;
@@ -43,8 +43,38 @@ async fn request_buffers(client: &mut ProtocolClient, request: BufferRequest) ->
     }
 }
 
+async fn wait_for_snapshot_line(
+    client: &mut ProtocolClient,
+    request_id: RequestId,
+    buffer_id: BufferId,
+    expected: &str,
+) -> SnapshotResponse {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(ServerResponse::Snapshot(snapshot)) = client
+            .request(&ClientMessage::Buffer(BufferRequest::Capture {
+                request_id,
+                buffer_id,
+            }))
+            .await
+            && snapshot.lines.iter().any(|line| line.contains(expected))
+        {
+            return snapshot;
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!(
+        "capture for buffer {buffer_id} did not contain expected line '{expected}' before timeout"
+    );
+}
+
 #[tokio::test]
-async fn clean_restart_restores_workspace_and_marks_live_buffers_interrupted() {
+async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
     init_test_tracing();
 
     let tempdir = tempdir().expect("tempdir");
@@ -158,7 +188,7 @@ async fn clean_restart_restores_workspace_and_marks_live_buffers_interrupted() {
         .iter()
         .find(|buffer| buffer.id == attached_id)
         .expect("attached buffer restored");
-    assert_eq!(attached_buffer.state, BufferRecordState::Interrupted);
+    assert_eq!(attached_buffer.state, BufferRecordState::Running);
     assert!(attached_buffer.attachment_node_id.is_some());
 
     let buffers = request_buffers(
@@ -176,22 +206,45 @@ async fn clean_restart_restores_workspace_and_marks_live_buffers_interrupted() {
         .iter()
         .find(|buffer| buffer.id == detached_id)
         .expect("detached buffer restored");
-    assert_eq!(detached_buffer.state, BufferRecordState::Interrupted);
+    assert_eq!(detached_buffer.state, BufferRecordState::Running);
     assert_eq!(detached_buffer.attachment_node_id, None);
 
-    let send_err = client
-        .request(&ClientMessage::Buffer(BufferRequest::Get {
+    match client
+        .request(&ClientMessage::Input(InputRequest::Send {
             request_id: RequestId(7),
-            buffer_id: BufferId(detached_id.0),
+            buffer_id: attached_id,
+            bytes: b"printf restarted-attached\\n\r".to_vec(),
         }))
         .await
-        .expect("buffer get succeeds");
-    match send_err {
-        ServerResponse::Buffer(response) => {
-            assert_eq!(response.buffer.state, BufferRecordState::Interrupted);
-        }
-        other => panic!("expected restored interrupted buffer, got {other:?}"),
+        .expect("send to attached buffer succeeds")
+    {
+        ServerResponse::Ok(_) => {}
+        other => panic!("expected ok response, got {other:?}"),
     }
+
+    match client
+        .request(&ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(8),
+            buffer_id: detached_id,
+            bytes: b"printf restarted-detached\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send to detached buffer succeeds")
+    {
+        ServerResponse::Ok(_) => {}
+        other => panic!("expected ok response, got {other:?}"),
+    }
+
+    let _attached_capture =
+        wait_for_snapshot_line(&mut client, RequestId(9), attached_id, "restarted-attached").await;
+
+    let _detached_capture = wait_for_snapshot_line(
+        &mut client,
+        RequestId(10),
+        detached_id,
+        "restarted-detached",
+    )
+    .await;
 
     handle.shutdown().await.expect("shutdown restarted server");
 }

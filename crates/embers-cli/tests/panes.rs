@@ -2,13 +2,14 @@ use std::time::Duration;
 
 use embers_core::RequestId;
 use embers_protocol::{BufferRequest, ClientMessage, ServerResponse};
-use embers_test_support::{TestConnection, TestServer};
+use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
 
 use crate::support::{run_cli, session_snapshot_by_name, stdout};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pane_commands_round_trip_through_cli() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "alpha"]);
@@ -129,6 +130,7 @@ async fn pane_commands_round_trip_through_cli() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detached_buffers_can_be_listed_and_attached_via_cli() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "alpha"]);

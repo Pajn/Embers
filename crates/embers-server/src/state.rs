@@ -122,7 +122,7 @@ impl ServerState {
         let safe_next_node_id = next_id_after_max(nodes.keys().map(|id| id.0));
         let safe_next_floating_id = next_id_after_max(floating.keys().map(|id| id.0));
 
-        let mut state = Self {
+        let state = Self {
             sessions,
             buffers,
             nodes,
@@ -132,7 +132,6 @@ impl ServerState {
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
             floating_ids: IdAllocator::new(next_floating_id.max(safe_next_floating_id)),
         };
-        state.interrupt_unrecoverable_buffers();
         state.validate()?;
         Ok(state)
     }
@@ -346,22 +345,8 @@ impl ServerState {
         env: BTreeMap<String, String>,
     ) -> BufferId {
         let buffer_id = self.buffer_ids.next();
-        self.buffers.insert(
-            buffer_id,
-            Buffer {
-                id: buffer_id,
-                title: title.into(),
-                command,
-                cwd,
-                env,
-                state: BufferState::Created,
-                attachment: BufferAttachment::Detached,
-                pty_size: PtySize::new(80, 24),
-                activity: ActivityState::Idle,
-                last_snapshot_seq: 0,
-                created_at: Timestamp::now(),
-            },
-        );
+        self.buffers
+            .insert(buffer_id, Buffer::new(buffer_id, title, command, cwd, env));
         buffer_id
     }
 
@@ -388,6 +373,27 @@ impl ServerState {
         Ok(())
     }
 
+    pub fn set_buffer_runtime_socket_path(
+        &mut self,
+        buffer_id: BufferId,
+        runtime_socket_path: Option<PathBuf>,
+    ) -> Result<()> {
+        self.buffer_mut(buffer_id)?
+            .set_runtime_socket_path(runtime_socket_path);
+        Ok(())
+    }
+
+    pub fn mark_buffer_interrupted(&mut self, buffer_id: BufferId, pid: Option<u32>) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        if matches!(buffer.state, BufferState::Exited(_)) {
+            return Ok(());
+        }
+        buffer.state = BufferState::Interrupted(InterruptedBuffer {
+            last_known_pid: pid,
+        });
+        Ok(())
+    }
+
     pub fn mark_buffer_exited(
         &mut self,
         buffer_id: BufferId,
@@ -398,17 +404,6 @@ impl ServerState {
             exit_code,
             exited_at: Timestamp::now(),
         });
-        Ok(())
-    }
-
-    pub fn mark_buffer_interrupted(&mut self, buffer_id: BufferId) -> Result<()> {
-        let buffer = self.buffer_mut(buffer_id)?;
-        let last_known_pid = match &buffer.state {
-            BufferState::Running(running) => running.pid,
-            BufferState::Interrupted(interrupted) => interrupted.last_known_pid,
-            BufferState::Created | BufferState::Exited(_) => None,
-        };
-        buffer.state = BufferState::Interrupted(InterruptedBuffer { last_known_pid });
         Ok(())
     }
 
