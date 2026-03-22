@@ -82,6 +82,9 @@ fn tabs(_: TreeApi, tabs: array) -> TreeSpec;
 /// Build a tabs container with an explicit active tab.
 fn tabs_with_active(_: TreeApi, tabs: array, active: int) -> TreeSpec;
 
+/// Break the current node into a new tab or floating window.
+fn break_current_node(_: ActionApi, destination: string) -> Action;
+
 /// Cancel the active search.
 fn cancel_search(_: ActionApi) -> Action;
 
@@ -166,6 +169,9 @@ fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeS
 /// Insert a tab before the current tab.
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
+/// Join a buffer at the current node.
+fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;
+
 /// Kill the currently focused buffer.
 fn kill_buffer(_: ActionApi) -> Action;
 
@@ -192,6 +198,12 @@ fn move_buffer_to_floating(_: ActionApi, buffer_id: int, options: map) -> Action
 /// Move a buffer into a specific node.
 fn move_buffer_to_node(_: ActionApi, buffer_id: int, node_id: int) -> Action;
 
+/// Move the current node before a sibling.
+fn move_current_node_before(_: ActionApi, sibling_node_id: int) -> Action;
+
+/// Move a node after a sibling.
+fn move_node_after(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
+
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
 
@@ -203,6 +215,9 @@ fn noop(_: ActionApi) -> Action;
 
 /// Emit a client notification.
 fn notify(_: ActionApi, level: string, message: string) -> Action;
+
+/// Open the history of a buffer in a new view.
+fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;
 
 /// Open a floating view around the provided tree.
 fn open_floating(_: ActionApi, tree: TreeSpec, options: map) -> Action;
@@ -297,11 +312,23 @@ fn send_keys_current(_: ActionApi, notation: string) -> Action;
 /// Split the current node and attach the provided tree as the new sibling.
 fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;
 
+/// Swap the current node with a sibling.
+fn swap_current_node(_: ActionApi, second_node_id: int) -> Action;
+
 /// Toggle a named input mode.
 fn toggle_mode(_: ActionApi, mode: string) -> Action;
 
+/// Toggle zoom on a node.
+fn toggle_zoom_node(_: ActionApi, node_id: int) -> Action;
+
+/// Unzoom the current session.
+fn unzoom_current_session(_: ActionApi) -> Action;
+
 /// Copy the current selection into the clipboard.
 fn yank_selection(_: ActionApi) -> Action;
+
+/// Zoom the current node.
+fn zoom_current_node(_: ActionApi) -> Action;
 
 /// Toggle focus-on-click behavior.
 ///

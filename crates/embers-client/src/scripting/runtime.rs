@@ -21,6 +21,9 @@ use super::model::{
 };
 use super::types::{BarSegment, BarSpec, BarTarget, RgbColor, StyleSpec, ThemeSpec};
 use super::{RhaiResultOf, ScriptResult};
+use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct ActionApi;
@@ -915,8 +918,9 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, ImmutableString, Map, NativeCallContext, NavigationDirection,
-        TreeSpec, parse_action_array, parse_buffer_id, parse_bytes, parse_floating_id,
+        Action, ActionApi, Array, BufferHistoryPlacement, BufferHistoryScope, ImmutableString, Map,
+        NativeCallContext, NavigationDirection, NodeBreakDestination, NodeJoinPlacement, TreeSpec,
+        parse_action_array, parse_buffer_id, parse_bytes, parse_floating_id,
         parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
         parse_node_id, parse_notify_level, parse_split_direction, runtime_error_at,
         with_call_position,
@@ -1291,6 +1295,159 @@ mod documented_action_api {
         with_call_position(ctx, || {
             Ok(Action::DetachBuffer {
                 buffer_id: Some(parse_buffer_id(buffer_id)?),
+            })
+        })
+    }
+
+    /// Open the history of a buffer in a new view.
+    #[rhai_fn(return_raw, name = "open_buffer_history")]
+    pub fn open_buffer_history(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+        scope: &str,
+        placement: &str,
+    ) -> RhaiResultOf<Action> {
+        let position = ctx.call_position();
+        with_call_position(ctx, || {
+            let scope = match scope {
+                "visible" => BufferHistoryScope::Visible,
+                "full" => BufferHistoryScope::Full,
+                _ => {
+                    return Err(runtime_error_at("invalid scope", position));
+                }
+            };
+            let placement = match placement {
+                "floating" => BufferHistoryPlacement::Floating,
+                "tab" => BufferHistoryPlacement::Tab,
+                _ => {
+                    return Err(runtime_error_at("invalid placement", position));
+                }
+            };
+            Ok(Action::OpenBufferHistory {
+                buffer_id: parse_buffer_id(buffer_id)?,
+                scope,
+                placement,
+            })
+        })
+    }
+
+    /// Zoom the current node.
+    #[rhai_fn(name = "zoom_current_node")]
+    pub fn zoom_current_node(_: &mut ActionApi) -> Action {
+        Action::ZoomNode { node_id: None }
+    }
+
+    /// Unzoom the current session.
+    #[rhai_fn(name = "unzoom_current_session")]
+    pub fn unzoom_current_session(_: &mut ActionApi) -> Action {
+        Action::UnzoomNode { session_id: None }
+    }
+
+    /// Toggle zoom on a node.
+    #[rhai_fn(return_raw, name = "toggle_zoom_node")]
+    pub fn toggle_zoom_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::ToggleZoomNode {
+                node_id: Some(parse_node_id(node_id)?),
+            })
+        })
+    }
+
+    /// Swap the current node with a sibling.
+    #[rhai_fn(return_raw, name = "swap_current_node")]
+    pub fn swap_current_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        second_node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SwapSiblingNodes {
+                first_node_id: None,
+                second_node_id: parse_node_id(second_node_id)?,
+            })
+        })
+    }
+
+    /// Break the current node into a new tab or floating window.
+    #[rhai_fn(return_raw, name = "break_current_node")]
+    pub fn break_current_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        destination: &str,
+    ) -> RhaiResultOf<Action> {
+        let position = ctx.call_position();
+        with_call_position(ctx, || {
+            let destination = match destination {
+                "tab" => NodeBreakDestination::Tab,
+                "floating" => NodeBreakDestination::Floating,
+                _ => return Err(runtime_error_at("invalid destination", position)),
+            };
+            Ok(Action::BreakNode {
+                node_id: None,
+                destination,
+            })
+        })
+    }
+
+    /// Join a buffer at the current node.
+    #[rhai_fn(return_raw, name = "join_buffer_here")]
+    pub fn join_buffer_here(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        buffer_id: i64,
+        placement: &str,
+    ) -> RhaiResultOf<Action> {
+        let position = ctx.call_position();
+        with_call_position(ctx, || {
+            let placement = match placement {
+                "tab-after" => NodeJoinPlacement::TabAfter,
+                "tab-before" => NodeJoinPlacement::TabBefore,
+                "left" => NodeJoinPlacement::Left,
+                "right" => NodeJoinPlacement::Right,
+                "up" => NodeJoinPlacement::Up,
+                "down" => NodeJoinPlacement::Down,
+                _ => return Err(runtime_error_at("invalid placement", position)),
+            };
+            Ok(Action::JoinBufferAtNode {
+                node_id: None,
+                buffer_id: parse_buffer_id(buffer_id)?,
+                placement,
+            })
+        })
+    }
+
+    /// Move the current node before a sibling.
+    #[rhai_fn(return_raw, name = "move_current_node_before")]
+    pub fn move_current_node_before(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        sibling_node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::MoveNodeBefore {
+                node_id: None,
+                sibling_node_id: parse_node_id(sibling_node_id)?,
+            })
+        })
+    }
+
+    /// Move a node after a sibling.
+    #[rhai_fn(return_raw, name = "move_node_after")]
+    pub fn move_node_after(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+        sibling_node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::MoveNodeAfter {
+                node_id: Some(parse_node_id(node_id)?),
+                sibling_node_id: parse_node_id(sibling_node_id)?,
             })
         })
     }

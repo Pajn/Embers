@@ -326,12 +326,28 @@ where
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
         let event = self.client.process_next_event().await?;
+        self.apply_processed_event(&event).await?;
+        Ok(event)
+    }
+
+    pub async fn process_next_event_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerEvent>> {
+        let Some(event) = self.client.process_next_event_timeout(timeout).await? else {
+            return Ok(None);
+        };
+        self.apply_processed_event(&event).await?;
+        Ok(Some(event))
+    }
+
+    async fn apply_processed_event(&mut self, event: &ServerEvent) -> Result<()> {
         if let ServerEvent::RenderInvalidated(event) = &event {
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
         }
 
-        let session_id = self.event_session_id(&event);
-        let mut event_names = vec![event_name(&event).to_owned()];
+        let session_id = self.event_session_id(event);
+        let mut event_names = vec![event_name(event).to_owned()];
         if let ServerEvent::RenderInvalidated(render) = &event
             && self
                 .client
@@ -347,7 +363,7 @@ where
             let context = self.context_for(
                 session_id,
                 self.viewport,
-                Some(event_info(&event_name, &event)),
+                Some(event_info(&event_name, event)),
             );
             match self
                 .config
@@ -362,7 +378,7 @@ where
                 Err(error) => self.record_notification(error.to_string()),
             }
         }
-        Ok(event)
+        Ok(())
     }
 
     pub async fn render_session(
@@ -895,6 +911,141 @@ where
                         request_id: self.client.next_request_id(),
                         buffer_id,
                         client_id: None,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::OpenBufferHistory {
+                buffer_id,
+                scope,
+                placement,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Buffer(BufferRequest::OpenHistory {
+                        request_id: self.client.next_request_id(),
+                        buffer_id,
+                        scope,
+                        placement,
+                        client_id: None,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::ZoomNode { node_id } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to zoom"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Zoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::UnzoomNode {
+                session_id: target_session_id,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Unzoom {
+                        request_id: self.client.next_request_id(),
+                        session_id: target_session_id.unwrap_or(session_id),
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::ToggleZoomNode { node_id } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to toggle zoom"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::SwapSiblingNodes {
+                first_node_id,
+                second_node_id,
+            } => {
+                let first_node_id = first_node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to swap"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::SwapSiblings {
+                        request_id: self.client.next_request_id(),
+                        first_node_id,
+                        second_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::BreakNode {
+                node_id,
+                destination,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to break"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::BreakNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        destination,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::JoinBufferAtNode {
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| {
+                        MuxError::invalid_input("no focused node to join buffer into")
+                    })?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        buffer_id,
+                        placement,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::MoveNodeBefore {
+                node_id,
+                sibling_node_id,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to reorder"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::MoveNodeAfter {
+                node_id,
+                sibling_node_id,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to reorder"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeAfter {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
                     }))
                     .await?;
                 self.client.resync_all_sessions().await
