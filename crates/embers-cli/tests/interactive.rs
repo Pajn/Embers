@@ -3,10 +3,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use embers_core::PtySize;
-use embers_test_support::{PtyHarness, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path};
+use embers_test_support::{
+    PtyHarness, TestConnection, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path,
+};
 use tempfile::tempdir;
 
-use crate::support::{run_cli, stdout};
+use crate::support::{run_cli, session_snapshot_by_name, stdout};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -300,6 +302,71 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
     run_cli(&server, ["detach-client", &client_id.to_string()]);
     harness.wait().expect("client exits after detach");
 
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    run_cli(&server, ["new-session", "ops"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "ops",
+            "--title",
+            "logs",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let ops_snapshot = session_snapshot_by_name(&mut connection, "ops").await;
+    let ops_buffer_id = ops_snapshot
+        .session
+        .focused_leaf_id
+        .and_then(|leaf_id| {
+            ops_snapshot
+                .nodes
+                .iter()
+                .find(|node| node.id == leaf_id)
+                .and_then(|node| node.buffer_view.as_ref())
+                .map(|view| view.buffer_id.0)
+        })
+        .expect("ops focused buffer id exists");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let mut harness = spawn_embers(&["attach", "--socket", &socket_arg, "-t", "main"]);
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders main");
+
+    run_cli(&server, ["buffer", "reveal", &ops_buffer_id.to_string()]);
+    harness
+        .read_until_contains("[ops]", IO_TIMEOUT)
+        .expect("buffer reveal retargets the live client");
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 

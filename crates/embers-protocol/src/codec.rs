@@ -96,6 +96,92 @@ fn encode_cursor_state<'a>(
     )
 }
 
+fn encode_buffer_history_scope(scope: BufferHistoryScope) -> fb::BufferHistoryScopeWire {
+    match scope {
+        BufferHistoryScope::Full => fb::BufferHistoryScopeWire::Full,
+        BufferHistoryScope::Visible => fb::BufferHistoryScopeWire::Visible,
+    }
+}
+
+fn decode_buffer_history_scope(
+    scope: fb::BufferHistoryScopeWire,
+) -> Result<BufferHistoryScope, ProtocolError> {
+    match scope {
+        fb::BufferHistoryScopeWire::Full => Ok(BufferHistoryScope::Full),
+        fb::BufferHistoryScopeWire::Visible => Ok(BufferHistoryScope::Visible),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown buffer history scope",
+        )),
+    }
+}
+
+fn encode_buffer_history_placement(
+    placement: BufferHistoryPlacement,
+) -> fb::BufferHistoryPlacementWire {
+    match placement {
+        BufferHistoryPlacement::Tab => fb::BufferHistoryPlacementWire::Tab,
+        BufferHistoryPlacement::Floating => fb::BufferHistoryPlacementWire::Floating,
+    }
+}
+
+fn decode_buffer_history_placement(
+    placement: fb::BufferHistoryPlacementWire,
+) -> Result<BufferHistoryPlacement, ProtocolError> {
+    match placement {
+        fb::BufferHistoryPlacementWire::Tab => Ok(BufferHistoryPlacement::Tab),
+        fb::BufferHistoryPlacementWire::Floating => Ok(BufferHistoryPlacement::Floating),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown buffer history placement",
+        )),
+    }
+}
+
+fn encode_node_break_destination(
+    destination: NodeBreakDestination,
+) -> fb::NodeBreakDestinationWire {
+    match destination {
+        NodeBreakDestination::Tab => fb::NodeBreakDestinationWire::Tab,
+        NodeBreakDestination::Floating => fb::NodeBreakDestinationWire::Floating,
+    }
+}
+
+fn decode_node_break_destination(
+    destination: fb::NodeBreakDestinationWire,
+) -> Result<NodeBreakDestination, ProtocolError> {
+    match destination {
+        fb::NodeBreakDestinationWire::Tab => Ok(NodeBreakDestination::Tab),
+        fb::NodeBreakDestinationWire::Floating => Ok(NodeBreakDestination::Floating),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown node break destination",
+        )),
+    }
+}
+
+fn encode_node_join_placement(placement: NodeJoinPlacement) -> fb::NodeJoinPlacementWire {
+    match placement {
+        NodeJoinPlacement::Left => fb::NodeJoinPlacementWire::Left,
+        NodeJoinPlacement::Right => fb::NodeJoinPlacementWire::Right,
+        NodeJoinPlacement::Up => fb::NodeJoinPlacementWire::Up,
+        NodeJoinPlacement::Down => fb::NodeJoinPlacementWire::Down,
+        NodeJoinPlacement::TabBefore => fb::NodeJoinPlacementWire::TabBefore,
+        NodeJoinPlacement::TabAfter => fb::NodeJoinPlacementWire::TabAfter,
+    }
+}
+
+fn decode_node_join_placement(
+    placement: fb::NodeJoinPlacementWire,
+) -> Result<NodeJoinPlacement, ProtocolError> {
+    match placement {
+        fb::NodeJoinPlacementWire::Left => Ok(NodeJoinPlacement::Left),
+        fb::NodeJoinPlacementWire::Right => Ok(NodeJoinPlacement::Right),
+        fb::NodeJoinPlacementWire::Up => Ok(NodeJoinPlacement::Up),
+        fb::NodeJoinPlacementWire::Down => Ok(NodeJoinPlacement::Down),
+        fb::NodeJoinPlacementWire::TabBefore => Ok(NodeJoinPlacement::TabBefore),
+        fb::NodeJoinPlacementWire::TabAfter => Ok(NodeJoinPlacement::TabAfter),
+        _ => Err(ProtocolError::InvalidMessage("unknown node join placement")),
+    }
+}
+
 fn decode_cursor_state(cursor: fb::CursorState<'_>) -> Result<CursorState, ProtocolError> {
     let shape = match cursor.shape() {
         fb::CursorShapeWire::Block => CursorShape::Block,
@@ -344,11 +430,14 @@ fn encode_buffer_request<'a>(
         op,
         buffer_id,
         session_id,
+        client_id,
         attached_only,
         detached_only,
         force,
         start_line,
         line_count,
+        history_scope,
+        history_placement,
         title_str,
         command_vec,
         cwd_str,
@@ -364,11 +453,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Create,
             0,
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             title.as_deref(),
             Some(command),
             cwd.as_deref(),
@@ -383,11 +475,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::List,
             0,
             session_id.map(|s| s.into()).unwrap_or(0),
+            0,
             *attached_only,
             *detached_only,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -397,11 +492,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Get,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -411,11 +509,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Detach,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -427,11 +528,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Kill,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             *force,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -441,11 +545,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Capture,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -455,11 +562,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::CaptureVisible,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -474,11 +584,75 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::ScrollbackSlice,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             *start_line,
             *line_count,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::GetLocation { buffer_id, .. } => (
+            fb::BufferOp::GetLocation,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Reveal {
+            buffer_id,
+            client_id,
+            ..
+        } => (
+            fb::BufferOp::Reveal,
+            (*buffer_id).into(),
+            0,
+            client_id.unwrap_or(0),
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::OpenHistory {
+            buffer_id,
+            scope,
+            placement,
+            client_id,
+            ..
+        } => (
+            fb::BufferOp::OpenHistory,
+            (*buffer_id).into(),
+            0,
+            client_id.unwrap_or(0),
+            false,
+            false,
+            false,
+            0,
+            0,
+            encode_buffer_history_scope(*scope),
+            encode_buffer_history_placement(*placement),
             None,
             None,
             None,
@@ -507,11 +681,14 @@ fn encode_buffer_request<'a>(
             op,
             buffer_id,
             session_id,
+            client_id,
             attached_only,
             detached_only,
             force,
             start_line,
             line_count,
+            history_scope,
+            history_placement,
             title,
             command,
             cwd,
@@ -549,10 +726,15 @@ fn encode_node_request<'a>(
         u32,
         u32,
         fb::SplitDirectionWire,
+        fb::NodeBreakDestinationWire,
+        fb::NodeJoinPlacementWire,
         Option<&'a Vec<u16>>,
         Option<Vec<u64>>,
         Option<Vec<String>>,
         bool,
+        u64,
+        u64,
+        u64,
     );
 
     let (
@@ -569,10 +751,15 @@ fn encode_node_request<'a>(
         index,
         active,
         direction,
+        break_destination,
+        join_placement,
         sizes_vec,
         child_node_ids_vec,
         titles_vec,
         insert_before,
+        first_node_id,
+        second_node_id,
+        sibling_node_id,
     ): EncodedNodeRequest<'_> = match req {
         NodeRequest::GetTree { session_id, .. } => (
             fb::NodeOp::GetTree,
@@ -588,10 +775,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Split {
             leaf_node_id,
@@ -617,10 +809,15 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 None,
                 None,
                 None,
                 false,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::CreateSplit {
@@ -648,6 +845,8 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 Some(sizes),
                 Some(
                     child_node_ids
@@ -657,6 +856,9 @@ fn encode_node_request<'a>(
                 ),
                 None,
                 false,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::CreateTabs {
@@ -679,6 +881,8 @@ fn encode_node_request<'a>(
             0,
             *active,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             Some(
                 child_node_ids
@@ -688,6 +892,9 @@ fn encode_node_request<'a>(
             ),
             Some(titles.clone()),
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::ReplaceNode {
             node_id,
@@ -707,10 +914,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::WrapInSplit {
             node_id,
@@ -737,10 +949,15 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 None,
                 None,
                 None,
                 *insert_before,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::WrapInTabs { node_id, title, .. } => (
@@ -757,10 +974,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::AddTab {
             tabs_node_id,
@@ -783,10 +1005,15 @@ fn encode_node_request<'a>(
             *index,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::SelectTab {
             tabs_node_id,
@@ -806,10 +1033,15 @@ fn encode_node_request<'a>(
             *index,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Focus {
             session_id,
@@ -829,10 +1061,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Close { node_id, .. } => (
             fb::NodeOp::Close,
@@ -848,10 +1085,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::MoveBufferToNode {
             buffer_id,
@@ -871,10 +1113,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Resize { node_id, sizes, .. } => (
             fb::NodeOp::Resize,
@@ -890,10 +1137,228 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             Some(sizes),
             None,
             None,
             false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::Zoom { node_id, .. } => (
+            fb::NodeOp::Zoom,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::Unzoom { session_id, .. } => (
+            fb::NodeOp::Unzoom,
+            (*session_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::ToggleZoom { node_id, .. } => (
+            fb::NodeOp::ToggleZoom,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::SwapSiblings {
+            first_node_id,
+            second_node_id,
+            ..
+        } => (
+            fb::NodeOp::SwapSiblings,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            (*first_node_id).into(),
+            (*second_node_id).into(),
+            0,
+        ),
+        NodeRequest::BreakNode {
+            node_id,
+            destination,
+            ..
+        } => (
+            fb::NodeOp::BreakNode,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            encode_node_break_destination(*destination),
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::JoinBufferAtNode {
+            node_id,
+            buffer_id,
+            placement,
+            ..
+        } => (
+            fb::NodeOp::JoinBufferAtNode,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            (*buffer_id).into(),
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            encode_node_join_placement(*placement),
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::MoveNodeBefore {
+            node_id,
+            sibling_node_id,
+            ..
+        } => (
+            fb::NodeOp::MoveNodeBefore,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            (*sibling_node_id).into(),
+        ),
+        NodeRequest::MoveNodeAfter {
+            node_id,
+            sibling_node_id,
+            ..
+        } => (
+            fb::NodeOp::MoveNodeAfter,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            (*sibling_node_id).into(),
         ),
     };
 
@@ -917,10 +1382,15 @@ fn encode_node_request<'a>(
             index,
             active,
             direction,
+            break_destination,
+            join_placement,
             sizes,
             child_node_ids,
             titles,
             insert_before,
+            first_node_id,
+            second_node_id,
+            sibling_node_id,
         },
     );
 
@@ -1373,6 +1843,32 @@ fn encode_server_response<'a>(
                 },
             )
         }
+        ServerResponse::BufferLocation(r) => {
+            let location = fb::BufferLocation::create(
+                builder,
+                &fb::BufferLocationArgs {
+                    buffer_id: r.location.buffer_id.into(),
+                    session_id: r.location.session_id.map(|id| id.into()).unwrap_or(0),
+                    node_id: r.location.node_id.map(|id| id.into()).unwrap_or(0),
+                    floating_id: r.location.floating_id.map(|id| id.into()).unwrap_or(0),
+                },
+            );
+            let response = fb::BufferLocationResponse::create(
+                builder,
+                &fb::BufferLocationResponseArgs {
+                    location: Some(location),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::BufferLocationResponse,
+                    buffer_location_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::Snapshot(r) => {
             let title = r.title.as_ref().map(|t| builder.create_string(t));
             let cwd = r.cwd.as_ref().map(|c| builder.create_string(c));
@@ -1669,6 +2165,7 @@ fn encode_session_record<'a>(
             floating_ids: Some(floating_ids_vec),
             focused_leaf_id: record.focused_leaf_id.map(|n| n.into()).unwrap_or(0),
             focused_floating_id: record.focused_floating_id.map(|f| f.into()).unwrap_or(0),
+            zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
         },
     )
 }
@@ -1702,6 +2199,14 @@ fn encode_buffer_record<'a>(
         ActivityState::Activity => fb::ActivityStateWire::Activity,
         ActivityState::Bell => fb::ActivityStateWire::Bell,
     };
+    let kind = match record.kind {
+        BufferRecordKind::Pty => fb::BufferKindWire::Pty,
+        BufferRecordKind::Helper => fb::BufferKindWire::Helper,
+    };
+    let helper_scope = record
+        .helper_scope
+        .map(encode_buffer_history_scope)
+        .unwrap_or(fb::BufferHistoryScopeWire::Full);
 
     fb::BufferRecord::create(
         builder,
@@ -1710,10 +2215,18 @@ fn encode_buffer_record<'a>(
             title: Some(title),
             command: Some(command),
             cwd,
+            kind,
             state,
             pid: record.pid.unwrap_or(0),
             has_pid: record.pid.is_some(),
             attachment_node_id: record.attachment_node_id.map(|n| n.into()).unwrap_or(0),
+            read_only: record.read_only,
+            helper_source_buffer_id: record
+                .helper_source_buffer_id
+                .map(|id| id.into())
+                .unwrap_or(0),
+            helper_scope,
+            has_helper_scope: record.helper_scope.is_some(),
             pty_cols: record.pty_size.cols,
             pty_rows: record.pty_size.rows,
             activity,
@@ -2010,6 +2523,22 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     start_line: req.start_line(),
                     line_count: req.line_count(),
                 },
+                fb::BufferOp::GetLocation => BufferRequest::GetLocation {
+                    request_id,
+                    buffer_id: BufferId(req.buffer_id()),
+                },
+                fb::BufferOp::Reveal => BufferRequest::Reveal {
+                    request_id,
+                    buffer_id: BufferId(req.buffer_id()),
+                    client_id: (req.client_id() != 0).then_some(req.client_id()),
+                },
+                fb::BufferOp::OpenHistory => BufferRequest::OpenHistory {
+                    request_id,
+                    buffer_id: BufferId(req.buffer_id()),
+                    scope: decode_buffer_history_scope(req.history_scope())?,
+                    placement: decode_buffer_history_placement(req.history_placement())?,
+                    client_id: (req.client_id() != 0).then_some(req.client_id()),
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown buffer op")),
             };
             Ok(ClientMessage::Buffer(buffer_request))
@@ -2141,6 +2670,44 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         sizes: sizes.iter().collect(),
                     }
                 }
+                fb::NodeOp::Zoom => NodeRequest::Zoom {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                },
+                fb::NodeOp::Unzoom => NodeRequest::Unzoom {
+                    request_id,
+                    session_id: SessionId(req.session_id()),
+                },
+                fb::NodeOp::ToggleZoom => NodeRequest::ToggleZoom {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                },
+                fb::NodeOp::SwapSiblings => NodeRequest::SwapSiblings {
+                    request_id,
+                    first_node_id: NodeId(req.first_node_id()),
+                    second_node_id: NodeId(req.second_node_id()),
+                },
+                fb::NodeOp::BreakNode => NodeRequest::BreakNode {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                    destination: decode_node_break_destination(req.break_destination())?,
+                },
+                fb::NodeOp::JoinBufferAtNode => NodeRequest::JoinBufferAtNode {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                    buffer_id: BufferId(req.buffer_id()),
+                    placement: decode_node_join_placement(req.join_placement())?,
+                },
+                fb::NodeOp::MoveNodeBefore => NodeRequest::MoveNodeBefore {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                    sibling_node_id: NodeId(req.sibling_node_id()),
+                },
+                fb::NodeOp::MoveNodeAfter => NodeRequest::MoveNodeAfter {
+                    request_id,
+                    node_id: NodeId(req.node_id()),
+                    sibling_node_id: NodeId(req.sibling_node_id()),
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown node op")),
             };
             Ok(ClientMessage::Node(node_request))
@@ -2394,6 +2961,26 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::BufferLocationResponse => {
+            let resp = required(
+                envelope.buffer_location_response(),
+                "buffer_location_response",
+            )?;
+            let location = required(resp.location(), "buffer_location_response.location")?;
+            Ok(ServerEnvelope::Response(ServerResponse::BufferLocation(
+                BufferLocationResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    location: BufferLocation {
+                        buffer_id: BufferId(location.buffer_id()),
+                        session_id: (location.session_id() != 0)
+                            .then(|| SessionId(location.session_id())),
+                        node_id: (location.node_id() != 0).then(|| NodeId(location.node_id())),
+                        floating_id: (location.floating_id() != 0)
+                            .then(|| FloatingId(location.floating_id())),
+                    },
+                },
+            )))
+        }
         fb::MessageKind::SnapshotResponse => {
             let resp = required(envelope.snapshot_response(), "snapshot_response")?;
             let lines = required(resp.lines(), "snapshot_response.lines")?;
@@ -2601,6 +3188,11 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
         } else {
             Some(FloatingId(record.focused_floating_id()))
         },
+        zoomed_node_id: if record.zoomed_node_id() == 0 {
+            None
+        } else {
+            Some(NodeId(record.zoomed_node_id()))
+        },
     })
 }
 
@@ -2624,12 +3216,23 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         _ => return Err(ProtocolError::InvalidMessage("unknown activity state")),
     };
     let env = decode_string_map(record.env_keys(), record.env_values(), "buffer_record.env")?;
+    let kind = match record.kind() {
+        fb::BufferKindWire::Pty => BufferRecordKind::Pty,
+        fb::BufferKindWire::Helper => BufferRecordKind::Helper,
+        _ => return Err(ProtocolError::InvalidMessage("unknown buffer kind")),
+    };
+    let helper_scope = if record.has_helper_scope() {
+        Some(decode_buffer_history_scope(record.helper_scope())?)
+    } else {
+        None
+    };
 
     Ok(BufferRecord {
         id: BufferId(record.id()),
         title: title.to_owned(),
         command,
         cwd: record.cwd().map(|c| c.to_owned()),
+        kind,
         state,
         pid: record.has_pid().then(|| record.pid()),
         attachment_node_id: if record.attachment_node_id() == 0 {
@@ -2637,6 +3240,13 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         } else {
             Some(NodeId(record.attachment_node_id()))
         },
+        read_only: record.read_only(),
+        helper_source_buffer_id: if record.helper_source_buffer_id() == 0 {
+            None
+        } else {
+            Some(BufferId(record.helper_source_buffer_id()))
+        },
+        helper_scope,
         pty_size: PtySize {
             cols: record.pty_cols(),
             rows: record.pty_rows(),

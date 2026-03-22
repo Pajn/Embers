@@ -15,7 +15,27 @@ pub struct Session {
     pub floating: Vec<FloatingId>,
     pub focused_leaf: Option<NodeId>,
     pub focused_floating: Option<FloatingId>,
+    pub zoomed_node: Option<NodeId>,
     pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelperBuffer {
+    pub source_buffer_id: BufferId,
+    pub scope: HelperBufferScope,
+    pub lines: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HelperBufferScope {
+    Full,
+    Visible,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufferKind {
+    Pty,
+    Helper(HelperBuffer),
 }
 
 #[derive(Clone)]
@@ -31,6 +51,7 @@ pub struct Buffer {
     pub pty_size: PtySize,
     pub activity: ActivityState,
     pub last_snapshot_seq: u64,
+    pub kind: BufferKind,
     pub created_at: Timestamp,
 }
 
@@ -54,6 +75,7 @@ impl Buffer {
             pty_size: PtySize::new(80, 24),
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,
+            kind: BufferKind::Pty,
             created_at: Timestamp::now(),
         }
     }
@@ -81,6 +103,7 @@ impl fmt::Debug for Buffer {
             .field("pty_size", &self.pty_size)
             .field("activity", &self.activity)
             .field("last_snapshot_seq", &self.last_snapshot_seq)
+            .field("kind", &self.kind)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -98,6 +121,7 @@ impl PartialEq for Buffer {
             && self.pty_size == other.pty_size
             && self.activity == other.activity
             && self.last_snapshot_seq == other.last_snapshot_seq
+            && self.kind == other.kind
             && self.created_at == other.created_at
     }
 }

@@ -888,8 +888,16 @@ where
                     .await?;
                 self.client.resync_all_sessions().await
             }
-            Action::FocusBuffer { buffer_id } | Action::RevealBuffer { buffer_id } => {
-                self.focus_buffer(session_id, buffer_id).await
+            Action::FocusBuffer { buffer_id } => self.focus_buffer(session_id, buffer_id).await,
+            Action::RevealBuffer { buffer_id } => {
+                self.client
+                    .request_message(ClientMessage::Buffer(BufferRequest::Reveal {
+                        request_id: self.client.next_request_id(),
+                        buffer_id,
+                        client_id: None,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
             }
             other => Err(MuxError::invalid_input(format!(
                 "action '{other:?}' is not supported by the live executor yet"

@@ -124,6 +124,22 @@ pub enum BufferRequest {
         start_line: u64,
         line_count: u32,
     },
+    GetLocation {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    Reveal {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        client_id: Option<u64>,
+    },
+    OpenHistory {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        scope: BufferHistoryScope,
+        placement: BufferHistoryPlacement,
+        client_id: Option<u64>,
+    },
 }
 
 impl BufferRequest {
@@ -136,9 +152,32 @@ impl BufferRequest {
             | Self::Kill { request_id, .. }
             | Self::Capture { request_id, .. }
             | Self::CaptureVisible { request_id, .. }
-            | Self::ScrollbackSlice { request_id, .. } => *request_id,
+            | Self::ScrollbackSlice { request_id, .. }
+            | Self::GetLocation { request_id, .. }
+            | Self::Reveal { request_id, .. }
+            | Self::OpenHistory { request_id, .. } => *request_id,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferHistoryScope {
+    Full,
+    Visible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferHistoryPlacement {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferLocation {
+    pub buffer_id: BufferId,
+    pub session_id: Option<SessionId>,
+    pub node_id: Option<NodeId>,
+    pub floating_id: Option<FloatingId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,6 +255,44 @@ pub enum NodeRequest {
         node_id: NodeId,
         sizes: Vec<u16>,
     },
+    Zoom {
+        request_id: RequestId,
+        node_id: NodeId,
+    },
+    Unzoom {
+        request_id: RequestId,
+        session_id: SessionId,
+    },
+    ToggleZoom {
+        request_id: RequestId,
+        node_id: NodeId,
+    },
+    SwapSiblings {
+        request_id: RequestId,
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    },
+    BreakNode {
+        request_id: RequestId,
+        node_id: NodeId,
+        destination: NodeBreakDestination,
+    },
+    JoinBufferAtNode {
+        request_id: RequestId,
+        node_id: NodeId,
+        buffer_id: BufferId,
+        placement: NodeJoinPlacement,
+    },
+    MoveNodeBefore {
+        request_id: RequestId,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+    },
+    MoveNodeAfter {
+        request_id: RequestId,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+    },
 }
 
 impl NodeRequest {
@@ -233,9 +310,33 @@ impl NodeRequest {
             | Self::Focus { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
-            | Self::Resize { request_id, .. } => *request_id,
+            | Self::Resize { request_id, .. }
+            | Self::Zoom { request_id, .. }
+            | Self::Unzoom { request_id, .. }
+            | Self::ToggleZoom { request_id, .. }
+            | Self::SwapSiblings { request_id, .. }
+            | Self::BreakNode { request_id, .. }
+            | Self::JoinBufferAtNode { request_id, .. }
+            | Self::MoveNodeBefore { request_id, .. }
+            | Self::MoveNodeAfter { request_id, .. } => *request_id,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeBreakDestination {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeJoinPlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    TabBefore,
+    TabAfter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,6 +488,13 @@ pub struct SessionRecord {
     pub floating_ids: Vec<FloatingId>,
     pub focused_leaf_id: Option<NodeId>,
     pub focused_floating_id: Option<FloatingId>,
+    pub zoomed_node_id: Option<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferRecordKind {
+    Pty,
+    Helper,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,9 +503,13 @@ pub struct BufferRecord {
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<String>,
+    pub kind: BufferRecordKind,
     pub state: BufferRecordState,
     pub pid: Option<u32>,
     pub attachment_node_id: Option<NodeId>,
+    pub read_only: bool,
+    pub helper_source_buffer_id: Option<BufferId>,
+    pub helper_scope: Option<BufferHistoryScope>,
     pub pty_size: PtySize,
     pub activity: ActivityState,
     pub last_snapshot_seq: u64,
@@ -545,6 +657,12 @@ pub struct ClientResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferLocationResponse {
+    pub request_id: RequestId,
+    pub location: BufferLocation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotResponse {
     pub request_id: RequestId,
     pub buffer_id: BufferId,
@@ -596,6 +714,7 @@ pub enum ServerResponse {
     SubscriptionAck(SubscriptionAckResponse),
     Clients(ClientsResponse),
     Client(ClientResponse),
+    BufferLocation(BufferLocationResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -616,6 +735,7 @@ impl ServerResponse {
             Self::SubscriptionAck(response) => Some(response.request_id),
             Self::Clients(response) => Some(response.request_id),
             Self::Client(response) => Some(response.request_id),
+            Self::BufferLocation(response) => Some(response.request_id),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),

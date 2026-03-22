@@ -6,10 +6,10 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, PtySize, RequestId, SessionId, SplitDirection,
 };
 use embers_protocol::{
-    BufferDetachedEvent, BufferRecord, BufferRecordState, BufferViewRecord, BuffersResponse,
-    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
-    FloatingChangedEvent, FloatingRecord, FocusChangedEvent, NodeChangedEvent, NodeRecord,
-    NodeRecordKind, RenderInvalidatedEvent, ServerEvent, ServerResponse, SessionRecord,
+    BufferDetachedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord,
+    BuffersResponse, ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest,
+    ClientResponse, FloatingChangedEvent, FloatingRecord, FocusChangedEvent, NodeChangedEvent,
+    NodeRecord, NodeRecordKind, RenderInvalidatedEvent, ServerEvent, ServerResponse, SessionRecord,
     SessionRequest, SessionSnapshot, SessionSnapshotResponse, SplitRecord, TabRecord, TabsRecord,
     VisibleSnapshotResponse,
 };
@@ -20,10 +20,14 @@ fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord
         title: title.to_owned(),
         command: vec!["/bin/sh".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        kind: BufferRecordKind::Pty,
         pid: None,
         env: Default::default(),
         state: BufferRecordState::Running,
         attachment_node_id: attachment_node_id.map(NodeId),
+        read_only: false,
+        helper_source_buffer_id: None,
+        helper_scope: None,
         pty_size: PtySize::new(80, 24),
         activity: ActivityState::Idle,
         last_snapshot_seq: 0,
@@ -64,6 +68,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
             floating_ids: vec![embers_core::FloatingId(90)],
             focused_leaf_id: Some(NodeId(11)),
             focused_floating_id: None,
+            zoomed_node_id: None,
         },
         nodes: vec![
             NodeRecord {
@@ -543,6 +548,7 @@ async fn reconnect_resync_rebuilds_sessions_and_detached_buffers() {
                 floating_ids: vec![],
                 focused_leaf_id: Some(NodeId(11)),
                 focused_floating_id: None,
+                zoomed_node_id: None,
             }],
         }),
     );
@@ -579,6 +585,7 @@ async fn reconnect_resync_rebuilds_sessions_and_detached_buffers() {
             floating_ids: vec![],
             focused_leaf_id: None,
             focused_floating_id: None,
+            zoomed_node_id: None,
         },
     );
     client
