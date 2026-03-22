@@ -1035,6 +1035,40 @@ async fn keybinding_runtime_errors_become_notifications() {
 }
 
 #[tokio::test]
+async fn recursive_named_actions_stop_at_expansion_limit() {
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn alpha(ctx) { action.run_named_action("beta") }
+            fn beta(ctx) { action.run_named_action("alpha") }
+
+            define_action("alpha", alpha);
+            define_action("beta", beta);
+            bind("normal", "a", "alpha");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('a'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        configured.notifications(),
+        ["invalid input: action expansion limit reached"]
+    );
+}
+
+#[tokio::test]
 async fn event_handler_runtime_errors_do_not_crash_client() {
     let transport = FakeTransport::default();
     transport.push_event(ServerEvent::FocusChanged(FocusChangedEvent {
@@ -1112,4 +1146,36 @@ async fn event_hooks_can_notify_without_an_active_view() {
 
     assert!(matches!(event, ServerEvent::FocusChanged(_)));
     assert_eq!(configured.notifications(), ["focus hook"]);
+}
+
+#[tokio::test]
+async fn event_context_keeps_session_without_an_active_view() {
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::FocusChanged(FocusChangedEvent {
+        session_id: SESSION_ID,
+        focused_leaf_id: Some(FOCUSED_LEAF_ID),
+        focused_floating_id: None,
+    }));
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_focus(ctx) {
+                let session = ctx.current_session();
+                if session == () {
+                    action.notify("error", "missing")
+                } else {
+                    action.notify("info", session.name())
+                }
+            }
+
+            on("focus_changed", on_focus);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::FocusChanged(_)));
+    assert_eq!(configured.notifications(), ["demo"]);
 }

@@ -135,6 +135,35 @@ fn same_sequence_can_resolve_differently_by_mode() {
 }
 
 #[test]
+fn define_mode_rejects_unknown_options() {
+    let source = LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: Some("bad-mode-options.rhai".into()),
+        source: r#"
+            fn enter(ctx) { () }
+            define_mode("locked", #{
+                on_enter: enter,
+                on_entter: enter
+            });
+        "#
+        .trim()
+        .to_owned(),
+        source_hash: 0,
+    };
+
+    let error = match ScriptEngine::load(&source) {
+        Ok(_) => panic!("unknown mode options should fail"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown mode option(s): on_entter")
+    );
+}
+
+#[test]
 fn formatter_functions_build_bar_specs_from_runtime_context() {
     let source = LoadedConfigSource {
         origin: ConfigOrigin::BuiltIn,

@@ -32,4 +32,3 @@ assert_cmd.workspace = true
 embers-test-support = { path = "../embers-test-support" }
 predicates.workspace = true
 tempfile.workspace = true
-tokio.workspace = true

@@ -1,6 +1,5 @@
 mod support;
 
-use std::fs;
 use std::path::PathBuf;
 
 use embers_client::{
@@ -213,16 +212,12 @@ fn repository_config_popup_and_scratchpad_actions_build_floating_layouts() {
 }
 
 fn repository_config_engine() -> ScriptEngine {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config.rhai")
-        .canonicalize()
-        .unwrap();
-    let source = fs::read_to_string(&path).unwrap();
-
     ScriptEngine::load(&LoadedConfigSource {
         origin: ConfigOrigin::Explicit,
-        path: Some(path),
-        source,
+        path: Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repository_config.rhai"),
+        ),
+        source: include_str!("fixtures/repository_config.rhai").to_owned(),
         source_hash: 0,
     })
     .unwrap()

@@ -598,16 +598,23 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
         .spawn()?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut exited_status = None;
     loop {
         if server_is_available(socket_path).await {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            return Err(MuxError::transport(format!(
-                "embers server exited before becoming ready with status {status}"
-            )));
+            exited_status.get_or_insert(status);
+            if server_is_available(socket_path).await {
+                return Ok(());
+            }
         }
         if tokio::time::Instant::now() >= deadline {
+            if let Some(status) = exited_status {
+                return Err(MuxError::transport(format!(
+                    "embers server exited before becoming ready with status {status}"
+                )));
+            }
             let _ = child.kill();
             let _ = child.wait();
             return Err(MuxError::timeout(format!(
@@ -688,6 +695,24 @@ impl ServerPidFile {
                         path.display()
                     )));
                 }
+                let pid_text = fs::read_to_string(path).map_err(|error| {
+                    MuxError::conflict(format!(
+                        "refusing to overwrite unreadable pid file {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                let pid = pid_text.trim().parse::<u32>().map_err(|error| {
+                    MuxError::conflict(format!(
+                        "refusing to overwrite invalid pid file {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                if process_is_alive(pid)? {
+                    return Err(MuxError::conflict(format!(
+                        "refusing to overwrite active pid file {} for running process {pid}",
+                        path.display()
+                    )));
+                }
                 fs::remove_file(path)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -710,6 +735,31 @@ impl ServerPidFile {
             path: path.to_path_buf(),
         })
     }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> Result<bool> {
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        Some(code) => Err(MuxError::transport(format!(
+            "failed to validate process {pid}: os error {code}"
+        ))),
+        None => Err(MuxError::transport(format!(
+            "failed to validate process {pid}: unknown os error"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> Result<bool> {
+    Err(MuxError::conflict(
+        "pid file validation is unsupported on this platform".to_owned(),
+    ))
 }
 
 impl Drop for ServerPidFile {
