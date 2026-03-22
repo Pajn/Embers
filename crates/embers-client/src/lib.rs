@@ -25,8 +25,8 @@ pub use controller::{
 pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, InputResolution, InputState,
-    KeyParseError, KeySequence, KeyToken, ModeSpec, NORMAL_MODE, SELECT_MODE, expand_leader,
-    parse_key_sequence, resolve_key,
+    KeyParseError, KeySequence, KeyToken, ModeSpec, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,
+    expand_leader, parse_key_sequence, resolve_key,
 };
 pub use presentation::{
     DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, TabItem,
@@ -36,13 +36,14 @@ pub use renderer::Renderer;
 pub use scripting::{
     Action, BarSegment, BarSpec, BarTarget, BufferRef, BufferSpawnSpec, Context, EventInfo,
     FloatingAnchor, FloatingGeometrySpec, FloatingRef, FloatingSize, FloatingSpec, LoadedConfig,
-    ModeHooks, NodeRef, NotifyLevel, PaletteError, RgbColor, ScriptEngine, ScriptError,
-    ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec, TabBarContext, TabInfo, TabSpec,
-    TabsSpec, ThemeSpec, TreeSpec,
+    ModeHooks, MouseSettings, NodeRef, NotifyLevel, PaletteError, RgbColor, ScriptEngine,
+    ScriptError, ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec, TabBarContext, TabInfo,
+    TabSpec, TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
 pub use state::{
-    BufferViewState, ClientState, SearchState, SelectionKind, SelectionPoint, SelectionState,
+    BufferViewState, ClientState, SearchMatch, SearchState, SelectionKind, SelectionPoint,
+    SelectionState,
 };
 pub use testing::{FakeTransport, ScriptedTransport, TestGrid};
 pub use transport::Transport;

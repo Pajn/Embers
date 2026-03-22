@@ -1,16 +1,17 @@
 mod support;
 
 use std::fs;
+use std::path::Path;
 
 use embers_client::{
-    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MuxClient,
-    ScriptedTransport,
+    ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseEvent,
+    MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
 };
 use embers_core::{BufferId, RequestId, SessionId, Size};
 use embers_protocol::{
-    ClientMessage, FocusChangedEvent, InputRequest, NodeRequest, OkResponse, ServerEvent,
-    ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
-    VisibleSnapshotResponse,
+    ClientMessage, FocusChangedEvent, InputRequest, NodeRequest, OkResponse,
+    ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRequest, SessionSnapshot,
+    SessionSnapshotResponse, SnapshotResponse, VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
@@ -53,6 +54,38 @@ fn visible_snapshot_from_state(
     let mut snapshot = state.snapshots.get(&buffer_id).unwrap().clone();
     snapshot.request_id = request_id;
     snapshot
+}
+
+fn scrollback_slice_response(
+    buffer_id: BufferId,
+    request_id: RequestId,
+    start_line: u64,
+    total_lines: u64,
+    lines: &[&str],
+) -> ScrollbackSliceResponse {
+    ScrollbackSliceResponse {
+        request_id,
+        buffer_id,
+        start_line,
+        total_lines,
+        lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+    }
+}
+
+fn snapshot_response(
+    buffer_id: BufferId,
+    request_id: RequestId,
+    lines: &[&str],
+) -> SnapshotResponse {
+    SnapshotResponse {
+        request_id,
+        buffer_id,
+        sequence: 1,
+        size: embers_core::PtySize::new(80, 24),
+        lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+        title: None,
+        cwd: None,
+    }
 }
 
 #[tokio::test]
@@ -312,6 +345,423 @@ async fn focus_events_are_ignored_when_program_did_not_request_them() {
                 height: 20,
             },
             true,
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+}
+
+#[tokio::test]
+async fn page_up_scrolls_locally_with_scrollback_slices() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::ScrollbackSlice(scrollback_slice_response(
+        BufferId(4),
+        RequestId(1),
+        12,
+        60,
+        &["history line", "match line"],
+    )));
+
+    let mut state = demo_state();
+    let snapshot = state.snapshots.get_mut(&BufferId(4)).unwrap();
+    snapshot.total_lines = 60;
+    snapshot.viewport_top_line = 36;
+    snapshot.lines = vec!["tail one".to_owned(), "tail two".to_owned()];
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.total_line_count = 60;
+    view.scroll_top_line = 36;
+    view.follow_output = true;
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::PageUp,
+        )
+        .await
+        .unwrap();
+
+    let view = configured
+        .client()
+        .state()
+        .view_state(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    assert_eq!(view.scroll_top_line, 12);
+    assert!(!view.follow_output);
+    assert_eq!(view.visible_lines[0], "history line");
+    assert!(matches!(
+        transport.requests()[0],
+        ClientMessage::Buffer(embers_protocol::BufferRequest::ScrollbackSlice {
+            buffer_id: BufferId(4),
+            start_line: 12,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn search_prompt_commits_matches_and_navigates_locally() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Snapshot(snapshot_response(
+        BufferId(4),
+        RequestId(1),
+        &["alpha", "needle here", "tail needle"],
+    )));
+
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+    configured
+        .client_mut()
+        .state_mut()
+        .view_state_mut(FOCUSED_LEAF_ID)
+        .unwrap()
+        .follow_output = false;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('/'),
+        )
+        .await
+        .unwrap();
+    for ch in "needle".chars() {
+        configured
+            .handle_key(
+                SESSION_ID,
+                Size {
+                    width: 80,
+                    height: 20,
+                },
+                KeyEvent::Char(ch),
+            )
+            .await
+            .unwrap();
+    }
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Enter,
+        )
+        .await
+        .unwrap();
+
+    let view = configured
+        .client()
+        .state()
+        .view_state(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    let search = view.search_state.as_ref().expect("search state");
+    assert_eq!(search.query, "needle");
+    assert_eq!(search.matches.len(), 2);
+    assert_eq!(search.active_match_index, Some(0));
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('n'),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        configured
+            .client()
+            .state()
+            .view_state(FOCUSED_LEAF_ID)
+            .and_then(|view| view.search_state.as_ref())
+            .and_then(|search| search.active_match_index),
+        Some(1)
+    );
+
+    let grid = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        grid.ansi_lines()
+            .iter()
+            .any(|line| line.contains("\x1b[4m"))
+    );
+}
+
+#[tokio::test]
+async fn pasted_text_updates_search_prompt_without_forwarding_input() {
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+    configured
+        .client_mut()
+        .state_mut()
+        .view_state_mut(FOCUSED_LEAF_ID)
+        .unwrap()
+        .follow_output = false;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('/'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_paste(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            b"needle".to_vec(),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+    assert_eq!(
+        configured.status_line(SESSION_ID, Path::new("/tmp/embers.sock")),
+        "[demo] /needle"
+    );
+}
+
+#[tokio::test]
+async fn select_mode_yanks_selection_to_osc52() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Snapshot(snapshot_response(
+        BufferId(4),
+        RequestId(1),
+        &["logs visible", "second row"],
+    )));
+
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+    configured
+        .client_mut()
+        .state_mut()
+        .view_state_mut(FOCUSED_LEAF_ID)
+        .unwrap()
+        .follow_output = false;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('v'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('l'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('y'),
+        )
+        .await
+        .unwrap();
+
+    let output = configured.drain_terminal_output();
+    assert_eq!(output.len(), 1);
+    let osc52 = String::from_utf8(output[0].clone()).unwrap();
+    assert!(osc52.starts_with("\x1b]52;c;"));
+    assert!(osc52.contains("bG8="));
+    assert!(
+        configured
+            .client()
+            .state()
+            .view_state(FOCUSED_LEAF_ID)
+            .and_then(|view| view.selection_state.as_ref())
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
+    let mut state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+    let focused = presentation.focused_leaf().unwrap().clone();
+
+    let local_transport = FakeTransport::default();
+    local_transport.push_response(ServerResponse::ScrollbackSlice(scrollback_slice_response(
+        BufferId(4),
+        RequestId(1),
+        33,
+        60,
+        &["older output"],
+    )));
+    state.snapshots.get_mut(&BufferId(4)).unwrap().total_lines = 60;
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .viewport_top_line = 36;
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.total_line_count = 60;
+    view.scroll_top_line = 36;
+    view.follow_output = true;
+    let client = MuxClient::new(local_transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state.clone();
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            MouseEvent {
+                row: (focused.rect.origin.y + 1) as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::WheelUp,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        local_transport.requests()[0],
+        ClientMessage::Buffer(embers_protocol::BufferRequest::ScrollbackSlice {
+            start_line: 33,
+            ..
+        })
+    ));
+
+    let forward_transport = FakeTransport::default();
+    forward_transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    forward_transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    forward_transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+    let client = MuxClient::new(forward_transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    let mut state = state;
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .mouse_reporting = true;
+    *configured.client_mut().state_mut() = state;
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            MouseEvent {
+                row: (focused.rect.origin.y + 1) as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::WheelUp,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        forward_transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[<64;1;1M".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn disabling_wheel_scroll_in_config_suppresses_local_mouse_scrolling() {
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+    let focused = presentation.focused_leaf().unwrap().clone();
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source("mouse.set_wheel_scroll(false);");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            MouseEvent {
+                row: (focused.rect.origin.y + 1) as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::WheelUp,
+            },
         )
         .await
         .unwrap();

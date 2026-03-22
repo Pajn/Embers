@@ -103,6 +103,14 @@ pub struct ModeHooks {
     pub on_leave: Option<ScriptFunctionRef>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MouseSettings {
+    pub click_focus: bool,
+    pub click_forward: bool,
+    pub wheel_scroll: bool,
+    pub wheel_forward: bool,
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,
@@ -115,6 +123,7 @@ pub struct LoadedConfig {
     pub named_actions: BTreeMap<String, ScriptFunctionRef>,
     pub event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     pub tab_bar_formatter: Option<ScriptFunctionRef>,
+    pub mouse: MouseSettings,
     pub theme: ThemeSpec,
 }
 
@@ -148,6 +157,7 @@ impl fmt::Debug for LoadedConfig {
             .field("named_actions", &self.named_actions)
             .field("event_handlers", &self.event_handlers)
             .field("tab_bar_formatter", &self.tab_bar_formatter)
+            .field("mouse", &self.mouse)
             .field("theme", &self.theme)
             .finish()
     }

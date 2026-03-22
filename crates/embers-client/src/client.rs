@@ -3,7 +3,8 @@ use std::path::Path;
 
 use embers_core::{BufferId, IdAllocator, MuxError, RequestId, Result, SessionId};
 use embers_protocol::{
-    BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest, SubscribeRequest,
+    BufferRequest, ClientMessage, ScrollbackSliceResponse, ServerEvent, ServerResponse,
+    SessionRequest, SnapshotResponse, SubscribeRequest,
 };
 
 use crate::socket_transport::SocketTransport;
@@ -108,6 +109,47 @@ where
             }
             other => Err(MuxError::protocol(format!(
                 "expected visible snapshot response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn capture_buffer(&self, buffer_id: BufferId) -> Result<SnapshotResponse> {
+        let response = self
+            .transport
+            .request(ClientMessage::Buffer(BufferRequest::Capture {
+                request_id: self.next_request_id(),
+                buffer_id,
+            }))
+            .await?;
+
+        match expect_response(response)? {
+            ServerResponse::Snapshot(snapshot) => Ok(snapshot),
+            other => Err(MuxError::protocol(format!(
+                "expected snapshot response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn capture_scrollback_slice(
+        &self,
+        buffer_id: BufferId,
+        start_line: u64,
+        line_count: u32,
+    ) -> Result<ScrollbackSliceResponse> {
+        let response = self
+            .transport
+            .request(ClientMessage::Buffer(BufferRequest::ScrollbackSlice {
+                request_id: self.next_request_id(),
+                buffer_id,
+                start_line,
+                line_count,
+            }))
+            .await?;
+
+        match expect_response(response)? {
+            ServerResponse::ScrollbackSlice(snapshot) => Ok(snapshot),
+            other => Err(MuxError::protocol(format!(
+                "expected scrollback slice response, got {other:?}"
             ))),
         }
     }

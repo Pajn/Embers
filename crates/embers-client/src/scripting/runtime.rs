@@ -14,9 +14,7 @@ use super::model::{
     Action, BufferSpawnSpec, FloatingAnchor, FloatingGeometrySpec, FloatingSize, FloatingSpec,
     NotifyLevel, TabSpec, TabsSpec, TreeSpec,
 };
-use super::types::{
-    BarSegment, BarSpec, BarTarget, RgbColor, StyleSpec, ThemeSpec,
-};
+use super::types::{BarSegment, BarSpec, BarTarget, RgbColor, StyleSpec, ThemeSpec};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
@@ -95,6 +93,15 @@ pub fn runtime_scope(context: Option<Context>, theme: ThemeSpec) -> Scope<'stati
     scope
 }
 
+pub fn registration_scope() -> Scope<'static> {
+    let mut scope = Scope::new();
+    scope.push_constant("system", SystemApi);
+    scope.push_constant("action", ActionApi);
+    scope.push_constant("tree", TreeApi);
+    scope.push_constant("ui", UiApi);
+    scope
+}
+
 pub fn normalize_actions(result: Dynamic) -> Result<Vec<Action>, String> {
     if result.is_unit() {
         return Ok(Vec::new());
@@ -139,18 +146,28 @@ fn register_context_api(engine: &mut Engine) {
     engine.register_fn("sessions", |context: &mut Context| -> Array {
         context.sessions().into_iter().map(Dynamic::from).collect()
     });
-    engine.register_fn("find_buffer", |context: &mut Context, buffer_id: i64| -> RhaiResult<Dynamic> {
-        Ok(dynamic_option_custom(
-            context.find_buffer(parse_buffer_id(buffer_id)?),
-        ))
-    });
-    engine.register_fn("find_node", |context: &mut Context, node_id: i64| -> RhaiResult<Dynamic> {
-        Ok(dynamic_option_custom(context.find_node(parse_node_id(node_id)?)))
-    });
+    engine.register_fn(
+        "find_buffer",
+        |context: &mut Context, buffer_id: i64| -> RhaiResult<Dynamic> {
+            Ok(dynamic_option_custom(
+                context.find_buffer(parse_buffer_id(buffer_id)?),
+            ))
+        },
+    );
+    engine.register_fn(
+        "find_node",
+        |context: &mut Context, node_id: i64| -> RhaiResult<Dynamic> {
+            Ok(dynamic_option_custom(
+                context.find_node(parse_node_id(node_id)?),
+            ))
+        },
+    );
     engine.register_fn(
         "find_floating",
         |context: &mut Context, floating_id: i64| -> RhaiResult<Dynamic> {
-            Ok(dynamic_option_custom(context.find_floating(parse_floating_id(floating_id)?)))
+            Ok(dynamic_option_custom(
+                context.find_floating(parse_floating_id(floating_id)?),
+            ))
         },
     );
     engine.register_fn("detached_buffers", |context: &mut Context| -> Array {
@@ -198,7 +215,9 @@ fn register_ref_api(engine: &mut Engine) {
 
     engine.register_fn("id", |session: &mut SessionRef| dynamic_u64(session.id.0));
     engine.register_fn("name", |session: &mut SessionRef| session.name.clone());
-    engine.register_fn("root_node", |session: &mut SessionRef| dynamic_u64(session.root_node_id.0));
+    engine.register_fn("root_node", |session: &mut SessionRef| {
+        dynamic_u64(session.root_node_id.0)
+    });
     engine.register_fn("floating", |session: &mut SessionRef| -> Array {
         session
             .floating_ids
@@ -236,7 +255,9 @@ fn register_ref_api(engine: &mut Engine) {
             Ok(buffer.snapshot_text(parse_count(limit, "snapshot_text limit")?))
         },
     );
-    engine.register_fn("history_text", |buffer: &mut BufferRef| buffer.history_text());
+    engine.register_fn("history_text", |buffer: &mut BufferRef| {
+        buffer.history_text()
+    });
     engine.register_fn("is_attached", |buffer: &mut BufferRef| buffer.is_attached());
     engine.register_fn("is_detached", |buffer: &mut BufferRef| buffer.is_detached());
     engine.register_fn("is_running", |buffer: &mut BufferRef| buffer.is_running());
@@ -273,7 +294,9 @@ fn register_ref_api(engine: &mut Engine) {
             .map(|child_id| dynamic_u64(child_id.0))
             .collect()
     });
-    engine.register_fn("session_id", |node: &mut NodeRef| dynamic_u64(node.session_id.0));
+    engine.register_fn("session_id", |node: &mut NodeRef| {
+        dynamic_u64(node.session_id.0)
+    });
     engine.register_fn("geometry", |node: &mut NodeRef| -> Dynamic {
         node.geometry
             .map(rect_map)
@@ -281,7 +304,9 @@ fn register_ref_api(engine: &mut Engine) {
             .unwrap_or(Dynamic::UNIT)
     });
     engine.register_fn("is_root", |node: &mut NodeRef| node.is_root);
-    engine.register_fn("is_floating_root", |node: &mut NodeRef| node.is_floating_root);
+    engine.register_fn("is_floating_root", |node: &mut NodeRef| {
+        node.is_floating_root
+    });
     engine.register_fn("is_visible", |node: &mut NodeRef| node.visible);
     engine.register_fn("is_focused", |node: &mut NodeRef| node.is_focused);
     engine.register_fn("buffer", |node: &mut NodeRef| -> Dynamic {
@@ -317,9 +342,15 @@ fn register_ref_api(engine: &mut Engine) {
         node.tab_titles.iter().cloned().map(Dynamic::from).collect()
     });
 
-    engine.register_fn("id", |floating: &mut FloatingRef| dynamic_u64(floating.id.0));
-    engine.register_fn("session_id", |floating: &mut FloatingRef| dynamic_u64(floating.session_id.0));
-    engine.register_fn("root_node", |floating: &mut FloatingRef| dynamic_u64(floating.root_node_id.0));
+    engine.register_fn("id", |floating: &mut FloatingRef| {
+        dynamic_u64(floating.id.0)
+    });
+    engine.register_fn("session_id", |floating: &mut FloatingRef| {
+        dynamic_u64(floating.session_id.0)
+    });
+    engine.register_fn("root_node", |floating: &mut FloatingRef| {
+        dynamic_u64(floating.root_node_id.0)
+    });
     engine.register_fn("title", |floating: &mut FloatingRef| -> Dynamic {
         dynamic_option_string(floating.title.clone())
     });
@@ -329,9 +360,13 @@ fn register_ref_api(engine: &mut Engine) {
         float_geometry_map(floating.geometry)
     });
 
-    engine.register_fn("node_id", |bar: &mut TabBarContext| dynamic_u64(bar.node_id.0));
+    engine.register_fn("node_id", |bar: &mut TabBarContext| {
+        dynamic_u64(bar.node_id.0)
+    });
     engine.register_fn("is_root", |bar: &mut TabBarContext| bar.is_root);
-    engine.register_fn("active_index", |bar: &mut TabBarContext| dynamic_usize(bar.active));
+    engine.register_fn("active_index", |bar: &mut TabBarContext| {
+        dynamic_usize(bar.active)
+    });
     engine.register_fn("mode", |bar: &mut TabBarContext| bar.mode.clone());
     engine.register_fn("viewport_width", |bar: &mut TabBarContext| {
         Dynamic::from(i64::from(bar.viewport_width))
@@ -345,14 +380,19 @@ fn register_ref_api(engine: &mut Engine) {
     engine.register_fn("is_active", |tab: &mut TabInfo| tab.active);
     engine.register_fn("has_activity", |tab: &mut TabInfo| tab.has_activity);
     engine.register_fn("has_bell", |tab: &mut TabInfo| tab.has_bell);
-    engine.register_fn("buffer_count", |tab: &mut TabInfo| dynamic_usize(tab.buffer_count));
+    engine.register_fn("buffer_count", |tab: &mut TabInfo| {
+        dynamic_usize(tab.buffer_count)
+    });
 }
 
 fn register_action_api(engine: &mut Engine) {
     engine.register_fn("noop", |_: &mut ActionApi| Action::Noop);
-    engine.register_fn("chain", |_: &mut ActionApi, actions: Array| -> RhaiResult<Action> {
-        Ok(Action::Chain(parse_action_array(actions)?))
-    });
+    engine.register_fn(
+        "chain",
+        |_: &mut ActionApi, actions: Array| -> RhaiResult<Action> {
+            Ok(Action::Chain(parse_action_array(actions)?))
+        },
+    );
     engine.register_fn("enter_mode", |_: &mut ActionApi, mode: ImmutableString| {
         Action::EnterMode {
             mode: mode.to_string(),
@@ -381,30 +421,42 @@ fn register_action_api(engine: &mut Engine) {
         direction: NavigationDirection::Down,
     });
 
-    engine.register_fn("resize_left", |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
-        Ok(Action::ResizeDirection {
-            direction: NavigationDirection::Left,
-            amount: parse_amount(amount, "resize amount")?,
-        })
-    });
-    engine.register_fn("resize_right", |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
-        Ok(Action::ResizeDirection {
-            direction: NavigationDirection::Right,
-            amount: parse_amount(amount, "resize amount")?,
-        })
-    });
-    engine.register_fn("resize_up", |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
-        Ok(Action::ResizeDirection {
-            direction: NavigationDirection::Up,
-            amount: parse_amount(amount, "resize amount")?,
-        })
-    });
-    engine.register_fn("resize_down", |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
-        Ok(Action::ResizeDirection {
-            direction: NavigationDirection::Down,
-            amount: parse_amount(amount, "resize amount")?,
-        })
-    });
+    engine.register_fn(
+        "resize_left",
+        |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
+            Ok(Action::ResizeDirection {
+                direction: NavigationDirection::Left,
+                amount: parse_amount(amount, "resize amount")?,
+            })
+        },
+    );
+    engine.register_fn(
+        "resize_right",
+        |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
+            Ok(Action::ResizeDirection {
+                direction: NavigationDirection::Right,
+                amount: parse_amount(amount, "resize amount")?,
+            })
+        },
+    );
+    engine.register_fn(
+        "resize_up",
+        |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
+            Ok(Action::ResizeDirection {
+                direction: NavigationDirection::Up,
+                amount: parse_amount(amount, "resize amount")?,
+            })
+        },
+    );
+    engine.register_fn(
+        "resize_down",
+        |_: &mut ActionApi, amount: i64| -> RhaiResult<Action> {
+            Ok(Action::ResizeDirection {
+                direction: NavigationDirection::Down,
+                amount: parse_amount(amount, "resize amount")?,
+            })
+        },
+    );
 
     engine.register_fn(
         "select_tab",
@@ -424,28 +476,37 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("next_tab", |_: &mut ActionApi, tabs_node_id: i64| -> RhaiResult<Action> {
-        Ok(Action::NextTab {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
-        })
-    });
+    engine.register_fn(
+        "next_tab",
+        |_: &mut ActionApi, tabs_node_id: i64| -> RhaiResult<Action> {
+            Ok(Action::NextTab {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+            })
+        },
+    );
     engine.register_fn("next_current_tabs", |_: &mut ActionApi| Action::NextTab {
         tabs_node_id: None,
     });
-    engine.register_fn("prev_tab", |_: &mut ActionApi, tabs_node_id: i64| -> RhaiResult<Action> {
-        Ok(Action::PrevTab {
-            tabs_node_id: Some(parse_node_id(tabs_node_id)?),
-        })
-    });
+    engine.register_fn(
+        "prev_tab",
+        |_: &mut ActionApi, tabs_node_id: i64| -> RhaiResult<Action> {
+            Ok(Action::PrevTab {
+                tabs_node_id: Some(parse_node_id(tabs_node_id)?),
+            })
+        },
+    );
     engine.register_fn("prev_current_tabs", |_: &mut ActionApi| Action::PrevTab {
         tabs_node_id: None,
     });
 
-    engine.register_fn("focus_buffer", |_: &mut ActionApi, buffer_id: i64| -> RhaiResult<Action> {
-        Ok(Action::FocusBuffer {
-            buffer_id: parse_buffer_id(buffer_id)?,
-        })
-    });
+    engine.register_fn(
+        "focus_buffer",
+        |_: &mut ActionApi, buffer_id: i64| -> RhaiResult<Action> {
+            Ok(Action::FocusBuffer {
+                buffer_id: parse_buffer_id(buffer_id)?,
+            })
+        },
+    );
     engine.register_fn(
         "reveal_buffer",
         |_: &mut ActionApi, buffer_id: i64| -> RhaiResult<Action> {
@@ -465,9 +526,13 @@ fn register_action_api(engine: &mut Engine) {
         },
     );
 
-    engine.register_fn("replace_current_with", |_: &mut ActionApi, tree: TreeSpec| {
-        Action::ReplaceNode { node_id: None, tree }
-    });
+    engine.register_fn(
+        "replace_current_with",
+        |_: &mut ActionApi, tree: TreeSpec| Action::ReplaceNode {
+            node_id: None,
+            tree,
+        },
+    );
     engine.register_fn(
         "replace_node",
         |_: &mut ActionApi, node_id: i64, tree: TreeSpec| -> RhaiResult<Action> {
@@ -490,7 +555,11 @@ fn register_action_api(engine: &mut Engine) {
     );
     engine.register_fn(
         "wrap_node_in_split",
-        |_: &mut ActionApi, node_id: i64, direction: ImmutableString, tree: TreeSpec| -> RhaiResult<Action> {
+        |_: &mut ActionApi,
+         node_id: i64,
+         direction: ImmutableString,
+         tree: TreeSpec|
+         -> RhaiResult<Action> {
             Ok(Action::WrapNodeInSplit {
                 node_id: Some(parse_node_id(node_id)?),
                 direction: parse_split_direction(direction.as_str())?,
@@ -520,7 +589,11 @@ fn register_action_api(engine: &mut Engine) {
 
     engine.register_fn(
         "insert_tab_after",
-        |_: &mut ActionApi, tabs_node_id: i64, title: ImmutableString, tree: TreeSpec| -> RhaiResult<Action> {
+        |_: &mut ActionApi,
+         tabs_node_id: i64,
+         title: ImmutableString,
+         tree: TreeSpec|
+         -> RhaiResult<Action> {
             Ok(Action::InsertTabAfter {
                 tabs_node_id: Some(parse_node_id(tabs_node_id)?),
                 title: Some(title.to_string()),
@@ -538,7 +611,11 @@ fn register_action_api(engine: &mut Engine) {
     );
     engine.register_fn(
         "insert_tab_before",
-        |_: &mut ActionApi, tabs_node_id: i64, title: ImmutableString, tree: TreeSpec| -> RhaiResult<Action> {
+        |_: &mut ActionApi,
+         tabs_node_id: i64,
+         title: ImmutableString,
+         tree: TreeSpec|
+         -> RhaiResult<Action> {
             Ok(Action::InsertTabBefore {
                 tabs_node_id: Some(parse_node_id(tabs_node_id)?),
                 title: Some(title.to_string()),
@@ -572,13 +649,16 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("replace_current_floating_root", |_: &mut ActionApi, tree: TreeSpec| {
-        Action::ReplaceFloatingRoot {
+    engine.register_fn(
+        "replace_current_floating_root",
+        |_: &mut ActionApi, tree: TreeSpec| Action::ReplaceFloatingRoot {
             floating_id: None,
             tree,
-        }
+        },
+    );
+    engine.register_fn("close_floating", |_: &mut ActionApi| {
+        Action::CloseFloating { floating_id: None }
     });
-    engine.register_fn("close_floating", |_: &mut ActionApi| Action::CloseFloating { floating_id: None });
     engine.register_fn(
         "close_floating_id",
         |_: &mut ActionApi, floating_id: i64| -> RhaiResult<Action> {
@@ -587,14 +667,21 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("close_view", |_: &mut ActionApi| Action::CloseView { node_id: None });
-    engine.register_fn("close_node", |_: &mut ActionApi, node_id: i64| -> RhaiResult<Action> {
-        Ok(Action::CloseView {
-            node_id: Some(parse_node_id(node_id)?),
-        })
+    engine.register_fn("close_view", |_: &mut ActionApi| Action::CloseView {
+        node_id: None,
     });
+    engine.register_fn(
+        "close_node",
+        |_: &mut ActionApi, node_id: i64| -> RhaiResult<Action> {
+            Ok(Action::CloseView {
+                node_id: Some(parse_node_id(node_id)?),
+            })
+        },
+    );
 
-    engine.register_fn("kill_buffer", |_: &mut ActionApi| Action::KillBuffer { buffer_id: None });
+    engine.register_fn("kill_buffer", |_: &mut ActionApi| Action::KillBuffer {
+        buffer_id: None,
+    });
     engine.register_fn(
         "kill_buffer_id",
         |_: &mut ActionApi, buffer_id: i64| -> RhaiResult<Action> {
@@ -603,7 +690,9 @@ fn register_action_api(engine: &mut Engine) {
             })
         },
     );
-    engine.register_fn("detach_buffer", |_: &mut ActionApi| Action::DetachBuffer { buffer_id: None });
+    engine.register_fn("detach_buffer", |_: &mut ActionApi| Action::DetachBuffer {
+        buffer_id: None,
+    });
     engine.register_fn(
         "detach_buffer_id",
         |_: &mut ActionApi, buffer_id: i64| -> RhaiResult<Action> {
@@ -690,11 +779,66 @@ fn register_action_api(engine: &mut Engine) {
         },
     );
 
+    engine.register_fn("scroll_line_up", |_: &mut ActionApi| Action::ScrollLineUp);
+    engine.register_fn("scroll_line_down", |_: &mut ActionApi| {
+        Action::ScrollLineDown
+    });
+    engine.register_fn("scroll_page_up", |_: &mut ActionApi| Action::ScrollPageUp);
+    engine.register_fn("scroll_page_down", |_: &mut ActionApi| {
+        Action::ScrollPageDown
+    });
+    engine.register_fn("scroll_to_top", |_: &mut ActionApi| Action::ScrollToTop);
+    engine.register_fn("scroll_to_bottom", |_: &mut ActionApi| {
+        Action::ScrollToBottom
+    });
+    engine.register_fn("follow_output", |_: &mut ActionApi| Action::FollowOutput);
+    engine.register_fn("enter_search_mode", |_: &mut ActionApi| {
+        Action::EnterSearchMode
+    });
+    engine.register_fn("search_next", |_: &mut ActionApi| Action::SearchNext);
+    engine.register_fn("search_prev", |_: &mut ActionApi| Action::SearchPrev);
+    engine.register_fn("cancel_search", |_: &mut ActionApi| Action::CancelSearch);
+    engine.register_fn("enter_select_char", |_: &mut ActionApi| {
+        Action::EnterSelect {
+            kind: crate::state::SelectionKind::Character,
+        }
+    });
+    engine.register_fn("enter_select_line", |_: &mut ActionApi| {
+        Action::EnterSelect {
+            kind: crate::state::SelectionKind::Line,
+        }
+    });
+    engine.register_fn("enter_select_block", |_: &mut ActionApi| {
+        Action::EnterSelect {
+            kind: crate::state::SelectionKind::Block,
+        }
+    });
+    engine.register_fn("select_move_left", |_: &mut ActionApi| Action::SelectMove {
+        direction: NavigationDirection::Left,
+    });
+    engine.register_fn("select_move_right", |_: &mut ActionApi| {
+        Action::SelectMove {
+            direction: NavigationDirection::Right,
+        }
+    });
+    engine.register_fn("select_move_up", |_: &mut ActionApi| Action::SelectMove {
+        direction: NavigationDirection::Up,
+    });
+    engine.register_fn("select_move_down", |_: &mut ActionApi| Action::SelectMove {
+        direction: NavigationDirection::Down,
+    });
+
+    engine.register_fn("yank_selection", |_: &mut ActionApi| Action::CopySelection);
     engine.register_fn("copy_selection", |_: &mut ActionApi| Action::CopySelection);
-    engine.register_fn("cancel_selection", |_: &mut ActionApi| Action::CancelSelection);
+    engine.register_fn("cancel_selection", |_: &mut ActionApi| {
+        Action::CancelSelection
+    });
     engine.register_fn(
         "notify",
-        |_: &mut ActionApi, level: ImmutableString, message: ImmutableString| -> RhaiResult<Action> {
+        |_: &mut ActionApi,
+         level: ImmutableString,
+         message: ImmutableString|
+         -> RhaiResult<Action> {
             Ok(Action::Notify {
                 level: parse_notify_level(level.as_str())?,
                 message: message.to_string(),
@@ -771,12 +915,20 @@ fn register_tree_api(engine: &mut Engine) {
     engine.register_fn(
         "split",
         |_: &mut TreeApi, direction: ImmutableString, children: Array| -> RhaiResult<TreeSpec> {
-            build_split(parse_split_direction(direction.as_str())?, children, Vec::new())
+            build_split(
+                parse_split_direction(direction.as_str())?,
+                children,
+                Vec::new(),
+            )
         },
     );
     engine.register_fn(
         "split",
-        |_: &mut TreeApi, direction: ImmutableString, children: Array, sizes: Array| -> RhaiResult<TreeSpec> {
+        |_: &mut TreeApi,
+         direction: ImmutableString,
+         children: Array,
+         sizes: Array|
+         -> RhaiResult<TreeSpec> {
             build_split(
                 parse_split_direction(direction.as_str())?,
                 children,
@@ -820,14 +972,22 @@ fn register_mux_api(engine: &mut Engine) {
             .map(Dynamic::from)
             .collect()
     });
-    engine.register_fn("find_buffer", |mux: &mut MuxApi, buffer_id: i64| -> RhaiResult<Dynamic> {
-        Ok(dynamic_option_custom(
-            mux.context.find_buffer(parse_buffer_id(buffer_id)?),
-        ))
-    });
-    engine.register_fn("find_node", |mux: &mut MuxApi, node_id: i64| -> RhaiResult<Dynamic> {
-        Ok(dynamic_option_custom(mux.context.find_node(parse_node_id(node_id)?)))
-    });
+    engine.register_fn(
+        "find_buffer",
+        |mux: &mut MuxApi, buffer_id: i64| -> RhaiResult<Dynamic> {
+            Ok(dynamic_option_custom(
+                mux.context.find_buffer(parse_buffer_id(buffer_id)?),
+            ))
+        },
+    );
+    engine.register_fn(
+        "find_node",
+        |mux: &mut MuxApi, node_id: i64| -> RhaiResult<Dynamic> {
+            Ok(dynamic_option_custom(
+                mux.context.find_node(parse_node_id(node_id)?),
+            ))
+        },
+    );
     engine.register_fn(
         "find_floating",
         |mux: &mut MuxApi, floating_id: i64| -> RhaiResult<Dynamic> {
@@ -839,17 +999,23 @@ fn register_mux_api(engine: &mut Engine) {
 }
 
 fn register_system_api(engine: &mut Engine) {
-    engine.register_fn("env", |_: &mut SystemApi, name: ImmutableString| -> Dynamic {
-        std::env::var(name.as_str())
-            .ok()
-            .map(Dynamic::from)
-            .unwrap_or(Dynamic::UNIT)
-    });
-    engine.register_fn("which", |_: &mut SystemApi, name: ImmutableString| -> Dynamic {
-        which(name.as_str())
-            .map(|path| Dynamic::from(path.display().to_string()))
-            .unwrap_or(Dynamic::UNIT)
-    });
+    engine.register_fn(
+        "env",
+        |_: &mut SystemApi, name: ImmutableString| -> Dynamic {
+            std::env::var(name.as_str())
+                .ok()
+                .map(Dynamic::from)
+                .unwrap_or(Dynamic::UNIT)
+        },
+    );
+    engine.register_fn(
+        "which",
+        |_: &mut SystemApi, name: ImmutableString| -> Dynamic {
+            which(name.as_str())
+                .map(|path| Dynamic::from(path.display().to_string()))
+                .unwrap_or(Dynamic::UNIT)
+        },
+    );
     engine.register_fn("now", |_: &mut SystemApi| -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -859,10 +1025,12 @@ fn register_system_api(engine: &mut Engine) {
 }
 
 fn register_ui_api(engine: &mut Engine) {
-    engine.register_fn("segment", |_: &mut UiApi, text: ImmutableString| BarSegment {
-        text: text.to_string(),
-        style: StyleSpec::default(),
-        target: None,
+    engine.register_fn("segment", |_: &mut UiApi, text: ImmutableString| {
+        BarSegment {
+            text: text.to_string(),
+            style: StyleSpec::default(),
+            target: None,
+        }
     });
     engine.register_fn(
         "segment",
@@ -902,7 +1070,11 @@ fn register_theme_runtime_api(engine: &mut Engine) {
     );
 }
 
-fn build_split(direction: SplitDirection, children: Array, sizes: Vec<u16>) -> RhaiResult<TreeSpec> {
+fn build_split(
+    direction: SplitDirection,
+    children: Array,
+    sizes: Vec<u16>,
+) -> RhaiResult<TreeSpec> {
     let children = parse_tree_array(children)?;
     if children.is_empty() {
         return Err(runtime_error("split children cannot be empty"));
@@ -1016,9 +1188,12 @@ struct ParsedFloatingOptions {
 fn parse_floating_options(mut options: Map) -> RhaiResult<ParsedFloatingOptions> {
     Ok(ParsedFloatingOptions {
         geometry: FloatingGeometrySpec {
-            width: parse_floating_size(options.remove("width"))?.unwrap_or(FloatingSize::Percent(50)),
-            height: parse_floating_size(options.remove("height"))?.unwrap_or(FloatingSize::Percent(50)),
-            anchor: parse_floating_anchor(options.remove("anchor"))?.unwrap_or(FloatingAnchor::Center),
+            width: parse_floating_size(options.remove("width"))?
+                .unwrap_or(FloatingSize::Percent(50)),
+            height: parse_floating_size(options.remove("height"))?
+                .unwrap_or(FloatingSize::Percent(50)),
+            anchor: parse_floating_anchor(options.remove("anchor"))?
+                .unwrap_or(FloatingAnchor::Center),
             offset_x: parse_i16_field(options.remove("x"), "x")?.unwrap_or(0),
             offset_y: parse_i16_field(options.remove("y"), "y")?.unwrap_or(0),
         },
@@ -1106,7 +1281,9 @@ fn parse_string_array(value: Dynamic) -> RhaiResult<Vec<String>> {
     Ok(parsed)
 }
 
-fn parse_string_map(value: Option<Dynamic>) -> RhaiResult<std::collections::BTreeMap<String, String>> {
+fn parse_string_map(
+    value: Option<Dynamic>,
+) -> RhaiResult<std::collections::BTreeMap<String, String>> {
     let Some(value) = value else {
         return Ok(Default::default());
     };
@@ -1189,7 +1366,10 @@ fn parse_floating_size(value: Option<Dynamic>) -> RhaiResult<Option<FloatingSize
         return Ok(None);
     }
     if let Some(value) = value.clone().try_cast::<i64>() {
-        return Ok(Some(FloatingSize::Cells(parse_amount(value, "floating size")?)));
+        return Ok(Some(FloatingSize::Cells(parse_amount(
+            value,
+            "floating size",
+        )?)));
     }
     if let Some(value) = value.try_cast::<ImmutableString>() {
         let value = value.to_string();

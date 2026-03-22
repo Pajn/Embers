@@ -4,6 +4,7 @@ use embers_core::{BufferId, FloatingId, NodeId, SplitDirection};
 
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
+use crate::state::SelectionKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -103,6 +104,23 @@ pub enum Action {
     SendBytes {
         buffer_id: Option<BufferId>,
         bytes: Vec<u8>,
+    },
+    ScrollLineUp,
+    ScrollLineDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollToTop,
+    ScrollToBottom,
+    FollowOutput,
+    EnterSearchMode,
+    SearchNext,
+    SearchPrev,
+    CancelSearch,
+    EnterSelect {
+        kind: SelectionKind,
+    },
+    SelectMove {
+        direction: NavigationDirection,
     },
     CopySelection,
     CancelSelection,

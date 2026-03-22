@@ -6,9 +6,17 @@ use embers_protocol::{
     BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, VisibleSnapshotResponse,
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line: u64,
+    pub start_column: u16,
+    pub end_column: u16,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchState {
     pub query: String,
+    pub matches: Vec<SearchMatch>,
     pub active_match_index: Option<usize>,
 }
 
@@ -40,6 +48,7 @@ pub struct BufferViewState {
     pub visible_line_count: u16,
     pub total_line_count: u64,
     pub alternate_screen: bool,
+    pub visible_lines: Vec<String>,
     pub search_state: Option<SearchState>,
     pub selection_state: Option<SelectionState>,
 }
@@ -53,6 +62,7 @@ impl Default for BufferViewState {
             visible_line_count: 0,
             total_line_count: 0,
             alternate_screen: false,
+            visible_lines: Vec::new(),
             search_state: None,
             selection_state: None,
         }
@@ -99,8 +109,9 @@ impl ClientState {
         self.floating.retain(|floating_id, window| {
             window.session_id != session_id || current_floating_ids.contains(floating_id)
         });
-        self.view_state
-            .retain(|node_id, _| !previous_node_ids.contains(node_id) || current_node_ids.contains(node_id));
+        self.view_state.retain(|node_id, _| {
+            !previous_node_ids.contains(node_id) || current_node_ids.contains(node_id)
+        });
 
         for node in nodes {
             self.nodes.insert(node.id, node);
@@ -139,7 +150,8 @@ impl ClientState {
         for buffer_id in current_detached.difference(&incoming_ids) {
             self.buffers.remove(buffer_id);
             self.snapshots.remove(buffer_id);
-            self.view_state.retain(|_, state| state.buffer_id != *buffer_id);
+            self.view_state
+                .retain(|_, state| state.buffer_id != *buffer_id);
             self.invalidated_buffers.remove(buffer_id);
         }
 
@@ -206,13 +218,69 @@ impl ClientState {
         self.nodes.retain(|_, node| node.session_id != session_id);
         self.floating
             .retain(|_, window| window.session_id != session_id);
-        self.view_state.retain(|node_id, _| !node_ids.contains(node_id));
+        self.view_state
+            .retain(|node_id, _| !node_ids.contains(node_id));
         self.detach_buffers_for_nodes(&node_ids);
         self.dirty_sessions.remove(&session_id);
     }
 
     pub fn view_state(&self, node_id: NodeId) -> Option<&BufferViewState> {
         self.view_state.get(&node_id)
+    }
+
+    pub fn view_state_mut(&mut self, node_id: NodeId) -> Option<&mut BufferViewState> {
+        self.view_state.get_mut(&node_id)
+    }
+
+    pub fn set_view_follow_output(&mut self, node_id: NodeId, follow_output: bool) -> Option<()> {
+        let snapshot_lines = self
+            .view_state
+            .get(&node_id)
+            .and_then(|state| self.snapshots.get(&state.buffer_id))
+            .map(|snapshot| snapshot.lines.clone())
+            .unwrap_or_default();
+        let state = self.view_state.get_mut(&node_id)?;
+        state.follow_output = follow_output;
+        if follow_output {
+            state.scroll_top_line =
+                bottom_top_line(state.total_line_count, state.visible_line_count);
+            if !snapshot_lines.is_empty() {
+                state.visible_lines = snapshot_lines;
+            }
+        }
+        Some(())
+    }
+
+    pub fn set_view_scroll_top(&mut self, node_id: NodeId, scroll_top_line: u64) -> Option<u64> {
+        let state = self.view_state.get_mut(&node_id)?;
+        let scroll_top_line = clamp_top_line(
+            scroll_top_line,
+            state.total_line_count,
+            state.visible_line_count,
+        );
+        state.scroll_top_line = scroll_top_line;
+        state.follow_output =
+            scroll_top_line == bottom_top_line(state.total_line_count, state.visible_line_count);
+        Some(scroll_top_line)
+    }
+
+    pub fn set_view_visible_lines(
+        &mut self,
+        node_id: NodeId,
+        scroll_top_line: u64,
+        lines: Vec<String>,
+    ) -> Option<()> {
+        let state = self.view_state.get_mut(&node_id)?;
+        let scroll_top_line = clamp_top_line(
+            scroll_top_line,
+            state.total_line_count,
+            state.visible_line_count,
+        );
+        state.scroll_top_line = scroll_top_line;
+        state.follow_output =
+            scroll_top_line == bottom_top_line(state.total_line_count, state.visible_line_count);
+        state.visible_lines = lines;
+        Some(())
     }
 
     fn sync_view_states_for_buffer(&mut self, buffer_id: BufferId) {
@@ -252,13 +320,18 @@ impl ClientState {
             let initial_top_line = snapshot
                 .map(|snapshot| snapshot.viewport_top_line)
                 .unwrap_or_else(|| bottom_top_line(total_line_count, visible_line_count));
+            let snapshot_lines = snapshot
+                .map(|snapshot| snapshot.lines.clone())
+                .unwrap_or_default();
 
             match self.view_state.get_mut(node_id) {
                 Some(state) if state.buffer_id == buffer_view.buffer_id => {
                     state.visible_line_count = visible_line_count;
                     state.total_line_count = total_line_count;
                     state.alternate_screen = alternate_screen;
-                    if !alternate_screen {
+                    if alternate_screen {
+                        state.visible_lines = snapshot_lines;
+                    } else {
                         state.scroll_top_line = if state.follow_output {
                             bottom_top_line(total_line_count, visible_line_count)
                         } else {
@@ -268,6 +341,17 @@ impl ClientState {
                                 visible_line_count,
                             )
                         };
+                        let live_top_line = snapshot
+                            .map(|snapshot| snapshot.viewport_top_line)
+                            .unwrap_or(state.scroll_top_line);
+                        if state.follow_output
+                            || state.scroll_top_line == live_top_line
+                            || state.visible_lines.is_empty()
+                        {
+                            state.visible_lines = snapshot_lines;
+                        } else {
+                            state.visible_lines.clear();
+                        }
                     }
                 }
                 Some(state) => {
@@ -280,6 +364,7 @@ impl ClientState {
                         visible_line_count,
                         total_line_count,
                         alternate_screen,
+                        visible_lines: snapshot_lines,
                         search_state,
                         selection_state,
                     };
@@ -294,6 +379,7 @@ impl ClientState {
                             visible_line_count,
                             total_line_count,
                             alternate_screen,
+                            visible_lines: snapshot_lines,
                             search_state: None,
                             selection_state: None,
                         },

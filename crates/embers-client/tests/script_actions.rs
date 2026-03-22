@@ -3,9 +3,9 @@ mod support;
 use std::collections::BTreeMap;
 
 use embers_client::{
-    Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    FloatingSpec, KeyToken, NavigationDirection, NotifyLevel, PresentationModel, ScriptEngine,
-    TabSpec, TabsSpec, TreeSpec,
+    Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec,
+    FloatingSize, FloatingSpec, KeyToken, NavigationDirection, NotifyLevel, PresentationModel,
+    ScriptEngine, SelectionKind, TabSpec, TabsSpec, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
@@ -45,6 +45,12 @@ fn action_helpers_roundtrip_to_typed_actions() {
             fn kill_buffer_action(ctx) { action.kill_buffer() }
             fn send_keys_action(ctx) { action.send_keys_current("abc") }
             fn send_bytes_action(ctx) { action.send_bytes_current([65, 66]) }
+            fn scroll_page_action(ctx) { action.scroll_page_up() }
+            fn search_action(ctx) { action.enter_search_mode() }
+            fn search_next_action(ctx) { action.search_next() }
+            fn select_char_action(ctx) { action.enter_select_char() }
+            fn select_move_action(ctx) { action.select_move_left() }
+            fn yank_action(ctx) { action.yank_selection() }
             fn notify_user_action(ctx) { action.notify("info", "hello") }
 
             define_action("enter-copy", enter_copy_action);
@@ -62,6 +68,12 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("kill-buffer", kill_buffer_action);
             define_action("send-keys", send_keys_action);
             define_action("send-bytes", send_bytes_action);
+            define_action("scroll-page", scroll_page_action);
+            define_action("search", search_action);
+            define_action("search-next", search_next_action);
+            define_action("select-char", select_char_action);
+            define_action("select-move", select_move_action);
+            define_action("yank", yank_action);
             define_action("notify-user", notify_user_action);
         "#,
     );
@@ -224,6 +236,42 @@ fn action_helpers_roundtrip_to_typed_actions() {
             buffer_id: None,
             bytes: vec![65, 66],
         }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("scroll-page", context.clone())
+            .unwrap(),
+        vec![Action::ScrollPageUp]
+    );
+    assert_eq!(
+        engine.run_named_action("search", context.clone()).unwrap(),
+        vec![Action::EnterSearchMode]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("search-next", context.clone())
+            .unwrap(),
+        vec![Action::SearchNext]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("select-char", context.clone())
+            .unwrap(),
+        vec![Action::EnterSelect {
+            kind: SelectionKind::Character,
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("select-move", context.clone())
+            .unwrap(),
+        vec![Action::SelectMove {
+            direction: NavigationDirection::Left,
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("yank", context.clone()).unwrap(),
+        vec![Action::CopySelection]
     );
     assert_eq!(
         engine.run_named_action("notify-user", context).unwrap(),

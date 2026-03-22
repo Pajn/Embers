@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
 use crate::scripting::{BarSegment, BarSpec};
-use crate::state::ClientState;
+use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Renderer;
@@ -168,9 +168,19 @@ impl Renderer {
             return;
         }
 
-        if let Some(snapshot) = state.snapshots.get(&leaf.buffer_id) {
-            for (row, line) in snapshot
-                .lines
+        let view_state = state.view_state(leaf.node_id);
+        let lines = view_state
+            .map(|view| view.visible_lines.as_slice())
+            .filter(|lines| !lines.is_empty())
+            .or_else(|| {
+                state
+                    .snapshots
+                    .get(&leaf.buffer_id)
+                    .map(|snapshot| snapshot.lines.as_slice())
+            });
+
+        if let Some(lines) = lines {
+            for (row, line) in lines
                 .iter()
                 .take(usize::from(height.saturating_sub(1)))
                 .enumerate()
@@ -180,8 +190,54 @@ impl Renderer {
                 };
                 grid.put_str(x, y + 1 + row, &truncate(line, width));
             }
+        }
 
-            if leaf.focused
+        if let Some(view_state) = view_state
+            && !view_state.alternate_screen
+        {
+            if let Some(search_state) = &view_state.search_state {
+                render_search_overlay(
+                    grid,
+                    x,
+                    y + 1,
+                    width,
+                    view_state.scroll_top_line,
+                    &view_state.visible_lines,
+                    search_state,
+                );
+            }
+            if let Some(selection_state) = &view_state.selection_state {
+                render_selection_overlay(
+                    grid,
+                    x,
+                    y + 1,
+                    width,
+                    view_state.scroll_top_line,
+                    &view_state.visible_lines,
+                    selection_state,
+                );
+            }
+            if !view_state.follow_output {
+                render_scroll_indicator(
+                    grid,
+                    x,
+                    y,
+                    width,
+                    view_state.scroll_top_line,
+                    view_state.total_line_count,
+                );
+            }
+        }
+
+        if let Some(snapshot) = state.snapshots.get(&leaf.buffer_id)
+            && leaf.focused
+        {
+            let locally_scrolled = view_state.is_some_and(|view| {
+                !view.alternate_screen && view.scroll_top_line != snapshot.viewport_top_line
+            });
+            let selection_active = view_state.is_some_and(|view| view.selection_state.is_some());
+            if !locally_scrolled
+                && !selection_active
                 && let Some(cursor) = snapshot.cursor
                 && cursor.position.col < width
             {
@@ -206,22 +262,10 @@ impl Renderer {
         let y = clamp_i32_to_u16(divider.rect.origin.y);
         match divider.direction {
             embers_core::SplitDirection::Horizontal => {
-                grid.draw_hline_styled(
-                    x,
-                    y,
-                    divider.rect.size.width,
-                    '-',
-                    divider_style(),
-                );
+                grid.draw_hline_styled(x, y, divider.rect.size.width, '-', divider_style());
             }
             embers_core::SplitDirection::Vertical => {
-                grid.draw_vline_styled(
-                    x,
-                    y,
-                    divider.rect.size.height,
-                    '|',
-                    divider_style(),
-                );
+                grid.draw_vline_styled(x, y, divider.rect.size.height, '|', divider_style());
             }
         }
     }
@@ -239,7 +283,11 @@ impl Renderer {
         } else {
             BorderStyle::ASCII
         };
-        grid.draw_box_styled(floating.rect, border, floating_border_style(floating.focused));
+        grid.draw_box_styled(
+            floating.rect,
+            border,
+            floating_border_style(floating.focused),
+        );
 
         if let Some(title) = &floating.title {
             let title_rect = Rect {
@@ -261,6 +309,191 @@ impl Renderer {
                 );
             }
         }
+    }
+}
+
+fn render_scroll_indicator(
+    grid: &mut RenderGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    top_line: u64,
+    total_lines: u64,
+) {
+    if width == 0 || total_lines == 0 {
+        return;
+    }
+    let label = truncate(
+        &format!("{}/{}", top_line.saturating_add(1), total_lines),
+        width,
+    );
+    let label_width = display_width(&label).min(width);
+    let origin_x = x.saturating_add(width.saturating_sub(label_width));
+    grid.put_str_styled(origin_x, y, &label, scroll_indicator_style());
+}
+
+fn render_search_overlay(
+    grid: &mut RenderGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    top_line: u64,
+    lines: &[String],
+    search_state: &crate::state::SearchState,
+) {
+    let Some(active_index) = search_state.active_match_index else {
+        return;
+    };
+    for (index, search_match) in search_state.matches.iter().enumerate() {
+        if search_match.line < top_line {
+            continue;
+        }
+        let relative_row = search_match.line - top_line;
+        let Some(relative_row) = u16::try_from(relative_row).ok() else {
+            continue;
+        };
+        if relative_row >= u16::try_from(lines.len()).unwrap_or(u16::MAX) {
+            continue;
+        }
+        let line = &lines[usize::from(relative_row)];
+        overlay_display_range(
+            grid,
+            x,
+            y.saturating_add(relative_row),
+            width,
+            line,
+            search_match.start_column,
+            search_match.end_column,
+            if index == active_index {
+                active_search_style()
+            } else {
+                search_style()
+            },
+        );
+    }
+}
+
+fn render_selection_overlay(
+    grid: &mut RenderGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    top_line: u64,
+    lines: &[String],
+    selection_state: &SelectionState,
+) {
+    for (row, line) in lines.iter().enumerate() {
+        let Some(row_u16) = u16::try_from(row).ok() else {
+            break;
+        };
+        let line_number = top_line.saturating_add(u64::try_from(row).unwrap_or(u64::MAX));
+        let Some((start_column, end_column)) =
+            selection_range_for_line(selection_state, line_number, width, line)
+        else {
+            continue;
+        };
+        overlay_display_range(
+            grid,
+            x,
+            y.saturating_add(row_u16),
+            width,
+            line,
+            start_column,
+            end_column,
+            selection_style(),
+        );
+    }
+}
+
+fn selection_range_for_line(
+    selection_state: &SelectionState,
+    line_number: u64,
+    width: u16,
+    line: &str,
+) -> Option<(u16, u16)> {
+    match selection_state.kind {
+        SelectionKind::Line => {
+            let start_line = selection_state.anchor.line.min(selection_state.cursor.line);
+            let end_line = selection_state.anchor.line.max(selection_state.cursor.line);
+            (start_line..=end_line)
+                .contains(&line_number)
+                .then_some((0, width))
+        }
+        SelectionKind::Block => {
+            let start_line = selection_state.anchor.line.min(selection_state.cursor.line);
+            let end_line = selection_state.anchor.line.max(selection_state.cursor.line);
+            if !(start_line..=end_line).contains(&line_number) {
+                return None;
+            }
+            Some((
+                selection_state
+                    .anchor
+                    .column
+                    .min(selection_state.cursor.column),
+                selection_state
+                    .anchor
+                    .column
+                    .max(selection_state.cursor.column)
+                    .saturating_add(1),
+            ))
+        }
+        SelectionKind::Character => {
+            let (start, end) = ordered_points(selection_state.anchor, selection_state.cursor);
+            if !(start.line..=end.line).contains(&line_number) {
+                return None;
+            }
+            let line_width = display_width(line).max(1);
+            if start.line == end.line {
+                Some((start.column, end.column.saturating_add(1)))
+            } else if line_number == start.line {
+                Some((start.column, line_width.max(start.column.saturating_add(1))))
+            } else if line_number == end.line {
+                Some((0, end.column.saturating_add(1)))
+            } else {
+                Some((0, line_width))
+            }
+        }
+    }
+}
+
+fn ordered_points(left: SelectionPoint, right: SelectionPoint) -> (SelectionPoint, SelectionPoint) {
+    if (left.line, left.column) <= (right.line, right.column) {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn overlay_display_range(
+    grid: &mut RenderGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    line: &str,
+    start_column: u16,
+    end_column: u16,
+    style: CellStyle,
+) {
+    if start_column >= end_column || width == 0 {
+        return;
+    }
+
+    let visible_end = end_column.min(width);
+    let mut column = 0_u16;
+    for grapheme in UnicodeSegmentation::graphemes(line, true) {
+        let grapheme_width = display_width(grapheme).max(1);
+        let next_column = column.saturating_add(grapheme_width);
+        if next_column > start_column && column < visible_end {
+            grid.put_str_styled(x.saturating_add(column), y, grapheme, style);
+        }
+        column = next_column;
+        if column >= visible_end {
+            return;
+        }
+    }
+
+    for column in column.max(start_column)..visible_end {
+        grid.put_char_styled(x.saturating_add(column), y, ' ', style);
     }
 }
 
@@ -393,5 +626,35 @@ fn floating_title_style(focused: bool) -> CellStyle {
             dim: true,
             ..CellStyle::default()
         }
+    }
+}
+
+fn scroll_indicator_style() -> CellStyle {
+    CellStyle {
+        dim: true,
+        reverse: true,
+        ..CellStyle::default()
+    }
+}
+
+fn search_style() -> CellStyle {
+    CellStyle {
+        underline: true,
+        ..CellStyle::default()
+    }
+}
+
+fn active_search_style() -> CellStyle {
+    CellStyle {
+        underline: true,
+        reverse: true,
+        ..CellStyle::default()
+    }
+}
+
+fn selection_style() -> CellStyle {
+    CellStyle {
+        reverse: true,
+        ..CellStyle::default()
     }
 }

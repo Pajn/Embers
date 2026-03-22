@@ -52,6 +52,13 @@ fn manager_uses_builtin_config_when_no_files_exist() {
     assert_eq!(manager.active_source().origin, ConfigOrigin::BuiltIn);
     assert_eq!(manager.active_source().source, BUILTIN_CONFIG_SOURCE);
     assert_eq!(manager.active_source().display_path(), "<built-in>");
+    assert!(
+        manager.active_script().loaded_config().bindings["normal"]
+            .iter()
+            .any(|binding| binding.notation == "<PageUp>")
+    );
+    assert!(manager.active_script().loaded_config().mouse.click_focus);
+    assert!(manager.active_script().loaded_config().mouse.wheel_scroll);
 }
 
 #[test]
@@ -92,4 +99,43 @@ fn reload_swaps_in_new_compiled_config_on_success() {
         manager.active_script().loaded_config().leader,
         vec![KeyToken::Ctrl('b')]
     );
+}
+
+#[test]
+fn user_config_overlays_builtins_and_can_unbind_defaults() {
+    let tempdir = tempdir().unwrap();
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"
+            unbind("normal", "<PageUp>");
+            mouse.set_wheel_scroll(false);
+        "#,
+    )
+    .unwrap();
+
+    let manager = ConfigManager::load(
+        ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .unwrap();
+
+    assert!(
+        manager
+            .active_source()
+            .source
+            .contains(r#"unbind("normal", "<PageUp>");"#)
+    );
+    assert!(
+        manager
+            .active_source()
+            .source
+            .contains("mouse.set_wheel_scroll(false);")
+    );
+    assert!(
+        !manager.active_script().loaded_config().bindings["normal"]
+            .iter()
+            .any(|binding| binding.notation == "<PageUp>")
+    );
+    assert!(manager.active_script().loaded_config().mouse.click_focus);
+    assert!(!manager.active_script().loaded_config().mouse.wheel_scroll);
 }
