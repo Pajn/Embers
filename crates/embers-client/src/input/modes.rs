@@ -4,6 +4,7 @@ use crate::input::keyparse::KeySequence;
 
 pub const NORMAL_MODE: &str = "normal";
 pub const COPY_MODE: &str = "copy";
+pub const SEARCH_MODE: &str = "search";
 pub const SELECT_MODE: &str = "select";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,6 +81,10 @@ pub fn builtin_modes() -> BTreeMap<String, ModeSpec> {
             ModeSpec::new(COPY_MODE, FallbackPolicy::Ignore),
         ),
         (
+            SEARCH_MODE.to_owned(),
+            ModeSpec::new(SEARCH_MODE, FallbackPolicy::Ignore),
+        ),
+        (
             SELECT_MODE.to_owned(),
             ModeSpec::new(SELECT_MODE, FallbackPolicy::Ignore),
         ),
@@ -102,10 +107,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_modes_include_normal_copy_and_select() {
+    fn builtin_modes_include_normal_copy_search_and_select() {
         let modes = builtin_modes();
         assert!(modes.contains_key("normal"));
         assert!(modes.contains_key("copy"));
+        assert!(modes.contains_key("search"));
         assert!(modes.contains_key("select"));
     }
 }

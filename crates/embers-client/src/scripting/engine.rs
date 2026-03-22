@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use rhai::{
     CallFnOptions, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, NativeCallContext,
-    Position, Scope,
+    Position,
 };
 
 use crate::config::LoadedConfigSource;
@@ -13,8 +13,12 @@ use crate::input::{
 };
 
 use super::error::ScriptError;
-use super::runtime::{normalize_actions, normalize_bar, register_runtime_api, runtime_scope};
-use super::types::{LoadedConfig, ModeHooks, RgbColor, ScriptFunctionRef, ThemeSpec};
+use super::runtime::{
+    normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
+};
+use super::types::{
+    LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
+};
 use super::{Action, Context, TabBarContext};
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
@@ -27,6 +31,13 @@ pub struct ScriptEngine {
 
 impl ScriptEngine {
     pub fn load(source: &LoadedConfigSource) -> Result<Self, ScriptError> {
+        Self::load_with_overlay("", source)
+    }
+
+    pub fn load_with_overlay(
+        builtins: &str,
+        source: &LoadedConfigSource,
+    ) -> Result<Self, ScriptError> {
         let registration = Arc::new(Mutex::new(RegistrationState::default()));
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 256);
@@ -34,13 +45,19 @@ impl ScriptEngine {
         register_api(&mut engine, registration.clone());
         register_runtime_api(&mut engine);
 
+        let composed_source = if builtins.is_empty() {
+            source.source.clone()
+        } else {
+            format!("{builtins}\n{}", source.source)
+        };
         let ast = engine
-            .compile(&source.source)
+            .compile(&composed_source)
             .map_err(|error| ScriptError::compile(source, error))?;
 
-        let mut scope = Scope::new();
+        let mut scope = registration_scope();
         scope.push_constant("tabbar", TabbarApi::new(registration.clone()));
         scope.push_constant("theme", ThemeApi::new(registration.clone()));
+        scope.push_constant("mouse", MouseApi::new(registration.clone()));
 
         let _ = engine
             .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
@@ -75,7 +92,11 @@ impl ScriptEngine {
         &self.engine
     }
 
-    pub fn run_named_action(&self, name: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
+    pub fn run_named_action(
+        &self,
+        name: &str,
+        context: Context,
+    ) -> Result<Vec<Action>, ScriptError> {
         let callback = self.loaded.named_actions.get(name).ok_or_else(|| {
             ScriptError::validation_path(
                 self.loaded.source_path.as_deref(),
@@ -86,7 +107,11 @@ impl ScriptEngine {
         self.invoke_action_function(&callback.name, context)
     }
 
-    pub fn dispatch_event(&self, event: &str, context: Context) -> Result<Vec<Action>, ScriptError> {
+    pub fn dispatch_event(
+        &self,
+        event: &str,
+        context: Context,
+    ) -> Result<Vec<Action>, ScriptError> {
         let Some(handlers) = self.loaded.event_handlers.get(event) else {
             return Ok(Vec::new());
         };
@@ -125,11 +150,15 @@ impl ScriptEngine {
         self.invoke_action_function(&callback.name, context)
     }
 
-    pub fn format_tab_bar(&self, bar_context: TabBarContext) -> Result<Option<super::BarSpec>, ScriptError> {
+    pub fn format_tab_bar(
+        &self,
+        bar_context: TabBarContext,
+    ) -> Result<Option<super::BarSpec>, ScriptError> {
         let Some(formatter) = &self.loaded.tab_bar_formatter else {
             return Ok(None);
         };
-        self.invoke_bar_function(&formatter.name, bar_context).map(Some)
+        self.invoke_bar_function(&formatter.name, bar_context)
+            .map(Some)
     }
 
     fn invoke_action_function(
@@ -198,10 +227,11 @@ struct RegistrationState {
     leader: Option<KeySequence>,
     custom_modes: BTreeMap<String, ModeSpec>,
     mode_hooks: BTreeMap<String, ModeHooks>,
-    bindings: Vec<PendingBinding>,
+    binding_ops: Vec<BindingOperation>,
     named_actions: BTreeMap<String, ScriptFunctionRef>,
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
+    mouse: MouseSettings,
     theme: ThemeSpec,
 }
 
@@ -215,43 +245,71 @@ impl RegistrationState {
         modes.extend(self.custom_modes);
 
         let mut bindings = BTreeMap::<String, Vec<BindingSpec<Vec<Action>>>>::new();
-        let mut seen = BTreeSet::<(String, KeySequence)>::new();
-        for pending in self.bindings {
-            if !modes.contains_key(&pending.mode) {
-                return Err(ScriptError::validation(
-                    source,
-                    pending.position,
-                    format!("binding uses unknown mode '{}'", pending.mode),
-                ));
+        for operation in self.binding_ops {
+            match operation {
+                BindingOperation::Bind(pending) => {
+                    if !modes.contains_key(&pending.mode) {
+                        return Err(ScriptError::validation(
+                            source,
+                            pending.position,
+                            format!("binding uses unknown mode '{}'", pending.mode),
+                        ));
+                    }
+
+                    validate_action_refs(
+                        source,
+                        pending.position,
+                        &self.named_actions,
+                        &pending.target,
+                    )?;
+
+                    let sequence = expand_leader(
+                        pending.raw_sequence.clone(),
+                        self.leader.as_deref().unwrap_or(&[]),
+                    )
+                    .map_err(|error| {
+                        ScriptError::validation(source, pending.position, error.to_string())
+                    })?;
+
+                    let mode_bindings = bindings.entry(pending.mode.clone()).or_default();
+                    if mode_bindings
+                        .iter()
+                        .any(|binding| binding.sequence == sequence)
+                    {
+                        return Err(ScriptError::validation(
+                            source,
+                            pending.position,
+                            format!(
+                                "duplicate binding '{}' in mode '{}'",
+                                pending.notation, pending.mode
+                            ),
+                        ));
+                    }
+
+                    mode_bindings.push(BindingSpec {
+                        notation: pending.notation,
+                        sequence,
+                        target: pending.target,
+                    });
+                }
+                BindingOperation::Unbind(pending) => {
+                    if !modes.contains_key(&pending.mode) {
+                        return Err(ScriptError::validation(
+                            source,
+                            pending.position,
+                            format!("unbind uses unknown mode '{}'", pending.mode),
+                        ));
+                    }
+                    let sequence =
+                        expand_leader(pending.raw_sequence, self.leader.as_deref().unwrap_or(&[]))
+                            .map_err(|error| {
+                                ScriptError::validation(source, pending.position, error.to_string())
+                            })?;
+                    if let Some(mode_bindings) = bindings.get_mut(&pending.mode) {
+                        mode_bindings.retain(|binding| binding.sequence != sequence);
+                    }
+                }
             }
-
-            validate_action_refs(source, pending.position, &self.named_actions, &pending.target)?;
-
-            let sequence = expand_leader(
-                pending.raw_sequence.clone(),
-                self.leader.as_deref().unwrap_or(&[]),
-            )
-            .map_err(|error| {
-                ScriptError::validation(source, pending.position, error.to_string())
-            })?;
-
-            let seen_key = (pending.mode.clone(), sequence.clone());
-            if !seen.insert(seen_key) {
-                return Err(ScriptError::validation(
-                    source,
-                    pending.position,
-                    format!(
-                        "duplicate binding '{}' in mode '{}'",
-                        pending.notation, pending.mode
-                    ),
-                ));
-            }
-
-            bindings.entry(pending.mode).or_default().push(BindingSpec {
-                notation: pending.notation,
-                sequence,
-                target: pending.target,
-            });
         }
 
         for (mode_name, hooks) in &self.mode_hooks {
@@ -269,8 +327,7 @@ impl RegistrationState {
             }
             if let Some(on_leave) = &hooks.on_leave
                 && !self.named_actions.values().any(|action| action == on_leave)
-            {
-            }
+            {}
         }
 
         Ok(LoadedConfig {
@@ -284,6 +341,7 @@ impl RegistrationState {
             named_actions: self.named_actions,
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
+            mouse: self.mouse,
             theme: self.theme,
         })
     }
@@ -322,6 +380,19 @@ struct PendingBinding {
     raw_sequence: KeySequence,
     target: Vec<Action>,
     position: Position,
+}
+
+#[derive(Clone, Debug)]
+struct PendingUnbinding {
+    mode: String,
+    raw_sequence: KeySequence,
+    position: Position,
+}
+
+#[derive(Clone, Debug)]
+enum BindingOperation {
+    Bind(PendingBinding),
+    Unbind(PendingUnbinding),
 }
 
 #[derive(Clone)]
@@ -381,9 +452,53 @@ impl ThemeApi {
     }
 }
 
+#[derive(Clone)]
+struct MouseApi {
+    registration: SharedRegistration,
+}
+
+impl MouseApi {
+    fn new(registration: SharedRegistration) -> Self {
+        Self { registration }
+    }
+
+    fn set_click_focus(&mut self, value: bool) {
+        self.registration
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .click_focus = value;
+    }
+
+    fn set_click_forward(&mut self, value: bool) {
+        self.registration
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .click_forward = value;
+    }
+
+    fn set_wheel_scroll(&mut self, value: bool) {
+        self.registration
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .wheel_scroll = value;
+    }
+
+    fn set_wheel_forward(&mut self, value: bool) {
+        self.registration
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .wheel_forward = value;
+    }
+}
+
 fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     engine.register_type_with_name::<TabbarApi>("TabbarApi");
     engine.register_type_with_name::<ThemeApi>("ThemeApi");
+    engine.register_type_with_name::<MouseApi>("MouseApi");
 
     let leader_registration = registration.clone();
     engine.register_fn(
@@ -407,15 +522,28 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
     engine.register_fn(
         "define_mode",
         move |context: NativeCallContext, mode_name: ImmutableString| -> RhaiResult<()> {
-            define_mode_impl(&mode_registration, context.call_position(), mode_name, Map::new())
+            define_mode_impl(
+                &mode_registration,
+                context.call_position(),
+                mode_name,
+                Map::new(),
+            )
         },
     );
 
     let mode_registration = registration.clone();
     engine.register_fn(
         "define_mode",
-        move |context: NativeCallContext, mode_name: ImmutableString, options: Map| -> RhaiResult<()> {
-            define_mode_impl(&mode_registration, context.call_position(), mode_name, options)
+        move |context: NativeCallContext,
+              mode_name: ImmutableString,
+              options: Map|
+              -> RhaiResult<()> {
+            define_mode_impl(
+                &mode_registration,
+                context.call_position(),
+                mode_name,
+                options,
+            )
         },
     );
 
@@ -435,6 +563,22 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
                 vec![Action::RunNamedAction {
                     name: action_name.to_string(),
                 }],
+            )
+        },
+    );
+
+    let unbind_registration = registration.clone();
+    engine.register_fn(
+        "unbind",
+        move |context: NativeCallContext,
+              mode: ImmutableString,
+              notation: ImmutableString|
+              -> RhaiResult<()> {
+            register_unbinding(
+                &unbind_registration,
+                context.call_position(),
+                mode,
+                notation,
             )
         },
     );
@@ -468,9 +612,9 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
             let target = actions
                 .into_iter()
                 .map(|action| {
-                    action
-                        .try_cast::<Action>()
-                        .ok_or_else(|| runtime_error("bind expects Action values", context.call_position()))
+                    action.try_cast::<Action>().ok_or_else(|| {
+                        runtime_error("bind expects Action values", context.call_position())
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             register_binding(
@@ -539,6 +683,30 @@ fn register_api(engine: &mut Engine, registration: SharedRegistration) {
             theme.set_palette(context.call_position(), palette)
         },
     );
+    engine.register_fn(
+        "set_click_focus",
+        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
+            mouse.set_click_focus(value);
+        },
+    );
+    engine.register_fn(
+        "set_click_forward",
+        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
+            mouse.set_click_forward(value);
+        },
+    );
+    engine.register_fn(
+        "set_wheel_scroll",
+        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
+            mouse.set_wheel_scroll(value);
+        },
+    );
+    engine.register_fn(
+        "set_wheel_forward",
+        |_: NativeCallContext, mouse: &mut MouseApi, value: bool| {
+            mouse.set_wheel_forward(value);
+        },
+    );
 }
 
 fn define_mode_impl(
@@ -548,8 +716,10 @@ fn define_mode_impl(
     mut options: Map,
 ) -> RhaiResult<()> {
     let fallback_policy = parse_fallback_policy(options.remove("fallback"))?;
-    let on_enter = parse_optional_function_ref(options.remove("on_enter"), "mode on_enter", position)?;
-    let on_leave = parse_optional_function_ref(options.remove("on_leave"), "mode on_leave", position)?;
+    let on_enter =
+        parse_optional_function_ref(options.remove("on_enter"), "mode on_enter", position)?;
+    let on_leave =
+        parse_optional_function_ref(options.remove("on_leave"), "mode on_leave", position)?;
 
     let mut registration = registration.lock().expect("registration lock");
     if registration.custom_modes.contains_key(mode_name.as_str()) {
@@ -562,13 +732,9 @@ fn define_mode_impl(
         mode_name.to_string(),
         ModeSpec::new(mode_name.to_string(), fallback_policy),
     );
-    registration.mode_hooks.insert(
-        mode_name.to_string(),
-        ModeHooks {
-            on_enter,
-            on_leave,
-        },
-    );
+    registration
+        .mode_hooks
+        .insert(mode_name.to_string(), ModeHooks { on_enter, on_leave });
     Ok(())
 }
 
@@ -584,14 +750,34 @@ fn register_binding(
     registration
         .lock()
         .expect("registration lock")
-        .bindings
-        .push(PendingBinding {
+        .binding_ops
+        .push(BindingOperation::Bind(PendingBinding {
             mode: mode.to_string(),
             notation: notation.to_string(),
             raw_sequence,
             target,
             position,
-        });
+        }));
+    Ok(())
+}
+
+fn register_unbinding(
+    registration: &SharedRegistration,
+    position: Position,
+    mode: ImmutableString,
+    notation: ImmutableString,
+) -> RhaiResult<()> {
+    let raw_sequence = parse_key_sequence(notation.as_str())
+        .map_err(|error| runtime_error(error.to_string(), position))?;
+    registration
+        .lock()
+        .expect("registration lock")
+        .binding_ops
+        .push(BindingOperation::Unbind(PendingUnbinding {
+            mode: mode.to_string(),
+            raw_sequence,
+            position,
+        }));
     Ok(())
 }
 
@@ -634,7 +820,10 @@ fn parse_optional_function_ref(
         return Ok(None);
     }
     let Some(callback) = value.try_cast::<FnPtr>() else {
-        return Err(runtime_error(format!("{role} must be a function"), position));
+        return Err(runtime_error(
+            format!("{role} must be a function"),
+            position,
+        ));
     };
     checked_function_ref(callback, role, position).map(Some)
 }

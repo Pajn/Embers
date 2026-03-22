@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 
 use tracing::warn;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-use embers_core::{ActivityState, BufferId, FloatGeometry, MuxError, Result, SessionId, Size};
+use embers_core::{
+    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
+};
 use embers_protocol::{
     BufferRequest, BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest,
     ServerEvent, ServerResponse,
@@ -11,17 +16,27 @@ use embers_protocol::{
 use crate::RenderGrid;
 use crate::client::MuxClient;
 use crate::config::ConfigManager;
-use crate::controller::KeyEvent;
+use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::input::{
-    FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, resolve_key,
+    FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,
+    resolve_key,
 };
-use crate::presentation::PresentationModel;
+use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
     NotifyLevel, TabBarContext, TreeSpec,
 };
+use crate::state::{SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState};
 use crate::transport::Transport;
+
+const WHEEL_SCROLL_LINES: u64 = 3;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchPrompt {
+    node_id: NodeId,
+    query: String,
+}
 
 pub struct ConfiguredClient<T> {
     client: MuxClient<T>,
@@ -31,6 +46,8 @@ pub struct ConfiguredClient<T> {
     notifications: Vec<String>,
     active_session_id: Option<SessionId>,
     viewport: Option<Size>,
+    search_prompt: Option<SearchPrompt>,
+    terminal_output: VecDeque<Vec<u8>>,
 }
 
 impl<T> ConfiguredClient<T>
@@ -46,6 +63,8 @@ where
             notifications: Vec::new(),
             active_session_id: None,
             viewport: None,
+            search_prompt: None,
+            terminal_output: VecDeque::new(),
         }
     }
 
@@ -65,6 +84,27 @@ where
         &self.notifications
     }
 
+    pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
+        self.terminal_output.drain(..).collect()
+    }
+
+    pub fn status_line(&self, session_id: SessionId, socket_path: &Path) -> String {
+        let session_name = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.name.as_str())
+            .unwrap_or("<missing>");
+        if let Some(prompt) = &self.search_prompt {
+            return format!("[{session_name}] /{}", prompt.query);
+        }
+        match self.notifications.last() {
+            Some(message) => format!("[{session_name}] {message}"),
+            None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
+        }
+    }
+
     pub async fn handle_key(
         &mut self,
         session_id: SessionId,
@@ -74,8 +114,17 @@ where
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
+        if self.input_state.current_mode() == SEARCH_MODE {
+            return self
+                .handle_search_key(session_id, viewport, &presentation, key)
+                .await;
+        }
+
         match key {
             KeyEvent::Bytes(bytes) => {
+                if self.current_fallback_policy() != FallbackPolicy::Passthrough {
+                    return Ok(());
+                }
                 let buffer_id = self.resolve_buffer_id(None, &presentation)?;
                 self.send_bytes_to_buffer(buffer_id, session_id, bytes)
                     .await?;
@@ -90,6 +139,19 @@ where
                     token,
                 ) {
                     InputResolution::ExactMatch(binding) => {
+                        if self.should_passthrough_binding_in_alternate_screen(
+                            &presentation,
+                            &binding.target,
+                        ) {
+                            let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+                            return self
+                                .send_bytes_to_buffer(
+                                    buffer_id,
+                                    session_id,
+                                    sequence_to_bytes(&binding.sequence)?,
+                                )
+                                .await;
+                        }
                         self.execute_actions(
                             Some(session_id),
                             Some(viewport),
@@ -126,6 +188,9 @@ where
         bytes: Vec<u8>,
     ) -> Result<()> {
         self.set_active_view(session_id, viewport);
+        if self.input_state.current_mode() == SEARCH_MODE {
+            return self.handle_search_paste(session_id, viewport, bytes).await;
+        }
         if self.current_fallback_policy() != FallbackPolicy::Passthrough {
             return Ok(());
         }
@@ -148,6 +213,65 @@ where
         };
         self.send_bytes_to_buffer(buffer_id, session_id, bytes)
             .await
+    }
+
+    pub async fn handle_mouse(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        event: MouseEvent,
+    ) -> Result<()> {
+        self.set_active_view(session_id, viewport);
+        let presentation = self.prepare_presentation(session_id, viewport).await?;
+        let point = Point {
+            x: i32::from(event.column),
+            y: i32::from(event.row),
+        };
+        let Some(target_leaf) = self.mouse_target_leaf(&presentation, point).cloned() else {
+            return Ok(());
+        };
+
+        let settings = self.config.active_script().loaded_config().mouse;
+        let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
+        let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
+        let point_in_content = point.y > target_leaf.rect.origin.y;
+
+        match event.kind {
+            MouseEventKind::WheelUp | MouseEventKind::WheelDown => {
+                if mouse_reporting && settings.wheel_forward && point_in_content {
+                    return self
+                        .send_bytes_to_buffer(
+                            target_leaf.buffer_id,
+                            session_id,
+                            encode_mouse_event(&target_leaf, event)?,
+                        )
+                        .await;
+                }
+                if settings.wheel_scroll && !self.view_is_alternate_screen(target_leaf.node_id) {
+                    let delta = match event.kind {
+                        MouseEventKind::WheelUp => -(WHEEL_SCROLL_LINES as i64),
+                        MouseEventKind::WheelDown => WHEEL_SCROLL_LINES as i64,
+                        _ => 0,
+                    };
+                    return self.scroll_view_by(target_leaf.node_id, delta).await;
+                }
+                Ok(())
+            }
+            MouseEventKind::Press(_) | MouseEventKind::Release(_) | MouseEventKind::Drag(_) => {
+                if settings.click_focus && !target_leaf.focused {
+                    self.focus_node(session_id, target_leaf.node_id).await?;
+                }
+                if settings.click_forward && mouse_reporting && point_in_content {
+                    self.send_bytes_to_buffer(
+                        target_leaf.buffer_id,
+                        session_id,
+                        encode_mouse_event(&target_leaf, event)?,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub async fn handle_focus_event(
@@ -396,18 +520,72 @@ where
                 let Some(node_id) = presentation.focus_target(direction) else {
                     return Ok(());
                 };
-                self.client
-                    .request_message(ClientMessage::Node(NodeRequest::Focus {
-                        request_id: self.client.next_request_id(),
-                        session_id,
-                        node_id,
-                    }))
-                    .await?;
-                self.client.resync_session(session_id).await
+                self.focus_node(session_id, node_id).await
             }
             Action::ResizeDirection { .. } => Err(MuxError::invalid_input(
                 "resize actions are not implemented yet",
             )),
+            Action::ScrollLineUp => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.scroll_view_by(leaf.node_id, -1).await
+            }
+            Action::ScrollLineDown => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.scroll_view_by(leaf.node_id, 1).await
+            }
+            Action::ScrollPageUp => {
+                let leaf = self.focused_leaf(presentation)?;
+                let page = self
+                    .client
+                    .state()
+                    .view_state(leaf.node_id)
+                    .map(|state| i64::from(state.visible_line_count.max(1)))
+                    .unwrap_or(1);
+                self.scroll_view_by(leaf.node_id, -page).await
+            }
+            Action::ScrollPageDown => {
+                let leaf = self.focused_leaf(presentation)?;
+                let page = self
+                    .client
+                    .state()
+                    .view_state(leaf.node_id)
+                    .map(|state| i64::from(state.visible_line_count.max(1)))
+                    .unwrap_or(1);
+                self.scroll_view_by(leaf.node_id, page).await
+            }
+            Action::ScrollToTop => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.set_view_scroll_top(leaf.node_id, 0).await
+            }
+            Action::ScrollToBottom | Action::FollowOutput => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.follow_output_for_view(leaf.node_id).await
+            }
+            Action::EnterSearchMode => {
+                self.enter_search_mode(session_id, viewport, presentation)
+                    .await
+            }
+            Action::SearchNext => self.navigate_search(presentation, true).await,
+            Action::SearchPrev => self.navigate_search(presentation, false).await,
+            Action::CancelSearch => self.cancel_search_prompt(session_id, viewport).await,
+            Action::EnterSelect { kind } => {
+                self.enter_select_mode(session_id, viewport, presentation, kind)
+                    .await
+            }
+            Action::SelectMove { direction } => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.move_selection(leaf.node_id, direction).await
+            }
+            Action::CopySelection => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.copy_selection(session_id, viewport, leaf.node_id)
+                    .await
+            }
+            Action::CancelSelection => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.cancel_selection(session_id, viewport, leaf.node_id)
+                    .await
+            }
             Action::SelectTab {
                 tabs_node_id,
                 index,
@@ -659,9 +837,7 @@ where
             }
             Action::ReplaceFloatingRoot { .. }
             | Action::WrapNodeInSplit { .. }
-            | Action::WrapNodeInTabs { .. }
-            | Action::CopySelection
-            | Action::CancelSelection => Err(MuxError::invalid_input(format!(
+            | Action::WrapNodeInTabs { .. } => Err(MuxError::invalid_input(format!(
                 "action '{action:?}' is not supported by the live executor yet"
             ))),
             other => Err(MuxError::invalid_input(format!(
@@ -821,6 +997,7 @@ where
         if !self.client.state().invalidated_buffers.is_empty() {
             presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
         }
+        self.refresh_local_viewports(&presentation).await?;
         Ok(presentation)
     }
 
@@ -917,6 +1094,554 @@ where
                 }))
                 .await?;
         }
+        self.focus_node(session_id, node_id).await
+    }
+
+    fn focused_leaf<'a>(&self, presentation: &'a PresentationModel) -> Result<&'a LeafFrame> {
+        presentation
+            .focused_leaf()
+            .ok_or_else(|| MuxError::invalid_input("no focused leaf"))
+    }
+
+    fn mouse_target_leaf<'a>(
+        &self,
+        presentation: &'a PresentationModel,
+        point: Point,
+    ) -> Option<&'a LeafFrame> {
+        if let Some(floating) = presentation.floating_at(point) {
+            return presentation.leaves.iter().rev().find(|leaf| {
+                leaf.floating_id == Some(floating.floating_id) && leaf.rect.contains(point)
+            });
+        }
+        presentation.leaf_at(point)
+    }
+
+    fn view_is_alternate_screen(&self, node_id: NodeId) -> bool {
+        self.client
+            .state()
+            .view_state(node_id)
+            .is_some_and(|state| state.alternate_screen)
+    }
+
+    fn should_passthrough_binding_in_alternate_screen(
+        &self,
+        presentation: &PresentationModel,
+        actions: &[Action],
+    ) -> bool {
+        let Some(leaf) = presentation.focused_leaf() else {
+            return false;
+        };
+        let Some(view_state) = self.client.state().view_state(leaf.node_id) else {
+            return false;
+        };
+        (view_state.alternate_screen && actions.iter().all(action_is_local_terminal_action))
+            || (self.input_state.current_mode() == NORMAL_MODE
+                && view_state.follow_output
+                && view_state.search_state.is_none()
+                && view_state.selection_state.is_none()
+                && actions.iter().all(action_requires_local_context))
+    }
+
+    async fn refresh_local_viewports(&mut self, presentation: &PresentationModel) -> Result<()> {
+        let refreshes = presentation
+            .leaves
+            .iter()
+            .filter_map(|leaf| {
+                let state = self.client.state().view_state(leaf.node_id)?;
+                if state.alternate_screen
+                    || state.follow_output
+                    || state.visible_line_count == 0
+                    || !state.visible_lines.is_empty()
+                {
+                    return None;
+                }
+                Some((leaf.node_id, state.scroll_top_line))
+            })
+            .collect::<Vec<_>>();
+
+        for (node_id, scroll_top_line) in refreshes {
+            self.fetch_view_slice(node_id, scroll_top_line).await?;
+        }
+        Ok(())
+    }
+
+    async fn scroll_view_by(&mut self, node_id: NodeId, delta: i64) -> Result<()> {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return Ok(());
+        };
+        if state.alternate_screen {
+            return Ok(());
+        }
+        let current = i128::from(state.scroll_top_line);
+        let delta = i128::from(delta);
+        let next = if delta.is_negative() {
+            current.saturating_sub(delta.unsigned_abs() as i128)
+        } else {
+            current.saturating_add(delta)
+        };
+        let next = next.max(0) as u64;
+        self.set_view_scroll_top(node_id, next).await
+    }
+
+    async fn set_view_scroll_top(&mut self, node_id: NodeId, scroll_top_line: u64) -> Result<()> {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return Ok(());
+        };
+        if state.alternate_screen {
+            return Ok(());
+        }
+        let bottom = state
+            .total_line_count
+            .saturating_sub(u64::from(state.visible_line_count));
+        let scroll_top_line = scroll_top_line.min(bottom);
+        if scroll_top_line == bottom {
+            return self.follow_output_for_view(node_id).await;
+        }
+
+        self.fetch_view_slice(node_id, scroll_top_line).await?;
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.follow_output = false;
+        }
+        Ok(())
+    }
+
+    async fn follow_output_for_view(&mut self, node_id: NodeId) -> Result<()> {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return Ok(());
+        };
+        if state.alternate_screen {
+            return Ok(());
+        }
+        self.client
+            .state_mut()
+            .set_view_follow_output(node_id, true);
+        Ok(())
+    }
+
+    async fn fetch_view_slice(&mut self, node_id: NodeId, scroll_top_line: u64) -> Result<()> {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return Ok(());
+        };
+        if state.visible_line_count == 0 {
+            return Ok(());
+        }
+        let response = self
+            .client
+            .capture_scrollback_slice(
+                state.buffer_id,
+                scroll_top_line,
+                u32::from(state.visible_line_count),
+            )
+            .await?;
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.total_line_count = response
+                .total_lines
+                .max(u64::from(state.visible_line_count));
+        }
+        self.client
+            .state_mut()
+            .set_view_visible_lines(node_id, scroll_top_line, response.lines);
+        Ok(())
+    }
+
+    async fn enter_search_mode(
+        &mut self,
+        _session_id: SessionId,
+        _viewport: Size,
+        presentation: &PresentationModel,
+    ) -> Result<()> {
+        let leaf = self.focused_leaf(presentation)?;
+        if self.view_is_alternate_screen(leaf.node_id) {
+            return Ok(());
+        }
+
+        let query = self
+            .client
+            .state()
+            .view_state(leaf.node_id)
+            .and_then(|state| state.search_state.as_ref())
+            .map(|state| state.query.clone())
+            .unwrap_or_default();
+        self.search_prompt = Some(SearchPrompt {
+            node_id: leaf.node_id,
+            query,
+        });
+        self.input_state.set_mode(SEARCH_MODE);
+        Ok(())
+    }
+
+    async fn handle_search_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        presentation: &PresentationModel,
+        key: KeyEvent,
+    ) -> Result<()> {
+        if self.search_prompt.is_none() {
+            return self
+                .enter_search_mode(session_id, viewport, presentation)
+                .await;
+        }
+
+        match key {
+            KeyEvent::Char(ch) => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.push(ch);
+                }
+                Ok(())
+            }
+            KeyEvent::Tab => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.push('\t');
+                }
+                Ok(())
+            }
+            KeyEvent::Backspace => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.pop();
+                }
+                Ok(())
+            }
+            KeyEvent::Enter => self.commit_search_prompt(session_id, viewport).await,
+            KeyEvent::Escape => self.cancel_search_prompt(session_id, viewport).await,
+            KeyEvent::Bytes(bytes) => {
+                if let Some(prompt) = &mut self.search_prompt {
+                    prompt.query.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                Ok(())
+            }
+            KeyEvent::Ctrl(_)
+            | KeyEvent::Alt(_)
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown => Ok(()),
+        }
+    }
+
+    async fn handle_search_paste(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        if self.search_prompt.is_none() {
+            return self.cancel_search_prompt(session_id, viewport).await;
+        }
+        if let Some(prompt) = &mut self.search_prompt {
+            prompt.query.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        Ok(())
+    }
+
+    async fn commit_search_prompt(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        let Some(prompt) = self.search_prompt.take() else {
+            return self.cancel_search_prompt(session_id, viewport).await;
+        };
+        let Some(buffer_id) = self
+            .client
+            .state()
+            .view_state(prompt.node_id)
+            .map(|state| state.buffer_id)
+        else {
+            return self.cancel_search_prompt(session_id, viewport).await;
+        };
+
+        let matches = if prompt.query.is_empty() {
+            Vec::new()
+        } else {
+            let snapshot = self.client.capture_buffer(buffer_id).await?;
+            compute_search_matches(&snapshot.lines, &prompt.query)
+        };
+
+        if let Some(state) = self.client.state_mut().view_state_mut(prompt.node_id) {
+            if prompt.query.is_empty() {
+                state.search_state = None;
+            } else {
+                state.search_state = Some(SearchState {
+                    query: prompt.query.clone(),
+                    matches,
+                    active_match_index: None,
+                });
+            }
+        }
+
+        if self
+            .client
+            .state()
+            .view_state(prompt.node_id)
+            .and_then(|state| state.search_state.as_ref())
+            .is_some_and(|state| !state.matches.is_empty())
+        {
+            self.jump_to_search_index(prompt.node_id, 0).await?;
+        }
+        self.input_state.set_mode(NORMAL_MODE);
+        Ok(())
+    }
+
+    async fn cancel_search_prompt(
+        &mut self,
+        _session_id: SessionId,
+        _viewport: Size,
+    ) -> Result<()> {
+        self.search_prompt = None;
+        self.input_state.set_mode(NORMAL_MODE);
+        Ok(())
+    }
+
+    async fn navigate_search(
+        &mut self,
+        presentation: &PresentationModel,
+        forward: bool,
+    ) -> Result<()> {
+        let leaf = self.focused_leaf(presentation)?;
+        if self.view_is_alternate_screen(leaf.node_id) {
+            return Ok(());
+        }
+        let Some(search_state) = self
+            .client
+            .state()
+            .view_state(leaf.node_id)
+            .and_then(|state| state.search_state.as_ref())
+        else {
+            return Ok(());
+        };
+        if search_state.matches.is_empty() {
+            return Ok(());
+        }
+        let current = search_state.active_match_index.unwrap_or(0);
+        let next = if forward {
+            (current + 1) % search_state.matches.len()
+        } else if current == 0 {
+            search_state.matches.len() - 1
+        } else {
+            current - 1
+        };
+        self.jump_to_search_index(leaf.node_id, next).await
+    }
+
+    async fn jump_to_search_index(&mut self, node_id: NodeId, index: usize) -> Result<()> {
+        let Some((selected, current_top, visible_line_count)) =
+            self.client.state().view_state(node_id).and_then(|state| {
+                state.search_state.as_ref().and_then(|search| {
+                    search
+                        .matches
+                        .get(index)
+                        .copied()
+                        .map(|selected| (selected, state.scroll_top_line, state.visible_line_count))
+                })
+            })
+        else {
+            return Ok(());
+        };
+
+        let visible_line_count = u64::from(visible_line_count.max(1));
+        let new_top = if selected.line < current_top {
+            selected.line
+        } else if selected.line >= current_top.saturating_add(visible_line_count) {
+            selected
+                .line
+                .saturating_sub(visible_line_count.saturating_sub(1))
+        } else {
+            current_top
+        };
+        if new_top != current_top
+            || self
+                .client
+                .state()
+                .view_state(node_id)
+                .is_some_and(|state| state.follow_output)
+        {
+            self.fetch_view_slice(node_id, new_top).await?;
+        }
+
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            if let Some(search) = &mut state.search_state {
+                search.active_match_index = Some(index);
+            }
+            state.follow_output = false;
+        }
+        Ok(())
+    }
+
+    async fn enter_select_mode(
+        &mut self,
+        _session_id: SessionId,
+        _viewport: Size,
+        presentation: &PresentationModel,
+        kind: SelectionKind,
+    ) -> Result<()> {
+        let leaf = self.focused_leaf(presentation)?;
+        if self.view_is_alternate_screen(leaf.node_id) {
+            return Ok(());
+        }
+
+        let start = self.selection_origin(leaf.node_id);
+        if let Some(state) = self.client.state_mut().view_state_mut(leaf.node_id) {
+            state.selection_state = Some(SelectionState {
+                kind,
+                anchor: start,
+                cursor: start,
+            });
+        }
+        self.input_state.set_mode(SELECT_MODE);
+        Ok(())
+    }
+
+    fn selection_origin(&self, node_id: NodeId) -> SelectionPoint {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return SelectionPoint::default();
+        };
+        let fallback = SelectionPoint {
+            line: state.scroll_top_line,
+            column: 0,
+        };
+        if !state.follow_output {
+            return fallback;
+        }
+        self.client
+            .state()
+            .snapshots
+            .get(&state.buffer_id)
+            .and_then(|snapshot| {
+                snapshot.cursor.map(|cursor| SelectionPoint {
+                    line: state.scroll_top_line + u64::from(cursor.position.row),
+                    column: cursor.position.col,
+                })
+            })
+            .unwrap_or(fallback)
+    }
+
+    async fn move_selection(
+        &mut self,
+        node_id: NodeId,
+        direction: NavigationDirection,
+    ) -> Result<()> {
+        let Some((mut selection, total_line_count, scroll_top_line, visible_line_count)) =
+            self.client.state().view_state(node_id).and_then(|state| {
+                state.selection_state.clone().map(|selection| {
+                    (
+                        selection,
+                        state.total_line_count,
+                        state.scroll_top_line,
+                        state.visible_line_count,
+                    )
+                })
+            })
+        else {
+            return Ok(());
+        };
+
+        match direction {
+            NavigationDirection::Left => {
+                selection.cursor.column = selection.cursor.column.saturating_sub(1);
+            }
+            NavigationDirection::Right => {
+                selection.cursor.column = selection.cursor.column.saturating_add(1);
+            }
+            NavigationDirection::Up => {
+                selection.cursor.line = selection.cursor.line.saturating_sub(1);
+            }
+            NavigationDirection::Down => {
+                selection.cursor.line = selection
+                    .cursor
+                    .line
+                    .saturating_add(1)
+                    .min(total_line_count.saturating_sub(1));
+            }
+        }
+
+        let visible_line_count = u64::from(visible_line_count.max(1));
+        let mut new_top = scroll_top_line;
+        if selection.cursor.line < new_top {
+            new_top = selection.cursor.line;
+        } else if selection.cursor.line >= new_top.saturating_add(visible_line_count) {
+            new_top = selection
+                .cursor
+                .line
+                .saturating_sub(visible_line_count.saturating_sub(1));
+        }
+        if new_top != scroll_top_line {
+            self.fetch_view_slice(node_id, new_top).await?;
+        }
+
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.follow_output = false;
+            state.selection_state = Some(selection);
+        }
+        Ok(())
+    }
+
+    async fn copy_selection(
+        &mut self,
+        _session_id: SessionId,
+        _viewport: Size,
+        node_id: NodeId,
+    ) -> Result<()> {
+        let Some((buffer_id, selection_state)) =
+            self.client.state().view_state(node_id).and_then(|state| {
+                state
+                    .selection_state
+                    .clone()
+                    .map(|selection| (state.buffer_id, selection))
+            })
+        else {
+            return Ok(());
+        };
+
+        let snapshot = self.client.capture_buffer(buffer_id).await?;
+        let copied = serialize_selection(&snapshot.lines, &selection_state);
+        self.enqueue_clipboard(copied);
+
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.selection_state = None;
+        }
+        self.input_state.set_mode(NORMAL_MODE);
+        Ok(())
+    }
+
+    async fn cancel_selection(
+        &mut self,
+        _session_id: SessionId,
+        _viewport: Size,
+        node_id: NodeId,
+    ) -> Result<()> {
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.selection_state = None;
+        }
+        self.input_state.set_mode(NORMAL_MODE);
+        Ok(())
+    }
+
+    fn enqueue_clipboard(&mut self, text: String) {
+        use base64::Engine as _;
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        self.terminal_output
+            .push_back(format!("\x1b]52;c;{encoded}\x07").into_bytes());
+    }
+
+    async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
+        if self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.focused_leaf_id)
+            == Some(node_id)
+        {
+            return Ok(());
+        }
+
+        let previous_buffer = self.focused_buffer_for_session(session_id);
+        let sent_focus_out = if let Some(buffer_id) = previous_buffer {
+            self.maybe_send_focus_sequence(buffer_id, false).await?
+        } else {
+            false
+        };
+
         self.client
             .request_message(ClientMessage::Node(NodeRequest::Focus {
                 request_id: self.client.next_request_id(),
@@ -924,7 +1649,79 @@ where
                 node_id,
             }))
             .await?;
-        self.client.resync_session(session_id).await
+        self.client.resync_session(session_id).await?;
+
+        let new_buffer = self.focused_buffer_for_session(session_id);
+        if new_buffer != previous_buffer {
+            let sent_focus_in = if let Some(buffer_id) = new_buffer {
+                self.maybe_send_focus_sequence(buffer_id, true).await?
+            } else {
+                false
+            };
+            if sent_focus_in {
+                if let Some(buffer_id) = new_buffer {
+                    self.client.refresh_buffer_snapshot(buffer_id).await?;
+                }
+            }
+            if sent_focus_out {
+                if let Some(buffer_id) = previous_buffer {
+                    self.client.refresh_buffer_snapshot(buffer_id).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn focused_buffer_for_session(&self, session_id: SessionId) -> Option<BufferId> {
+        self.client
+            .state()
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.focused_leaf_id)
+            .and_then(|node_id| self.node_buffer_id(node_id))
+    }
+
+    fn node_buffer_id(&self, node_id: NodeId) -> Option<BufferId> {
+        self.client
+            .state()
+            .nodes
+            .get(&node_id)
+            .and_then(|node| node.buffer_view.as_ref())
+            .map(|buffer_view| buffer_view.buffer_id)
+    }
+
+    async fn maybe_send_focus_sequence(
+        &mut self,
+        buffer_id: BufferId,
+        focused: bool,
+    ) -> Result<bool> {
+        if !self
+            .client
+            .state()
+            .snapshots
+            .get(&buffer_id)
+            .is_some_and(|snapshot| snapshot.focus_reporting)
+        {
+            return Ok(false);
+        }
+        let bytes = if focused {
+            b"\x1b[I".to_vec()
+        } else {
+            b"\x1b[O".to_vec()
+        };
+        self.send_input_only(buffer_id, bytes).await?;
+        Ok(true)
+    }
+
+    async fn send_input_only(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<()> {
+        self.client
+            .request_message(ClientMessage::Input(InputRequest::Send {
+                request_id: self.client.next_request_id(),
+                buffer_id,
+                bytes,
+            }))
+            .await?;
+        Ok(())
     }
 
     fn record_notification(&mut self, message: impl Into<String>) {
@@ -936,6 +1733,235 @@ where
             self.notifications.drain(0..overflow);
         }
     }
+}
+
+fn action_is_local_terminal_action(action: &Action) -> bool {
+    match action {
+        Action::Chain(actions) => actions.iter().all(action_is_local_terminal_action),
+        Action::EnterMode { mode } | Action::ToggleMode { mode } => {
+            mode == SEARCH_MODE || mode == SELECT_MODE
+        }
+        Action::ScrollLineUp
+        | Action::ScrollLineDown
+        | Action::ScrollPageUp
+        | Action::ScrollPageDown
+        | Action::ScrollToTop
+        | Action::ScrollToBottom
+        | Action::FollowOutput
+        | Action::EnterSearchMode
+        | Action::SearchNext
+        | Action::SearchPrev
+        | Action::CancelSearch
+        | Action::EnterSelect { .. }
+        | Action::SelectMove { .. }
+        | Action::CopySelection
+        | Action::CancelSelection => true,
+        _ => false,
+    }
+}
+
+fn action_requires_local_context(action: &Action) -> bool {
+    match action {
+        Action::Chain(actions) => actions.iter().all(action_requires_local_context),
+        Action::EnterSearchMode
+        | Action::SearchNext
+        | Action::SearchPrev
+        | Action::EnterSelect { .. } => true,
+        Action::EnterMode { mode } | Action::ToggleMode { mode } => {
+            mode == SEARCH_MODE || mode == SELECT_MODE
+        }
+        _ => false,
+    }
+}
+
+fn compute_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        let mut search_from = 0;
+        while let Some(found) = line[search_from..].find(query) {
+            let byte_start = search_from + found;
+            let byte_end = byte_start + query.len();
+            let start_column = display_width(&line[..byte_start]);
+            let end_column =
+                start_column.saturating_add(display_width(&line[byte_start..byte_end]));
+            matches.push(SearchMatch {
+                line: u64::try_from(line_index).unwrap_or(u64::MAX),
+                start_column,
+                end_column,
+            });
+            search_from = byte_end.max(search_from + 1);
+        }
+    }
+    matches
+}
+
+fn serialize_selection(lines: &[String], selection: &SelectionState) -> String {
+    match selection.kind {
+        SelectionKind::Line => serialize_line_selection(lines, selection),
+        SelectionKind::Block => serialize_block_selection(lines, selection),
+        SelectionKind::Character => serialize_character_selection(lines, selection),
+    }
+}
+
+fn serialize_character_selection(lines: &[String], selection: &SelectionState) -> String {
+    let (start, end) = ordered_points(selection.anchor, selection.cursor);
+    let mut parts = Vec::new();
+    for line_index in start.line..=end.line {
+        let line = lines
+            .get(usize::try_from(line_index).unwrap_or(usize::MAX))
+            .map(String::as_str)
+            .unwrap_or("");
+        let fragment = if start.line == end.line {
+            slice_display_range(line, start.column, end.column.saturating_add(1))
+        } else if line_index == start.line {
+            slice_display_range(line, start.column, u16::MAX)
+        } else if line_index == end.line {
+            slice_display_range(line, 0, end.column.saturating_add(1))
+        } else {
+            line.to_owned()
+        };
+        parts.push(fragment);
+    }
+    parts.join("\n")
+}
+
+fn serialize_line_selection(lines: &[String], selection: &SelectionState) -> String {
+    let start_line = selection.anchor.line.min(selection.cursor.line);
+    let end_line = selection.anchor.line.max(selection.cursor.line);
+    (start_line..=end_line)
+        .map(|line_index| {
+            lines
+                .get(usize::try_from(line_index).unwrap_or(usize::MAX))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn serialize_block_selection(lines: &[String], selection: &SelectionState) -> String {
+    let start_line = selection.anchor.line.min(selection.cursor.line);
+    let end_line = selection.anchor.line.max(selection.cursor.line);
+    let start_column = selection.anchor.column.min(selection.cursor.column);
+    let end_column = selection
+        .anchor
+        .column
+        .max(selection.cursor.column)
+        .saturating_add(1);
+    (start_line..=end_line)
+        .map(|line_index| {
+            let line = lines
+                .get(usize::try_from(line_index).unwrap_or(usize::MAX))
+                .map(String::as_str)
+                .unwrap_or("");
+            slice_display_range(line, start_column, end_column)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn ordered_points(left: SelectionPoint, right: SelectionPoint) -> (SelectionPoint, SelectionPoint) {
+    if (left.line, left.column) <= (right.line, right.column) {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn slice_display_range(line: &str, start_column: u16, end_column: u16) -> String {
+    if start_column >= end_column {
+        return String::new();
+    }
+
+    let mut column = 0_u16;
+    let mut output = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(line, true) {
+        let width = display_width(grapheme).max(1);
+        let next_column = column.saturating_add(width);
+        if next_column > start_column && column < end_column {
+            output.push_str(grapheme);
+        }
+        if column >= end_column {
+            break;
+        }
+        column = next_column;
+    }
+    output
+}
+
+fn encode_mouse_event(leaf: &LeafFrame, event: MouseEvent) -> Result<Vec<u8>> {
+    let origin_x = clamp_origin(leaf.rect.origin.x);
+    let origin_y = clamp_origin(leaf.rect.origin.y);
+    let local_column = event
+        .column
+        .checked_sub(origin_x)
+        .ok_or_else(|| MuxError::invalid_input("mouse event fell outside pane bounds"))?;
+    let content_origin_y = origin_y.saturating_add(1);
+    let local_row = event
+        .row
+        .checked_sub(content_origin_y)
+        .ok_or_else(|| MuxError::invalid_input("mouse event fell outside pane content"))?;
+
+    let mut code = 0_u16;
+    if event.modifiers.shift {
+        code |= 0b00100;
+    }
+    if event.modifiers.alt {
+        code |= 0b01000;
+    }
+    if event.modifiers.ctrl {
+        code |= 0b10000;
+    }
+
+    let suffix = match event.kind {
+        MouseEventKind::Press(button) => {
+            code |= mouse_button_code(button);
+            'M'
+        }
+        MouseEventKind::Release(button) => {
+            code |= mouse_button_code(button);
+            'm'
+        }
+        MouseEventKind::Drag(button) => {
+            code |= 0b100000 | mouse_button_code(button);
+            'M'
+        }
+        MouseEventKind::WheelUp => {
+            code |= 0b1_000000;
+            'M'
+        }
+        MouseEventKind::WheelDown => {
+            code |= 0b1_000001;
+            'M'
+        }
+    };
+
+    Ok(format!(
+        "\x1b[<{code};{};{}{suffix}",
+        local_column.saturating_add(1),
+        local_row.saturating_add(1)
+    )
+    .into_bytes())
+}
+
+fn mouse_button_code(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
+fn clamp_origin(value: i32) -> u16 {
+    u16::try_from(value.max(0)).unwrap_or(u16::MAX)
+}
+
+fn display_width(text: &str) -> u16 {
+    u16::try_from(UnicodeWidthStr::width(text)).unwrap_or(u16::MAX)
 }
 
 fn prepend_actions(pending: &mut VecDeque<Action>, actions: Vec<Action>) {

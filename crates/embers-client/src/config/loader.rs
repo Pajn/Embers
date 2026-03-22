@@ -7,7 +7,31 @@ use super::discover::{ConfigDiscoveryOptions, ConfigOrigin, DiscoveredConfig, di
 use super::error::{ConfigError, ConfigManagerError, ConfigResult};
 use crate::scripting::ScriptEngine;
 
-pub const BUILTIN_CONFIG_SOURCE: &str = "";
+pub const BUILTIN_CONFIG_SOURCE: &str = r#"mouse.set_click_focus(true);
+mouse.set_click_forward(true);
+mouse.set_wheel_scroll(true);
+mouse.set_wheel_forward(true);
+
+bind("normal", "<PageUp>", action.scroll_page_up());
+bind("normal", "<PageDown>", action.scroll_page_down());
+bind("normal", "/", action.enter_search_mode());
+bind("normal", "n", action.search_next());
+bind("normal", "N", action.search_prev());
+bind("normal", "v", action.enter_select_char());
+bind("normal", "V", action.enter_select_line());
+bind("normal", "<C-v>", action.enter_select_block());
+
+bind("select", "<Left>", action.select_move_left());
+bind("select", "<Right>", action.select_move_right());
+bind("select", "<Up>", action.select_move_up());
+bind("select", "<Down>", action.select_move_down());
+bind("select", "h", action.select_move_left());
+bind("select", "j", action.select_move_down());
+bind("select", "k", action.select_move_up());
+bind("select", "l", action.select_move_right());
+bind("select", "y", action.yank_selection());
+bind("select", "<Esc>", action.cancel_selection());
+"#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedConfigSource {
@@ -35,7 +59,10 @@ pub struct ConfigManager {
 impl ConfigManager {
     pub fn load(discovery: ConfigDiscoveryOptions) -> Result<Self, ConfigManagerError> {
         let active_source = load_config_source(&discovery)?;
-        let active_script = ScriptEngine::load(&active_source)?;
+        let active_script = match active_source.origin {
+            ConfigOrigin::BuiltIn => ScriptEngine::load(&active_source)?,
+            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &active_source)?,
+        };
         Ok(Self {
             discovery,
             active_source,
@@ -61,7 +88,10 @@ impl ConfigManager {
 
     pub fn reload(&mut self) -> Result<(), ConfigManagerError> {
         let candidate_source = load_config_source(&self.discovery)?;
-        let candidate_script = ScriptEngine::load(&candidate_source)?;
+        let candidate_script = match candidate_source.origin {
+            ConfigOrigin::BuiltIn => ScriptEngine::load(&candidate_source)?,
+            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &candidate_source)?,
+        };
         self.active_source = candidate_source;
         self.active_script = candidate_script;
         Ok(())

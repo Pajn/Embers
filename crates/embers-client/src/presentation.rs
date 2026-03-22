@@ -174,6 +174,20 @@ impl PresentationModel {
             .min_by(|left, right| left.0.cmp(&right.0))
             .map(|(_, node_id)| node_id)
     }
+
+    pub fn leaf_at(&self, point: Point) -> Option<&LeafFrame> {
+        self.leaves
+            .iter()
+            .rev()
+            .find(|leaf| leaf.rect.contains(point))
+    }
+
+    pub fn floating_at(&self, point: Point) -> Option<&FloatingFrame> {
+        self.floating
+            .iter()
+            .rev()
+            .find(|floating| floating.rect.contains(point))
+    }
 }
 
 #[derive(Default)]

@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 directories.workspace = true
 embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
