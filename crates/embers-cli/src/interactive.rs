@@ -18,8 +18,10 @@ const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
 const KEY_SEQUENCE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(2);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
-const TERMINAL_ENTER_SEQUENCE: &str = "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
-const TERMINAL_EXIT_SEQUENCE: &str = "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l\x1b[?1004l\x1b[?1049l";
+const TERMINAL_ENTER_SEQUENCE: &str =
+    "\x1b[?1049h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
+const TERMINAL_EXIT_SEQUENCE: &str =
+    "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?1049l";
 
 pub async fn run(
     socket_path: PathBuf,
@@ -55,7 +57,8 @@ pub async fn run(
             terminal_size = terminal.size()?;
             let viewport = content_viewport(terminal_size);
             let grid = configured.render_session(session_id, viewport).await?;
-            let status = status_line(&configured, session_id, &socket_path);
+            terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+            let status = configured.status_line(session_id, &socket_path);
             terminal.render(&grid, terminal_size, Some(&status))?;
             dirty = false;
         }
@@ -66,11 +69,13 @@ pub async fn run(
                 Ok(TerminalEvent::Key(key)) => {
                     let viewport = content_viewport(terminal_size);
                     configured.handle_key(session_id, viewport, key).await?;
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                     dirty = true;
                 }
                 Ok(TerminalEvent::Paste(bytes)) => {
                     let viewport = content_viewport(terminal_size);
                     configured.handle_paste(session_id, viewport, bytes).await?;
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                     dirty = true;
                 }
                 Ok(TerminalEvent::Focus(focused)) => {
@@ -78,9 +83,15 @@ pub async fn run(
                     configured
                         .handle_focus_event(session_id, viewport, focused)
                         .await?;
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                     dirty = true;
                 }
-                Ok(TerminalEvent::Mouse(_)) => {}
+                Ok(TerminalEvent::Mouse(mouse)) => {
+                    let viewport = content_viewport(terminal_size);
+                    configured.handle_mouse(session_id, viewport, mouse).await?;
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                    dirty = true;
+                }
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
                     return Err(MuxError::transport(message));
@@ -100,6 +111,7 @@ pub async fn run(
         match tokio::time::timeout(EVENT_POLL_INTERVAL, configured.process_next_event()).await {
             Ok(result) => {
                 result?;
+                terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
             Err(_) => {
@@ -269,22 +281,12 @@ fn content_viewport(size: Size) -> Size {
     }
 }
 
-fn status_line(
-    configured: &ConfiguredClient<SocketTransport>,
-    session_id: SessionId,
-    socket_path: &Path,
-) -> String {
-    let session_name = configured
-        .client()
-        .state()
-        .sessions
-        .get(&session_id)
-        .map(|session| session.name.as_str())
-        .unwrap_or("<missing>");
-    match configured.notifications().last() {
-        Some(message) => format!("[{session_name}] {message}"),
-        None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
-    }
+fn drain_terminal_output(configured: &mut ConfiguredClient<SocketTransport>) -> Vec<u8> {
+    configured
+        .drain_terminal_output()
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -612,6 +614,16 @@ impl TerminalGuard {
         terminal_size(io::stdout().as_raw_fd())
     }
 
+    fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        stdout.write_all(bytes)?;
+        stdout.flush()?;
+        Ok(())
+    }
+
     fn render(&self, grid: &RenderGrid, terminal_size: Size, status: Option<&str>) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
@@ -831,8 +843,12 @@ mod tests {
     #[test]
     fn terminal_guard_sequences_enable_focus_and_paste_modes() {
         assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1004h"));
+        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1002h"));
+        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1006h"));
         assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?2004h"));
         assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1004l"));
+        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1002l"));
+        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1006l"));
         assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?2004l"));
     }
 }
