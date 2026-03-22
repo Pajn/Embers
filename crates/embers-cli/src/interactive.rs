@@ -18,10 +18,9 @@ const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
 const KEY_SEQUENCE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(2);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
-const TERMINAL_ENTER_SEQUENCE: &str =
-    "\x1b[?1049h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
-const TERMINAL_EXIT_SEQUENCE: &str =
-    "\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1004l\x1b[?1049l";
+const TERMINAL_ENTER_BASE_SEQUENCE: &str = "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
+const TERMINAL_ENABLE_MOUSE_SEQUENCE: &str = "\x1b[?1002h\x1b[?1006h";
+const TERMINAL_DISABLE_MOUSE_SEQUENCE: &str = "\x1b[?1006l\x1b[?1002l";
 
 pub async fn run(
     socket_path: PathBuf,
@@ -36,7 +35,7 @@ pub async fn run(
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     let mut configured = ConfiguredClient::new(client, config);
 
-    let terminal = TerminalGuard::enter()?;
+    let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let _input_thread = spawn_input_thread(input_tx)?;
 
@@ -44,6 +43,7 @@ pub async fn run(
     let mut dirty = true;
     loop {
         if dirty {
+            terminal.sync_mouse_capture(mouse_capture_enabled(&configured))?;
             if !configured
                 .client()
                 .state()
@@ -578,10 +578,11 @@ fn read_byte(fd: libc::c_int) -> Result<Option<u8>> {
 struct TerminalGuard {
     input_fd: libc::c_int,
     original_mode: libc::termios,
+    mouse_capture_enabled: bool,
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    fn enter(mouse_capture_enabled: bool) -> Result<Self> {
         let input_fd = io::stdin().as_raw_fd();
         let output_fd = io::stdout().as_raw_fd();
         if !is_tty(input_fd) || !is_tty(output_fd) {
@@ -601,12 +602,13 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        write!(stdout, "{TERMINAL_ENTER_SEQUENCE}")?;
+        write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))?;
         stdout.flush()?;
 
         Ok(Self {
             input_fd,
             original_mode,
+            mouse_capture_enabled,
         })
     }
 
@@ -621,6 +623,25 @@ impl TerminalGuard {
         let mut stdout = io::stdout();
         stdout.write_all(bytes)?;
         stdout.flush()?;
+        Ok(())
+    }
+
+    fn sync_mouse_capture(&mut self, enabled: bool) -> Result<()> {
+        if self.mouse_capture_enabled == enabled {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        write!(
+            stdout,
+            "{}",
+            if enabled {
+                TERMINAL_ENABLE_MOUSE_SEQUENCE
+            } else {
+                TERMINAL_DISABLE_MOUSE_SEQUENCE
+            }
+        )?;
+        stdout.flush()?;
+        self.mouse_capture_enabled = enabled;
         Ok(())
     }
 
@@ -657,9 +678,35 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = set_terminal_mode(self.input_fd, &self.original_mode);
         let mut stdout = io::stdout();
-        let _ = write!(stdout, "{TERMINAL_EXIT_SEQUENCE}");
+        let _ = write!(stdout, "{}", terminal_exit_sequence(self.mouse_capture_enabled));
         let _ = stdout.flush();
     }
+}
+
+fn mouse_capture_enabled(configured: &ConfiguredClient<SocketTransport>) -> bool {
+    configured
+        .config()
+        .active_script()
+        .loaded_config()
+        .mouse
+        .capture_enabled()
+}
+
+fn terminal_enter_sequence(mouse_capture_enabled: bool) -> String {
+    let mut sequence = TERMINAL_ENTER_BASE_SEQUENCE.to_owned();
+    if mouse_capture_enabled {
+        sequence.push_str(TERMINAL_ENABLE_MOUSE_SEQUENCE);
+    }
+    sequence
+}
+
+fn terminal_exit_sequence(mouse_capture_enabled: bool) -> String {
+    let mut sequence = String::from("\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l");
+    if mouse_capture_enabled {
+        sequence.push_str(TERMINAL_DISABLE_MOUSE_SEQUENCE);
+    }
+    sequence.push_str("\x1b[?1004l\x1b[?1049l");
+    sequence
 }
 
 fn is_tty(fd: libc::c_int) -> bool {
@@ -740,7 +787,8 @@ fn cursor_shape_code(shape: CursorShape) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        TERMINAL_ENTER_SEQUENCE, TERMINAL_EXIT_SEQUENCE, TerminalEvent, read_terminal_event,
+        TERMINAL_DISABLE_MOUSE_SEQUENCE, TERMINAL_ENABLE_MOUSE_SEQUENCE, TerminalEvent,
+        read_terminal_event, terminal_enter_sequence, terminal_exit_sequence,
     };
     use embers_client::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
 
@@ -841,14 +889,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_guard_sequences_enable_focus_and_paste_modes() {
-        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1004h"));
-        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1002h"));
-        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?1006h"));
-        assert!(TERMINAL_ENTER_SEQUENCE.contains("\x1b[?2004h"));
-        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1004l"));
-        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1002l"));
-        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?1006l"));
-        assert!(TERMINAL_EXIT_SEQUENCE.contains("\x1b[?2004l"));
+    fn terminal_guard_sequences_toggle_mouse_capture_with_config() {
+        let with_mouse_enter = terminal_enter_sequence(true);
+        let without_mouse_enter = terminal_enter_sequence(false);
+        let with_mouse_exit = terminal_exit_sequence(true);
+        let without_mouse_exit = terminal_exit_sequence(false);
+
+        assert!(with_mouse_enter.contains("\x1b[?1004h"));
+        assert!(with_mouse_enter.contains("\x1b[?2004h"));
+        assert!(with_mouse_enter.contains(TERMINAL_ENABLE_MOUSE_SEQUENCE));
+        assert!(with_mouse_exit.contains("\x1b[?1004l"));
+        assert!(with_mouse_exit.contains("\x1b[?2004l"));
+        assert!(with_mouse_exit.contains(TERMINAL_DISABLE_MOUSE_SEQUENCE));
+
+        assert!(without_mouse_enter.contains("\x1b[?1004h"));
+        assert!(without_mouse_enter.contains("\x1b[?2004h"));
+        assert!(!without_mouse_enter.contains(TERMINAL_ENABLE_MOUSE_SEQUENCE));
+        assert!(without_mouse_exit.contains("\x1b[?1004l"));
+        assert!(without_mouse_exit.contains("\x1b[?2004l"));
+        assert!(!without_mouse_exit.contains(TERMINAL_DISABLE_MOUSE_SEQUENCE));
     }
 }

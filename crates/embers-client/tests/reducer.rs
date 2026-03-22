@@ -1,4 +1,7 @@
-use embers_client::{ClientState, MuxClient, ScriptedTransport};
+use embers_client::{
+    ClientState, MuxClient, ScriptedTransport, SearchState, SelectionKind, SelectionPoint,
+    SelectionState,
+};
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, PtySize, RequestId, SessionId, SplitDirection,
 };
@@ -321,6 +324,60 @@ fn scrolled_view_preserves_position_and_alternate_screen_keeps_state() {
     assert_eq!(root.scroll_top_line, 5);
     assert!(!root.alternate_screen);
     assert_eq!(root.total_line_count, 60);
+}
+
+#[test]
+fn rebinding_view_to_a_new_buffer_resets_search_and_selection_state() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+    state.apply_buffer_snapshot(visible_snapshot(1, 40, 16, false));
+
+    let view = state
+        .view_state
+        .get_mut(&NodeId(11))
+        .expect("root leaf view state");
+    view.search_state = Some(SearchState {
+        query: "line".to_owned(),
+        matches: vec![embers_client::SearchMatch {
+            line: 16,
+            start_column: 0,
+            end_column: 4,
+        }],
+        active_match_index: Some(0),
+    });
+    view.selection_state = Some(SelectionState {
+        kind: SelectionKind::Character,
+        anchor: SelectionPoint {
+            line: 16,
+            column: 0,
+        },
+        cursor: SelectionPoint {
+            line: 17,
+            column: 2,
+        },
+    });
+
+    let mut rebound = session_snapshot(0, 0);
+    let rebound_node = rebound
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == NodeId(11))
+        .expect("rebound node");
+    rebound_node
+        .buffer_view
+        .as_mut()
+        .expect("buffer view")
+        .buffer_id = BufferId(99);
+    rebound
+        .buffers
+        .retain(|buffer| buffer.id != BufferId(1));
+    rebound.buffers.push(buffer(99, Some(11), "replacement"));
+    state.apply_session_snapshot(rebound);
+
+    let view = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert_eq!(view.buffer_id, BufferId(99));
+    assert!(view.search_state.is_none());
+    assert!(view.selection_state.is_none());
 }
 
 #[tokio::test]

@@ -111,6 +111,12 @@ pub struct MouseSettings {
     pub wheel_forward: bool,
 }
 
+impl MouseSettings {
+    pub const fn capture_enabled(self) -> bool {
+        self.click_focus || self.click_forward || self.wheel_scroll || self.wheel_forward
+    }
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,

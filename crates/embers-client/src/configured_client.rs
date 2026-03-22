@@ -235,7 +235,7 @@ where
         let settings = self.config.active_script().loaded_config().mouse;
         let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
         let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
-        let point_in_content = point.y >= target_leaf.rect.origin.y;
+        let point_in_content = point.y > target_leaf.rect.origin.y;
 
         match event.kind {
             MouseEventKind::WheelUp | MouseEventKind::WheelDown => {
@@ -1847,6 +1847,16 @@ fn compute_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
     matches
 }
 
+#[doc(hidden)]
+pub fn benchmark_search_matches(lines: &[String], query: &str) -> Vec<SearchMatch> {
+    compute_search_matches(lines, query)
+}
+
+#[doc(hidden)]
+pub fn benchmark_serialize_selection(lines: &[String], selection: &SelectionState) -> String {
+    serialize_selection(lines, selection)
+}
+
 fn serialize_selection(lines: &[String], selection: &SelectionState) -> String {
     match selection.kind {
         SelectionKind::Line => serialize_line_selection(lines, selection),
@@ -1943,7 +1953,7 @@ fn slice_display_range(line: &str, start_column: u16, end_column: u16) -> String
 
 fn encode_mouse_event(leaf: &LeafFrame, event: MouseEvent) -> Result<Vec<u8>> {
     let origin_x = clamp_origin(leaf.rect.origin.x);
-    let origin_y = clamp_origin(leaf.rect.origin.y);
+    let origin_y = clamp_origin(leaf.rect.origin.y).saturating_add(1);
     let local_column = event
         .column
         .checked_sub(origin_x)
