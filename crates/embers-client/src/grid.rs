@@ -252,8 +252,12 @@ impl RenderGrid {
     fn clip_rect(&self, rect: Rect) -> Option<Rect> {
         let left = rect.origin.x.max(0);
         let top = rect.origin.y.max(0);
-        let right = (rect.origin.x + i32::from(rect.size.width)).min(i32::from(self.width));
-        let bottom = (rect.origin.y + i32::from(rect.size.height)).min(i32::from(self.height));
+        let right = (i64::from(rect.origin.x) + i64::from(rect.size.width))
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let bottom = (i64::from(rect.origin.y) + i64::from(rect.size.height))
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let right = right.min(i32::from(self.width));
+        let bottom = bottom.min(i32::from(self.height));
 
         if right <= left || bottom <= top {
             return None;

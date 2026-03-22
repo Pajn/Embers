@@ -90,24 +90,21 @@ impl Controller {
             }
             KeyEvent::Alt(ch) if ('1'..='9').contains(&ch) => {
                 let index = ch.to_digit(10)?.saturating_sub(1);
-                let index_usize = usize::try_from(index).ok()?;
-                let tabs = presentation.focused_tabs()?;
-                if index_usize >= tabs.tabs.len() {
-                    return None;
+                let Some(index_usize) = usize::try_from(index).ok() else {
+                    return alt_bytes_request(presentation, request_id, ch);
+                };
+                if let Some(tabs) = presentation.focused_tabs()
+                    && index_usize < tabs.tabs.len()
+                {
+                    return Some(ClientMessage::Node(NodeRequest::SelectTab {
+                        request_id,
+                        tabs_node_id: tabs.node_id,
+                        index,
+                    }));
                 }
-
-                Some(ClientMessage::Node(NodeRequest::SelectTab {
-                    request_id,
-                    tabs_node_id: tabs.node_id,
-                    index,
-                }))
+                alt_bytes_request(presentation, request_id, ch)
             }
-            KeyEvent::Alt(ch) => {
-                let mut encoded = [0; 4];
-                let mut bytes = vec![0x1b];
-                bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
-                input_request(presentation, request_id, bytes)
-            }
+            KeyEvent::Alt(ch) => alt_bytes_request(presentation, request_id, ch),
             KeyEvent::Escape => {
                 if let Some(floating_id) = presentation.focused_floating_id() {
                     Some(ClientMessage::Floating(FloatingRequest::Close {
@@ -145,6 +142,17 @@ impl Controller {
 fn ctrl_byte(ch: char) -> Option<u8> {
     ch.is_ascii()
         .then_some((ch.to_ascii_lowercase() as u8) & 0x1f)
+}
+
+fn alt_bytes_request(
+    presentation: &PresentationModel,
+    request_id: RequestId,
+    ch: char,
+) -> Option<ClientMessage> {
+    let mut encoded = [0; 4];
+    let mut bytes = vec![0x1b];
+    bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+    input_request(presentation, request_id, bytes)
 }
 
 fn input_request(

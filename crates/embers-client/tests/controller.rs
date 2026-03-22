@@ -118,10 +118,32 @@ fn alt_digit_is_ignored_without_focused_tabs_context() {
     let state = root_split_state();
     let presentation =
         PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
+    let buffer_id = presentation.focused_buffer_id().expect("focused buffer");
 
     assert_eq!(
         Controller.map_key(&presentation, RequestId(12), KeyEvent::Alt('1')),
-        None
+        Some(ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(12),
+            buffer_id,
+            bytes: vec![0x1b, b'1'],
+        }))
+    );
+}
+
+#[test]
+fn alt_digit_falls_back_to_esc_prefixed_bytes_when_out_of_range() {
+    let state = root_focus_state();
+    let presentation =
+        PresentationModel::project(&state, SESSION_ID, TEST_SIZE).expect("projection succeeds");
+    let buffer_id = presentation.focused_buffer_id().expect("focused buffer");
+
+    assert_eq!(
+        Controller.map_key(&presentation, RequestId(15), KeyEvent::Alt('9')),
+        Some(ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(15),
+            buffer_id,
+            bytes: vec![0x1b, b'9'],
+        }))
     );
 }
 

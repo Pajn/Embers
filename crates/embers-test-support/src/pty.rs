@@ -8,6 +8,8 @@ use portable_pty::{
     CommandBuilder, MasterPty, NativePtySystem, PtySize as PortableSize, PtySystem,
 };
 
+const OUTPUT_TAIL_CHARS: usize = 2000;
+
 pub struct PtyHarness {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -95,7 +97,34 @@ impl PtyHarness {
         }
 
         Err(MuxError::timeout(format!(
-            "timed out waiting for output containing {needle:?}; got {output:?}"
+            "timed out waiting for output containing {needle:?}; recent output: {:?}",
+            tail_excerpt(&output)
+        )))
+    }
+
+    pub fn wait_for_quiet(&mut self, quiet_for: Duration, timeout: Duration) -> Result<String> {
+        let start = Instant::now();
+        let mut output = String::new();
+        let mut last_activity = Instant::now();
+
+        while start.elapsed() < timeout {
+            match self.output_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => {
+                    output.push_str(&String::from_utf8_lossy(&chunk));
+                    last_activity = Instant::now();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if last_activity.elapsed() >= quiet_for {
+                        return Ok(output);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(output),
+            }
+        }
+
+        Err(MuxError::timeout(format!(
+            "timed out waiting for quiet PTY output; recent output: {:?}",
+            tail_excerpt(&output)
         )))
     }
 
@@ -124,4 +153,17 @@ impl Drop for PtyHarness {
             let _ = join.join();
         }
     }
+}
+
+fn tail_excerpt(output: &str) -> String {
+    let total = output.chars().count();
+    if total <= OUTPUT_TAIL_CHARS {
+        return output.to_owned();
+    }
+
+    let tail: String = output
+        .chars()
+        .skip(total.saturating_sub(OUTPUT_TAIL_CHARS))
+        .collect();
+    format!("...[truncated {} chars]{}", total - OUTPUT_TAIL_CHARS, tail)
 }

@@ -403,11 +403,15 @@ async fn popup_close_preserves_underlying_buffer() {
         .expect("display-popup returns popup id");
 
     run_cli(&server, &["kill-popup", "-t", &popup_id.to_string()]);
+    run_cli(
+        &server,
+        &["send-keys", "--enter", "printf", "popup-after-close\\n"],
+    );
 
     let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
     assert!(snapshot.floating.is_empty());
     connection
-        .wait_for_capture_contains(base_buffer, "popup-base", Duration::from_secs(3))
+        .wait_for_capture_contains(base_buffer, "popup-after-close", Duration::from_secs(3))
         .await
         .expect("base pane survives popup lifecycle");
 
@@ -477,8 +481,16 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         ServerResponse::Floating(response) => response.floating,
         other => panic!("expected floating response, got {other:?}"),
     };
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf moved-buffer-floating\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send floating marker succeeds");
     connection
-        .wait_for_capture_contains(buffer_a.id, "moved-buffer", Duration::from_secs(3))
+        .wait_for_capture_contains(buffer_a.id, "moved-buffer-floating", Duration::from_secs(3))
         .await
         .expect("buffer survives floating move");
 
@@ -515,8 +527,16 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         }))
         .await
         .expect("reattach detached buffer succeeds");
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf moved-buffer-reattach\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send reattach marker succeeds");
     connection
-        .wait_for_capture_contains(buffer_a.id, "moved-buffer", Duration::from_secs(3))
+        .wait_for_capture_contains(buffer_a.id, "moved-buffer-reattach", Duration::from_secs(3))
         .await
         .expect("buffer survives reattach");
 

@@ -1,5 +1,5 @@
 // Embers config derived from tmux settings in:
-// /Users/emma/Development/nix-config/home/base/shell/default.nix
+// project/nix-config/home/base/shell/default.nix
 //
 // Notes:
 // - This mirrors the tmux leader, split/navigation keys, popup helpers, bell
@@ -21,7 +21,7 @@ fn current_cwd(ctx) {
 
 fn shell_tree(ctx, tree_api, title) {
     tree_api.buffer_spawn(
-        ["/bin/zsh"],
+        ["/usr/bin/env", "zsh"],
         #{
             title: title,
             cwd: current_cwd(ctx)

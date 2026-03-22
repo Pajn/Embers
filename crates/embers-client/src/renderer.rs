@@ -98,22 +98,38 @@ impl Renderer {
 
         if let Some(bar) = custom {
             let width = tabs.rect.size.width;
-            render_bar_segments(grid, x, y, end_x, &bar.left);
+            let left_width = bar
+                .left
+                .iter()
+                .map(|segment| display_width(&segment.text))
+                .sum::<u16>()
+                .min(width);
             let right_width = bar
                 .right
                 .iter()
                 .map(|segment| display_width(&segment.text))
-                .sum::<u16>();
-            let right_x = end_x.saturating_sub(right_width.min(width));
-            render_bar_segments(grid, right_x, y, end_x, &bar.right);
+                .sum::<u16>()
+                .min(width);
+            let left_end = x.saturating_add(left_width);
+            let right_start = end_x.saturating_sub(right_width);
+            render_bar_segments(grid, x, y, left_end, &bar.left);
+            render_bar_segments(grid, right_start, y, end_x, &bar.right);
 
+            let center_span = right_start.saturating_sub(left_end);
             let center_width = bar
                 .center
                 .iter()
                 .map(|segment| display_width(&segment.text))
-                .sum::<u16>();
-            let center_x = x.saturating_add(width.saturating_sub(center_width.min(width)) / 2);
-            render_bar_segments(grid, center_x, y, end_x, &bar.center);
+                .sum::<u16>()
+                .min(center_span);
+            let center_x = left_end.saturating_add(center_span.saturating_sub(center_width) / 2);
+            render_bar_segments(
+                grid,
+                center_x,
+                y,
+                center_x.saturating_add(center_width),
+                &bar.center,
+            );
             return;
         }
 

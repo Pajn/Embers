@@ -279,6 +279,28 @@ fn unsupported_live_executor_actions_fail_when_actions_are_materialized() {
 }
 
 #[test]
+fn unsupported_live_executor_actions_are_rejected_inside_chains() {
+    let engine = load_engine(
+        r#"
+            fn nested(ctx) {
+                action.chain([
+                    action.noop(),
+                    action.wrap_current_in_split("vertical", tree.buffer_current())
+                ])
+            }
+
+            define_action("nested", nested);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("nested", demo_context())
+        .expect_err("nested unsupported live actions should fail before execution");
+
+    assert!(error.to_string().contains("WrapNodeInSplit"));
+}
+
+#[test]
 fn action_arrays_preserve_order_and_unit_is_noop() {
     let engine = load_engine(
         r#"

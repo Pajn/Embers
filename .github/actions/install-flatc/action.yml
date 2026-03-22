@@ -26,19 +26,17 @@ runs:
 
         for candidate in "${candidates[@]}"; do
           if curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 120 -fsSL -o flatbuffers-bin/flatc.zip "https://github.com/google/flatbuffers/releases/download/v${{ inputs.version }}/${candidate}"; then
-            asset="${candidate}"
-            break
+            actual_sha256="$(sha256sum flatbuffers-bin/flatc.zip | awk '{print $1}')"
+            if [[ "${actual_sha256}" == "${{ inputs.sha256 }}" ]]; then
+              asset="${candidate}"
+              break
+            fi
+            rm -f flatbuffers-bin/flatc.zip
           fi
         done
 
         if [[ -z "${asset}" ]]; then
           echo "::error::failed to download flatc v${{ inputs.version }}; attempted assets: ${candidates[*]}"
-          exit 1
-        fi
-
-        actual_sha256="$(sha256sum flatbuffers-bin/flatc.zip | awk '{print $1}')"
-        if [[ "${actual_sha256}" != "${{ inputs.sha256 }}" ]]; then
-          echo "::error::flatc archive checksum mismatch for ${asset}: expected ${{ inputs.sha256 }}, got ${actual_sha256}"
           exit 1
         fi
 

@@ -129,7 +129,7 @@ fn repository_config_split_and_tab_actions_build_expected_shell_trees() {
             direction: SplitDirection::Horizontal,
             new_child: TreeSpec::BufferSpawn(BufferSpawnSpec {
                 title: Some("shell".to_owned()),
-                command: vec!["/bin/zsh".to_owned()],
+                command: vec!["/usr/bin/env".to_owned(), "zsh".to_owned()],
                 cwd: Some("/tmp".to_owned()),
                 env: Default::default(),
             }),
@@ -145,7 +145,7 @@ fn repository_config_split_and_tab_actions_build_expected_shell_trees() {
             title: Some("shell".to_owned()),
             child: TreeSpec::BufferSpawn(BufferSpawnSpec {
                 title: Some("shell".to_owned()),
-                command: vec!["/bin/zsh".to_owned()],
+                command: vec!["/usr/bin/env".to_owned(), "zsh".to_owned()],
                 cwd: Some("/tmp".to_owned()),
                 env: Default::default(),
             }),
@@ -165,7 +165,7 @@ fn repository_config_popup_and_scratchpad_actions_build_floating_layouts() {
             spec: embers_client::FloatingSpec {
                 tree: TreeSpec::BufferSpawn(BufferSpawnSpec {
                     title: Some("shell".to_owned()),
-                    command: vec!["/bin/zsh".to_owned()],
+                    command: vec!["/usr/bin/env".to_owned(), "zsh".to_owned()],
                     cwd: Some("/tmp".to_owned()),
                     env: Default::default(),
                 }),
