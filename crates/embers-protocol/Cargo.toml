@@ -7,6 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 flatbuffers.workspace = true
 embers-core = { path = "../embers-core" }

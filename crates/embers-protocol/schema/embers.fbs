@@ -27,6 +27,7 @@ enum MessageKind : ubyte {
   ScrollbackSliceResponse = 32,
   ClientsResponse = 33,
   ClientResponse = 34,
+  BufferLocationResponse = 35,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -73,6 +74,9 @@ enum BufferOp : ubyte {
   Capture = 5,
   CaptureVisible = 6,
   ScrollbackSlice = 7,
+  GetLocation = 8,
+  Reveal = 9,
+  OpenHistory = 10,
 }
 
 enum NodeOp : ubyte {
@@ -89,6 +93,14 @@ enum NodeOp : ubyte {
   CreateTabs = 10,
   ReplaceNode = 11,
   WrapInSplit = 12,
+  Zoom = 13,
+  Unzoom = 14,
+  ToggleZoom = 15,
+  SwapSiblings = 16,
+  BreakNode = 17,
+  JoinBufferAtNode = 18,
+  MoveNodeBefore = 19,
+  MoveNodeAfter = 20,
 }
 
 enum FloatingOp : ubyte {
@@ -128,6 +140,35 @@ enum BufferStateWire : ubyte {
   Interrupted = 4,
 }
 
+enum BufferKindWire : ubyte {
+  Pty = 0,
+  Helper = 1,
+}
+
+enum BufferHistoryScopeWire : ubyte {
+  Full = 0,
+  Visible = 1,
+}
+
+enum BufferHistoryPlacementWire : ubyte {
+  Tab = 0,
+  Floating = 1,
+}
+
+enum NodeBreakDestinationWire : ubyte {
+  Tab = 0,
+  Floating = 1,
+}
+
+enum NodeJoinPlacementWire : ubyte {
+  Left = 0,
+  Right = 1,
+  Up = 2,
+  Down = 3,
+  TabBefore = 4,
+  TabAfter = 5,
+}
+
 enum NodeRecordKindWire : ubyte {
   BufferView = 0,
   Split = 1,
@@ -159,11 +200,14 @@ table BufferRequest {
   op:BufferOp = Create;
   buffer_id:ulong = 0;
   session_id:ulong = 0;
+  client_id:ulong = 0;
   attached_only:bool = false;
   detached_only:bool = false;
   force:bool = false;
   start_line:ulong = 0;
   line_count:uint = 0;
+  history_scope:BufferHistoryScopeWire = Full;
+  history_placement:BufferHistoryPlacementWire = Tab;
   title:string;
   command:[string];
   cwd:string;
@@ -185,10 +229,15 @@ table NodeRequest {
   index:uint = 0;
   active:uint = 0;
   direction:SplitDirectionWire = Horizontal;
+  break_destination:NodeBreakDestinationWire = Tab;
+  join_placement:NodeJoinPlacementWire = Left;
   sizes:[ushort];
   child_node_ids:[ulong];
   titles:[string];
   insert_before:bool = false;
+  first_node_id:ulong = 0;
+  second_node_id:ulong = 0;
+  sibling_node_id:ulong = 0;
 }
 
 table FloatingRequest {
@@ -246,6 +295,7 @@ table SessionRecord {
   floating_ids:[ulong];
   focused_leaf_id:ulong = 0;
   focused_floating_id:ulong = 0;
+  zoomed_node_id:ulong = 0;
 }
 
 table BufferRecord {
@@ -253,10 +303,15 @@ table BufferRecord {
   title:string;
   command:[string];
   cwd:string;
+  kind:BufferKindWire = Pty;
   state:BufferStateWire = Created;
   pid:uint = 0;
   has_pid:bool = false;
   attachment_node_id:ulong = 0;
+  read_only:bool = false;
+  helper_source_buffer_id:ulong = 0;
+  helper_scope:BufferHistoryScopeWire = Full;
+  has_helper_scope:bool = false;
   pty_cols:ushort = 0;
   pty_rows:ushort = 0;
   activity:ActivityStateWire = Idle;
@@ -366,6 +421,17 @@ table ClientResponse {
   client:ClientRecord;
 }
 
+table BufferLocation {
+  buffer_id:ulong;
+  session_id:ulong = 0;
+  node_id:ulong = 0;
+  floating_id:ulong = 0;
+}
+
+table BufferLocationResponse {
+  location:BufferLocation;
+}
+
 table CursorState {
   row:ushort = 0;
   col:ushort = 0;
@@ -462,6 +528,7 @@ table Envelope {
   input_request:InputRequest;
   subscribe_request:SubscribeRequest;
   unsubscribe_request:UnsubscribeRequest;
+  client_request:ClientRequest;
 
   ping_response:PingResponse;
   ok_response:OkResponse;
@@ -476,6 +543,9 @@ table Envelope {
   snapshot_response:SnapshotResponse;
   visible_snapshot_response:VisibleSnapshotResponse;
   scrollback_slice_response:ScrollbackSliceResponse;
+  clients_response:ClientsResponse;
+  client_response:ClientResponse;
+  buffer_location_response:BufferLocationResponse;
 
   session_created_event:SessionCreatedEvent;
   session_closed_event:SessionClosedEvent;
@@ -487,9 +557,6 @@ table Envelope {
   render_invalidated_event:RenderInvalidatedEvent;
   session_renamed_event:SessionRenamedEvent;
   client_changed_event:ClientChangedEvent;
-  client_request:ClientRequest;
-  clients_response:ClientsResponse;
-  client_response:ClientResponse;
 }
 
 root_type Envelope;

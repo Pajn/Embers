@@ -90,6 +90,22 @@ fn client_message_families_round_trip() {
             start_line: 4,
             line_count: 8,
         }),
+        ClientMessage::Buffer(BufferRequest::GetLocation {
+            request_id: RequestId(153),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::Reveal {
+            request_id: RequestId(154),
+            buffer_id: BufferId(20),
+            client_id: Some(7),
+        }),
+        ClientMessage::Buffer(BufferRequest::OpenHistory {
+            request_id: RequestId(155),
+            buffer_id: BufferId(20),
+            scope: BufferHistoryScope::Visible,
+            placement: BufferHistoryPlacement::Floating,
+            client_id: None,
+        }),
         ClientMessage::Node(NodeRequest::GetTree {
             request_id: RequestId(16),
             session_id: SessionId(10),
@@ -162,6 +178,44 @@ fn client_message_families_round_trip() {
             request_id: RequestId(24),
             node_id: NodeId(35),
             sizes: vec![3, 2, 1],
+        }),
+        ClientMessage::Node(NodeRequest::Zoom {
+            request_id: RequestId(241),
+            node_id: NodeId(35),
+        }),
+        ClientMessage::Node(NodeRequest::Unzoom {
+            request_id: RequestId(242),
+            session_id: SessionId(10),
+        }),
+        ClientMessage::Node(NodeRequest::ToggleZoom {
+            request_id: RequestId(243),
+            node_id: NodeId(35),
+        }),
+        ClientMessage::Node(NodeRequest::SwapSiblings {
+            request_id: RequestId(244),
+            first_node_id: NodeId(50),
+            second_node_id: NodeId(51),
+        }),
+        ClientMessage::Node(NodeRequest::BreakNode {
+            request_id: RequestId(245),
+            node_id: NodeId(35),
+            destination: NodeBreakDestination::Floating,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(246),
+            node_id: NodeId(35),
+            buffer_id: BufferId(22),
+            placement: NodeJoinPlacement::TabAfter,
+        }),
+        ClientMessage::Node(NodeRequest::MoveNodeBefore {
+            request_id: RequestId(247),
+            node_id: NodeId(35),
+            sibling_node_id: NodeId(36),
+        }),
+        ClientMessage::Node(NodeRequest::MoveNodeAfter {
+            request_id: RequestId(248),
+            node_id: NodeId(35),
+            sibling_node_id: NodeId(36),
         }),
         ClientMessage::Floating(FloatingRequest::Create {
             request_id: RequestId(25),
@@ -252,6 +306,15 @@ fn server_envelope_families_round_trip() {
         ServerEnvelope::Response(ServerResponse::Buffer(BufferResponse {
             request_id: RequestId(36),
             buffer: buffers[0].clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::BufferLocation(BufferLocationResponse {
+            request_id: RequestId(361),
+            location: BufferLocation {
+                buffer_id: BufferId(11),
+                session_id: Some(SessionId(10)),
+                node_id: Some(NodeId(21)),
+                floating_id: None,
+            },
         })),
         ServerEnvelope::Response(ServerResponse::FloatingList(FloatingListResponse {
             request_id: RequestId(37),
@@ -345,6 +408,7 @@ fn sample_snapshot() -> SessionSnapshot {
             floating_ids: vec![FloatingId(30)],
             focused_leaf_id: Some(NodeId(21)),
             focused_floating_id: Some(FloatingId(30)),
+            zoomed_node_id: Some(NodeId(24)),
         },
         nodes: vec![
             NodeRecord {
@@ -475,9 +539,13 @@ fn sample_buffer_record(
         title: format!("buffer-{id}"),
         command: vec!["bash".to_owned(), "-lc".to_owned(), "echo mux".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        kind: BufferRecordKind::Pty,
         state,
         pid: Some(4242),
         attachment_node_id,
+        read_only: false,
+        helper_source_buffer_id: None,
+        helper_scope: None,
         pty_size: PtySize::new(120, 40),
         activity,
         last_snapshot_seq: 9,

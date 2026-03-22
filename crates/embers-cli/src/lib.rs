@@ -20,9 +20,11 @@ use embers_core::{
     new_request_id,
 };
 use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationResponse,
     BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord,
-    FloatingRequest, FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse,
-    SessionRecord, SessionRequest, SessionSnapshot, SnapshotResponse,
+    FloatingRequest, FloatingResponse, NodeBreakDestination, NodeJoinPlacement, NodeRequest,
+    PingRequest, ProtocolClient, ServerResponse, SessionRecord, SessionRequest, SessionSnapshot,
+    SnapshotResponse,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -143,6 +145,14 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: String,
     },
+    Buffer {
+        #[command(subcommand)]
+        command: BufferCommand,
+    },
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     #[command(name = "new-window")]
     NewWindow {
         #[arg(short = 't', long = "target")]
@@ -241,6 +251,94 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BufferCommand {
+    Show {
+        buffer_id: u64,
+    },
+    Reveal {
+        buffer_id: u64,
+        #[arg(long)]
+        client: Option<u64>,
+    },
+    History {
+        buffer_id: u64,
+        #[arg(long, default_value = "full")]
+        scope: HistoryScopeArg,
+        #[arg(long, default_value = "tab")]
+        placement: HistoryPlacementArg,
+        #[arg(long)]
+        client: Option<u64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    Zoom {
+        node_id: u64,
+    },
+    Unzoom {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    ToggleZoom {
+        node_id: u64,
+    },
+    Swap {
+        first_node_id: u64,
+        second_node_id: u64,
+    },
+    Break {
+        node_id: u64,
+        #[arg(long = "to")]
+        destination: BreakDestinationArg,
+    },
+    JoinBuffer {
+        node_id: u64,
+        buffer_id: u64,
+        #[arg(long = "as")]
+        placement: JoinPlacementArg,
+    },
+    MoveBefore {
+        node_id: u64,
+        sibling_id: u64,
+    },
+    MoveAfter {
+        node_id: u64,
+        sibling_id: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum HistoryScopeArg {
+    Full,
+    Visible,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum HistoryPlacementArg {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum BreakDestinationArg {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum JoinPlacementArg {
+    Left,
+    Right,
+    Up,
+    Down,
+    #[value(name = "tab-before")]
+    TabBefore,
+    #[value(name = "tab-after")]
+    TabAfter,
 }
 
 async fn execute(socket: &Path, command: Command) -> Result<String> {
@@ -377,6 +475,164 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 ))),
             }
         }
+        Command::Buffer { command } => match command {
+            BufferCommand::Show { buffer_id } => {
+                let buffer = connection
+                    .request(ClientMessage::Buffer(BufferRequest::Get {
+                        request_id: new_request_id(),
+                        buffer_id: BufferId(buffer_id),
+                    }))
+                    .await?;
+                let buffer = match buffer {
+                    ServerResponse::Buffer(response) => response.buffer,
+                    other => {
+                        return Err(MuxError::protocol(format!(
+                            "unexpected response to buffer show: {other:?}"
+                        )));
+                    }
+                };
+                let location = connection
+                    .request(ClientMessage::Buffer(BufferRequest::GetLocation {
+                        request_id: new_request_id(),
+                        buffer_id: BufferId(buffer_id),
+                    }))
+                    .await?;
+                let location = expect_buffer_location(location, "buffer show")?;
+                Ok(format_buffer_details(&buffer, &location))
+            }
+            BufferCommand::Reveal { buffer_id, client } => {
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::Reveal {
+                        request_id: new_request_id(),
+                        buffer_id: BufferId(buffer_id),
+                        client_id: client,
+                    }))
+                    .await?;
+                let location = expect_buffer_location(response, "buffer reveal")?;
+                if location.session_id.is_none() {
+                    return Err(MuxError::conflict(format!(
+                        "buffer {} is detached; use attach-buffer or node join-buffer",
+                        buffer_id
+                    )));
+                }
+                Ok(format_buffer_location_line(&location))
+            }
+            BufferCommand::History {
+                buffer_id,
+                scope,
+                placement,
+                client,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::OpenHistory {
+                        request_id: new_request_id(),
+                        buffer_id: BufferId(buffer_id),
+                        scope: history_scope(scope),
+                        placement: history_placement(placement),
+                        client_id: client,
+                    }))
+                    .await?;
+                let location = expect_buffer_location(response, "buffer history")?;
+                Ok(format_buffer_location_line(&location))
+            }
+        },
+        Command::Node { command } => match command {
+            NodeCommand::Zoom { node_id } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::Zoom {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::Unzoom { target } => {
+                let session = connection.resolve_session_record(target.as_deref()).await?;
+                connection
+                    .request(ClientMessage::Node(NodeRequest::Unzoom {
+                        request_id: new_request_id(),
+                        session_id: session.id,
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::ToggleZoom { node_id } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::Swap {
+                first_node_id,
+                second_node_id,
+            } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::SwapSiblings {
+                        request_id: new_request_id(),
+                        first_node_id: NodeId(first_node_id),
+                        second_node_id: NodeId(second_node_id),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::Break {
+                node_id,
+                destination,
+            } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::BreakNode {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        destination: break_destination(destination),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::JoinBuffer {
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        buffer_id: BufferId(buffer_id),
+                        placement: join_placement(placement),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::MoveBefore {
+                node_id,
+                sibling_id,
+            } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        sibling_node_id: NodeId(sibling_id),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+            NodeCommand::MoveAfter {
+                node_id,
+                sibling_id,
+            } => {
+                connection
+                    .request(ClientMessage::Node(NodeRequest::MoveNodeAfter {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        sibling_node_id: NodeId(sibling_id),
+                    }))
+                    .await?;
+                Ok(String::new())
+            }
+        },
         Command::NewWindow {
             target,
             title,
@@ -1327,6 +1583,15 @@ fn expect_capture(response: ServerResponse, operation: &str) -> Result<SnapshotR
     }
 }
 
+fn expect_buffer_location(response: ServerResponse, operation: &str) -> Result<BufferLocation> {
+    match response {
+        ServerResponse::BufferLocation(BufferLocationResponse { location, .. }) => Ok(location),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
 fn format_sessions(sessions: &[SessionRecord]) -> String {
     sessions
         .iter()
@@ -1379,6 +1644,53 @@ fn format_clients(clients: &[ClientRecord], sessions: &[SessionRecord]) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_buffer_details(
+    buffer: &embers_protocol::BufferRecord,
+    location: &BufferLocation,
+) -> String {
+    let mut lines = vec![
+        format!("id\t{}", buffer.id),
+        format!("title\t{}", buffer.title),
+        format!("state\t{}", buffer_state_label(buffer.state)),
+        format!("kind\t{}", buffer_kind_label(buffer.kind)),
+        format!("read_only\t{}", usize::from(buffer.read_only)),
+        format!("location\t{}", format_buffer_location_value(location)),
+    ];
+    if let Some(source_buffer_id) = buffer.helper_source_buffer_id {
+        lines.push(format!("source_buffer\t{}", source_buffer_id));
+    }
+    if let Some(scope) = buffer.helper_scope {
+        lines.push(format!("history_scope\t{}", history_scope_label(scope)));
+    }
+    if !buffer.command.is_empty() {
+        lines.push(format!("command\t{}", buffer.command.join(" ")));
+    }
+    if let Some(cwd) = &buffer.cwd {
+        lines.push(format!("cwd\t{cwd}"));
+    }
+    lines.join("\n")
+}
+
+fn format_buffer_location_line(location: &BufferLocation) -> String {
+    format!(
+        "{}\t{}",
+        location.buffer_id,
+        format_buffer_location_value(location)
+    )
+}
+
+fn format_buffer_location_value(location: &BufferLocation) -> String {
+    match (location.session_id, location.node_id, location.floating_id) {
+        (Some(session_id), Some(node_id), Some(floating_id)) => {
+            format!("session:{session_id}\tnode:{node_id}\tfloating:{floating_id}")
+        }
+        (Some(session_id), Some(node_id), None) => {
+            format!("session:{session_id}\tnode:{node_id}")
+        }
+        _ => "detached".to_owned(),
+    }
 }
 
 fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
@@ -1627,6 +1939,52 @@ fn buffer_state_label(state: embers_protocol::BufferRecordState) -> &'static str
         embers_protocol::BufferRecordState::Running => "running",
         embers_protocol::BufferRecordState::Interrupted => "interrupted",
         embers_protocol::BufferRecordState::Exited => "exited",
+    }
+}
+
+fn buffer_kind_label(kind: embers_protocol::BufferRecordKind) -> &'static str {
+    match kind {
+        embers_protocol::BufferRecordKind::Pty => "pty",
+        embers_protocol::BufferRecordKind::Helper => "helper",
+    }
+}
+
+fn history_scope_label(scope: BufferHistoryScope) -> &'static str {
+    match scope {
+        BufferHistoryScope::Full => "full",
+        BufferHistoryScope::Visible => "visible",
+    }
+}
+
+fn history_scope(scope: HistoryScopeArg) -> BufferHistoryScope {
+    match scope {
+        HistoryScopeArg::Full => BufferHistoryScope::Full,
+        HistoryScopeArg::Visible => BufferHistoryScope::Visible,
+    }
+}
+
+fn history_placement(placement: HistoryPlacementArg) -> BufferHistoryPlacement {
+    match placement {
+        HistoryPlacementArg::Tab => BufferHistoryPlacement::Tab,
+        HistoryPlacementArg::Floating => BufferHistoryPlacement::Floating,
+    }
+}
+
+fn break_destination(destination: BreakDestinationArg) -> NodeBreakDestination {
+    match destination {
+        BreakDestinationArg::Tab => NodeBreakDestination::Tab,
+        BreakDestinationArg::Floating => NodeBreakDestination::Floating,
+    }
+}
+
+fn join_placement(placement: JoinPlacementArg) -> NodeJoinPlacement {
+    match placement {
+        JoinPlacementArg::Left => NodeJoinPlacement::Left,
+        JoinPlacementArg::Right => NodeJoinPlacement::Right,
+        JoinPlacementArg::Up => NodeJoinPlacement::Up,
+        JoinPlacementArg::Down => NodeJoinPlacement::Down,
+        JoinPlacementArg::TabBefore => NodeJoinPlacement::TabBefore,
+        JoinPlacementArg::TabAfter => NodeJoinPlacement::TabAfter,
     }
 }
 

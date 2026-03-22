@@ -7,8 +7,9 @@ use embers_core::{
 };
 
 use crate::model::{
-    Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
+    ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
+    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
     CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
@@ -322,6 +323,7 @@ impl ServerState {
                 floating: Vec::new(),
                 focused_leaf: None,
                 focused_floating: None,
+                zoomed_node: None,
                 created_at: Timestamp::now(),
             },
         );
@@ -347,6 +349,28 @@ impl ServerState {
         let buffer_id = self.buffer_ids.next();
         self.buffers
             .insert(buffer_id, Buffer::new(buffer_id, title, command, cwd, env));
+        buffer_id
+    }
+
+    pub fn create_helper_buffer(
+        &mut self,
+        title: impl Into<String>,
+        source_buffer_id: BufferId,
+        scope: HelperBufferScope,
+        cwd: Option<PathBuf>,
+        lines: Vec<String>,
+    ) -> BufferId {
+        let buffer_id = self.buffer_ids.next();
+        let rows = u16::try_from(lines.len().max(1)).unwrap_or(u16::MAX);
+        let mut buffer = Buffer::new(buffer_id, title, Vec::new(), cwd, BTreeMap::new());
+        buffer.pty_size = PtySize::new(80, rows);
+        buffer.last_snapshot_seq = 1;
+        buffer.kind = BufferKind::Helper(HelperBuffer {
+            source_buffer_id,
+            scope,
+            lines,
+        });
+        self.buffers.insert(buffer_id, buffer);
         buffer_id
     }
 
@@ -1671,7 +1695,7 @@ impl ServerState {
             .map(|floating| floating.id)
     }
 
-    fn floating_id_for_node(&self, node_id: NodeId) -> Result<Option<FloatingId>> {
+    pub fn floating_id_for_node(&self, node_id: NodeId) -> Result<Option<FloatingId>> {
         let root = self.top_root_for_node(node_id)?;
         Ok(self.floating_id_by_root(root))
     }

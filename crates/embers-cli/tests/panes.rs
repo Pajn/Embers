@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use embers_core::RequestId;
-use embers_protocol::{BufferRequest, ClientMessage, ServerResponse};
+use embers_protocol::{BufferRequest, ClientMessage, InputRequest, ServerResponse};
 use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
 
@@ -242,6 +242,132 @@ async fn detached_buffers_can_be_listed_and_attached_via_cli() {
         stdout(&detached_again)
             .lines()
             .any(|line| line.starts_with(&format!("{previous_buffer_id}\trunning\tdetached\t")))
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_show_and_history_open_helper_buffers() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let leaf = snapshot
+        .session
+        .focused_leaf_id
+        .expect("focused pane exists");
+    let buffer_id = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == leaf)
+        .and_then(|node| node.buffer_view.as_ref())
+        .map(|view| view.buffer_id)
+        .expect("focused pane buffer exists");
+
+    run_cli(
+        &server,
+        [
+            "send-keys",
+            "-t",
+            &leaf.to_string(),
+            "--enter",
+            "printf",
+            "history-helper\\n",
+        ],
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let captured = run_cli(&server, ["capture-pane", "-t", &leaf.to_string()]);
+        if stdout(&captured).contains("history-helper") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for pane output"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let shown = run_cli(&server, ["buffer", "show", &buffer_id.to_string()]);
+    let shown_stdout = stdout(&shown);
+    assert!(shown_stdout.contains(&format!("id\t{buffer_id}")));
+    assert!(shown_stdout.contains("kind\tpty"));
+    assert!(shown_stdout.contains(&format!("location\tsession:1\tnode:{leaf}")));
+
+    let opened = run_cli(
+        &server,
+        [
+            "buffer",
+            "history",
+            &buffer_id.to_string(),
+            "--scope",
+            "visible",
+        ],
+    );
+    let opened_stdout = stdout(&opened).trim().to_owned();
+    let helper_buffer_id = opened_stdout
+        .split('\t')
+        .next()
+        .expect("helper buffer id column")
+        .parse::<u64>()
+        .expect("helper buffer id parses");
+
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let helper = snapshot
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id.0 == helper_buffer_id)
+        .expect("helper buffer exists in session");
+    assert_eq!(helper.kind, embers_protocol::BufferRecordKind::Helper);
+    assert!(helper.read_only);
+    assert_eq!(helper.helper_source_buffer_id, Some(buffer_id));
+    assert_eq!(
+        helper.helper_scope,
+        Some(embers_protocol::BufferHistoryScope::Visible)
+    );
+
+    let helper_capture = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Capture {
+            request_id: RequestId(3),
+            buffer_id: helper.id,
+        }))
+        .await
+        .expect("capture helper succeeds");
+    let helper_text = match helper_capture {
+        ServerResponse::Snapshot(response) => response.lines.join("\n"),
+        other => panic!("expected helper snapshot response, got {other:?}"),
+    };
+    assert!(helper_text.contains("history-helper"));
+
+    let send = connection
+        .request(&ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(4),
+            buffer_id: helper.id,
+            bytes: b"nope".to_vec(),
+        }))
+        .await
+        .expect("helper send request returns a response");
+    assert!(
+        matches!(send, ServerResponse::Error(_)),
+        "helper buffers reject input, got {send:?}"
     );
 
     server.shutdown().await.expect("shutdown server");

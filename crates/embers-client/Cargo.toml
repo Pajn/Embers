@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true

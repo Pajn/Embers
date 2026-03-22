@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 alacritty_terminal = "0.25.1"
 base64.workspace = true

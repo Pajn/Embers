@@ -5,6 +5,9 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
