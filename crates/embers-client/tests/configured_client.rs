@@ -8,11 +8,12 @@ use embers_client::{
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
-    BufferCreatedEvent, BufferRecord, BufferRecordState, BufferViewRecord, ClientChangedEvent,
-    ClientMessage, ClientRecord, ClientRequest, ClientResponse, FocusChangedEvent, InputRequest,
-    NodeRecord, NodeRecordKind, NodeRequest, OkResponse, RenderInvalidatedEvent,
-    ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord, SessionRequest,
-    SessionSnapshot, SessionSnapshotResponse, SnapshotResponse, VisibleSnapshotResponse,
+    BufferCreatedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord,
+    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
+    FocusChangedEvent, InputRequest, NodeRecord, NodeRecordKind, NodeRequest, OkResponse,
+    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
+    VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
@@ -127,6 +128,7 @@ fn second_session_state() -> embers_client::ClientState {
             floating_ids: Vec::new(),
             focused_leaf_id: Some(SECOND_ROOT_ID),
             focused_floating_id: None,
+            zoomed_node_id: None,
         },
     );
     state.nodes.insert(
@@ -154,9 +156,13 @@ fn second_session_state() -> embers_client::ClientState {
             title: "other pane".to_owned(),
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
+            kind: BufferRecordKind::Pty,
             state: BufferRecordState::Running,
             pid: None,
             attachment_node_id: Some(SECOND_ROOT_ID),
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
             pty_size: PtySize::new(80, 20),
             activity: ActivityState::Idle,
             last_snapshot_seq: 1,
@@ -983,9 +989,13 @@ async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
             title: "detached".to_owned(),
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
+            kind: BufferRecordKind::Pty,
             state: BufferRecordState::Running,
             pid: None,
             attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
             pty_size: PtySize::new(80, 20),
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,

@@ -1,10 +1,14 @@
 use embers_core::{MuxError, Result};
 use embers_protocol::{
-    BufferRecord, BufferRecordState, BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind,
-    SessionRecord, SessionSnapshot, SplitRecord, TabRecord, TabsRecord,
+    BufferHistoryScope, BufferLocation, BufferRecord, BufferRecordKind, BufferRecordState,
+    BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind, SessionRecord, SessionSnapshot,
+    SplitRecord, TabRecord, TabsRecord,
 };
 
-use crate::model::{Buffer, BufferAttachment, BufferState, FloatingWindow, Node, Session};
+use crate::model::{
+    Buffer, BufferAttachment, BufferKind, BufferState, FloatingWindow, HelperBufferScope, Node,
+    Session,
+};
 use crate::state::ServerState;
 
 pub fn session_record(session: &Session) -> SessionRecord {
@@ -15,6 +19,7 @@ pub fn session_record(session: &Session) -> SessionRecord {
         floating_ids: session.floating.clone(),
         focused_leaf_id: session.focused_leaf,
         focused_floating_id: session.focused_floating,
+        zoomed_node_id: session.zoomed_node,
     }
 }
 
@@ -29,6 +34,18 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         ),
         BufferState::Exited(exited) => (BufferRecordState::Exited, None, exited.exit_code),
     };
+    let (kind, read_only, helper_source_buffer_id, helper_scope) = match &buffer.kind {
+        BufferKind::Pty => (BufferRecordKind::Pty, false, None, None),
+        BufferKind::Helper(helper) => (
+            BufferRecordKind::Helper,
+            true,
+            Some(helper.source_buffer_id),
+            Some(match helper.scope {
+                HelperBufferScope::Full => BufferHistoryScope::Full,
+                HelperBufferScope::Visible => BufferHistoryScope::Visible,
+            }),
+        ),
+    };
 
     BufferRecord {
         id: buffer.id,
@@ -38,18 +55,47 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
             .cwd
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
+        kind,
         state,
         pid,
         attachment_node_id: match buffer.attachment {
             BufferAttachment::Attached(node_id) => Some(node_id),
             BufferAttachment::Detached => None,
         },
+        read_only,
+        helper_source_buffer_id,
+        helper_scope,
         pty_size: buffer.pty_size,
         activity: buffer.activity,
         last_snapshot_seq: buffer.last_snapshot_seq,
         exit_code,
         env: buffer.env.clone(),
     }
+}
+
+pub fn buffer_location(
+    state: &ServerState,
+    buffer_id: embers_core::BufferId,
+) -> Result<BufferLocation> {
+    let buffer = state.buffer(buffer_id)?;
+    let node_id = match buffer.attachment {
+        BufferAttachment::Attached(node_id) => Some(node_id),
+        BufferAttachment::Detached => None,
+    };
+    let session_id = node_id
+        .map(|node_id| state.node(node_id).map(|node| node.session_id()))
+        .transpose()?;
+    let floating_id = node_id
+        .map(|node_id| state.floating_id_for_node(node_id))
+        .transpose()?
+        .flatten();
+
+    Ok(BufferLocation {
+        buffer_id,
+        session_id,
+        node_id,
+        floating_id,
+    })
 }
 
 pub fn node_record(node: &Node) -> NodeRecord {

@@ -14,8 +14,9 @@ use embers_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, InterruptedBuffer, Node, Session, SplitNode, TabEntry, TabsNode,
+    Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
+    ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
+    Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::state::ServerState;
 
@@ -44,6 +45,8 @@ pub struct PersistedSession {
     pub floating: Vec<u64>,
     pub focused_leaf: Option<u64>,
     pub focused_floating: Option<u64>,
+    #[serde(default)]
+    pub zoomed_node: Option<u64>,
     pub created_at_ms: u64,
 }
 
@@ -61,7 +64,29 @@ pub struct PersistedBuffer {
     pub pty_size: PtySize,
     pub activity: PersistedActivityState,
     pub last_snapshot_seq: u64,
+    #[serde(default)]
+    pub kind: PersistedBufferKind,
     pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
+pub enum PersistedBufferKind {
+    #[default]
+    Pty,
+    Helper {
+        source_buffer_id: u64,
+        scope: PersistedHelperBufferScope,
+        lines: Vec<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedHelperBufferScope {
+    Full,
+    Visible,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,6 +299,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         floating: session.floating.iter().map(|id| id.0).collect(),
         focused_leaf: session.focused_leaf.map(|id| id.0),
         focused_floating: session.focused_floating.map(|id| id.0),
+        zoomed_node: session.zoomed_node.map(|id| id.0),
         created_at_ms: timestamp_to_millis(session.created_at),
     }
 }
@@ -286,6 +312,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         floating: session.floating.into_iter().map(FloatingId).collect(),
         focused_leaf: session.focused_leaf.map(NodeId),
         focused_floating: session.focused_floating.map(FloatingId),
+        zoomed_node: session.zoomed_node.map(NodeId),
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
 }
@@ -303,6 +330,7 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         pty_size: buffer.pty_size,
         activity: persisted_activity(buffer.activity),
         last_snapshot_seq: buffer.last_snapshot_seq,
+        kind: persisted_buffer_kind(&buffer.kind),
         created_at_ms: timestamp_to_millis(buffer.created_at),
     }
 }
@@ -321,6 +349,7 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
     restored.pty_size = buffer.pty_size;
     restored.activity = restored_activity(buffer.activity);
     restored.last_snapshot_seq = buffer.last_snapshot_seq;
+    restored.kind = restored_buffer_kind(buffer.kind);
     restored.created_at = timestamp_from_millis(buffer.created_at_ms)?;
     Ok(restored)
 }
@@ -534,6 +563,46 @@ fn restored_activity(activity: PersistedActivityState) -> ActivityState {
         PersistedActivityState::Idle => ActivityState::Idle,
         PersistedActivityState::Activity => ActivityState::Activity,
         PersistedActivityState::Bell => ActivityState::Bell,
+    }
+}
+
+fn persisted_buffer_kind(kind: &BufferKind) -> PersistedBufferKind {
+    match kind {
+        BufferKind::Pty => PersistedBufferKind::Pty,
+        BufferKind::Helper(helper) => PersistedBufferKind::Helper {
+            source_buffer_id: helper.source_buffer_id.0,
+            scope: persisted_helper_scope(helper.scope),
+            lines: helper.lines.clone(),
+        },
+    }
+}
+
+fn restored_buffer_kind(kind: PersistedBufferKind) -> BufferKind {
+    match kind {
+        PersistedBufferKind::Pty => BufferKind::Pty,
+        PersistedBufferKind::Helper {
+            source_buffer_id,
+            scope,
+            lines,
+        } => BufferKind::Helper(HelperBuffer {
+            source_buffer_id: BufferId(source_buffer_id),
+            scope: restored_helper_scope(scope),
+            lines,
+        }),
+    }
+}
+
+fn persisted_helper_scope(scope: HelperBufferScope) -> PersistedHelperBufferScope {
+    match scope {
+        HelperBufferScope::Full => PersistedHelperBufferScope::Full,
+        HelperBufferScope::Visible => PersistedHelperBufferScope::Visible,
+    }
+}
+
+fn restored_helper_scope(scope: PersistedHelperBufferScope) -> HelperBufferScope {
+    match scope {
+        PersistedHelperBufferScope::Full => HelperBufferScope::Full,
+        PersistedHelperBufferScope::Visible => HelperBufferScope::Visible,
     }
 }
 

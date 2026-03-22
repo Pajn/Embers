@@ -13,15 +13,16 @@ use embers_core::{
     BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, WireError, request_span,
 };
 use embers_protocol::{
-    BufferCreatedEvent, BufferDetachedEvent, BufferRequest, BufferResponse, BuffersResponse,
-    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
-    ClientsResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
-    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
-    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
-    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
-    SubscriptionAckResponse, VisibleSnapshotResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame_no_flush,
+    BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
+    BufferLocationResponse, BufferRequest, BufferResponse, BuffersResponse, ClientChangedEvent,
+    ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
+    FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent, FrameType,
+    InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
+    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
+    SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
+    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -29,8 +30,11 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
+use crate::model::{BufferKind, HelperBufferScope};
 use crate::persist::{load_workspace, save_workspace};
-use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
+use crate::protocol::{
+    buffer_location, buffer_record, floating_record, session_record, session_snapshot,
+};
 use crate::{
     BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeStatus,
     BufferRuntimeUpdate, BufferState, ServerConfig, ServerState, TabEntry,
@@ -531,7 +535,7 @@ impl Runtime {
                 (resp, events, None)
             }
             ClientMessage::Buffer(request) => {
-                let (resp, events) = self.dispatch_buffer(request).await;
+                let (resp, events) = self.dispatch_buffer(connection_id, request).await;
                 (resp, events, None)
             }
             ClientMessage::Node(request) => {
@@ -855,6 +859,7 @@ impl Runtime {
 
     async fn dispatch_buffer(
         self: &Arc<Self>,
+        connection_id: u64,
         request: BufferRequest,
     ) -> (ServerResponse, Vec<ServerEvent>) {
         match request {
@@ -1046,6 +1051,82 @@ impl Runtime {
                 .await
             {
                 Ok(snapshot) => (ServerResponse::ScrollbackSlice(snapshot), Vec::new()),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::GetLocation {
+                request_id,
+                buffer_id,
+            } => {
+                let state = self.state.lock().await;
+                match buffer_location(&state, buffer_id) {
+                    Ok(location) => (
+                        ServerResponse::BufferLocation(BufferLocationResponse {
+                            request_id,
+                            location,
+                        }),
+                        Vec::new(),
+                    ),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            BufferRequest::Reveal {
+                request_id,
+                buffer_id,
+                client_id,
+            } => match self
+                .reveal_buffer(connection_id, client_id, buffer_id)
+                .await
+            {
+                Ok((location, events)) => (
+                    ServerResponse::BufferLocation(BufferLocationResponse {
+                        request_id,
+                        location,
+                    }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::OpenHistory {
+                request_id,
+                buffer_id,
+                scope,
+                placement,
+                client_id,
+            } => match self
+                .open_history_buffer(connection_id, client_id, buffer_id, scope, placement)
+                .await
+            {
+                Ok((location, mut reveal_events)) => {
+                    let mut events = Vec::new();
+                    {
+                        let state = self.state.lock().await;
+                        let buffer = match state.buffer(location.buffer_id) {
+                            Ok(buffer) => buffer_record(buffer),
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        events.push(ServerEvent::BufferCreated(BufferCreatedEvent { buffer }));
+                    }
+                    if let Some(session_id) = location.session_id {
+                        if location.floating_id.is_some() {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: location.floating_id,
+                            }));
+                        } else {
+                            events.push(ServerEvent::NodeChanged(NodeChangedEvent { session_id }));
+                        }
+                    }
+                    events.append(&mut reveal_events);
+                    (
+                        ServerResponse::BufferLocation(BufferLocationResponse {
+                            request_id,
+                            location,
+                        }),
+                        events,
+                    )
+                }
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
         }
@@ -1429,6 +1510,21 @@ impl Runtime {
                 }
                 layout_snapshot_response(&state, request_id, session_id)
             }
+            embers_protocol::NodeRequest::Zoom { request_id, .. }
+            | embers_protocol::NodeRequest::Unzoom { request_id, .. }
+            | embers_protocol::NodeRequest::ToggleZoom { request_id, .. }
+            | embers_protocol::NodeRequest::SwapSiblings { request_id, .. }
+            | embers_protocol::NodeRequest::BreakNode { request_id, .. }
+            | embers_protocol::NodeRequest::JoinBufferAtNode { request_id, .. }
+            | embers_protocol::NodeRequest::MoveNodeBefore { request_id, .. }
+            | embers_protocol::NodeRequest::MoveNodeAfter { request_id, .. } => (
+                error_response(
+                    Some(request_id),
+                    ErrorCode::Unsupported,
+                    "node ergonomics commands are not implemented yet",
+                ),
+                Vec::new(),
+            ),
         }
     }
 
@@ -1644,6 +1740,199 @@ impl Runtime {
         }
     }
 
+    async fn resolve_reveal_client_id(
+        &self,
+        connection_id: u64,
+        requested: Option<u64>,
+    ) -> Result<u64> {
+        if let Some(client_id) = requested {
+            if self.clients.lock().await.contains_key(&client_id) {
+                return Ok(client_id);
+            }
+            return Err(MuxError::not_found(format!("unknown client {client_id}")));
+        }
+
+        let clients = self.clients.lock().await;
+        if clients
+            .get(&connection_id)
+            .is_some_and(|client| client.current_session_id.is_some())
+        {
+            return Ok(connection_id);
+        }
+
+        clients
+            .iter()
+            .rev()
+            .find(|(_, client)| client.current_session_id.is_some())
+            .map(|(client_id, _)| *client_id)
+            .ok_or_else(|| MuxError::conflict("no interactive client is currently attached"))
+    }
+
+    async fn has_attached_client(&self) -> bool {
+        self.clients
+            .lock()
+            .await
+            .values()
+            .any(|client| client.current_session_id.is_some())
+    }
+
+    async fn reveal_buffer(
+        &self,
+        connection_id: u64,
+        requested_client_id: Option<u64>,
+        buffer_id: BufferId,
+    ) -> Result<(embers_protocol::BufferLocation, Vec<ServerEvent>)> {
+        let (location, mut events) = {
+            let mut state = self.state.lock().await;
+            let location = buffer_location(&state, buffer_id)?;
+            let Some(session_id) = location.session_id else {
+                return Ok((location, Vec::new()));
+            };
+            let events = match (location.node_id, location.floating_id) {
+                (Some(node_id), _) => {
+                    state.focus_leaf(session_id, node_id)?;
+                    let mut events =
+                        vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+                    if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                        events.push(ServerEvent::FocusChanged(focus_event));
+                    }
+                    events
+                }
+                (None, Some(floating_id)) => {
+                    state.focus_floating(floating_id)?;
+                    let mut events = Vec::new();
+                    if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                        events.push(ServerEvent::FocusChanged(focus_event));
+                    }
+                    events
+                }
+                (None, None) => Vec::new(),
+            };
+            (buffer_location(&state, buffer_id)?, events)
+        };
+
+        if let Some(session_id) = location.session_id
+            && (requested_client_id.is_some() || self.has_attached_client().await)
+        {
+            let client_id = self
+                .resolve_reveal_client_id(connection_id, requested_client_id)
+                .await?;
+            let (_, event) = self.set_client_session(client_id, Some(session_id)).await?;
+            events.push(event);
+        }
+
+        Ok((location, events))
+    }
+
+    async fn open_history_buffer(
+        &self,
+        connection_id: u64,
+        requested_client_id: Option<u64>,
+        source_buffer_id: BufferId,
+        scope: BufferHistoryScope,
+        placement: BufferHistoryPlacement,
+    ) -> Result<(embers_protocol::BufferLocation, Vec<ServerEvent>)> {
+        let (source_title, source_cwd, source_location, source_kind) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(source_buffer_id)?.clone();
+            let location = buffer_location(&state, source_buffer_id)?;
+            (
+                buffer.title.clone(),
+                buffer.cwd.clone(),
+                location,
+                buffer.kind.clone(),
+            )
+        };
+
+        let lines = match source_kind {
+            BufferKind::Helper(helper) => match scope {
+                BufferHistoryScope::Full => helper.lines,
+                BufferHistoryScope::Visible => {
+                    let count = {
+                        let state = self.state.lock().await;
+                        u64::from(state.buffer(source_buffer_id)?.pty_size.rows).max(1)
+                    } as usize;
+                    helper
+                        .lines
+                        .into_iter()
+                        .rev()
+                        .take(count)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
+                }
+            },
+            BufferKind::Pty => match scope {
+                BufferHistoryScope::Full => {
+                    self.capture_snapshot(RequestId(0), source_buffer_id)
+                        .await?
+                        .lines
+                }
+                BufferHistoryScope::Visible => {
+                    self.capture_visible_snapshot(RequestId(0), source_buffer_id)
+                        .await?
+                        .lines
+                }
+            },
+        };
+
+        let target_session_id = match source_location.session_id {
+            Some(session_id) => session_id,
+            None => {
+                let client_id = self
+                    .resolve_reveal_client_id(connection_id, requested_client_id)
+                    .await?;
+                let clients = self.clients.lock().await;
+                clients
+                    .get(&client_id)
+                    .and_then(|client| client.current_session_id)
+                    .ok_or_else(|| {
+                        MuxError::conflict(
+                            "history for detached buffers requires an attached client session",
+                        )
+                    })?
+            }
+        };
+
+        let helper_scope = match scope {
+            BufferHistoryScope::Full => HelperBufferScope::Full,
+            BufferHistoryScope::Visible => HelperBufferScope::Visible,
+        };
+        let helper_title = format!("{} history", source_title);
+        let helper_buffer_id = {
+            let mut state = self.state.lock().await;
+            let helper_buffer_id = state.create_helper_buffer(
+                helper_title.clone(),
+                source_buffer_id,
+                helper_scope,
+                source_cwd,
+                lines,
+            );
+            match placement {
+                BufferHistoryPlacement::Tab => {
+                    state.add_root_tab_from_buffer(
+                        target_session_id,
+                        helper_title,
+                        helper_buffer_id,
+                    )?;
+                }
+                BufferHistoryPlacement::Floating => {
+                    state.create_floating_from_buffer(
+                        target_session_id,
+                        helper_buffer_id,
+                        embers_core::FloatGeometry::new(10, 3, 100, 26),
+                        Some(helper_title),
+                    )?;
+                }
+            }
+            helper_buffer_id
+        };
+
+        self.reveal_buffer(connection_id, requested_client_id, helper_buffer_id)
+            .await
+    }
+
     async fn capture_snapshot(
         &self,
         request_id: RequestId,
@@ -1653,6 +1942,17 @@ impl Runtime {
             let state = self.state.lock().await;
             state.buffer(buffer_id)?.clone()
         };
+        if let BufferKind::Helper(helper) = &buffer.kind {
+            return Ok(SnapshotResponse {
+                request_id,
+                buffer_id,
+                sequence: buffer.last_snapshot_seq,
+                size: buffer.pty_size,
+                lines: helper.lines.clone(),
+                title: Some(buffer.title),
+                cwd: buffer.cwd.map(|path| path.display().to_string()),
+            });
+        }
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_snapshot(buffer.cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
@@ -1677,6 +1977,25 @@ impl Runtime {
             let state = self.state.lock().await;
             state.buffer(buffer_id)?.clone()
         };
+        if let BufferKind::Helper(helper) = &buffer.kind {
+            let total_lines = u64::try_from(helper.lines.len()).unwrap_or(u64::MAX).max(1);
+            return Ok(VisibleSnapshotResponse {
+                request_id,
+                buffer_id,
+                sequence: buffer.last_snapshot_seq,
+                size: buffer.pty_size,
+                lines: helper.lines.clone(),
+                title: Some(buffer.title),
+                cwd: buffer.cwd.map(|path| path.display().to_string()),
+                viewport_top_line: 0,
+                total_lines,
+                alternate_screen: false,
+                mouse_reporting: false,
+                focus_reporting: false,
+                bracketed_paste: false,
+                cursor: None,
+            });
+        }
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_visible_snapshot(buffer.cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
@@ -1706,6 +2025,29 @@ impl Runtime {
         start_line: u64,
         line_count: u32,
     ) -> Result<ScrollbackSliceResponse> {
+        let helper_lines = {
+            let state = self.state.lock().await;
+            match &state.buffer(buffer_id)?.kind {
+                BufferKind::Helper(helper) => Some(helper.lines.clone()),
+                BufferKind::Pty => None,
+            }
+        };
+        if let Some(lines) = helper_lines {
+            let total_lines = u64::try_from(lines.len()).unwrap_or(u64::MAX);
+            let start = usize::try_from(start_line)
+                .unwrap_or(usize::MAX)
+                .min(lines.len());
+            let end = start
+                .saturating_add(usize::try_from(line_count).unwrap_or(usize::MAX))
+                .min(lines.len());
+            return Ok(ScrollbackSliceResponse {
+                request_id,
+                buffer_id,
+                start_line,
+                total_lines,
+                lines: lines[start..end].to_vec(),
+            });
+        }
         let runtime = self.buffer_runtime(buffer_id).await?;
         let slice = runtime
             .capture_scrollback_slice(start_line, line_count)
@@ -1731,7 +2073,7 @@ impl Runtime {
                 false
             } else {
                 buffer.last_snapshot_seq = update.sequence;
-                buffer.activity = update.activity;
+                buffer.activity = max_activity(buffer.activity, update.activity);
                 if let Some(title) = update.title {
                     match title {
                         Some(title) => buffer.title = title,
@@ -2291,11 +2633,27 @@ fn apply_runtime_status(
     if let Some(title) = &status.title {
         let _ = state.set_buffer_title(buffer_id, title.clone());
     }
-    let _ = state.set_buffer_activity(buffer_id, status.activity);
+    if let Some(buffer) = state.buffers.get(&buffer_id) {
+        let _ =
+            state.set_buffer_activity(buffer_id, max_activity(buffer.activity, status.activity));
+    }
     if status.running {
         let _ = state.mark_buffer_running(buffer_id, status.pid);
     } else {
         let _ = state.mark_buffer_exited(buffer_id, status.exit_code);
+    }
+}
+
+fn max_activity(
+    left: embers_core::ActivityState,
+    right: embers_core::ActivityState,
+) -> embers_core::ActivityState {
+    use embers_core::ActivityState;
+
+    match (left, right) {
+        (ActivityState::Bell, _) | (_, ActivityState::Bell) => ActivityState::Bell,
+        (ActivityState::Activity, _) | (_, ActivityState::Activity) => ActivityState::Activity,
+        _ => ActivityState::Idle,
     }
 }
 
