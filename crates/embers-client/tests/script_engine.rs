@@ -2,6 +2,7 @@ mod support;
 
 use std::path::Path;
 
+use embers_client::input::KeyParseError;
 use embers_client::{
     Action, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
     TabBarContext,
@@ -238,4 +239,14 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
     assert_eq!(nested.left[0].text, "NESTED ");
     assert_eq!(nested.left[1].text, "logs-long-title");
     assert_eq!(nested.left[1].style.fg.unwrap().green, 255);
+}
+
+#[test]
+fn harness_rejects_empty_notation_without_panicking() {
+    let mut harness = ScriptHarness::load("").unwrap();
+
+    assert_eq!(
+        harness.resolve_notation("normal", "").unwrap_err(),
+        KeyParseError::EmptySequence
+    );
 }

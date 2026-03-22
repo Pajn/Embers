@@ -122,6 +122,7 @@ pub fn normalize_actions(result: Dynamic) -> Result<Vec<Action>, String> {
 fn validate_live_actions(actions: &[Action]) -> Result<(), String> {
     for action in actions {
         match action {
+            Action::Chain(inner) => validate_live_actions(inner)?,
             Action::ReplaceFloatingRoot { .. }
             | Action::WrapNodeInSplit { .. }
             | Action::WrapNodeInTabs { .. } => {
@@ -1116,18 +1117,14 @@ fn build_split(
 
 fn build_tabs(tabs: Array, active: usize) -> RhaiResult<TreeSpec> {
     let tabs = parse_tabs(tabs)?;
-    if tabs.is_empty() {
-        return Err(runtime_error("tabs cannot be empty"));
-    }
-    if active >= tabs.len() {
-        return Err(runtime_error("active tab index is out of bounds"));
-    }
-    Ok(TreeSpec::Tabs(TabsSpec { tabs, active }))
+    TabsSpec::try_new(tabs, active)
+        .map(TreeSpec::Tabs)
+        .map_err(runtime_error)
 }
 
 fn parse_tabs_tree(tree: TreeSpec) -> RhaiResult<TabsSpec> {
     match tree {
-        TreeSpec::Tabs(tabs) => Ok(tabs),
+        TreeSpec::Tabs(tabs) => TabsSpec::try_new(tabs.tabs, tabs.active).map_err(runtime_error),
         _ => Err(runtime_error("expected a tree.tabs(...) spec")),
     }
 }
@@ -1569,7 +1566,9 @@ fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path) {
         let candidate = entry.join(name);
-        let metadata = candidate.metadata().ok()?;
+        let Some(metadata) = candidate.metadata().ok() else {
+            continue;
+        };
         if !metadata.is_file() {
             continue;
         }

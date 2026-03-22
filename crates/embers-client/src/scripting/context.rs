@@ -58,6 +58,15 @@ impl Context {
             .unwrap_or_default();
         let geometry_by_node = presentation.map(geometry_by_node).unwrap_or_default();
         let visible_node_ids = visible_node_ids(state, &geometry_by_node);
+        let visible_floating_ids = presentation
+            .map(|presentation| {
+                presentation
+                    .floating
+                    .iter()
+                    .map(|floating| floating.floating_id)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         let focused_leaf_ids = state
             .sessions
             .values()
@@ -188,7 +197,11 @@ impl Context {
                         title: window.title.clone(),
                         geometry: window.geometry,
                         focused: window.focused,
-                        visible: window.visible,
+                        visible: if presentation.is_some() {
+                            visible_floating_ids.contains(&window.id)
+                        } else {
+                            window.visible
+                        },
                         close_on_empty: window.close_on_empty,
                     },
                 )

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Point, Rect, Result,
     SessionId, Size, SplitDirection,
@@ -83,12 +85,14 @@ impl PresentationModel {
             size: viewport,
         };
         let mut projection = Projection::default();
-        Projector {
+        let mut projector = Projector {
             state,
             session,
             projection: &mut projection,
-        }
-        .project_node(session.root_node_id, root_bounds, None, true, Vec::new())?;
+            activity_by_node: BTreeMap::new(),
+            buffer_count_by_node: BTreeMap::new(),
+        };
+        projector.project_node(session.root_node_id, root_bounds, None, true, Vec::new())?;
 
         let overlay_bounds = root_bounds;
         for floating_id in &session.floating_ids {
@@ -105,7 +109,7 @@ impl PresentationModel {
             }
 
             let content_rect = inset_border(rect);
-            projection.floating.push(FloatingFrame {
+            projector.projection.floating.push(FloatingFrame {
                 floating_id: window.id,
                 rect,
                 content_rect,
@@ -113,12 +117,7 @@ impl PresentationModel {
                 focused: window.focused,
             });
 
-            Projector {
-                state,
-                session,
-                projection: &mut projection,
-            }
-            .project_node(
+            projector.project_node(
                 window.root_node_id,
                 content_rect,
                 Some(window.id),
@@ -149,7 +148,14 @@ impl PresentationModel {
     }
 
     pub fn focused_floating_id(&self) -> Option<FloatingId> {
-        self.focused_leaf().and_then(|leaf| leaf.floating_id)
+        self.focused_leaf()
+            .and_then(|leaf| leaf.floating_id)
+            .or_else(|| {
+                self.floating
+                    .iter()
+                    .find(|floating| floating.focused)
+                    .map(|floating| floating.floating_id)
+            })
     }
 
     pub fn focused_tabs(&self) -> Option<&TabsFrame> {
@@ -203,6 +209,8 @@ struct Projector<'a> {
     state: &'a ClientState,
     session: &'a SessionRecord,
     projection: &'a mut Projection,
+    activity_by_node: BTreeMap<NodeId, ActivityState>,
+    buffer_count_by_node: BTreeMap<NodeId, usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -282,21 +290,29 @@ impl Projector<'_> {
                         height: 1,
                     },
                 };
+                let mut tab_items = Vec::with_capacity(tabs.tabs.len());
+                for (index, tab) in tabs.tabs.iter().enumerate() {
+                    tab_items.push(TabItem {
+                        title: tab.title.clone(),
+                        child_id: tab.child_id,
+                        active: u32::try_from(index).ok() == Some(tabs.active),
+                        activity: subtree_activity_cached(
+                            self.state,
+                            tab.child_id,
+                            &mut self.activity_by_node,
+                        ),
+                        buffer_count: subtree_buffer_count_cached(
+                            self.state,
+                            tab.child_id,
+                            &mut self.buffer_count_by_node,
+                        ),
+                    });
+                }
+
                 self.projection.tab_bars.push(TabsFrame {
                     node_id: node.id,
                     rect: bar_rect,
-                    tabs: tabs
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .map(|(index, tab)| TabItem {
-                            title: tab.title.clone(),
-                            child_id: tab.child_id,
-                            active: u32::try_from(index).ok() == Some(tabs.active),
-                            activity: subtree_activity(self.state, tab.child_id),
-                            buffer_count: subtree_buffer_count(self.state, tab.child_id),
-                        })
-                        .collect(),
+                    tabs: tab_items,
                     active: active_index,
                     is_root,
                     floating_id,
@@ -351,12 +367,25 @@ impl Projector<'_> {
     }
 }
 
+#[allow(dead_code)]
 fn subtree_activity(state: &ClientState, node_id: NodeId) -> ActivityState {
+    subtree_activity_cached(state, node_id, &mut BTreeMap::new())
+}
+
+fn subtree_activity_cached(
+    state: &ClientState,
+    node_id: NodeId,
+    cache: &mut BTreeMap<NodeId, ActivityState>,
+) -> ActivityState {
+    if let Some(activity) = cache.get(&node_id).copied() {
+        return activity;
+    }
+
     let Some(node) = state.nodes.get(&node_id) else {
         return ActivityState::Idle;
     };
 
-    match node.kind {
+    let activity = match node.kind {
         NodeRecordKind::BufferView => node
             .buffer_view
             .as_ref()
@@ -367,7 +396,10 @@ fn subtree_activity(state: &ClientState, node_id: NodeId) -> ActivityState {
             .as_ref()
             .map(|tabs| {
                 tabs.tabs.iter().fold(ActivityState::Idle, |activity, tab| {
-                    max_activity(activity, subtree_activity(state, tab.child_id))
+                    max_activity(
+                        activity,
+                        subtree_activity_cached(state, tab.child_id, cache),
+                    )
                 })
             })
             .unwrap_or(ActivityState::Idle),
@@ -379,19 +411,34 @@ fn subtree_activity(state: &ClientState, node_id: NodeId) -> ActivityState {
                     .child_ids
                     .iter()
                     .fold(ActivityState::Idle, |activity, child_id| {
-                        max_activity(activity, subtree_activity(state, *child_id))
+                        max_activity(activity, subtree_activity_cached(state, *child_id, cache))
                     })
             })
             .unwrap_or(ActivityState::Idle),
-    }
+    };
+
+    cache.insert(node_id, activity);
+    activity
 }
 
 pub(crate) fn subtree_buffer_count(state: &ClientState, node_id: NodeId) -> usize {
+    subtree_buffer_count_cached(state, node_id, &mut BTreeMap::new())
+}
+
+fn subtree_buffer_count_cached(
+    state: &ClientState,
+    node_id: NodeId,
+    cache: &mut BTreeMap<NodeId, usize>,
+) -> usize {
+    if let Some(count) = cache.get(&node_id).copied() {
+        return count;
+    }
+
     let Some(node) = state.nodes.get(&node_id) else {
         return 0;
     };
 
-    match node.kind {
+    let count = match node.kind {
         NodeRecordKind::BufferView => usize::from(node.buffer_view.is_some()),
         NodeRecordKind::Tabs => node
             .tabs
@@ -399,7 +446,7 @@ pub(crate) fn subtree_buffer_count(state: &ClientState, node_id: NodeId) -> usiz
             .map(|tabs| {
                 tabs.tabs
                     .iter()
-                    .map(|tab| subtree_buffer_count(state, tab.child_id))
+                    .map(|tab| subtree_buffer_count_cached(state, tab.child_id, cache))
                     .sum()
             })
             .unwrap_or(0),
@@ -410,11 +457,14 @@ pub(crate) fn subtree_buffer_count(state: &ClientState, node_id: NodeId) -> usiz
                 split
                     .child_ids
                     .iter()
-                    .map(|child_id| subtree_buffer_count(state, *child_id))
+                    .map(|child_id| subtree_buffer_count_cached(state, *child_id, cache))
                     .sum()
             })
             .unwrap_or(0),
-    }
+    };
+
+    cache.insert(node_id, count);
+    count
 }
 
 fn max_activity(left: ActivityState, right: ActivityState) -> ActivityState {

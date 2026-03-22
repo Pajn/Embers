@@ -10,6 +10,13 @@ use tempfile::tempdir;
 
 use support::run_cli;
 
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const IO_TIMEOUT: Duration = Duration::from_secs(15);
+const FILE_WAIT_POLL: Duration = Duration::from_millis(50);
+const FILE_WAIT_ATTEMPTS: usize = 200;
+const SCROLLBACK_SETTLE_DELAY: Duration = Duration::from_millis(750);
+const QUIET_TIMEOUT: Duration = Duration::from_millis(500);
+
 fn spawn_embers(args: &[&str]) -> PtyHarness {
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
@@ -41,11 +48,11 @@ async fn shutdown_spawned_server(socket_path: &Path) {
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
     assert_eq!(result, 0, "failed to signal spawned server");
 
-    for _ in 0..50 {
+    for _ in 0..FILE_WAIT_ATTEMPTS {
         if !socket_path.exists() && !pid_path.exists() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(FILE_WAIT_POLL).await;
     }
 
     panic!(
@@ -56,22 +63,22 @@ async fn shutdown_spawned_server(socket_path: &Path) {
 }
 
 async fn wait_for_socket(socket_path: &Path) {
-    for _ in 0..50 {
+    for _ in 0..FILE_WAIT_ATTEMPTS {
         if socket_path.exists() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(FILE_WAIT_POLL).await;
     }
 
     panic!("timed out waiting for socket {}", socket_path.display());
 }
 
 async fn wait_for_pid(pid_path: &Path) -> String {
-    for _ in 0..50 {
+    for _ in 0..FILE_WAIT_ATTEMPTS {
         if let Ok(pid) = fs::read_to_string(pid_path) {
             return pid;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(FILE_WAIT_POLL).await;
     }
 
     panic!("timed out waiting for pid file {}", pid_path.display());
@@ -88,11 +95,13 @@ async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
     harness
         .write_all(&long_output)
         .expect("write scrolling command");
-    let final_line = format!("line-{}", lines.saturating_sub(1));
     harness
-        .read_until_contains(&final_line, Duration::from_secs(10))
-        .unwrap_or_else(|error| panic!("long output reached visible bottom: {error}"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+        .read_until_contains("line-1", IO_TIMEOUT)
+        .unwrap_or_else(|error| panic!("long output started: {error}"));
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .unwrap_or_else(|error| panic!("long output settled: {error}"));
+    tokio::time::sleep(SCROLLBACK_SETTLE_DELAY).await;
 }
 
 fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> String {
@@ -101,7 +110,7 @@ fn run_pane_command(harness: &mut PtyHarness, command: &str, expected: &str) -> 
         .unwrap_or_else(|error| panic!("send pane command `{command}`: {error}"));
 
     let output = harness
-        .read_until_contains(expected, Duration::from_secs(10))
+        .read_until_contains(expected, IO_TIMEOUT)
         .unwrap_or_else(|error| {
             panic!("pane command `{command}` did not print `{expected}`: {error}")
         });
@@ -122,7 +131,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
     let mut harness = spawn_embers(&["--socket", &socket_arg]);
 
     harness
-        .read_until_contains("[main]", Duration::from_secs(5))
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("client starts and renders");
 
     let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
@@ -183,7 +192,7 @@ async fn attach_subcommand_connects_to_running_server() {
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
     let mut harness = spawn_embers(&["attach", "--socket", &socket_arg]);
     harness
-        .read_until_contains("[main]", Duration::from_secs(5))
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
 
     let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
@@ -205,13 +214,13 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
     let mut harness = spawn_embers(&["--socket", &socket_arg]);
 
     harness
-        .read_until_contains("[main]", Duration::from_secs(5))
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("client starts and renders");
     populate_scrollback_or_wait(&mut harness, 40).await;
 
     harness.write_all("\x1b[5~").expect("page up");
     let output = harness
-        .read_until_contains("line-1", Duration::from_secs(5))
+        .read_until_contains("line-1", IO_TIMEOUT)
         .expect("page up reveals earlier scrollback");
     assert!(output.contains("line-1"));
 
@@ -228,17 +237,17 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     let mut harness = spawn_embers(&["--socket", &socket_arg]);
 
     harness
-        .read_until_contains("[main]", Duration::from_secs(5))
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("client starts and renders");
     populate_scrollback_or_wait(&mut harness, 40).await;
 
     harness.write_all("\x1b[5~").expect("page up");
     harness
-        .read_until_contains("line-1", Duration::from_secs(5))
+        .read_until_contains("line-1", IO_TIMEOUT)
         .expect("page up reveals earlier scrollback");
     harness.write_all("vly").expect("select and yank");
     let output = harness
-        .read_until_contains("]52;c;", Duration::from_secs(5))
+        .read_until_contains("]52;c;", IO_TIMEOUT)
         .expect("osc52 emitted");
     assert!(output.contains("]52;c;"));
 

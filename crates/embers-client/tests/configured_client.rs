@@ -42,9 +42,32 @@ fn session_snapshot_from_state(
     session_id: SessionId,
 ) -> SessionSnapshot {
     let session = state.sessions.get(&session_id).unwrap().clone();
-    let nodes = state.nodes.values().cloned().collect::<Vec<_>>();
-    let buffers = state.buffers.values().cloned().collect::<Vec<_>>();
-    let floating = state.floating.values().cloned().collect::<Vec<_>>();
+    let nodes = state
+        .nodes
+        .values()
+        .filter(|node| node.session_id == session_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let buffers = state
+        .buffers
+        .values()
+        .filter(|buffer| {
+            buffer
+                .attachment_node_id
+                .is_some_and(|node_id| node_ids.contains(&node_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let floating = state
+        .floating
+        .values()
+        .filter(|floating| floating.session_id == session_id)
+        .cloned()
+        .collect::<Vec<_>>();
     SessionSnapshot {
         session,
         nodes,

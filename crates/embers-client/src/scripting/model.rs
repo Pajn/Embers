@@ -207,6 +207,18 @@ pub struct TabsSpec {
     pub active: usize,
 }
 
+impl TabsSpec {
+    pub fn try_new(tabs: Vec<TabSpec>, active: usize) -> Result<Self, String> {
+        if tabs.is_empty() {
+            return Err("tabs cannot be empty".to_owned());
+        }
+        if active >= tabs.len() {
+            return Err("active tab index is out of bounds".to_owned());
+        }
+        Ok(Self { tabs, active })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeSpec {
     BufferCurrent,

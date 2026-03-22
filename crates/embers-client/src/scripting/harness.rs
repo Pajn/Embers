@@ -43,6 +43,6 @@ impl ScriptHarness {
                 key,
             ));
         }
-        Ok(last_resolution.expect("notation parser returned an empty sequence"))
+        last_resolution.ok_or(crate::input::KeyParseError::EmptySequence)
     }
 }

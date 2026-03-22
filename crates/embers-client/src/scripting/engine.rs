@@ -6,6 +6,7 @@ use rhai::{
     Position,
 };
 
+use crate::config::ConfigOrigin;
 use crate::config::LoadedConfigSource;
 use crate::input::{
     BindingSpec, FallbackPolicy, KeySequence, ModeSpec, builtin_modes, expand_leader,
@@ -45,19 +46,29 @@ impl ScriptEngine {
         register_api(&mut engine, registration.clone());
         register_runtime_api(&mut engine);
 
-        let composed_source = if builtins.is_empty() {
-            source.source.clone()
-        } else {
-            format!("{builtins}\n{}", source.source)
-        };
-        let ast = engine
-            .compile(&composed_source)
-            .map_err(|error| ScriptError::compile(source, error))?;
-
         let mut scope = registration_scope();
         scope.push_constant("tabbar", TabbarApi::new(registration.clone()));
         scope.push_constant("theme", ThemeApi::new(registration.clone()));
         scope.push_constant("mouse", MouseApi::new(registration.clone()));
+
+        if !builtins.is_empty() {
+            let builtins_source = LoadedConfigSource {
+                origin: ConfigOrigin::BuiltIn,
+                path: None,
+                source: builtins.to_owned(),
+                source_hash: 0,
+            };
+            let builtins_ast = engine
+                .compile(builtins)
+                .map_err(|error| ScriptError::compile(&builtins_source, error))?;
+            let _ = engine
+                .eval_ast_with_scope::<Dynamic>(&mut scope, &builtins_ast)
+                .map_err(|error| ScriptError::runtime(&builtins_source, error))?;
+        }
+
+        let ast = engine
+            .compile(&source.source)
+            .map_err(|error| ScriptError::compile(source, error))?;
 
         let _ = engine
             .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)

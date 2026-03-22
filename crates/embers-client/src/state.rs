@@ -126,7 +126,11 @@ impl ClientState {
         }
 
         for buffer_id in previous_attached_buffers.difference(&current_buffer_ids) {
-            if let Some(buffer) = self.buffers.get_mut(buffer_id) {
+            if let Some(buffer) = self.buffers.get_mut(buffer_id)
+                && buffer
+                    .attachment_node_id
+                    .is_some_and(|node_id| previous_node_ids.contains(&node_id))
+            {
                 buffer.attachment_node_id = None;
             }
         }

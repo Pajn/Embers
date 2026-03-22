@@ -11,7 +11,7 @@ use embers_client::{
 use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_SESSION_NAME: &str = "main";
 const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
@@ -341,7 +341,9 @@ fn read_terminal_event(fd: libc::c_int) -> Result<Option<TerminalEvent>> {
         b'\t' => TerminalEvent::Key(KeyEvent::Tab),
         0x7f | 0x08 => TerminalEvent::Key(KeyEvent::Backspace),
         0x1b => read_escape_event(fd)?,
-        0x01..=0x1a => TerminalEvent::Key(KeyEvent::Ctrl(char::from(b'a' + first - 1))),
+        0x00 | 0x01..=0x1a | 0x1c..=0x1f => TerminalEvent::Key(KeyEvent::Ctrl(
+            char::from(first | 0x40).to_ascii_lowercase(),
+        )),
         0x20..=0x7e => TerminalEvent::Key(KeyEvent::Char(char::from(first))),
         other => TerminalEvent::Key(decode_utf8_key(fd, other)?),
     };
@@ -778,7 +780,7 @@ fn fit_width(text: &str, width: u16) -> String {
     let mut fitted = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let ch_width = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4])).max(1);
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(1);
         if used + ch_width > width {
             break;
         }
@@ -855,6 +857,32 @@ mod tests {
             assert_eq!(
                 read_terminal_event(fd).unwrap(),
                 Some(TerminalEvent::Key(KeyEvent::PageDown))
+            );
+        });
+    }
+
+    #[test]
+    fn parses_extended_ctrl_chords() {
+        with_pipe(&[0x00, 0x1c, 0x1d, 0x1e, 0x1f], |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('@')))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('\\')))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl(']')))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('^')))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('_')))
             );
         });
     }

@@ -518,7 +518,10 @@ where
             self.config
                 .active_script()
                 .run_enter_hook(&mode, self.context_for(session_id, viewport, None))
-                .map_err(|error| MuxError::invalid_input(error.to_string()))?,
+                .map_err(|error| {
+                    self.input_state.set_mode(previous_mode.clone());
+                    MuxError::invalid_input(error.to_string())
+                })?,
         );
         Ok(actions)
     }
@@ -1325,6 +1328,9 @@ where
         }
         let current = i128::from(state.scroll_top_line);
         let delta = i128::from(delta);
+        // Negative deltas scroll up by subtracting the absolute value; positive deltas
+        // scroll down by adding. We do the math in i128 with saturating ops so
+        // unsigned_abs/subtraction cannot underflow or overflow before clamping at 0.
         let next = if delta.is_negative() {
             current.saturating_sub(delta.unsigned_abs() as i128)
         } else {
