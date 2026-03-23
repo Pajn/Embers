@@ -11,8 +11,9 @@ use crate::model::{
     FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
-    PersistedWorkspace, persisted_buffer, persisted_floating, persisted_node, persisted_session,
-    restored_buffer, restored_floating, restored_node, restored_session,
+    CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
+    persisted_node, persisted_session, restored_buffer, restored_floating, restored_node,
+    restored_session,
 };
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ impl ServerState {
 
     pub fn from_persisted(workspace: PersistedWorkspace) -> Result<Self> {
         let PersistedWorkspace {
+            format_version: _,
             sessions: persisted_sessions,
             buffers: persisted_buffers,
             nodes: persisted_nodes,
@@ -100,6 +102,21 @@ impl ServerState {
             }
         }
 
+        for (floating_id, window) in &floating {
+            let Some(session) = sessions.get(&window.session_id) else {
+                return Err(MuxError::internal(format!(
+                    "floating window {floating_id} references unknown session {}",
+                    window.session_id
+                )));
+            };
+            if !session.floating.contains(floating_id) {
+                return Err(MuxError::internal(format!(
+                    "floating window {floating_id} is not referenced by session {}",
+                    window.session_id
+                )));
+            }
+        }
+
         let safe_next_session_id = next_id_after_max(sessions.keys().map(|id| id.0));
         let safe_next_buffer_id = next_id_after_max(buffers.keys().map(|id| id.0));
         let safe_next_node_id = next_id_after_max(nodes.keys().map(|id| id.0));
@@ -122,6 +139,7 @@ impl ServerState {
 
     pub fn to_persisted(&self) -> PersistedWorkspace {
         PersistedWorkspace {
+            format_version: Some(CURRENT_FORMAT_VERSION),
             sessions: self.sessions.values().map(persisted_session).collect(),
             buffers: self.buffers.values().map(persisted_buffer).collect(),
             nodes: self.nodes.values().map(persisted_node).collect(),
@@ -2094,5 +2112,68 @@ fn next_id_after_max(ids: impl Iterator<Item = u64>) -> u64 {
             )
         }),
         None => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embers_core::FloatGeometry;
+
+    #[test]
+    fn interrupt_unrecoverable_buffers_marks_created_buffers_interrupted() {
+        let mut state = ServerState::new();
+        let buffer_id = state.create_buffer("detached", vec!["/bin/sh".to_owned()], None);
+
+        assert_eq!(
+            state.buffer(buffer_id).expect("buffer exists").state,
+            BufferState::Created
+        );
+
+        state.interrupt_unrecoverable_buffers();
+
+        assert_eq!(
+            state.buffer(buffer_id).expect("buffer exists").state,
+            BufferState::Interrupted(InterruptedBuffer {
+                last_known_pid: None,
+            })
+        );
+    }
+
+    #[test]
+    fn from_persisted_rejects_unreferenced_floating_windows() {
+        let mut state = ServerState::new();
+        let session_id = state.create_session("main");
+        let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+        let floating_id = state
+            .create_floating_from_buffer_with_options(
+                session_id,
+                buffer_id,
+                FloatGeometry {
+                    x: 1,
+                    y: 2,
+                    width: 80,
+                    height: 24,
+                },
+                Some("popup".to_owned()),
+                true,
+                true,
+            )
+            .expect("floating is created");
+
+        let mut workspace = state.to_persisted();
+        workspace
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id.0)
+            .expect("session persists")
+            .floating
+            .retain(|candidate| *candidate != floating_id.0);
+
+        let error = ServerState::from_persisted(workspace)
+            .expect_err("unreferenced floating window should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("floating window"));
+        assert!(message.contains("not referenced by session"));
     }
 }

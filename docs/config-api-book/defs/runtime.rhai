@@ -19,8 +19,9 @@ fn segment(_: UiApi, text: string) -> BarSegment;
 /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
 ///
 /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-/// `bold`, `italic`, `underline`, and `target` keys to override styling and attach an
-/// optional interaction target.
+/// `bold`, `italic`, `underline`, `dim`, and `target` keys to override styling and attach an
+/// optional interaction target. `dim` is a boolean that renders the text with reduced
+/// intensity for a muted appearance.
 fn segment(_: UiApi, text: string, options: map) -> BarSegment;
 
 /// Read an environment variable, if it is set.
@@ -92,8 +93,7 @@ fn buffer_empty(_: TreeApi) -> TreeSpec;
 /// Spawn a new buffer from a command array.
 ///
 /// Supported `options` keys are `title` (`string`), `cwd` (`string`), and `env`
-/// (`map<string, string>`). The runtime validates these keys, and unknown keys are currently
-/// ignored.
+/// (`map<string, string>`). Unknown keys are rejected.
 ///
 /// # Example
 ///
@@ -225,6 +225,17 @@ fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 fn leave_mode(_: ActionApi) -> Action;
 
 /// Move a buffer into a new floating window.
+///
+/// # Options
+///
+/// - `x` (i16): horizontal offset from the anchor (default: 0)
+/// - `y` (i16): vertical offset from the anchor (default: 0)
+/// - `width` (FloatingSize): window width, as a percentage (e.g., 50%) or pixel value (default: 50%)
+/// - `height` (FloatingSize): window height, as a percentage or pixel value (default: 50%)
+/// - `anchor` (FloatingAnchor): anchor point for positioning, e.g., "top_left", "center" (default: center)
+/// - `title` (Option\<String\>): window title (default: none)
+/// - `focus` (bool): whether to focus the window after creation (default: true)
+/// - `close_on_empty` (bool): whether to close the window when its buffer empties (default: true)
 fn move_buffer_to_floating(_: ActionApi, buffer_id: int, options: map) -> Action;
 
 /// Move a buffer into a specific node.

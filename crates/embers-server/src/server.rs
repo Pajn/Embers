@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
     BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, WireError, request_span,
@@ -22,7 +22,7 @@ use embers_protocol::{
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
@@ -58,6 +58,7 @@ impl Server {
             self.config.workspace_path.clone(),
             self.config.buffer_env.clone(),
         ));
+        let shutdown_signal = runtime.shutdown.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let join = tokio::spawn(async move {
@@ -79,7 +80,9 @@ impl Server {
                         let write_runtime = runtime.clone();
                         let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
                         let read_runtime = runtime.clone();
+                        let connection_task = runtime.connection_tasks.enter();
                         let read_handle = tokio::spawn(async move {
+                            let _connection_task = connection_task;
                             if let Err(error) =
                                 handle_connection(read_runtime, connection_id, reader, outbound_tx)
                                     .await
@@ -88,25 +91,30 @@ impl Server {
                             }
                         });
                         tokio::spawn(async move {
+                            if let Err(error) = read_handle.await {
+                                error!(%error, connection_id, "read_loop panicked");
+                            }
+
+                            write_handle.abort();
                             match write_handle.await {
                                 Ok(Ok(())) => {}
                                 Ok(Err(error)) => {
                                     error!(%error, connection_id, "write_loop failed");
                                 }
+                                Err(error) if error.is_cancelled() => {}
                                 Err(error) => {
                                     error!(%error, connection_id, "write_loop panicked");
                                 }
                             }
-                            read_handle.abort();
-                            let _ = read_handle.await;
                             write_runtime.cleanup_connection(connection_id).await;
                         });
                     }
                 }
             }
 
-            runtime.shutting_down.store(true, Ordering::Relaxed);
+            runtime.shutdown.trigger();
             runtime.shutdown_runtimes().await;
+            runtime.quiesce_state_tasks().await;
             if let Err(error) = runtime.persist_workspace().await {
                 error!(%error, "failed to persist workspace during shutdown");
                 return Err(error);
@@ -117,6 +125,7 @@ impl Server {
         Ok(ServerHandle {
             socket_path: self.config.socket_path,
             shutdown: Some(shutdown_tx),
+            shutdown_signal,
             join,
         })
     }
@@ -126,6 +135,7 @@ impl Server {
 pub struct ServerHandle {
     socket_path: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
+    shutdown_signal: ShutdownSignal,
     join: JoinHandle<Result<()>>,
 }
 
@@ -135,6 +145,7 @@ impl ServerHandle {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
+        self.shutdown_signal.trigger();
         if let Some(sender) = self.shutdown.take() {
             let _ = sender.send(());
         }
@@ -161,6 +172,47 @@ impl Drop for SocketCleanup {
     }
 }
 
+#[derive(Clone)]
+struct ShutdownSignal {
+    inner: Arc<ShutdownSignalInner>,
+}
+
+struct ShutdownSignalInner {
+    active: AtomicBool,
+    tx: watch::Sender<bool>,
+}
+
+impl std::fmt::Debug for ShutdownSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShutdownSignal")
+            .field("active", &self.inner.active.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl ShutdownSignal {
+    fn new() -> Self {
+        let (tx, _rx) = watch::channel(false);
+        Self {
+            inner: Arc::new(ShutdownSignalInner {
+                active: AtomicBool::new(false),
+                tx,
+            }),
+        }
+    }
+
+    fn trigger(&self) {
+        if !self.inner.active.swap(true, Ordering::AcqRel) {
+            self.inner.tx.send_replace(true);
+        }
+    }
+
+    fn subscribe(&self) -> watch::Receiver<bool> {
+        self.inner.tx.subscribe()
+    }
+}
+
 #[derive(Debug)]
 struct Subscription {
     connection_id: u64,
@@ -172,13 +224,16 @@ struct Subscription {
 struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
+    buffer_shutdown_intents: StdMutex<BTreeSet<BufferId>>,
     buffer_surfaces: Mutex<BTreeMap<BufferId, BufferSurface>>,
     workspace_path: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
-    shutting_down: AtomicBool,
+    shutdown: ShutdownSignal,
+    connection_tasks: TaskCounter,
+    state_tasks: TaskCounter,
 }
 
 struct BufferSurface {
@@ -193,6 +248,66 @@ impl std::fmt::Debug for BufferSurface {
             .debug_struct("BufferSurface")
             .field("size", &self.size)
             .finish()
+    }
+}
+
+#[derive(Clone, Default)]
+struct TaskCounter {
+    inner: Arc<TaskCounterInner>,
+}
+
+struct TaskCounterInner {
+    active: AtomicUsize,
+    drained: Notify,
+}
+
+impl Default for TaskCounterInner {
+    fn default() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            drained: Notify::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TaskCounter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TaskCounter")
+            .field("active", &self.inner.active.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+#[must_use]
+struct TaskTicket {
+    inner: Arc<TaskCounterInner>,
+}
+
+impl TaskCounter {
+    fn enter(&self) -> TaskTicket {
+        self.inner.active.fetch_add(1, Ordering::Relaxed);
+        TaskTicket {
+            inner: self.inner.clone(),
+        }
+    }
+
+    async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.inner.drained.notified();
+            if self.inner.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for TaskTicket {
+    fn drop(&mut self) {
+        if self.inner.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.drained.notify_waiters();
+        }
     }
 }
 
@@ -261,13 +376,16 @@ impl Runtime {
         Self {
             state: Mutex::new(state),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
+            buffer_shutdown_intents: StdMutex::new(BTreeSet::new()),
             buffer_surfaces: Mutex::new(BTreeMap::new()),
             workspace_path,
             buffer_env,
             subscriptions: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
-            shutting_down: AtomicBool::new(false),
+            shutdown: ShutdownSignal::new(),
+            connection_tasks: TaskCounter::default(),
+            state_tasks: TaskCounter::default(),
         }
     }
 }
@@ -276,6 +394,18 @@ impl Runtime {
     async fn persist_workspace(&self) -> Result<()> {
         let state = self.state.lock().await;
         save_workspace(&self.workspace_path, &state)
+    }
+
+    async fn quiesce_state_tasks(&self) {
+        self.connection_tasks.wait_for_idle().await;
+        self.state_tasks.wait_for_idle().await;
+    }
+
+    fn take_buffer_shutdown_intent(&self, buffer_id: BufferId) -> bool {
+        self.buffer_shutdown_intents
+            .lock()
+            .expect("buffer shutdown intent lock")
+            .remove(&buffer_id)
     }
 
     async fn dispatch_request(
@@ -1195,6 +1325,8 @@ impl Runtime {
         let exit_handle = output_handle.clone();
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
+        let output_tasks = self.state_tasks.clone();
+        let exit_tasks = self.state_tasks.clone();
         let mut buffer_env = self.buffer_env.clone();
         for (key, value) in env_hints {
             buffer_env.insert(key, OsString::from(value));
@@ -1208,13 +1340,17 @@ impl Runtime {
             BufferRuntimeCallbacks {
                 on_output: Arc::new(move |buffer_id, bytes| {
                     let runtime = output_runtime.clone();
+                    let _task = output_tasks.enter();
                     std::mem::drop(output_handle.spawn(async move {
+                        let _task = _task;
                         runtime.record_buffer_output(buffer_id, bytes).await;
                     }));
                 }),
                 on_exit: Arc::new(move |buffer_id, exit_code| {
                     let runtime = exit_runtime.clone();
+                    let _task = exit_tasks.enter();
                     std::mem::drop(exit_handle.spawn(async move {
+                        let _task = _task;
                         runtime.record_buffer_exit(buffer_id, exit_code).await;
                     }));
                 }),
@@ -1416,9 +1552,10 @@ impl Runtime {
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
         let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
+        let should_interrupt = self.take_buffer_shutdown_intent(buffer_id);
         let updated = {
             let mut state = self.state.lock().await;
-            let result = if self.shutting_down.load(Ordering::Relaxed) {
+            let result = if should_interrupt {
                 state.mark_buffer_interrupted(buffer_id)
             } else {
                 state.mark_buffer_exited(buffer_id, exit_code)
@@ -1447,13 +1584,20 @@ impl Runtime {
     }
 
     async fn shutdown_runtimes(&self) {
-        let runtimes: Vec<_> = self
-            .buffer_runtimes
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect();
+        let runtimes: Vec<_> = {
+            let runtimes = self.buffer_runtimes.lock().await;
+            let mut shutdown_intents = self
+                .buffer_shutdown_intents
+                .lock()
+                .expect("buffer shutdown intent lock");
+            runtimes
+                .iter()
+                .map(|(&buffer_id, runtime)| {
+                    shutdown_intents.insert(buffer_id);
+                    runtime.clone()
+                })
+                .collect()
+        };
         for runtime in runtimes {
             if let Err(error) = runtime.kill().await {
                 debug!(%error, "failed to kill buffer runtime during shutdown");
@@ -1503,11 +1647,16 @@ async fn handle_connection(
     mut reader: OwnedReadHalf,
     outbound: mpsc::UnboundedSender<ServerEnvelope>,
 ) -> Result<()> {
+    let mut server_shutdown = runtime.shutdown.subscribe();
     loop {
-        let Some(frame) = read_frame(&mut reader)
-            .await
-            .map_err(protocol_error_to_mux)?
-        else {
+        let frame = tokio::select! {
+            _ = wait_for_shutdown(&mut server_shutdown) => {
+                runtime.cleanup_connection(connection_id).await;
+                return Ok(());
+            }
+            frame = read_frame(&mut reader) => frame.map_err(protocol_error_to_mux)?,
+        };
+        let Some(frame) = frame else {
             debug!(connection_id, "client disconnected");
             runtime.cleanup_connection(connection_id).await;
             return Ok(());
@@ -1592,6 +1741,17 @@ async fn write_loop(
     }
 
     Ok(())
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow_and_update() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+    }
 }
 
 fn set_socket_permissions(socket_path: &Path) -> Result<()> {
@@ -1687,5 +1847,45 @@ fn render_events(buffer_id: BufferId, damage: BackendDamage) -> Vec<ServerEvent>
                 buffer_id,
             })]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::{Runtime, ShutdownSignal, wait_for_shutdown};
+    use crate::ServerState;
+
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn shutdown_signal_is_latched_for_new_receivers() {
+        let signal = ShutdownSignal::new();
+        signal.trigger();
+        let mut shutdown = signal.subscribe();
+
+        timeout(Duration::from_millis(50), wait_for_shutdown(&mut shutdown))
+            .await
+            .expect("latched shutdown should resolve immediately");
+    }
+
+    #[test]
+    fn buffer_shutdown_intents_are_consumed_per_buffer() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("workspace"),
+            BTreeMap::new(),
+        );
+        runtime
+            .buffer_shutdown_intents
+            .lock()
+            .expect("buffer shutdown intent lock")
+            .insert(embers_core::BufferId(1));
+
+        assert!(runtime.take_buffer_shutdown_intent(embers_core::BufferId(1)));
+        assert!(!runtime.take_buffer_shutdown_intent(embers_core::BufferId(1)));
+        assert!(!runtime.take_buffer_shutdown_intent(embers_core::BufferId(2)));
     }
 }
