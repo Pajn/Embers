@@ -1,5 +1,6 @@
 [package]
 name = "embers-test-support"
+autotests = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -13,3 +14,7 @@ embers-server = { path = "../embers-server" }
 portable-pty.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

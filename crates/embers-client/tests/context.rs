@@ -1,9 +1,7 @@
-mod support;
-
 use embers_client::{Context, PresentationModel, TabBarContext};
 use embers_core::Size;
 
-use support::{NESTED_TABS_ID, ROOT_SPLIT_ID, SESSION_ID, demo_state};
+use crate::support::{NESTED_TABS_ID, ROOT_SPLIT_ID, SESSION_ID, demo_state};
 
 const TEST_SIZE: Size = Size {
     width: 40,

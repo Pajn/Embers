@@ -1,9 +1,7 @@
-mod support;
-
 use embers_client::PresentationModel;
 use embers_core::{FloatGeometry, Size, SplitDirection};
 
-use support::{
+use crate::support::{
     FLOATING_BOTTOM_LEAF_ID, FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID,
     NESTED_TABS_ID, ROOT_BUFFER_LEAF_ID, ROOT_ONLY_SPLIT_ID, ROOT_SPLIT_LEFT_LEAF_ID,
     ROOT_SPLIT_RIGHT_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state,

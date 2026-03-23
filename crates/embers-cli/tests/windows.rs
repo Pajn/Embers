@@ -1,8 +1,6 @@
-mod support;
-
 use embers_test_support::{TestConnection, TestServer};
 
-use support::{run_cli, session_snapshot_by_name, stdout};
+use crate::support::{run_cli, session_snapshot_by_name, stdout};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn window_commands_round_trip_through_cli() {

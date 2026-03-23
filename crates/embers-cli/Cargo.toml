@@ -1,6 +1,7 @@
 [package]
 name = "embers-cli"
 autobins = false
+autotests = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -32,3 +33,7 @@ assert_cmd.workspace = true
 embers-test-support = { path = "../embers-test-support" }
 predicates.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

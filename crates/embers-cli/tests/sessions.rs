@@ -1,5 +1,3 @@
-mod support;
-
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -10,7 +8,7 @@ use predicates::prelude::*;
 use embers_test_support::TestServer;
 use tempfile::tempdir;
 
-use support::{cli_command, run_cli, stdout};
+use crate::support::{cli_command, run_cli, stdout};
 
 async fn shutdown_spawned_server(socket_path: &Path) {
     let pid_path = socket_path.with_extension("pid");

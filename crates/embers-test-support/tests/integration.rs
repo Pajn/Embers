@@ -1,0 +1,9 @@
+mod buffer_runtime;
+mod detach_move;
+mod floating_windows;
+mod nested_tabs;
+mod protocol_server;
+mod pty_smoke;
+mod server_harness;
+mod session_root_tabs;
+mod split_layout;
