@@ -1318,6 +1318,7 @@ mod documented_action_api {
                 geometry: spec.geometry,
                 title: spec.title,
                 focus: spec.focus,
+                close_on_empty: spec.close_on_empty,
             })
         })
     }
@@ -1637,8 +1638,7 @@ mod documented_tree_api {
     /// Spawn a new buffer from a command array.
     ///
     /// Supported `options` keys are `title` (`string`), `cwd` (`string`), and `env`
-    /// (`map<string, string>`). The runtime validates these keys, and unknown keys are currently
-    /// ignored.
+    /// (`map<string, string>`). Unknown keys are rejected.
     ///
     /// # Example
     ///
@@ -1815,8 +1815,9 @@ mod documented_ui_api {
     /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
     ///
     /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-    /// `bold`, `italic`, `underline`, and `target` keys to override styling and attach an
-    /// optional interaction target.
+    /// `bold`, `italic`, `underline`, `dim`, and `target` keys to override styling and attach an
+    /// optional interaction target. `dim` is a boolean that renders the text with reduced
+    /// intensity for a muted appearance.
     #[rhai_fn(return_raw, name = "segment")]
     pub fn segment_with_options(
         ctx: NativeCallContext,
@@ -1951,12 +1952,19 @@ fn parse_bar_segments(segments: Array) -> ScriptResult<Vec<BarSegment>> {
 }
 
 fn parse_buffer_spawn(command: Array, mut options: Map) -> ScriptResult<BufferSpawnSpec> {
-    Ok(BufferSpawnSpec {
+    let parsed = BufferSpawnSpec {
         title: parse_optional_string(options.remove("title"))?,
         command: parse_string_array(Dynamic::from(command))?,
         cwd: parse_optional_string(options.remove("cwd"))?,
         env: parse_string_map(options.remove("env"))?,
-    })
+    };
+    if !options.is_empty() {
+        return Err(runtime_error(format!(
+            "unknown buffer_spawn option(s): {}",
+            unexpected_option_keys(&options)
+        )));
+    }
+    Ok(parsed)
 }
 
 fn parse_floating_spec(tree: TreeSpec, options: Map) -> ScriptResult<FloatingSpec> {
@@ -2040,19 +2048,26 @@ fn parse_bar_target(value: Option<Dynamic>) -> ScriptResult<Option<BarTarget>> {
         return Err(runtime_error("bar target must be a map"));
     };
     let kind = parse_required_string(&mut target, "kind")?;
-    match kind.as_str() {
-        "tab" => Ok(Some(BarTarget::Tab {
+    let parsed = match kind.as_str() {
+        "tab" => BarTarget::Tab {
             tabs_node_id: parse_node_id(parse_required_i64(&mut target, "tabs_node_id")?)?,
             index: parse_index(parse_required_i64(&mut target, "index")?, "target index")?,
-        })),
-        "floating" => Ok(Some(BarTarget::Floating {
+        },
+        "floating" => BarTarget::Floating {
             floating_id: parse_floating_id(parse_required_i64(&mut target, "floating_id")?)?,
-        })),
-        "buffer" => Ok(Some(BarTarget::Buffer {
+        },
+        "buffer" => BarTarget::Buffer {
             buffer_id: parse_buffer_id(parse_required_i64(&mut target, "buffer_id")?)?,
-        })),
-        _ => Err(runtime_error(format!("unknown bar target kind '{kind}'"))),
+        },
+        _ => return Err(runtime_error(format!("unknown bar target kind '{kind}'"))),
+    };
+    if !target.is_empty() {
+        return Err(runtime_error(format!(
+            "unknown bar target option(s): {}",
+            unexpected_option_keys(&target)
+        )));
     }
+    Ok(Some(parsed))
 }
 
 fn parse_optional_color(value: Option<Dynamic>) -> ScriptResult<Option<RgbColor>> {
@@ -2384,7 +2399,10 @@ fn with_call_position<T>(
     build: impl FnOnce() -> RhaiResultOf<T>,
 ) -> RhaiResultOf<T> {
     let position = ctx.call_position();
-    build().map_err(|error| runtime_error_at(error.to_string(), position))
+    build().map_err(|mut error| {
+        error.set_position(position);
+        error
+    })
 }
 
 fn runtime_error(message: impl Into<String>) -> Box<EvalAltResult> {
@@ -2397,7 +2415,10 @@ fn runtime_error_at(message: impl Into<String>, position: Position) -> Box<EvalA
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_notify_level, parse_split_direction};
+    use super::{
+        Dynamic, Map, parse_bar_target, parse_buffer_spawn, parse_notify_level,
+        parse_split_direction,
+    };
 
     #[test]
     fn parse_levels_accepts_draft_names() {
@@ -2410,5 +2431,33 @@ mod tests {
     fn parse_split_direction_accepts_words() {
         assert!(parse_split_direction("horizontal").is_ok());
         assert!(parse_split_direction("vertical").is_ok());
+    }
+
+    #[test]
+    fn parse_buffer_spawn_rejects_unknown_options() {
+        let command = vec![Dynamic::from("/bin/sh")];
+        let mut options = Map::new();
+        options.insert("bogus".into(), Dynamic::TRUE);
+
+        let error = parse_buffer_spawn(command, options).expect_err("unknown option should fail");
+        assert_eq!(
+            error.to_string(),
+            "Runtime error: unknown buffer_spawn option(s): bogus"
+        );
+    }
+
+    #[test]
+    fn parse_bar_target_rejects_unknown_options() {
+        let mut target = Map::new();
+        target.insert("kind".into(), Dynamic::from("buffer"));
+        target.insert("buffer_id".into(), Dynamic::from(7_i64));
+        target.insert("bogus".into(), Dynamic::TRUE);
+
+        let error = parse_bar_target(Some(Dynamic::from(target)))
+            .expect_err("unknown target option should fail");
+        assert_eq!(
+            error.to_string(),
+            "Runtime error: unknown bar target option(s): bogus"
+        );
     }
 }

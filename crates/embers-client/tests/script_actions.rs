@@ -29,6 +29,12 @@ fn action_helpers_roundtrip_to_typed_actions() {
                     #{ x: 1, y: 2, width: 30, height: 10, title: "popup" }
                 )
             }
+            fn move_buffer_popup_action(ctx) {
+                action.move_buffer_to_floating(
+                    9,
+                    #{ x: 1, y: 2, width: 30, height: 10, close_on_empty: false }
+                )
+            }
             fn detach_buffer_action(ctx) { action.detach_buffer() }
             fn kill_buffer_action(ctx) { action.kill_buffer() }
             fn send_keys_action(ctx) { action.send_keys_current("abc") }
@@ -49,6 +55,7 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("replace-node", replace_node_action);
             define_action("insert-tab", insert_tab_action);
             define_action("open-popup", open_popup_action);
+            define_action("move-buffer-popup", move_buffer_popup_action);
             define_action("detach-buffer", detach_buffer_action);
             define_action("kill-buffer", kill_buffer_action);
             define_action("send-keys", send_keys_action);
@@ -146,6 +153,24 @@ fn action_helpers_roundtrip_to_typed_actions() {
                 focus: true,
                 close_on_empty: true,
             },
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("move-buffer-popup", context.clone())
+            .unwrap(),
+        vec![Action::MoveBufferToFloating {
+            buffer_id: BufferId(9),
+            geometry: FloatingGeometrySpec {
+                width: FloatingSize::Cells(30),
+                height: FloatingSize::Cells(10),
+                anchor: FloatingAnchor::Center,
+                offset_x: 1,
+                offset_y: 2,
+            },
+            title: None,
+            focus: true,
+            close_on_empty: false,
         }]
     );
     assert_eq!(

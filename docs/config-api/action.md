@@ -663,10 +663,25 @@ fn move_buffer_to_floating(_: ActionApi, buffer_id: int, options: Map) -> Action
     onclick="openTab(event, 'move_buffer_to_floating', 'Description')">
 Description
 </button>
+<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Options"  class="tablinks" 
+    onclick="openTab(event, 'move_buffer_to_floating', 'Options')">
+Options
+</button>
 </div>
 
 <div group="move_buffer_to_floating" id="move_buffer_to_floating-Description" class="tabcontent"  style="display: block;" >
 Move a buffer into a new floating window.
+</div>
+<div group="move_buffer_to_floating" id="move_buffer_to_floating-Options" class="tabcontent"  style="display: none;" >
+
+- `x` (i16): horizontal offset from the anchor (default: 0)
+- `y` (i16): vertical offset from the anchor (default: 0)
+- `width` (FloatingSize): window width, as a percentage (e.g., 50%) or pixel value (default: 50%)
+- `height` (FloatingSize): window height, as a percentage or pixel value (default: 50%)
+- `anchor` (FloatingAnchor): anchor point for positioning, e.g., "top_left", "center" (default: center)
+- `title` (Option\<String\>): window title (default: none)
+- `focus` (bool): whether to focus the window after creation (default: true)
+- `close_on_empty` (bool): whether to close the window when its buffer empties (default: true)
 </div>
 
 </div>

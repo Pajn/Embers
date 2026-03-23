@@ -92,8 +92,7 @@ Example
 Spawn a new buffer from a command array.
 
 Supported `options` keys are `title` (`string`), `cwd` (`string`), and `env`
-(`map<string, string>`). The runtime validates these keys, and unknown keys are currently
-ignored.
+(`map<string, string>`). Unknown keys are rejected.
 </div>
 <div group="buffer_spawn" id="buffer_spawn-Example" class="tabcontent"  style="display: none;" >
 

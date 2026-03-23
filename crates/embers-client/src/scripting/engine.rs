@@ -25,6 +25,12 @@ use super::types::{
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
 
+fn populate_common_registration_scope(scope: &mut rhai::Scope<'static>) {
+    scope.push("tabbar", TabbarApi::new());
+    scope.push("theme", ThemeApi::new());
+    scope.push("mouse", MouseApi::new());
+}
+
 thread_local! {
     /// [`ACTIVE_REGISTRATION`] holds the current [`SharedRegistration`] for registration-time
     /// Rhai callbacks on this thread. It is managed by [`with_active_registration`] and consumed
@@ -54,9 +60,7 @@ impl ScriptEngine {
         register_runtime_api(&mut engine);
 
         let mut scope = registration_scope();
-        scope.push("tabbar", TabbarApi::new());
-        scope.push("theme", ThemeApi::new());
-        scope.push("mouse", MouseApi::new());
+        populate_common_registration_scope(&mut scope);
 
         if !builtins.is_empty() {
             let builtins_source = LoadedConfigSource {
@@ -832,9 +836,7 @@ pub(crate) fn register_documented_registration_api(engine: &mut Engine) {
 
 pub(crate) fn documentation_registration_scope() -> rhai::Scope<'static> {
     let mut scope = registration_scope();
-    scope.push("tabbar", TabbarApi::new());
-    scope.push("theme", ThemeApi::new());
-    scope.push("mouse", MouseApi::new());
+    populate_common_registration_scope(&mut scope);
     scope
 }
 

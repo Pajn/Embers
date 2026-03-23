@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
@@ -14,12 +15,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    FloatingWindow, InterruptedBuffer, Node, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::state::ServerState;
 
+const LEGACY_FORMAT_VERSION: u32 = 0;
+pub const CURRENT_FORMAT_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedWorkspace {
+    #[serde(default)]
+    pub format_version: Option<u32>,
     pub sessions: Vec<PersistedSession>,
     pub buffers: Vec<PersistedBuffer>,
     pub nodes: Vec<PersistedNode>,
@@ -150,6 +156,7 @@ pub fn load_workspace(path: &Path) -> Result<Option<ServerState>> {
         Ok(bytes) => {
             let persisted: PersistedWorkspace = serde_json::from_slice(&bytes)
                 .map_err(|error| MuxError::internal(error.to_string()))?;
+            let persisted = load_current_workspace(persisted)?;
             Ok(Some(ServerState::from_persisted(persisted)?))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -163,24 +170,98 @@ pub fn save_workspace(path: &Path, state: &ServerState) -> Result<()> {
     }
     let bytes = serde_json::to_vec_pretty(&state.to_persisted())
         .map_err(|error| MuxError::internal(error.to_string()))?;
-    let temp_path = path.with_extension("tmp");
-    {
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temp_path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
+    let (temp_path, mut file) = open_workspace_temp_file(path)?;
+    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
     }
-    fs::rename(&temp_path, path)?;
+    drop(file);
+    if let Err(error) = validate_workspace_temp_path(&temp_path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         OpenOptions::new().read(true).open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+fn open_workspace_temp_file(path: &Path) -> Result<(PathBuf, fs::File)> {
+    const MAX_ATTEMPTS: u32 = 1024;
+
+    let pid = std::process::id();
+    for attempt in 0..MAX_ATTEMPTS {
+        let temp_path = workspace_temp_path(path, pid, attempt);
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        match options.open(&temp_path) {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(MuxError::internal(format!(
+        "failed to allocate a temporary workspace file next to {}",
+        path.display()
+    )))
+}
+
+fn workspace_temp_path(path: &Path, pid: u32, attempt: u32) -> PathBuf {
+    let file_name = path.file_name().unwrap_or_else(|| OsStr::new("workspace"));
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(".tmp.{pid}.{attempt}"));
+    path.with_file_name(temp_name)
+}
+
+fn validate_workspace_temp_path(temp_path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(temp_path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(MuxError::internal(format!(
+            "refusing to rename symlink temp workspace file {}",
+            temp_path.display()
+        )));
+    }
+    if !metadata.is_file() {
+        return Err(MuxError::internal(format!(
+            "refusing to rename non-file temp workspace path {}",
+            temp_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn load_current_workspace(mut workspace: PersistedWorkspace) -> Result<PersistedWorkspace> {
+    let version = workspace.format_version.unwrap_or(LEGACY_FORMAT_VERSION);
+    if version != CURRENT_FORMAT_VERSION {
+        return migrate_workspace(workspace, version);
+    }
+    workspace.format_version = Some(CURRENT_FORMAT_VERSION);
+    Ok(workspace)
+}
+
+fn migrate_workspace(
+    mut workspace: PersistedWorkspace,
+    version: u32,
+) -> Result<PersistedWorkspace> {
+    match version {
+        LEGACY_FORMAT_VERSION => {
+            workspace.format_version = Some(CURRENT_FORMAT_VERSION);
+            Ok(workspace)
+        }
+        _ => Err(MuxError::internal(format!(
+            "unsupported workspace format version {version}"
+        ))),
+    }
 }
 
 pub fn persisted_session(session: &Session) -> PersistedSession {
@@ -387,7 +468,9 @@ fn persisted_buffer_state(state: &BufferState) -> PersistedBufferState {
 fn restored_buffer_state(state: PersistedBufferState) -> Result<BufferState> {
     Ok(match state {
         PersistedBufferState::Created => BufferState::Created,
-        PersistedBufferState::Running { pid } => BufferState::Running(RunningBuffer { pid }),
+        PersistedBufferState::Running { pid } => BufferState::Interrupted(InterruptedBuffer {
+            last_known_pid: pid,
+        }),
         PersistedBufferState::Interrupted { last_known_pid } => {
             BufferState::Interrupted(InterruptedBuffer { last_known_pid })
         }
@@ -463,4 +546,80 @@ fn timestamp_from_millis(millis: u64) -> Result<Timestamp> {
         .checked_add(Duration::from_millis(millis))
         .map(Timestamp)
         .ok_or_else(|| MuxError::internal(format!("timestamp overflow for milliseconds: {millis}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn save_workspace_writes_current_format_version() {
+        let tempdir = tempdir().expect("tempdir");
+        let workspace_path = tempdir.path().join("workspace.json");
+        let mut state = ServerState::new();
+        let _ = state.create_session("main");
+
+        save_workspace(&workspace_path, &state).expect("workspace saves");
+
+        let persisted: PersistedWorkspace =
+            serde_json::from_slice(&fs::read(&workspace_path).expect("workspace bytes"))
+                .expect("workspace json");
+        assert_eq!(persisted.format_version, Some(CURRENT_FORMAT_VERSION));
+    }
+
+    #[test]
+    fn load_current_workspace_migrates_unversioned_workspace() {
+        let workspace = PersistedWorkspace {
+            format_version: None,
+            sessions: Vec::new(),
+            buffers: Vec::new(),
+            nodes: Vec::new(),
+            floating: Vec::new(),
+            next_session_id: 1,
+            next_buffer_id: 1,
+            next_node_id: 1,
+            next_floating_id: 1,
+        };
+
+        let migrated = load_current_workspace(workspace).expect("legacy workspace migrates");
+        assert_eq!(migrated.format_version, Some(CURRENT_FORMAT_VERSION));
+    }
+
+    #[test]
+    fn load_current_workspace_rejects_unknown_format_versions() {
+        let workspace = PersistedWorkspace {
+            format_version: Some(CURRENT_FORMAT_VERSION + 1),
+            sessions: Vec::new(),
+            buffers: Vec::new(),
+            nodes: Vec::new(),
+            floating: Vec::new(),
+            next_session_id: 1,
+            next_buffer_id: 1,
+            next_node_id: 1,
+            next_floating_id: 1,
+        };
+
+        let error = load_current_workspace(workspace).expect_err("unknown version should fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "internal error: unsupported workspace format version {}",
+                CURRENT_FORMAT_VERSION + 1
+            )
+        );
+    }
+
+    #[test]
+    fn restored_running_buffers_become_interrupted() {
+        let state = restored_buffer_state(PersistedBufferState::Running { pid: Some(42) })
+            .expect("state restores");
+        assert_eq!(
+            state,
+            BufferState::Interrupted(InterruptedBuffer {
+                last_known_pid: Some(42),
+            })
+        );
+    }
 }

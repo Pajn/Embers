@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-329edd6d.js";
+            window.path_to_searchindex_js = "searchindex-72423136.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c8603eba.js"></script>
@@ -1037,10 +1037,26 @@ Leave the active input mode.
 <button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Description" class="tablinks active" onclick="openTab(event, &#39;move_buffer_to_floating&#39;, &#39;Description&#39;)">
 Description
 </button>
+<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Options" class="tablinks" onclick="openTab(event, &#39;move_buffer_to_floating&#39;, &#39;Options&#39;)">
+Options
+</button>
 </div>
 
 <div group="move_buffer_to_floating" id="move_buffer_to_floating-Description" class="tabcontent" style="display: block;">
 Move a buffer into a new floating window.
+</div>
+
+<div group="move_buffer_to_floating" id="move_buffer_to_floating-Options" class="tabcontent" style="display: none;">
+<ul>
+<li><code>x</code> (i16): horizontal offset from the anchor (default: 0)</li>
+<li><code>y</code> (i16): vertical offset from the anchor (default: 0)</li>
+<li><code>width</code> (FloatingSize): window width, as a percentage (e.g., 50%) or pixel value (default: 50%)</li>
+<li><code>height</code> (FloatingSize): window height, as a percentage or pixel value (default: 50%)</li>
+<li><code>anchor</code> (FloatingAnchor): anchor point for positioning, e.g., “top_left”, “center” (default: center)</li>
+<li><code>title</code> (Option&lt;String&gt;): window title (default: none)</li>
+<li><code>focus</code> (bool): whether to focus the window after creation (default: true)</li>
+<li><code>close_on_empty</code> (bool): whether to close the window when its buffer empties (default: true)</li>
+</ul>
 </div>
 
 </div>
@@ -1828,8 +1844,7 @@ Example
 <div group="buffer_spawn" id="buffer_spawn-Description" class="tabcontent" style="display: block;">
 Spawn a new buffer from a command array.
 <p>Supported <code>options</code> keys are <code>title</code> (<code>string</code>), <code>cwd</code> (<code>string</code>), and <code>env</code>
-(<code>map&lt;string, string&gt;</code>). The runtime validates these keys, and unknown keys are currently
-ignored.</p>
+(<code>map&lt;string, string&gt;</code>). Unknown keys are rejected.</p>
 </div>
 
 <div group="buffer_spawn" id="buffer_spawn-Example" class="tabcontent" style="display: none;">
@@ -2892,10 +2907,26 @@ Leave the active input mode.
 <button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Description-1" class="tablinks active" onclick="openTab(event, &#39;move_buffer_to_floating&#39;, &#39;Description&#39;)">
 Description
 </button>
+<button group="move_buffer_to_floating" id="link-move_buffer_to_floating-Options-1" class="tablinks" onclick="openTab(event, &#39;move_buffer_to_floating&#39;, &#39;Options&#39;)">
+Options
+</button>
 </div>
 
 <div group="move_buffer_to_floating" id="move_buffer_to_floating-Description-1" class="tabcontent" style="display: block;">
 Move a buffer into a new floating window.
+</div>
+
+<div group="move_buffer_to_floating" id="move_buffer_to_floating-Options-1" class="tabcontent" style="display: none;">
+<ul>
+<li><code>x</code> (i16): horizontal offset from the anchor (default: 0)</li>
+<li><code>y</code> (i16): vertical offset from the anchor (default: 0)</li>
+<li><code>width</code> (FloatingSize): window width, as a percentage (e.g., 50%) or pixel value (default: 50%)</li>
+<li><code>height</code> (FloatingSize): window height, as a percentage or pixel value (default: 50%)</li>
+<li><code>anchor</code> (FloatingAnchor): anchor point for positioning, e.g., “top_left”, “center” (default: center)</li>
+<li><code>title</code> (Option&lt;String&gt;): window title (default: none)</li>
+<li><code>focus</code> (bool): whether to focus the window after creation (default: true)</li>
+<li><code>close_on_empty</code> (bool): whether to close the window when its buffer empties (default: true)</li>
+</ul>
 </div>
 
 </div>
@@ -3683,8 +3714,7 @@ Example
 <div group="buffer_spawn" id="buffer_spawn-Description-1" class="tabcontent" style="display: block;">
 Spawn a new buffer from a command array.
 <p>Supported <code>options</code> keys are <code>title</code> (<code>string</code>), <code>cwd</code> (<code>string</code>), and <code>env</code>
-(<code>map&lt;string, string&gt;</code>). The runtime validates these keys, and unknown keys are currently
-ignored.</p>
+(<code>map&lt;string, string&gt;</code>). Unknown keys are rejected.</p>
 </div>
 
 <div group="buffer_spawn" id="buffer_spawn-Example-1" class="tabcontent" style="display: none;">

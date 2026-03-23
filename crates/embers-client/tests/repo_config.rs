@@ -72,6 +72,7 @@ fn repository_config_bell_handler_moves_hidden_buffer_to_floating() {
             },
             title: Some("build".to_owned()),
             focus: true,
+            close_on_empty: true,
         }]
     );
 }

@@ -872,6 +872,7 @@ where
                 geometry,
                 title,
                 focus,
+                close_on_empty,
             } => {
                 self.client
                     .request_message(ClientMessage::Floating(FloatingRequest::Create {
@@ -882,7 +883,7 @@ where
                         geometry: resolve_floating_geometry(geometry, viewport),
                         title,
                         focus,
-                        close_on_empty: true,
+                        close_on_empty,
                     }))
                     .await?;
                 self.client.resync_all_sessions().await

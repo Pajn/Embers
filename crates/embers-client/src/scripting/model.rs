@@ -79,6 +79,7 @@ pub enum Action {
         geometry: FloatingGeometrySpec,
         title: Option<String>,
         focus: bool,
+        close_on_empty: bool,
     },
     SendKeys {
         buffer_id: Option<BufferId>,
