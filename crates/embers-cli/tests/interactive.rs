@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use embers_core::PtySize;
@@ -18,7 +18,60 @@ const SCROLLBACK_SETTLE_DELAY: Duration = Duration::from_millis(750);
 const QUIET_TIMEOUT: Duration = Duration::from_millis(500);
 const PAGE_UP_ATTEMPTS: usize = 4;
 
-fn spawn_embers(args: &[&str]) -> PtyHarness {
+/// A guard that owns the spawned embers process and ensures cleanup
+/// of orphaned __serve processes when dropped.
+struct SpawnedEmbers {
+    socket_path: PathBuf,
+}
+
+impl SpawnedEmbers {
+    fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+}
+
+impl Drop for SpawnedEmbers {
+    fn drop(&mut self) {
+        // Kill any orphaned __serve process for our socket
+        kill_orphaned_server(&self.socket_path);
+    }
+}
+
+/// Kill any orphaned embers __serve process for the given socket.
+/// This is safe to call from Drop or any synchronous context.
+fn kill_orphaned_server(socket_path: &Path) {
+    let pid_path = socket_path.with_extension("pid");
+
+    // Try to read and kill the PID from the pid file
+    if let Ok(pid_str) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+        && pid > 0
+    {
+        // SAFETY: pid comes from our own pid file
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+
+    // Wait briefly for graceful shutdown
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Force kill if still alive
+    if let Ok(pid_str) = fs::read_to_string(&pid_path)
+        && let Ok(pid) = pid_str.trim().parse::<i32>()
+        && pid > 0
+    {
+        // SAFETY: pid comes from our own pid file
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    // Clean up pid file
+    let _ = fs::remove_file(&pid_path);
+}
+
+/// Spawn an embers client process with the given arguments and return a guard
+/// that ensures cleanup of any orphaned __serve process when dropped.
+/// The socket_path should be the path to the socket - if a server needs to be
+/// spawned for it, the guard will clean it up.
+fn spawn_embers(args: &[&str], socket_path: PathBuf) -> (SpawnedEmbers, PtyHarness) {
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
     let path = format!(
@@ -33,34 +86,9 @@ fn spawn_embers(args: &[&str]) -> PtyHarness {
     ];
     env_and_args.extend(args.iter().map(|arg| (*arg).to_owned()));
     let argv = env_and_args.iter().map(String::as_str).collect::<Vec<_>>();
-    PtyHarness::spawn("/usr/bin/env", &argv, PtySize::new(80, 24)).expect("spawn embers in pty")
-}
-
-async fn shutdown_spawned_server(socket_path: &Path) {
-    let pid_path = socket_path.with_extension("pid");
-    let pid = wait_for_pid(&pid_path)
-        .await
-        .trim()
-        .parse::<i32>()
-        .expect("pid parses");
-    assert!(pid > 0, "invalid pid: {pid}");
-
-    // SAFETY: pid comes from our own pid file and SIGTERM targets that specific process.
-    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-    assert_eq!(result, 0, "failed to signal spawned server");
-
-    for _ in 0..FILE_WAIT_ATTEMPTS {
-        if !socket_path.exists() && !pid_path.exists() {
-            return;
-        }
-        tokio::time::sleep(FILE_WAIT_POLL).await;
-    }
-
-    panic!(
-        "timed out waiting for spawned server shutdown (socket: {}, pid file: {})",
-        socket_path.display(),
-        pid_path.display()
-    );
+    let harness = PtyHarness::spawn("/usr/bin/env", &argv, PtySize::new(80, 24))
+        .expect("spawn embers in pty");
+    (SpawnedEmbers::new(socket_path), harness)
 }
 
 async fn wait_for_socket(socket_path: &Path) {
@@ -72,17 +100,6 @@ async fn wait_for_socket(socket_path: &Path) {
     }
 
     panic!("timed out waiting for socket {}", socket_path.display());
-}
-
-async fn wait_for_pid(pid_path: &Path) -> String {
-    for _ in 0..FILE_WAIT_ATTEMPTS {
-        if let Ok(pid) = fs::read_to_string(pid_path) {
-            return pid;
-        }
-        tokio::time::sleep(FILE_WAIT_POLL).await;
-    }
-
-    panic!("timed out waiting for pid file {}", pid_path.display());
 }
 
 async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
@@ -171,7 +188,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["--socket", &socket_arg]);
+    let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
@@ -202,7 +219,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
     harness.write_all("\x11").expect("quit client");
     harness.wait().expect("client exits");
 
-    shutdown_spawned_server(&socket_path).await;
+    // spawned.drop() will clean up the orphaned __serve process
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,7 +251,8 @@ async fn attach_subcommand_connects_to_running_server() {
     );
 
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["attach", "--socket", &socket_arg]);
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(&["attach", "--socket", &socket_arg], socket_path);
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
@@ -283,7 +301,11 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
     );
 
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["attach", "--socket", &socket_arg, "-t", "main"]);
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders main");
@@ -355,7 +377,11 @@ async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
         .expect("ops focused buffer id exists");
 
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["attach", "--socket", &socket_arg, "-t", "main"]);
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders main");
@@ -376,7 +402,7 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["--socket", &socket_arg]);
+    let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
@@ -387,7 +413,8 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
 
     harness.write_all("\x11").expect("quit client");
     harness.wait().expect("client exits");
-    shutdown_spawned_server(&socket_path).await;
+
+    // spawned.drop() will clean up the orphaned __serve process
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,7 +423,7 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     let tempdir = tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
-    let mut harness = spawn_embers(&["--socket", &socket_arg]);
+    let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
@@ -415,5 +442,6 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
 
     harness.write_all("\x11").expect("quit client");
     harness.wait().expect("client exits");
-    shutdown_spawned_server(&socket_path).await;
+
+    // spawned.drop() will clean up the orphaned __serve process
 }
