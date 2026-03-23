@@ -1,12 +1,10 @@
-mod support;
-
 use embers_client::{
     PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind, SelectionPoint,
     SelectionState,
 };
 use embers_core::{CursorPosition, CursorShape, CursorState, Size};
 
-use support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
+use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
 
 #[test]
 fn renders_nested_tabs_splits_and_floating_overlay() {

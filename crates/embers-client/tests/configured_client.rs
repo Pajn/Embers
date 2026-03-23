@@ -1,5 +1,3 @@
-mod support;
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -18,7 +16,7 @@ use embers_protocol::{
 };
 use tempfile::tempdir;
 
-use support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
+use crate::support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
 
 const SECOND_SESSION_ID: SessionId = SessionId(2);
 const SECOND_ROOT_ID: NodeId = NodeId(200);

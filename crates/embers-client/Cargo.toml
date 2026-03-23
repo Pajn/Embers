@@ -1,5 +1,6 @@
 [package]
 name = "embers-client"
+autotests = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -28,3 +29,7 @@ tempfile.workspace = true
 [[bench]]
 name = "search_yank"
 harness = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

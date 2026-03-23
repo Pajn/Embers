@@ -1,10 +1,8 @@
-mod support;
-
 use embers_client::{Controller, KeyEvent, PresentationModel};
 use embers_core::{RequestId, Size};
 use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest};
 
-use support::{
+use crate::support::{
     FLOATING_ID, FOCUSED_BUFFER_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID,
     demo_state, floating_focused_state, root_focus_state, root_split_state,
 };

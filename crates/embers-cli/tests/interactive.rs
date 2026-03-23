@@ -1,5 +1,3 @@
-mod support;
-
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -8,7 +6,7 @@ use embers_core::PtySize;
 use embers_test_support::{PtyHarness, TestServer, cargo_bin, cargo_bin_path};
 use tempfile::tempdir;
 
-use support::run_cli;
+use crate::support::run_cli;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);

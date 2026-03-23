@@ -1,5 +1,3 @@
-mod support;
-
 use std::collections::BTreeMap;
 
 use embers_client::{
@@ -10,7 +8,7 @@ use embers_client::{
 };
 use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
 
-use support::{SESSION_ID, demo_state};
+use crate::support::{SESSION_ID, demo_state};
 
 #[test]
 fn action_helpers_roundtrip_to_typed_actions() {

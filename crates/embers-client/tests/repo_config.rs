@@ -1,5 +1,3 @@
-mod support;
-
 use std::path::PathBuf;
 
 use embers_client::{
@@ -9,7 +7,7 @@ use embers_client::{
 };
 use embers_core::{BufferId, Size, SplitDirection};
 
-use support::{SESSION_ID, demo_state};
+use crate::support::{SESSION_ID, demo_state};
 
 #[test]
 fn repository_config_loads_with_current_public_api() {

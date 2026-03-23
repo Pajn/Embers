@@ -1,5 +1,3 @@
-mod support;
-
 use std::path::Path;
 
 use embers_client::input::KeyParseError;
@@ -10,7 +8,7 @@ use embers_client::{
 };
 use embers_core::Size;
 
-use support::{SESSION_ID, demo_state};
+use crate::support::{SESSION_ID, demo_state};
 
 #[test]
 fn loaded_config_debug_snapshot_is_stable() {
