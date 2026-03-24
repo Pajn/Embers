@@ -528,6 +528,12 @@ impl KeeperSurface {
     }
 }
 
+/// Maximum retries for PTY allocation in runtime keeper
+const KEEPER_PTY_MAX_RETRIES: usize = 3;
+
+/// Delay between PTY allocation retries
+const KEEPER_PTY_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let Some(program) = cli.command.first() else {
         return Err(MuxError::invalid_input(
@@ -545,9 +551,39 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let _cleanup = SocketCleanup::new(cli.socket_path.clone());
 
     let pty_system = NativePtySystem::default();
-    let pair = pty_system
-        .openpty(to_portable_size(cli.size))
-        .map_err(|error| MuxError::pty(error.to_string()))?;
+    let mut last_error = None;
+
+    // Try to open PTY with retries.
+    let mut pair = None;
+    for attempt in 0..=KEEPER_PTY_MAX_RETRIES {
+        match pty_system.openpty(to_portable_size(cli.size)) {
+            Ok(opened_pair) => {
+                pair = Some(opened_pair);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < KEEPER_PTY_MAX_RETRIES {
+                    thread::sleep(KEEPER_PTY_RETRY_DELAY * (attempt + 1) as u32);
+                }
+            }
+        }
+    }
+    let pair = match pair {
+        Some(pair) => pair,
+        None => {
+            let error = last_error.ok_or_else(|| {
+                MuxError::pty(format!(
+                    "failed to openpty after {} attempts with no error details",
+                    KEEPER_PTY_MAX_RETRIES + 1
+                ))
+            })?;
+            return Err(MuxError::pty(format!(
+                "failed to openpty after {} attempts: {error}",
+                KEEPER_PTY_MAX_RETRIES + 1
+            )));
+        }
+    };
 
     let mut command_builder = CommandBuilder::new(program);
     command_builder.args(&cli.command[1..]);
