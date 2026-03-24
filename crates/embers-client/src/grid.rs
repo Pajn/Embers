@@ -30,6 +30,7 @@ pub struct CellStyle {
     pub underline: bool,
     pub dim: bool,
     pub reverse: bool,
+    pub blink: bool,
 }
 
 impl CellStyle {
@@ -40,6 +41,16 @@ impl CellStyle {
 
     pub const fn with_bold(mut self) -> Self {
         self.bold = true;
+        self
+    }
+
+    pub const fn with_italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    pub const fn with_blink(mut self) -> Self {
+        self.blink = true;
         self
     }
 
@@ -58,6 +69,7 @@ impl From<&crate::scripting::StyleSpec> for CellStyle {
             underline: value.underline,
             dim: value.dim,
             reverse: false,
+            blink: value.blink,
         }
     }
 }
@@ -388,6 +400,9 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     }
     if to.reverse {
         output.push_str("\x1b[7m");
+    }
+    if to.blink {
+        output.push_str("\x1b[5m");
     }
     if let Some(fg) = to.fg {
         let _ = write!(output, "\x1b[38;2;{};{};{}m", fg.red, fg.green, fg.blue);
