@@ -109,6 +109,9 @@ fn close_node(_: ActionApi, node_id: int) -> Action;
 /// Close the currently focused view.
 fn close_view(_: ActionApi) -> Action;
 
+/// Commit the active search.
+fn commit_search(_: ActionApi) -> Action;
+
 /// Copy the current selection into the clipboard.
 fn copy_selection(_: ActionApi) -> Action;
 

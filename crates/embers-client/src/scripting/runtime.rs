@@ -4,6 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use embers_core::{BufferId, FloatingId, NodeId, Rect, SplitDirection};
+use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+};
 use rhai::plugin::*;
 use rhai::{
     Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, NativeCallContext, Position, Scope,
@@ -21,9 +24,6 @@ use super::model::{
 };
 use super::types::{BarSegment, BarSpec, BarTarget, RgbColor, StyleSpec, ThemeSpec};
 use super::{RhaiResultOf, ScriptResult};
-use embers_protocol::{
-    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
-};
 
 #[derive(Clone, Default)]
 pub(crate) struct ActionApi;

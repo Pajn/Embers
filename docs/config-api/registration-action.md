@@ -201,6 +201,28 @@ Close the currently focused view.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> commit_search </h2>
+
+```rust,ignore
+fn commit_search(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="commit_search" id="link-commit_search-Description"  class="tablinks active" 
+    onclick="openTab(event, 'commit_search', 'Description')">
+Description
+</button>
+</div>
+
+<div group="commit_search" id="commit_search-Description" class="tabcontent"  style="display: block;" >
+Commit the active search.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> copy_selection </h2>
 
 ```rust,ignore
