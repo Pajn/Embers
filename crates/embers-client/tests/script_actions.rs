@@ -399,6 +399,195 @@ fn invalid_action_shapes_fail_cleanly() {
 }
 
 #[test]
+fn open_buffer_history_rejects_invalid_scope() {
+    let engine = load_engine(
+        r#"
+            fn bad_scope(ctx) { action.open_buffer_history(1, "invalid-scope", "floating") }
+            define_action("bad-scope", bad_scope);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-scope", demo_context())
+        .expect_err("invalid scope should fail");
+
+    assert!(error.to_string().contains("invalid scope"));
+}
+
+#[test]
+fn open_buffer_history_rejects_invalid_placement() {
+    let engine = load_engine(
+        r#"
+            fn bad_placement(ctx) { action.open_buffer_history(1, "visible", "invalid-placement") }
+            define_action("bad-placement", bad_placement);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-placement", demo_context())
+        .expect_err("invalid placement should fail");
+
+    assert!(error.to_string().contains("invalid placement"));
+}
+
+#[test]
+fn break_node_rejects_invalid_destination() {
+    let engine = load_engine(
+        r#"
+            fn bad_dest(ctx) { action.break_current_node("invalid-dest") }
+            define_action("bad-dest", bad_dest);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-dest", demo_context())
+        .expect_err("invalid destination should fail");
+
+    assert!(error.to_string().contains("invalid destination"));
+}
+
+#[test]
+fn join_buffer_rejects_invalid_placement() {
+    let engine = load_engine(
+        r#"
+            fn bad_place(ctx) { action.join_buffer_here(1, "invalid-place") }
+            define_action("bad-place", bad_place);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-place", demo_context())
+        .expect_err("invalid placement should fail");
+
+    assert!(error.to_string().contains("invalid placement"));
+}
+
+#[test]
+fn commit_search_and_cancel_search_roundtrip() {
+    let engine = load_engine(
+        r#"
+            fn commit_search_action(ctx) { action.commit_search() }
+            fn cancel_search_action(ctx) { action.cancel_search() }
+            define_action("commit-search", commit_search_action);
+            define_action("cancel-search", cancel_search_action);
+        "#,
+    );
+
+    assert_eq!(
+        engine
+            .run_named_action("commit-search", demo_context())
+            .unwrap(),
+        vec![Action::CommitSearch]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("cancel-search", demo_context())
+            .unwrap(),
+        vec![Action::CancelSearch]
+    );
+}
+
+#[test]
+fn toggle_zoom_node_rejects_negative_node_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_zoom(ctx) { action.toggle_zoom_node(-1) }
+            define_action("bad-zoom", bad_zoom);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-zoom", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn swap_current_node_rejects_negative_node_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_swap(ctx) { action.swap_current_node(-5) }
+            define_action("bad-swap", bad_swap);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-swap", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_current_node_before_rejects_negative_sibling_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_current_node_before(-3) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_node_after_rejects_negative_sibling_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_node_after(-1, 5) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_node_after_rejects_negative_target_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_node_after(1, -5) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
 fn query_api_supports_smart_nav_style_scripts() {
     let engine = load_engine(
         r#"
