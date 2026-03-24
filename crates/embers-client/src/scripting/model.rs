@@ -137,6 +137,7 @@ pub enum Action {
     EnterSearchMode,
     SearchNext,
     SearchPrev,
+    CommitSearch,
     CancelSearch,
     EnterSelect {
         kind: SelectionKind,

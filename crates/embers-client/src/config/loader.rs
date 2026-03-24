@@ -31,6 +31,11 @@ bind("select", "k", action.select_move_up());
 bind("select", "l", action.select_move_right());
 bind("select", "y", action.yank_selection());
 bind("select", "<Esc>", action.cancel_selection());
+
+bind("search", "<Enter>", action.commit_search());
+bind("search", "<Esc>", action.cancel_search());
+bind("search", "n", action.search_next());
+bind("search", "N", action.search_prev());
 "#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
