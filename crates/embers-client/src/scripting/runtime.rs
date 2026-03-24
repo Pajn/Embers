@@ -1653,6 +1653,12 @@ mod documented_action_api {
         Action::CancelSearch
     }
 
+    /// Commit the active search.
+    #[rhai_fn(name = "commit_search")]
+    pub fn commit_search(_: &mut ActionApi) -> Action {
+        Action::CommitSearch
+    }
+
     /// Jump to the next search match.
     #[rhai_fn(name = "search_next")]
     pub fn search_next(_: &mut ActionApi) -> Action {
@@ -2195,6 +2201,7 @@ fn parse_segment_options(mut options: Map) -> ScriptResult<(StyleSpec, Option<Ba
             italic: parse_bool_field(options.remove("italic"))?.unwrap_or(false),
             underline: parse_bool_field(options.remove("underline"))?.unwrap_or(false),
             dim: parse_bool_field(options.remove("dim"))?.unwrap_or(false),
+            blink: parse_bool_field(options.remove("blink"))?.unwrap_or(false),
         },
         parse_bar_target(options.remove("target"))?,
     );

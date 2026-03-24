@@ -598,6 +598,7 @@ where
             }
             Action::SearchNext => self.navigate_search(presentation, true).await,
             Action::SearchPrev => self.navigate_search(presentation, false).await,
+            Action::CommitSearch => self.commit_search_prompt(session_id, viewport).await,
             Action::CancelSearch => self.cancel_search_prompt(session_id, viewport).await,
             Action::EnterSelect { kind } => {
                 self.enter_select_mode(session_id, viewport, presentation, kind)
@@ -1613,8 +1614,14 @@ where
                 }
                 Ok(())
             }
-            KeyEvent::Enter => self.commit_search_prompt(session_id, viewport).await,
-            KeyEvent::Escape => self.cancel_search_prompt(session_id, viewport).await,
+            KeyEvent::Enter => {
+                self.execute_actions(Some(session_id), Some(viewport), vec![Action::CommitSearch])
+                    .await
+            }
+            KeyEvent::Escape => {
+                self.execute_actions(Some(session_id), Some(viewport), vec![Action::CancelSearch])
+                    .await
+            }
             KeyEvent::Bytes(bytes) => {
                 if let Some(prompt) = &mut self.search_prompt {
                     prompt.query.push_str(&String::from_utf8_lossy(&bytes));
@@ -2062,6 +2069,7 @@ fn action_is_local_terminal_action(action: &Action) -> bool {
         | Action::EnterSearchMode
         | Action::SearchNext
         | Action::SearchPrev
+        | Action::CommitSearch
         | Action::CancelSearch
         | Action::EnterSelect { .. }
         | Action::SelectMove { .. }

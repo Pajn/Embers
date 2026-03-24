@@ -664,6 +664,7 @@ fn scroll_indicator_style() -> CellStyle {
 fn search_style() -> CellStyle {
     CellStyle {
         underline: true,
+        italic: true,
         ..CellStyle::default()
     }
 }
@@ -672,6 +673,7 @@ fn active_search_style() -> CellStyle {
     CellStyle {
         underline: true,
         reverse: true,
+        italic: true,
         ..CellStyle::default()
     }
 }

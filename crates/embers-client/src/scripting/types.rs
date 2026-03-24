@@ -67,6 +67,7 @@ pub struct StyleSpec {
     pub italic: bool,
     pub underline: bool,
     pub dim: bool,
+    pub blink: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
