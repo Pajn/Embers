@@ -4,7 +4,21 @@ use std::ffi::OsStr;
 use std::process::Output;
 
 use embers_protocol::{ClientMessage, ServerResponse, SessionRequest, SessionSnapshot};
-use embers_test_support::{TestConnection, TestServer, cargo_bin};
+use embers_test_support::{TestConnection, TestServer, cargo_bin, is_pty_available};
+
+/// Returns true if PTY tests can run on this system.
+/// Call this at the start of tests that require PTY support.
+pub fn require_pty() -> bool {
+    if is_pty_available() {
+        true
+    } else {
+        eprintln!(
+            "WARNING: PTY devices not available on this system. \
+             Tests requiring PTY will be skipped."
+        );
+        false
+    }
+}
 
 pub fn cli_command(server: &TestServer) -> assert_cmd::Command {
     let mut command = cargo_bin("embers");

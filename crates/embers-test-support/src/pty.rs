@@ -10,6 +10,20 @@ use portable_pty::{
 
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
+/// Checks if PTY devices are available on this system.
+/// Returns true if we can successfully open a PTY pair.
+pub fn is_pty_available() -> bool {
+    let pty_system = NativePtySystem::default();
+    pty_system
+        .openpty(PortableSize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .is_ok()
+}
+
 pub struct PtyHarness {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -19,58 +33,86 @@ pub struct PtyHarness {
 }
 
 impl PtyHarness {
+    /// Maximum number of retries for PTY allocation failures
+    const MAX_RETRIES: usize = 3;
+
+    /// Initial delay between retries on PTY allocation failure
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
+
     pub fn spawn(command: &str, args: &[&str], size: PtySize) -> Result<Self> {
         let pty_system = NativePtySystem::default();
-        let pair = pty_system
-            .openpty(PortableSize {
+        let mut last_error = None;
+
+        for attempt in 0..=Self::MAX_RETRIES {
+            let open_result = pty_system.openpty(PortableSize {
                 rows: size.rows,
                 cols: size.cols,
                 pixel_width: size.pixel_width,
                 pixel_height: size.pixel_height,
-            })
-            .map_err(|error| MuxError::pty(error.to_string()))?;
+            });
 
-        let mut command_builder = CommandBuilder::new(command);
-        for arg in args {
-            command_builder.arg(arg);
+            let pair = match open_result {
+                Ok(pair) => pair,
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt < Self::MAX_RETRIES {
+                        // Small delay before retry to allow OS to reclaim PTY resources
+                        thread::sleep(Self::RETRY_DELAY * (attempt + 1) as u32);
+                    }
+                    continue;
+                }
+            };
+
+            // PTY opened successfully, now proceed with spawning the command
+            // These operations are unlikely to fail if openpty succeeded
+            let mut command_builder = CommandBuilder::new(command);
+            for arg in args {
+                command_builder.arg(arg);
+            }
+
+            let child = pair
+                .slave
+                .spawn_command(command_builder)
+                .map_err(|error| MuxError::pty(error.to_string()))?;
+            let mut reader = pair
+                .master
+                .try_clone_reader()
+                .map_err(|error| MuxError::pty(error.to_string()))?;
+            let writer = pair
+                .master
+                .take_writer()
+                .map_err(|error| MuxError::pty(error.to_string()))?;
+            let (tx, rx) = mpsc::channel();
+            let reader_join = thread::spawn(move || {
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            if tx.send(buffer[..read].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            return Ok(Self {
+                master: pair.master,
+                child,
+                writer,
+                output_rx: rx,
+                reader_join: Some(reader_join),
+            });
         }
 
-        let child = pair
-            .slave
-            .spawn_command(command_builder)
-            .map_err(|error| MuxError::pty(error.to_string()))?;
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|error| MuxError::pty(error.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| MuxError::pty(error.to_string()))?;
-        let (tx, rx) = mpsc::channel();
-        let reader_join = thread::spawn(move || {
-            let mut buffer = [0_u8; 1024];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if tx.send(buffer[..read].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Ok(Self {
-            master: pair.master,
-            child,
-            writer,
-            output_rx: rx,
-            reader_join: Some(reader_join),
-        })
+        Err(MuxError::pty(format!(
+            "failed to openpty after {} attempts: {}",
+            Self::MAX_RETRIES + 1,
+            last_error.unwrap()
+        )))
     }
 
     pub fn write_all(&mut self, input: &str) -> Result<()> {
