@@ -6,8 +6,8 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, SessionId, Size, SplitDirection, new_request_id,
 };
 use embers_protocol::{
-    BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest, NodeRequest,
-    ServerResponse, SessionRequest, SessionSnapshot,
+    BufferRecord, BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest,
+    NodeRequest, ServerResponse, SessionRequest, SessionSnapshot,
 };
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
 
@@ -142,6 +142,112 @@ async fn render_session(
     )
     .expect("projection succeeds");
     Renderer.render(client.state(), &model).render()
+}
+
+async fn buffer_record(connection: &mut TestConnection, buffer_id: BufferId) -> BufferRecord {
+    match connection
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: new_request_id(),
+            buffer_id,
+        }))
+        .await
+        .expect("get buffer succeeds")
+    {
+        ServerResponse::Buffer(BufferResponse { buffer, .. }) => buffer,
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+}
+
+async fn wait_for_buffer_activity(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    expected: ActivityState,
+    timeout: Duration,
+) -> BufferRecord {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let buffer = buffer_record(connection, buffer_id).await;
+        if buffer.activity == expected {
+            return buffer;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {:?}",
+                buffer.activity
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+struct HiddenTabFixture {
+    nested_tabs_id: NodeId,
+    hidden_buffer: BufferRecord,
+}
+
+async fn create_hidden_tab_fixture(connection: &mut TestConnection) -> HiddenTabFixture {
+    let session = create_session(connection, "alpha").await;
+    let buffer_a = create_buffer(connection, "main").await;
+    let session = match connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "main".to_owned(),
+            buffer_id: Some(buffer_a.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add root tab succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    let main_leaf = session.session.focused_leaf_id.expect("main leaf exists");
+
+    let session = match connection
+        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
+            request_id: new_request_id(),
+            node_id: main_leaf,
+            title: "main".to_owned(),
+        }))
+        .await
+        .expect("wrap main leaf in tabs succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    let nested_tabs_id = node(&session, main_leaf)
+        .parent_id
+        .expect("wrapped main leaf has tabs parent");
+
+    let hidden_buffer = create_buffer(connection, "hidden").await;
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::AddTab {
+            request_id: new_request_id(),
+            tabs_node_id: nested_tabs_id,
+            title: "bg".to_owned(),
+            buffer_id: Some(hidden_buffer.id),
+            child_node_id: None,
+            index: 1,
+        }))
+        .await
+        .expect("add hidden tab succeeds");
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: nested_tabs_id,
+            index: 0,
+        }))
+        .await
+        .expect("select visible tab succeeds");
+
+    HiddenTabFixture {
+        nested_tabs_id,
+        hidden_buffer,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -463,6 +569,52 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         }))
         .await
         .expect("detach succeeds");
+    assert!(
+        buffer_record(&mut connection, buffer_a.id)
+            .await
+            .attachment_node_id
+            .is_none()
+    );
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf detached-output\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send detached output succeeds");
+    connection
+        .wait_for_capture_contains(buffer_a.id, "detached-output", Duration::from_secs(3))
+        .await
+        .expect("detached buffer captures output");
+    wait_for_buffer_activity(
+        &mut connection,
+        buffer_a.id,
+        ActivityState::Activity,
+        Duration::from_secs(3),
+    )
+    .await;
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf 'detached-bell\\a\\n'; sleep 0.5\r".to_vec(),
+        }))
+        .await
+        .expect("send detached bell succeeds");
+    connection
+        .wait_for_capture_contains(buffer_a.id, "detached-bell", Duration::from_secs(3))
+        .await
+        .expect("detached buffer captures bell marker");
+    wait_for_buffer_activity(
+        &mut connection,
+        buffer_a.id,
+        ActivityState::Bell,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let popup = match connection
         .request(&ClientMessage::Floating(FloatingRequest::Create {
@@ -481,6 +633,10 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         ServerResponse::Floating(response) => response.floating,
         other => panic!("expected floating response, got {other:?}"),
     };
+    assert_eq!(
+        buffer_record(&mut connection, buffer_a.id).await.activity,
+        ActivityState::Idle
+    );
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
@@ -566,73 +722,31 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
         .await
         .expect("protocol connection");
 
-    let session = create_session(&mut connection, "alpha").await;
-    let buffer_a = create_buffer(&mut connection, "main").await;
-    let session = match connection
-        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
-            request_id: new_request_id(),
-            session_id: session.session.id,
-            title: "main".to_owned(),
-            buffer_id: Some(buffer_a.id),
-            child_node_id: None,
-        }))
-        .await
-        .expect("add root tab succeeds")
-    {
-        ServerResponse::SessionSnapshot(response) => response.snapshot,
-        other => panic!("expected session snapshot response, got {other:?}"),
-    };
-    let main_leaf = session.session.focused_leaf_id.expect("main leaf exists");
-
-    let session = match connection
-        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
-            request_id: new_request_id(),
-            node_id: main_leaf,
-            title: "main".to_owned(),
-        }))
-        .await
-        .expect("wrap main leaf in tabs succeeds")
-    {
-        ServerResponse::SessionSnapshot(response) => response.snapshot,
-        other => panic!("expected session snapshot response, got {other:?}"),
-    };
-    let nested_tabs_id = node(&session, main_leaf)
-        .parent_id
-        .expect("wrapped main leaf has tabs parent");
-
-    let buffer_b = create_buffer(&mut connection, "hidden").await;
-    let _ = connection
-        .request(&ClientMessage::Node(NodeRequest::AddTab {
-            request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
-            title: "bg".to_owned(),
-            buffer_id: Some(buffer_b.id),
-            child_node_id: None,
-            index: 1,
-        }))
-        .await
-        .expect("add hidden tab succeeds");
-    let _ = connection
-        .request(&ClientMessage::Node(NodeRequest::SelectTab {
-            request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
-            index: 0,
-        }))
-        .await
-        .expect("select visible tab succeeds");
+    let fixture = create_hidden_tab_fixture(&mut connection).await;
 
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
-            buffer_id: buffer_b.id,
+            buffer_id: fixture.hidden_buffer.id,
             bytes: b"printf hidden-activity\\n\r".to_vec(),
         }))
         .await
         .expect("send to hidden buffer succeeds");
     connection
-        .wait_for_capture_contains(buffer_b.id, "hidden-activity", Duration::from_secs(3))
+        .wait_for_capture_contains(
+            fixture.hidden_buffer.id,
+            "hidden-activity",
+            Duration::from_secs(3),
+        )
         .await
         .expect("hidden buffer captures output");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Activity,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let mut first_client = MuxClient::connect(server.socket_path())
         .await
@@ -657,12 +771,12 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
         let tabs = model
             .tab_bars
             .iter()
-            .find(|tabs| tabs.node_id == nested_tabs_id)
+            .find(|tabs| tabs.node_id == fixture.nested_tabs_id)
             .expect("nested tabs frame exists");
         if tabs
             .tabs
             .iter()
-            .any(|tab| tab.title == "bg" && tab.activity != ActivityState::Idle)
+            .any(|tab| tab.title == "bg" && tab.activity == ActivityState::Activity)
         {
             saw_hidden_activity = true;
             break;
@@ -679,17 +793,105 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
     let _ = connection
         .request(&ClientMessage::Node(NodeRequest::SelectTab {
             request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
+            tabs_node_id: fixture.nested_tabs_id,
             index: 1,
         }))
         .await
         .expect("select hidden tab succeeds");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Idle,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let mut second_client = MuxClient::connect(server.socket_path())
         .await
         .expect("second client connects");
     let render = render_session(&mut second_client, "alpha").await;
     assert!(render.contains("hidden-activity"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_bell_is_visible_to_clients_until_revealed() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let fixture = create_hidden_tab_fixture(&mut connection).await;
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: fixture.hidden_buffer.id,
+            bytes: b"printf 'hidden-bell\\a\\n'; sleep 0.5\r".to_vec(),
+        }))
+        .await
+        .expect("send hidden bell succeeds");
+    connection
+        .wait_for_capture_contains(
+            fixture.hidden_buffer.id,
+            "hidden-bell",
+            Duration::from_secs(3),
+        )
+        .await
+        .expect("hidden bell marker appears");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Bell,
+        Duration::from_secs(3),
+    )
+    .await;
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    client
+        .resync_all_sessions()
+        .await
+        .expect("client resyncs sessions");
+    refresh_all_snapshots(&mut client).await;
+    let session_id = session_id_by_name(&client, "alpha");
+    let model = PresentationModel::project(
+        client.state(),
+        session_id,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .expect("projection succeeds");
+    let tabs = model
+        .tab_bars
+        .iter()
+        .find(|tabs| tabs.node_id == fixture.nested_tabs_id)
+        .expect("nested tabs frame exists");
+    assert!(
+        tabs.tabs
+            .iter()
+            .any(|tab| tab.title == "bg" && tab.activity == ActivityState::Bell)
+    );
+
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: fixture.nested_tabs_id,
+            index: 1,
+        }))
+        .await
+        .expect("select hidden tab succeeds");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Idle,
+        Duration::from_secs(3),
+    )
+    .await;
 
     server.shutdown().await.expect("server shuts down");
 }

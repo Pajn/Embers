@@ -8,11 +8,11 @@ use embers_client::{
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
-    BufferCreatedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord,
-    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
-    FocusChangedEvent, InputRequest, NodeRecord, NodeRecordKind, NodeRequest, OkResponse,
-    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
+    BufferCreatedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferResponse,
+    BufferViewRecord, ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest,
+    ClientResponse, FocusChangedEvent, InputRequest, NodeRecord, NodeRecordKind, NodeRequest,
+    OkResponse, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEvent, ServerResponse,
+    SessionRecord, SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
     VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
@@ -85,6 +85,17 @@ fn visible_snapshot_from_state(
     let mut snapshot = state.snapshots.get(&buffer_id).unwrap().clone();
     snapshot.request_id = request_id;
     snapshot
+}
+
+fn buffer_response_from_state(
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+    request_id: RequestId,
+) -> BufferResponse {
+    BufferResponse {
+        request_id,
+        buffer: state.buffers.get(&buffer_id).unwrap().clone(),
+    }
 }
 
 fn scrollback_slice_response(
@@ -1174,8 +1185,13 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
     transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
         buffer_id: SECOND_BUFFER_ID,
     }));
+    transport.push_response(ServerResponse::Buffer(buffer_response_from_state(
+        &state,
+        SECOND_BUFFER_ID,
+        RequestId(1),
+    )));
     transport.push_response(ServerResponse::VisibleSnapshot(
-        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(1)),
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(2)),
     ));
     let client = MuxClient::new(transport);
     let (config, _tempdir) = manager_from_source(
@@ -1201,6 +1217,52 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
 
     assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
     assert_eq!(configured.notifications(), ["other"]);
+}
+
+#[tokio::test]
+async fn render_invalidated_events_refresh_buffer_activity_before_bell_hooks() {
+    let mut state = second_session_state();
+    state.buffers.get_mut(&SECOND_BUFFER_ID).unwrap().activity = ActivityState::Bell;
+
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    }));
+    transport.push_response(ServerResponse::Buffer(buffer_response_from_state(
+        &state,
+        SECOND_BUFFER_ID,
+        RequestId(1),
+    )));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(2)),
+    ));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_bell(ctx) { action.notify("info", ctx.current_session().name()) }
+            on("buffer_bell", on_bell);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = second_session_state();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
+    assert_eq!(configured.notifications(), ["other"]);
+    assert_eq!(
+        transport.requests(),
+        vec![
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+                request_id: RequestId(1),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(2),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+        ]
+    );
 }
 
 #[tokio::test]
