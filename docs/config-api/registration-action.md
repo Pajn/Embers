@@ -209,7 +209,7 @@ fn commit_search(_: ActionApi) -> Action
 
 <div>
 <div class="tab">
-<button group="commit_search" id="link-commit_search-Description"  class="tablinks active" 
+<button group="commit_search" id="link-commit_search-Description"  class="tablinks active"
     onclick="openTab(event, 'commit_search', 'Description')">
 Description
 </button>

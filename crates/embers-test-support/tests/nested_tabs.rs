@@ -1,3 +1,4 @@
+use crate::support::integration_test_lock;
 use embers_core::{SplitDirection, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, ClientMessage, NodeRequest, ServerResponse, SessionRequest,
@@ -108,6 +109,7 @@ fn split_record(snapshot: &SessionSnapshot, node_id: embers_core::NodeId) -> Spl
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nested_tab_mutations_round_trip_through_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -251,6 +253,7 @@ async fn nested_tab_mutations_round_trip_through_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_tree_returns_nested_tab_structure() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
