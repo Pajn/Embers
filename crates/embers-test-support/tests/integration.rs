@@ -7,3 +7,4 @@ mod pty_smoke;
 mod server_harness;
 mod session_root_tabs;
 mod split_layout;
+mod support;

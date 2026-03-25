@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::support::integration_test_lock;
 use embers_core::{SplitDirection, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, BuffersResponse, ClientMessage, InputRequest, NodeRequest,
@@ -180,6 +181,7 @@ async fn wait_for_capture_contains(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_list_capture_and_reattach_buffer_via_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -253,6 +255,7 @@ async fn detach_list_capture_and_reattach_buffer_via_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn move_request_replaces_target_leaf_without_killing_buffer() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -323,6 +326,7 @@ async fn move_request_replaces_target_leaf_without_killing_buffer() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detach_and_reattach_preserve_runtime_identity_size_and_capture() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
