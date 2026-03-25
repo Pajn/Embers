@@ -1455,6 +1455,7 @@ impl ServerState {
     pub fn focus_leaf(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
         self.ensure_leaf_belongs_to(leaf_id, session_id)?;
         self.ensure_leaf_is_focusable(session_id, leaf_id)?;
+        let buffer_id = self.buffer_view_buffer_id(leaf_id)?;
         self.clear_session_focus(session_id)?;
         self.set_leaf_focus(leaf_id, true)?;
 
@@ -1491,6 +1492,8 @@ impl ServerState {
             }
             child = parent;
         }
+
+        self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
 
         Ok(())
     }
