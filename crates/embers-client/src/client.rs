@@ -174,6 +174,26 @@ where
         }
     }
 
+    pub async fn refresh_buffer_record(&mut self, buffer_id: BufferId) -> Result<()> {
+        let response = self
+            .transport
+            .request(ClientMessage::Buffer(BufferRequest::Get {
+                request_id: self.next_request_id(),
+                buffer_id,
+            }))
+            .await?;
+
+        match expect_response(response)? {
+            ServerResponse::Buffer(response) => {
+                self.state.apply_buffer_record(response.buffer);
+                Ok(())
+            }
+            other => Err(MuxError::protocol(format!(
+                "expected buffer response, got {other:?}"
+            ))),
+        }
+    }
+
     pub async fn capture_buffer(&self, buffer_id: BufferId) -> Result<SnapshotResponse> {
         let response = self
             .transport
@@ -291,10 +311,12 @@ where
                 }
                 Ok(())
             }
+            ServerEvent::RenderInvalidated(event) => {
+                self.refresh_buffer_record(event.buffer_id).await
+            }
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
-            | ServerEvent::FocusChanged(_)
-            | ServerEvent::RenderInvalidated(_) => Ok(()),
+            | ServerEvent::FocusChanged(_) => Ok(()),
         }
     }
 
