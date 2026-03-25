@@ -2,13 +2,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use embers_core::PtySize;
-use embers_test_support::{
-    PtyHarness, TestConnection, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path,
+use embers_core::{ActivityState, BufferId, NodeId, PtySize, new_request_id};
+use embers_protocol::{
+    BufferRequest, ClientMessage, InputRequest, ServerResponse, SessionSnapshot,
+    VisibleSnapshotResponse,
 };
-use tempfile::tempdir;
+use embers_test_support::{PtyHarness, TestConnection, TestServer, cargo_bin, cargo_bin_path};
+use tokio::sync::Mutex;
 
-use crate::support::{run_cli, session_snapshot_by_name, stdout};
+use std::sync::OnceLock;
+
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+use crate::support::{require_pty, run_cli, session_snapshot_by_name, stdout};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
@@ -182,10 +191,206 @@ fn first_client_id_finds_attached_row() {
     assert_eq!(first_client_id(output), 42);
 }
 
+fn focused_pane_id(snapshot: &SessionSnapshot) -> u64 {
+    snapshot
+        .session
+        .focused_leaf_id
+        .map(|leaf_id| leaf_id.0)
+        .expect("session has a focused pane")
+}
+
+fn pane_buffer_id(snapshot: &SessionSnapshot, pane_id: u64) -> BufferId {
+    snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == NodeId(pane_id))
+        .and_then(|node| node.buffer_view.as_ref())
+        .map(|view| view.buffer_id)
+        .unwrap_or_else(|| panic!("pane {pane_id} buffer view exists"))
+}
+
+fn root_tab_child_id(snapshot: &SessionSnapshot, title: &str) -> NodeId {
+    snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == snapshot.session.root_node_id)
+        .and_then(|node| node.tabs.as_ref())
+        .and_then(|tabs| {
+            tabs.tabs
+                .iter()
+                .find(|tab| tab.title == title)
+                .map(|tab| tab.child_id)
+        })
+        .unwrap_or_else(|| panic!("root tab `{title}` exists"))
+}
+
+fn split_child_order(
+    snapshot: &SessionSnapshot,
+    first_pane_id: u64,
+    second_pane_id: u64,
+) -> [u64; 2] {
+    snapshot
+        .nodes
+        .iter()
+        .find_map(|node| {
+            let split = node.split.as_ref()?;
+            let child_ids = split
+                .child_ids
+                .iter()
+                .map(|child| child.0)
+                .collect::<Vec<_>>();
+            if child_ids.len() == 2
+                && child_ids.contains(&first_pane_id)
+                && child_ids.contains(&second_pane_id)
+            {
+                Some([child_ids[0], child_ids[1]])
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!("split containing panes {first_pane_id} and {second_pane_id} exists")
+        })
+}
+
+fn disable_echo_in_pane(server: &TestServer, pane_id: u64) {
+    run_cli(
+        server,
+        [
+            "send-keys",
+            "-t",
+            &pane_id.to_string(),
+            "--enter",
+            "--",
+            "stty",
+            "-echo",
+        ],
+    );
+}
+
+async fn send_buffer_input(connection: &mut TestConnection, buffer_id: BufferId, bytes: &[u8]) {
+    let response = connection
+        .request(&ClientMessage::Input(InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id,
+            bytes: bytes.to_vec(),
+        }))
+        .await
+        .expect("send input succeeds");
+    assert!(
+        matches!(response, ServerResponse::Ok(_)),
+        "expected ok response to input send, got {response:?}"
+    );
+}
+
+async fn wait_for_buffer_activity(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    expected: ActivityState,
+) {
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let response = connection
+            .request(&ClientMessage::Buffer(BufferRequest::Get {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await
+            .expect("buffer get succeeds");
+        let activity = match response {
+            ServerResponse::Buffer(response) => response.buffer.activity,
+            other => panic!("expected buffer response, got {other:?}"),
+        };
+        if activity == expected {
+            return;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity {activity:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_target_pane_buffer(
+    connection: &mut TestConnection,
+    session_name: &str,
+    pane_id: u64,
+    expected_buffer_id: BufferId,
+) -> SessionSnapshot {
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let snapshot = session_snapshot_by_name(connection, session_name).await;
+        if pane_buffer_id(&snapshot, pane_id) == expected_buffer_id {
+            return snapshot;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for pane {pane_id} to attach buffer {expected_buffer_id}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_split_child_order(
+    connection: &mut TestConnection,
+    session_name: &str,
+    pane_a: u64,
+    pane_b: u64,
+    expected: [u64; 2],
+) -> SessionSnapshot {
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let snapshot = session_snapshot_by_name(connection, session_name).await;
+        if split_child_order(&snapshot, pane_a, pane_b) == expected {
+            return snapshot;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for split order {:?}; last order {:?}",
+            expected,
+            split_child_order(&snapshot, pane_a, pane_b)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_visible_snapshot<F>(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    mut predicate: F,
+) -> VisibleSnapshotResponse
+where
+    F: FnMut(&VisibleSnapshotResponse) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let snapshot = connection
+            .capture_visible_buffer(buffer_id)
+            .await
+            .expect("visible capture succeeds");
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for visible snapshot predicate; last snapshot: {snapshot:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
-    let tempdir = tempdir().expect("tempdir");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let tempdir = tempfile::tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
@@ -224,7 +429,10 @@ async fn embers_without_subcommand_starts_server_and_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_subcommand_connects_to_running_server() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
     let server = TestServer::start().await.expect("start server");
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
@@ -270,7 +478,10 @@ async fn attach_subcommand_connects_to_running_server() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_commands_can_switch_and_detach_a_live_attached_client() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "main"]);
@@ -329,7 +540,10 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "main"]);
@@ -398,8 +612,11 @@ async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_up_enters_local_scrollback_and_shows_indicator() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
-    let tempdir = tempdir().expect("tempdir");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let tempdir = tempfile::tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
@@ -419,8 +636,11 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_selection_yank_emits_osc52_clipboard_sequence() {
-    let _guard = acquire_test_lock().await.expect("acquire test lock");
-    let tempdir = tempdir().expect("tempdir");
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let tempdir = tempfile::tempdir().expect("tempdir");
     let socket_path = tempdir.path().join("embers.sock");
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
@@ -444,4 +664,480 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     harness.wait().expect("client exits");
 
     // spawned.drop() will clean up the orphaned __serve process
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scripted_input_bindings_reach_the_live_terminal_in_pty() {
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"bind("normal", "<C-g>", action.send_bytes_current("echo scripted-pty\r"))"#,
+    )
+    .expect("write config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let (_spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("focused shell settles");
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "main").await;
+    let buffer_id = pane_buffer_id(&snapshot, focused_pane_id(&snapshot));
+
+    harness.write_all("\x07").expect("trigger scripted binding");
+    harness
+        .read_until_contains("scripted-pty", IO_TIMEOUT)
+        .expect("scripted output renders");
+    connection
+        .wait_for_capture_contains(buffer_id, "scripted-pty", IO_TIMEOUT)
+        .await
+        .expect("scripted output reaches focused buffer");
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"bind("normal", "<C-g>", action.send_bytes_current("echo before-reload\r"))"#,
+    )
+    .expect("write initial config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let (_spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("focused shell settles");
+
+    harness.write_all("\x07").expect("trigger initial binding");
+    harness
+        .read_until_contains("before-reload", IO_TIMEOUT)
+        .expect("initial binding renders");
+
+    fs::write(
+        &config_path,
+        r#"bind("normal", "<C-g>", action.send_bytes_current("echo after-reload\r"))"#,
+    )
+    .expect("write reloaded config");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    harness.write_all("\x07").expect("trigger reloaded binding");
+    harness
+        .read_until_contains("after-reload", IO_TIMEOUT)
+        .expect("reloaded binding renders");
+
+    let output = run_pane_command(&mut harness, "echo still-live", "still-live");
+    assert!(
+        output.contains("still-live"),
+        "regular terminal input must still work after reload:\n{output}"
+    );
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes() {
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+
+    let split = run_cli(&server, ["split-window", "--", "/bin/sh"]);
+    let moving_pane_id = stdout(&split)
+        .trim()
+        .parse::<u64>()
+        .expect("split-window returns new pane id");
+    disable_echo_in_pane(&server, moving_pane_id);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "main").await;
+    let anchor_pane_id = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.buffer_view.is_some())
+        .map(|node| node.id.0)
+        .find(|pane_id| *pane_id != moving_pane_id)
+        .expect("anchor pane exists");
+    let moving_buffer_id = pane_buffer_id(&snapshot, moving_pane_id);
+
+    run_cli(
+        &server,
+        [
+            "send-keys",
+            "-t",
+            &moving_pane_id.to_string(),
+            "--enter",
+            "echo",
+            "split-live",
+        ],
+    );
+    connection
+        .wait_for_capture_contains(moving_buffer_id, "split-live", IO_TIMEOUT)
+        .await
+        .expect("split pane keeps running");
+    harness
+        .read_until_contains("split-live", IO_TIMEOUT)
+        .expect("split output renders in attached client");
+
+    let initial_order = split_child_order(&snapshot, anchor_pane_id, moving_pane_id);
+    let expected_order = if initial_order == [anchor_pane_id, moving_pane_id] {
+        run_cli(
+            &server,
+            [
+                "node",
+                "move-before",
+                &moving_pane_id.to_string(),
+                &anchor_pane_id.to_string(),
+            ],
+        );
+        [moving_pane_id, anchor_pane_id]
+    } else {
+        run_cli(
+            &server,
+            [
+                "node",
+                "move-after",
+                &moving_pane_id.to_string(),
+                &anchor_pane_id.to_string(),
+            ],
+        );
+        [anchor_pane_id, moving_pane_id]
+    };
+    let _moved_snapshot = wait_for_split_child_order(
+        &mut connection,
+        "main",
+        anchor_pane_id,
+        moving_pane_id,
+        expected_order,
+    )
+    .await;
+
+    run_cli(
+        &server,
+        [
+            "send-keys",
+            "-t",
+            &moving_pane_id.to_string(),
+            "--enter",
+            "echo",
+            "moved-live",
+        ],
+    );
+    connection
+        .wait_for_capture_contains(moving_buffer_id, "moved-live", IO_TIMEOUT)
+        .await
+        .expect("moved pane keeps running");
+    harness
+        .read_until_contains("moved-live", IO_TIMEOUT)
+        .expect("moved pane output still renders");
+
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Detach {
+            request_id: new_request_id(),
+            buffer_id: moving_buffer_id,
+        }))
+        .await
+        .expect("detach buffer succeeds");
+    assert!(
+        matches!(response, ServerResponse::Ok(_)),
+        "expected ok response to buffer detach, got {response:?}"
+    );
+
+    send_buffer_input(&mut connection, moving_buffer_id, b"echo detached-live\r").await;
+    connection
+        .wait_for_capture_contains(moving_buffer_id, "detached-live", IO_TIMEOUT)
+        .await
+        .expect("detached buffer continues receiving output");
+
+    run_cli(
+        &server,
+        [
+            "attach-buffer",
+            &moving_buffer_id.to_string(),
+            "-t",
+            &anchor_pane_id.to_string(),
+        ],
+    );
+    let _reattached_snapshot =
+        wait_for_target_pane_buffer(&mut connection, "main", anchor_pane_id, moving_buffer_id)
+            .await;
+
+    send_buffer_input(&mut connection, moving_buffer_id, b"echo reattach-live\r").await;
+    connection
+        .wait_for_capture_contains(moving_buffer_id, "reattach-live", IO_TIMEOUT)
+        .await
+        .expect("reattached buffer continues receiving output");
+    harness
+        .read_until_contains("reattach-live", IO_TIMEOUT)
+        .expect("reattached buffer output renders in attached client");
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_output() {
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    run_cli(
+        &server,
+        ["new-window", "-t", "main", "--title", "bg", "--", "/bin/sh"],
+    );
+    run_cli(&server, ["select-window", "-t", "main:0"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "main").await;
+    let hidden_pane_id = root_tab_child_id(&snapshot, "bg").0;
+    let hidden_buffer_id = pane_buffer_id(&snapshot, hidden_pane_id);
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+
+    send_buffer_input(
+        &mut connection,
+        hidden_buffer_id,
+        b"printf 'hidden-bell\\a\\n'; sleep 0.5\r",
+    )
+    .await;
+    connection
+        .wait_for_capture_contains(hidden_buffer_id, "hidden-bell", IO_TIMEOUT)
+        .await
+        .expect("hidden buffer output accumulates");
+    wait_for_buffer_activity(&mut connection, hidden_buffer_id, ActivityState::Bell).await;
+    harness
+        .read_until_contains("!bg", IO_TIMEOUT)
+        .expect("hidden bell updates tab marker in attached client");
+
+    run_cli(&server, ["select-window", "-t", "main:bg"]);
+    harness
+        .read_until_contains("hidden-bell", IO_TIMEOUT)
+        .expect("revealed hidden buffer shows accumulated output");
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
+    let _guard = test_lock().lock().await;
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "main").await;
+    let buffer_id = pane_buffer_id(&snapshot, focused_pane_id(&snapshot));
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("focused shell settles");
+
+    harness
+        .write_all(
+            "printf '\\033[?1049h\\033[2J\\033[HPTY-FULLSCREEN'; sleep 1; printf '\\033[?1049lPTY-RESTORED\\n'\r",
+        )
+        .expect("run fullscreen fixture");
+    harness
+        .read_until_contains("PTY-FULLSCREEN", IO_TIMEOUT)
+        .expect("fullscreen output renders in live client");
+
+    let live = wait_for_visible_snapshot(&mut connection, buffer_id, |snapshot| {
+        snapshot.alternate_screen
+            && snapshot
+                .lines
+                .iter()
+                .any(|line| line.contains("PTY-FULLSCREEN"))
+    })
+    .await;
+    assert!(live.alternate_screen);
+
+    harness
+        .read_until_contains("PTY-RESTORED", IO_TIMEOUT)
+        .expect("primary screen restoration renders in live client");
+    let restored = wait_for_visible_snapshot(&mut connection, buffer_id, |snapshot| {
+        !snapshot.alternate_screen
+            && snapshot
+                .lines
+                .iter()
+                .any(|line| line.contains("PTY-RESTORED"))
+    })
+    .await;
+    assert!(!restored.alternate_screen);
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
 }
