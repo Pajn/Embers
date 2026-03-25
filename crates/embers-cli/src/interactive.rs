@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ const DEFAULT_SESSION_NAME: &str = "main";
 const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(15);
 const KEY_SEQUENCE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(2);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const CONFIG_WATCH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 const TERMINAL_ENTER_BASE_SEQUENCE: &str =
     "\x1b[?1049h\x1b[?1004h\x1b[?2004h\x1b[?25l\x1b[2J\x1b[H";
@@ -37,11 +39,13 @@ pub async fn run(
     let mut session_id = Some(initial_session_id);
     let config = ConfigManager::from_process(config_path)
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
+    let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
 
     let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
-    let _input_thread = spawn_input_thread(input_tx)?;
+    let _input_thread = spawn_input_thread(input_tx.clone())?;
+    let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
 
     let mut terminal_size = terminal.size()?;
     let mut dirty = true;
@@ -116,6 +120,11 @@ pub async fn run(
                         terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                         dirty = true;
                     }
+                }
+                Ok(TerminalEvent::ConfigChanged) => {
+                    let _ = configured.reload_config_if_changed()?;
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                    dirty = true;
                 }
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
@@ -390,6 +399,7 @@ enum TerminalEvent {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Focus(bool),
+    ConfigChanged,
     InputClosed,
     InputError(String),
 }
@@ -424,6 +434,40 @@ fn spawn_input_thread(
             }
         })
         .map_err(|error| MuxError::internal(format!("failed to spawn input thread: {error}")))
+}
+
+fn spawn_config_thread(
+    config_path: Option<PathBuf>,
+    tx: mpsc::UnboundedSender<TerminalEvent>,
+) -> Result<Option<std::thread::JoinHandle<()>>> {
+    let Some(config_path) = config_path else {
+        return Ok(None);
+    };
+
+    let handle = thread::Builder::new()
+        .name("embers-config".to_owned())
+        .spawn(move || {
+            let mut last_modified = config_modified(&config_path);
+            loop {
+                thread::sleep(CONFIG_WATCH_POLL_INTERVAL);
+                let next_modified = config_modified(&config_path);
+                if next_modified != last_modified {
+                    last_modified = next_modified;
+                    if tx.send(TerminalEvent::ConfigChanged).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|error| MuxError::internal(format!("failed to spawn config thread: {error}")))?;
+
+    Ok(Some(handle))
+}
+
+fn config_modified(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 fn read_terminal_event(fd: libc::c_int) -> Result<Option<TerminalEvent>> {

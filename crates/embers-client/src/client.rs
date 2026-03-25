@@ -107,9 +107,8 @@ where
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
-        let event = self.transport.next_event().await?;
-        self.state.apply_event(&event);
-        self.resync_for_event(&event).await?;
+        let event = self.next_event().await?;
+        self.handle_event(&event).await?;
         Ok(event)
     }
 
@@ -125,13 +124,21 @@ where
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Option<ServerEvent>> {
-        let event = match tokio::time::timeout(timeout, self.transport.next_event()).await {
+        let event = match tokio::time::timeout(timeout, self.next_event()).await {
             Ok(result) => result?,
             Err(_) => return Ok(None),
         };
-        self.state.apply_event(&event);
-        self.resync_for_event(&event).await?;
+        self.handle_event(&event).await?;
         Ok(Some(event))
+    }
+
+    pub async fn next_event(&mut self) -> Result<ServerEvent> {
+        self.transport.next_event().await
+    }
+
+    pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        self.state.apply_event(event);
+        self.resync_for_event(event).await
     }
 
     pub async fn resync_session(&mut self, session_id: SessionId) -> Result<()> {
