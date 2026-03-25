@@ -144,6 +144,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prefix_match_keeps_pending_sequence_until_it_resolves() {
+        let mut state = InputState::default();
+        let bindings = bindings(&[("normal", "ab", "target")]);
+        let modes = builtin_modes();
+
+        assert_eq!(
+            resolve_key(&bindings, &modes, &mut state, KeyToken::Char('a')),
+            InputResolution::PrefixMatch
+        );
+        assert_eq!(state.pending_sequence(), &[KeyToken::Char('a')]);
+
+        assert_eq!(
+            resolve_key(&bindings, &modes, &mut state, KeyToken::Char('b')),
+            InputResolution::ExactMatch(super::BindingMatch {
+                mode: "normal".to_owned(),
+                sequence: vec![KeyToken::Char('a'), KeyToken::Char('b')],
+                target: "target".to_owned(),
+            })
+        );
+        assert!(state.pending_sequence().is_empty());
+    }
+
+    #[test]
+    fn unmatched_sequence_clears_pending_state_after_prefix_miss() {
+        let mut state = InputState::default();
+        let bindings = bindings(&[("normal", "ab", "target")]);
+        let modes = builtin_modes();
+
+        assert_eq!(
+            resolve_key(&bindings, &modes, &mut state, KeyToken::Char('a')),
+            InputResolution::PrefixMatch
+        );
+        assert_eq!(state.pending_sequence(), &[KeyToken::Char('a')]);
+
+        assert_eq!(
+            resolve_key(&bindings, &modes, &mut state, KeyToken::Char('x')),
+            InputResolution::Unmatched {
+                mode: "normal".to_owned(),
+                sequence: vec![KeyToken::Char('a'), KeyToken::Char('x')],
+                fallback_policy: FallbackPolicy::Passthrough,
+            }
+        );
+        assert!(state.pending_sequence().is_empty());
+    }
+
     fn bindings(entries: &[(&str, &str, &str)]) -> BTreeMap<String, Vec<BindingSpec<String>>> {
         let mut bindings = BTreeMap::<String, Vec<BindingSpec<String>>>::new();
         for (mode, sequence, target) in entries {
