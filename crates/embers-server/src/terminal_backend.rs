@@ -365,7 +365,7 @@ mod tests {
         AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
         RawByteRouter, TerminalBackend,
     };
-    use embers_core::{ActivityState, CursorShape, PtySize};
+    use embers_core::{ActivityState, CursorShape, PtySize, TerminalSnapshot};
 
     #[derive(Default)]
     struct StubBackend {
@@ -423,6 +423,10 @@ mod tests {
         }
     }
 
+    fn snapshot_lines(snapshot: TerminalSnapshot) -> Vec<String> {
+        snapshot.lines.into_iter().map(|line| line.text).collect()
+    }
+
     #[test]
     fn visible_snapshot_extracts_plain_text_lines() {
         let mut backend = AlacrittyTerminalBackend::new(PtySize::new(8, 3));
@@ -431,7 +435,7 @@ mod tests {
         backend.ingest_bytes(b"hello\r\nworld");
         let snapshot = backend.visible_snapshot(3, PtySize::new(8, 3), None);
 
-        let lines: Vec<_> = snapshot.lines.into_iter().map(|line| line.text).collect();
+        let lines = snapshot_lines(snapshot.clone());
         assert_eq!(lines, vec!["hello", "world", ""]);
         assert_eq!(snapshot.total_lines, 3);
         assert_eq!(snapshot.viewport_top_line, 0);
@@ -439,6 +443,50 @@ mod tests {
             snapshot.cursor.as_ref().map(|cursor| cursor.shape),
             Some(CursorShape::Block) | Some(CursorShape::Underline) | Some(CursorShape::Beam)
         ));
+    }
+
+    #[test]
+    fn carriage_return_overwrites_cells_without_advancing_the_row() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(8, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"hello\rHEY");
+
+        let lines = snapshot_lines(backend.visible_snapshot(1, PtySize::new(8, 2), None));
+        assert_eq!(lines, vec!["HEYlo", ""]);
+    }
+
+    #[test]
+    fn automatic_wrap_moves_following_bytes_to_the_next_row() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(4, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"abcdX");
+
+        let lines = snapshot_lines(backend.visible_snapshot(1, PtySize::new(4, 2), None));
+        assert_eq!(lines, vec!["abcd", "X"]);
+    }
+
+    #[test]
+    fn erase_in_line_clears_trailing_cells_from_the_cursor() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 1));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"abcdef\rabc\x1b[K");
+
+        let lines = snapshot_lines(backend.visible_snapshot(1, PtySize::new(6, 1), None));
+        assert_eq!(lines, vec!["abc"]);
+    }
+
+    #[test]
+    fn clear_screen_resets_visible_cells_before_new_output() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"one\r\ntwo\x1b[2J\x1b[Hdone");
+
+        let lines = snapshot_lines(backend.visible_snapshot(1, PtySize::new(6, 2), None));
+        assert_eq!(lines, vec!["done", ""]);
     }
 
     #[test]
@@ -497,6 +545,26 @@ mod tests {
         assert!(metadata.mouse_reporting);
         assert!(metadata.focus_reporting);
         assert!(metadata.bracketed_paste);
+    }
+
+    #[test]
+    fn metadata_mode_flags_clear_when_disable_sequences_arrive() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b[?1049h\x1b[?1000h\x1b[?1004h\x1b[?2004h");
+        let enabled = backend.metadata();
+        assert!(enabled.alternate_screen);
+        assert!(enabled.mouse_reporting);
+        assert!(enabled.focus_reporting);
+        assert!(enabled.bracketed_paste);
+
+        backend.ingest_bytes(b"\x1b[?1049l\x1b[?1000l\x1b[?1004l\x1b[?2004l");
+        let disabled = backend.metadata();
+        assert!(!disabled.alternate_screen);
+        assert!(!disabled.mouse_reporting);
+        assert!(!disabled.focus_reporting);
+        assert!(!disabled.bracketed_paste);
     }
 
     #[test]
