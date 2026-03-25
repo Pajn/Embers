@@ -1266,6 +1266,138 @@ async fn render_invalidated_events_refresh_buffer_activity_before_bell_hooks() {
 }
 
 #[tokio::test]
+async fn render_session_refreshes_invalidated_snapshot_before_rendering_title_and_content() {
+    let transport = FakeTransport::default();
+    let mut stale_state = demo_state();
+    stale_state.apply_event(&ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: FOCUSED_BUFFER_ID,
+    }));
+
+    let mut refreshed_state = demo_state();
+    let snapshot = refreshed_state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap();
+    snapshot.lines = vec!["fresh render line".to_owned()];
+    snapshot.title = Some("fresh-title".to_owned());
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&refreshed_state, FOCUSED_BUFFER_ID, RequestId(1)),
+    ));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = stale_state;
+
+    let grid = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+    let rendered = grid.render();
+    let presentation = PresentationModel::project(
+        configured.client().state(),
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .expect("projection succeeds");
+
+    assert!(rendered.contains("fresh render line"));
+    assert!(!rendered.contains("logs visible"));
+    assert_eq!(
+        configured
+            .client()
+            .state()
+            .buffers
+            .get(&FOCUSED_BUFFER_ID)
+            .expect("focused buffer")
+            .title,
+        "fresh-title"
+    );
+    assert_eq!(
+        presentation.focused_leaf().expect("focused leaf").title,
+        "fresh-title"
+    );
+    assert!(configured.client().state().invalidated_buffers.is_empty());
+    assert_eq!(
+        transport.requests(),
+        vec![ClientMessage::Buffer(
+            embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(1),
+                buffer_id: FOCUSED_BUFFER_ID,
+            }
+        )]
+    );
+}
+
+#[tokio::test]
+async fn render_session_replaces_stale_scrolled_cache_when_snapshot_switches_to_alternate_screen() {
+    let transport = FakeTransport::default();
+    let mut stale_state = demo_state();
+    let view = stale_state
+        .view_state_mut(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    view.follow_output = false;
+    view.scroll_top_line = 12;
+    view.total_line_count = 60;
+    view.visible_lines = vec!["stale scrolled line".to_owned()];
+    stale_state.apply_event(&ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: FOCUSED_BUFFER_ID,
+    }));
+
+    let mut refreshed_state = demo_state();
+    let snapshot = refreshed_state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap();
+    snapshot.lines = vec!["alternate screen live".to_owned()];
+    snapshot.alternate_screen = true;
+    snapshot.viewport_top_line = 0;
+    snapshot.total_lines = 24;
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&refreshed_state, FOCUSED_BUFFER_ID, RequestId(1)),
+    ));
+
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = stale_state;
+
+    let grid = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+    let rendered = grid.render();
+
+    assert!(rendered.contains("alternate screen live"));
+    assert!(!rendered.contains("stale scrolled line"));
+    assert!(!rendered.contains("13/60"));
+    let view = configured
+        .client()
+        .state()
+        .view_state(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    assert!(view.alternate_screen);
+    assert_eq!(view.visible_lines, vec!["alternate screen live".to_owned()]);
+}
+
+#[tokio::test]
 async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
     let transport = FakeTransport::default();
     transport.push_event(ServerEvent::BufferCreated(BufferCreatedEvent {

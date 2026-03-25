@@ -1094,3 +1094,83 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
 
     server.shutdown().await.expect("server shuts down");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rapid_terminal_output_renders_latest_visible_snapshot() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "burst",
+        vec![
+            "/bin/sh".to_owned(),
+            "-lc".to_owned(),
+            "i=1; while [ $i -le 80 ]; do printf 'burst-%02d\\n' \"$i\"; i=$((i+1)); done"
+                .to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "burst".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add burst tab succeeds");
+
+    connection
+        .wait_for_capture_contains(buffer.id, "burst-80", Duration::from_secs(3))
+        .await
+        .expect("rapid output finishes");
+    wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(3),
+        |snapshot| snapshot.total_lines >= 80 && snapshot.lines.join("\n").contains("burst-80"),
+    )
+    .await;
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let render = render_session(&mut client, "alpha").await;
+    let session_id = session_id_by_name(&client, "alpha");
+    let presentation = PresentationModel::project(
+        client.state(),
+        session_id,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .expect("projection succeeds");
+    let visible_rows = presentation
+        .focused_leaf()
+        .expect("focused leaf")
+        .rect
+        .size
+        .height
+        .saturating_sub(1) as usize;
+    let latest_rendered_line = client
+        .state()
+        .snapshots
+        .get(&buffer.id)
+        .expect("burst snapshot")
+        .lines
+        .iter()
+        .take(visible_rows)
+        .rev()
+        .find(|line| line.starts_with("burst-"))
+        .expect("latest rendered burst line");
+    assert!(render.contains(latest_rendered_line));
+    assert!(!render.contains("burst-01"));
+
+    server.shutdown().await.expect("server shuts down");
+}
