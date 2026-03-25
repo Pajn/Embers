@@ -1,3 +1,4 @@
+use crate::support::integration_test_lock;
 use embers_core::{FloatGeometry, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, ClientMessage, FloatingRequest, NodeRequest, ServerResponse,
@@ -99,6 +100,7 @@ async fn get_buffer(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_focus_move_and_close_floating_window_via_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -203,6 +205,7 @@ async fn create_focus_move_and_close_floating_window_via_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closing_last_tab_in_floating_tabs_removes_popup() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await

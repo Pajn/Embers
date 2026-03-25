@@ -1,3 +1,4 @@
+use crate::support::integration_test_lock;
 use embers_core::{SplitDirection, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, ClientMessage, NodeRequest, ServerResponse, SessionRequest,
@@ -107,6 +108,7 @@ fn split_record(snapshot: &SessionSnapshot, node_id: embers_core::NodeId) -> Spl
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn split_and_resize_requests_build_nested_layouts_via_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -188,6 +190,7 @@ async fn split_and_resize_requests_build_nested_layouts_via_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn focus_and_close_requests_normalize_layout_and_detach_buffers() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await

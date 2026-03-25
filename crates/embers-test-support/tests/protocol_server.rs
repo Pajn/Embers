@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::support::integration_test_lock;
 use embers_core::{ErrorCode, MuxError, RequestId, SessionId, new_request_id};
 use embers_protocol::{
     ClientMessage, FrameType, NodeRequest, PingRequest, RawFrame, ServerEnvelope, ServerEvent,
@@ -55,6 +56,7 @@ fn encode_frame_bytes(frame: &RawFrame) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscriptions_fan_out_to_multiple_clients_with_session_filters() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut actor = TestConnection::connect(server.socket_path())
         .await
@@ -139,6 +141,7 @@ async fn subscriptions_fan_out_to_multiple_clients_with_session_filters() {
 
 #[tokio::test]
 async fn fragmented_request_frames_round_trip_and_preserve_correlation_id() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut stream = UnixStream::connect(server.socket_path())
         .await
@@ -177,6 +180,7 @@ async fn fragmented_request_frames_round_trip_and_preserve_correlation_id() {
 
 #[tokio::test]
 async fn malformed_payloads_return_protocol_violation_errors() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut stream = UnixStream::connect(server.socket_path())
         .await
@@ -208,6 +212,7 @@ async fn malformed_payloads_return_protocol_violation_errors() {
 
 #[tokio::test]
 async fn typed_errors_cover_invalid_ids_and_impossible_mutations() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -264,6 +269,7 @@ async fn typed_errors_cover_invalid_ids_and_impossible_mutations() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disconnected_subscribers_are_cleaned_up_without_breaking_remaining_clients() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut actor = TestConnection::connect(server.socket_path())
         .await

@@ -1,3 +1,4 @@
+use crate::support::integration_test_lock;
 use embers_core::{ErrorCode, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, ClientMessage, ServerResponse, SessionRequest,
@@ -83,6 +84,7 @@ fn root_tabs(snapshot: &embers_protocol::SessionSnapshot) -> Option<TabsRecord> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_list_get_and_close_sessions_via_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -147,6 +149,7 @@ async fn create_list_get_and_close_sessions_via_socket() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_select_rename_and_close_root_tabs_via_socket() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await

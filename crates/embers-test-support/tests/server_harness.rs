@@ -1,7 +1,9 @@
+use crate::support::integration_test_lock;
 use embers_test_support::{TestConnection, TestServer};
 
 #[tokio::test]
 async fn harness_starts_server_and_pings_it() {
+    let _guard = integration_test_lock().lock().await;
     let server = TestServer::start().await.expect("start server");
     let mut connection = TestConnection::connect(server.socket_path())
         .await

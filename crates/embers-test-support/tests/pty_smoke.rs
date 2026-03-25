@@ -1,11 +1,13 @@
 use std::time::Duration;
 
+use crate::support::integration_test_lock;
 use embers_core::PtySize;
 use embers_test_support::PtyHarness;
 
 #[test]
 #[ignore = "exercises the PTY smoke harness in CI and later end-to-end runs"]
 fn pty_round_trips_input() {
+    let _guard = integration_test_lock().blocking_lock();
     let mut harness = PtyHarness::spawn(
         "sh",
         &["-lc", "read line; printf '%s' \"$line\""],
