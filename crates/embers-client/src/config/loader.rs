@@ -101,6 +101,21 @@ impl ConfigManager {
         self.active_script = candidate_script;
         Ok(())
     }
+
+    pub fn reload_if_changed(&mut self) -> Result<bool, ConfigManagerError> {
+        let candidate_source = load_config_source(&self.discovery)?;
+        if candidate_source == self.active_source {
+            return Ok(false);
+        }
+
+        let candidate_script = match candidate_source.origin {
+            ConfigOrigin::BuiltIn => ScriptEngine::load(&candidate_source)?,
+            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &candidate_source)?,
+        };
+        self.active_source = candidate_source;
+        self.active_script = candidate_script;
+        Ok(true)
+    }
 }
 
 pub fn load_config_source(discovery: &ConfigDiscoveryOptions) -> ConfigResult<LoadedConfigSource> {

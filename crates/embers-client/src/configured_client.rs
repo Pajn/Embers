@@ -325,8 +325,8 @@ where
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
-        let event = self.client.process_next_event().await?;
-        self.apply_processed_event(&event).await?;
+        let event = self.next_event().await?;
+        self.handle_event(&event).await?;
         Ok(event)
     }
 
@@ -337,18 +337,23 @@ where
         let Some(event) = self.client.process_next_event_timeout(timeout).await? else {
             return Ok(None);
         };
-        self.apply_processed_event(&event).await?;
+        self.handle_event(&event).await?;
         Ok(Some(event))
     }
 
-    async fn apply_processed_event(&mut self, event: &ServerEvent) -> Result<()> {
-        if let ServerEvent::RenderInvalidated(event) = &event {
+    pub async fn next_event(&mut self) -> Result<ServerEvent> {
+        self.client.next_event().await
+    }
+
+    pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        self.client.handle_event(event).await?;
+        if let ServerEvent::RenderInvalidated(event) = event {
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
         }
 
         let session_id = self.event_session_id(event);
         let mut event_names = vec![event_name(event).to_owned()];
-        if let ServerEvent::RenderInvalidated(render) = &event
+        if let ServerEvent::RenderInvalidated(render) = event
             && self
                 .client
                 .state()
@@ -418,18 +423,37 @@ where
         self.config
             .reload()
             .map_err(|error| MuxError::invalid_input(error.to_string()))?;
+        self.finish_config_reload(&current_mode);
+        Ok(())
+    }
+
+    pub fn reload_config_if_changed(&mut self) -> Result<bool> {
+        match self.config.reload_if_changed() {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                let current_mode = self.input_state.current_mode().to_owned();
+                self.finish_config_reload(&current_mode);
+                Ok(true)
+            }
+            Err(error) => {
+                self.record_notification(error.to_string());
+                Ok(false)
+            }
+        }
+    }
+
+    fn finish_config_reload(&mut self, current_mode: &str) {
         if self
             .config
             .active_script()
             .loaded_config()
             .modes
-            .contains_key(&current_mode)
+            .contains_key(current_mode)
         {
             self.input_state.clear_pending();
         } else {
             self.input_state.set_mode(NORMAL_MODE);
         }
-        Ok(())
     }
 
     async fn execute_actions(
