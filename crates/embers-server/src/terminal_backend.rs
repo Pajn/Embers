@@ -38,6 +38,11 @@ pub enum BackendDamage {
     Partial(Vec<LineDamageBounds>),
 }
 
+/// Terminal emulation boundary used by the runtime keeper.
+///
+/// Raw PTY bytes are routed through `RawByteRouter` and then ingested here. The backend owns
+/// terminal parsing, alternate-screen state, scrollback, snapshots, cursor metadata, and render
+/// damage tracking.
 pub trait TerminalBackend: Send {
     fn ingest_bytes(&mut self, bytes: &[u8]);
     fn resize(&mut self, size: PtySize);
@@ -58,10 +63,18 @@ pub trait TerminalBackend: Send {
 pub struct RawByteRouter;
 
 impl RawByteRouter {
+    /// Route client-originated bytes before they reach the PTY.
+    ///
+    /// The current implementation is intentionally passthrough, but the method is the explicit
+    /// seam for future prefix/passthrough-aware interception.
     pub fn route_input(&self, bytes: Vec<u8>) -> Vec<u8> {
         bytes
     }
 
+    /// Route PTY output bytes before terminal emulation.
+    ///
+    /// Today this forwards output directly into the backend, making the raw-routing seam explicit
+    /// without introducing policy beyond passthrough.
     pub fn route_output(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
         backend.ingest_bytes(bytes);
     }
@@ -346,8 +359,69 @@ impl TerminalBackend for AlacrittyTerminalBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlacrittyTerminalBackend, BackendDamage, TerminalBackend};
+    use std::path::PathBuf;
+
+    use super::{
+        AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
+        RawByteRouter, TerminalBackend,
+    };
     use embers_core::{ActivityState, CursorShape, PtySize};
+
+    #[derive(Default)]
+    struct StubBackend {
+        ingested: Vec<u8>,
+    }
+
+    impl TerminalBackend for StubBackend {
+        fn ingest_bytes(&mut self, bytes: &[u8]) {
+            self.ingested.extend_from_slice(bytes);
+        }
+
+        fn resize(&mut self, _size: PtySize) {}
+
+        fn visible_snapshot(
+            &self,
+            sequence: u64,
+            size: PtySize,
+            cwd: Option<PathBuf>,
+        ) -> embers_core::TerminalSnapshot {
+            let mut snapshot = embers_core::TerminalSnapshot::from_lines(
+                sequence,
+                size,
+                [String::from_utf8_lossy(&self.ingested).into_owned()],
+            );
+            snapshot.cwd = cwd;
+            snapshot
+        }
+
+        fn capture_scrollback(&self) -> Vec<String> {
+            vec![String::from_utf8_lossy(&self.ingested).into_owned()]
+        }
+
+        fn capture_scrollback_slice(
+            &self,
+            start_line: u64,
+            _line_count: u32,
+        ) -> BackendScrollbackSlice {
+            BackendScrollbackSlice {
+                start_line,
+                total_lines: 1,
+                lines: vec![String::from_utf8_lossy(&self.ingested).into_owned()],
+            }
+        }
+
+        fn metadata(&self) -> BackendMetadata {
+            BackendMetadata::default()
+        }
+
+        fn take_activity(&mut self) -> ActivityState {
+            ActivityState::Activity
+        }
+
+        fn take_damage(&mut self) -> BackendDamage {
+            BackendDamage::None
+        }
+    }
 
     #[test]
     fn visible_snapshot_extracts_plain_text_lines() {
@@ -439,5 +513,60 @@ mod tests {
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
         assert_eq!(backend.take_activity(), ActivityState::Activity);
+    }
+
+    #[test]
+    fn raw_byte_router_is_explicit_passthrough_for_input_and_output() {
+        let mut router = RawByteRouter;
+        let mut backend = StubBackend::default();
+        let input = b"\x1b[200~paste\x1b[201~".to_vec();
+
+        assert_eq!(router.route_input(input.clone()), input);
+
+        router.route_output(&mut backend, b"hello");
+        router.route_output(&mut backend, b" world");
+
+        assert_eq!(backend.ingested, b"hello world");
+    }
+
+    #[test]
+    fn alternate_screen_visible_snapshot_tracks_active_screen_and_restores_primary_screen() {
+        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(20, 4));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"main-one\r\nmain-two");
+        backend.ingest_bytes(b"\x1b[?1049h\x1b[Halt-screen");
+
+        let alternate = backend.visible_snapshot(2, PtySize::new(20, 4), None);
+        let alternate_lines: Vec<_> = alternate
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert!(alternate.modes.alternate_screen);
+        assert!(
+            alternate_lines
+                .iter()
+                .any(|line| line.contains("alt-screen")),
+            "alternate visible lines: {alternate_lines:?}"
+        );
+
+        backend.ingest_bytes(b"\x1b[?1049l");
+
+        let restored = backend.visible_snapshot(3, PtySize::new(20, 4), None);
+        let restored_lines: Vec<_> = restored
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert!(!restored.modes.alternate_screen);
+        assert!(
+            restored_lines.iter().any(|line| line.contains("main-one")),
+            "restored visible lines: {restored_lines:?}"
+        );
+        assert!(
+            restored_lines.iter().any(|line| line.contains("main-two")),
+            "restored visible lines: {restored_lines:?}"
+        );
     }
 }
