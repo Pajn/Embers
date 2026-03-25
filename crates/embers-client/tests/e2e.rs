@@ -7,7 +7,7 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferRecord, BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest,
-    NodeRequest, ServerResponse, SessionRequest, SessionSnapshot,
+    NodeRequest, ServerResponse, SessionRequest, SessionSnapshot, VisibleSnapshotResponse,
 };
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
 
@@ -49,11 +49,19 @@ async fn create_buffer(
     connection: &mut TestConnection,
     title: &str,
 ) -> embers_protocol::BufferRecord {
+    create_buffer_with_command(connection, title, vec!["/bin/sh".to_owned()]).await
+}
+
+async fn create_buffer_with_command(
+    connection: &mut TestConnection,
+    title: &str,
+    command: Vec<String>,
+) -> embers_protocol::BufferRecord {
     let response = connection
         .request(&ClientMessage::Buffer(BufferRequest::Create {
             request_id: new_request_id(),
             title: Some(title.to_owned()),
-            command: vec!["/bin/sh".to_owned()],
+            command,
             cwd: None,
             env: Default::default(),
         }))
@@ -144,6 +152,34 @@ async fn render_session(
     Renderer.render(client.state(), &model).render()
 }
 
+async fn wait_for_visible_snapshot<F>(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    timeout: Duration,
+    mut predicate: F,
+) -> VisibleSnapshotResponse
+where
+    F: FnMut(&VisibleSnapshotResponse) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let snapshot = connection
+            .capture_visible_buffer(buffer_id)
+            .await
+            .expect("visible capture succeeds");
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for visible snapshot; last snapshot: {snapshot:?}");
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn buffer_record(connection: &mut TestConnection, buffer_id: BufferId) -> BufferRecord {
     match connection
         .request(&ClientMessage::Buffer(BufferRequest::Get {
@@ -189,6 +225,14 @@ struct HiddenTabFixture {
 }
 
 async fn create_hidden_tab_fixture(connection: &mut TestConnection) -> HiddenTabFixture {
+    let hidden_buffer = create_buffer(connection, "hidden").await;
+    create_hidden_tab_fixture_with_buffer(connection, hidden_buffer).await
+}
+
+async fn create_hidden_tab_fixture_with_buffer(
+    connection: &mut TestConnection,
+    hidden_buffer: BufferRecord,
+) -> HiddenTabFixture {
     let session = create_session(connection, "alpha").await;
     let buffer_a = create_buffer(connection, "main").await;
     let session = match connection
@@ -223,7 +267,6 @@ async fn create_hidden_tab_fixture(connection: &mut TestConnection) -> HiddenTab
         .parent_id
         .expect("wrapped main leaf has tabs parent");
 
-    let hidden_buffer = create_buffer(connection, "hidden").await;
     let _ = connection
         .request(&ClientMessage::Node(NodeRequest::AddTab {
             request_id: new_request_id(),
@@ -248,6 +291,23 @@ async fn create_hidden_tab_fixture(connection: &mut TestConnection) -> HiddenTab
         nested_tabs_id,
         hidden_buffer,
     }
+}
+
+fn fullscreen_fixture_command(
+    live_title: &str,
+    restored_title: &str,
+    sleep_secs: &str,
+) -> Vec<String> {
+    vec![
+        "/bin/sh".to_owned(),
+        "-lc".to_owned(),
+        format!(
+            "printf 'main-before\\n'; \
+             printf '\\033]0;{live_title}\\007\\033[?1049h\\033[2J\\033[Hfullscreen-live\\033[3;10Hcursor-target'; \
+             sleep {sleep_secs}; \
+             printf '\\033]0;{restored_title}\\007\\033[?1049lrestored-after\\n'"
+        ),
+    ]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -892,6 +952,145 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         Duration::from_secs(3),
     )
     .await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "fullscreen",
+        fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "1.0"),
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "fullscreen".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add fullscreen tab succeeds");
+
+    let live = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(3),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-live-title")
+                && text.contains("fullscreen-live")
+                && text.contains("cursor-target")
+        },
+    )
+    .await;
+    let live_text = live.lines.join("\n");
+    assert!(!live_text.contains("main-before"));
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let render = render_session(&mut client, "alpha").await;
+    assert!(render.contains("fullscreen-live"));
+    assert!(render.contains("cursor-target"));
+    assert!(!render.contains("main-before"));
+
+    let restored = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(4),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            !snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("primary-restored-title")
+                && text.contains("main-before")
+                && text.contains("restored-after")
+        },
+    )
+    .await;
+    let restored_text = restored.lines.join("\n");
+    assert!(!restored_text.contains("fullscreen-live"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let hidden_buffer = create_buffer_with_command(
+        &mut connection,
+        "fullscreen-hidden",
+        fullscreen_fixture_command(
+            "fullscreen-hidden-live",
+            "fullscreen-hidden-restored",
+            "1.2",
+        ),
+    )
+    .await;
+    let fixture = create_hidden_tab_fixture_with_buffer(&mut connection, hidden_buffer).await;
+
+    wait_for_visible_snapshot(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        Duration::from_secs(3),
+        |snapshot| {
+            snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-hidden-live")
+                && snapshot.lines.join("\n").contains("fullscreen-live")
+        },
+    )
+    .await;
+
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: fixture.nested_tabs_id,
+            index: 1,
+        }))
+        .await
+        .expect("select fullscreen tab succeeds");
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let live_render = render_session(&mut client, "alpha").await;
+    assert!(live_render.contains("fullscreen-live"));
+    assert!(live_render.contains("cursor-target"));
+    assert!(!live_render.contains("main-before"));
+
+    let restored = wait_for_visible_snapshot(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        Duration::from_secs(4),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            !snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-hidden-restored")
+                && text.contains("main-before")
+                && text.contains("restored-after")
+        },
+    )
+    .await;
+    assert!(!restored.lines.join("\n").contains("fullscreen-live"));
+
+    let restored_render = render_session(&mut client, "alpha").await;
+    assert!(restored_render.contains("main-before"));
+    assert!(restored_render.contains("restored-after"));
+    assert!(!restored_render.contains("fullscreen-live"));
 
     server.shutdown().await.expect("server shuts down");
 }
