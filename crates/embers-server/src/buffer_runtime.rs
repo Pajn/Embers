@@ -367,19 +367,16 @@ impl BufferRuntimeHandle {
 impl BufferRuntimeInner {
     fn join_threads_blocking(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        let mut threads = match self.threads.lock() {
-            Ok(threads) => threads,
+        let poller = match self.threads.lock() {
+            Ok(mut threads) => threads.poller.take(),
             Err(poisoned) => {
                 error!(
                     %self.buffer_id,
                     "buffer runtime thread registry lock poisoned during shutdown"
                 );
-                poisoned.into_inner()
+                poisoned.into_inner().poller.take()
             }
         };
-        let poller = threads.poller.take();
-        drop(threads);
-
         if let Some(poller) = poller
             && poller.thread().id() != thread::current().id()
         {
@@ -713,6 +710,18 @@ fn handle_keeper_request(
 }
 
 impl KeeperRuntime {
+    fn ensure_running(&self) -> Result<()> {
+        if self
+            .exit_code
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper exit lock poisoned"))?
+            .is_some()
+        {
+            return Err(MuxError::conflict("buffer runtime has already exited"));
+        }
+        Ok(())
+    }
+
     fn status(&self) -> Result<KeeperStatus> {
         let exit_code = *self
             .exit_code
@@ -739,14 +748,7 @@ impl KeeperRuntime {
     }
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
-        if self
-            .exit_code
-            .lock()
-            .map_err(|_| MuxError::internal("runtime keeper exit lock poisoned"))?
-            .is_some()
-        {
-            return Err(MuxError::conflict("buffer runtime has already exited"));
-        }
+        self.ensure_running()?;
         let mut writer = self
             .writer
             .lock()
@@ -757,6 +759,7 @@ impl KeeperRuntime {
     }
 
     fn resize(&self, size: PtySize) -> Result<()> {
+        self.ensure_running()?;
         let master = self
             .master
             .lock()
@@ -802,6 +805,7 @@ impl KeeperRuntime {
     }
 
     fn kill(&self) -> Result<()> {
+        self.ensure_running()?;
         let mut killer = self
             .killer
             .lock()

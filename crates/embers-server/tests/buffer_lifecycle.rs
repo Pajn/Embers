@@ -135,3 +135,28 @@ fn resize_updates_buffer_size_for_attached_and_detached_buffers() {
         PtySize::new(90, 20)
     );
 }
+
+#[test]
+fn exited_detached_buffers_can_be_removed_cleanly() {
+    let mut state = ServerState::new();
+    let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+
+    state
+        .mark_buffer_running(buffer_id, Some(88))
+        .expect("mark running");
+    state
+        .mark_buffer_exited(buffer_id, Some(0))
+        .expect("mark exited");
+
+    let removed = state
+        .remove_buffer(buffer_id)
+        .expect("remove detached exited buffer");
+    assert!(matches!(
+        removed.state,
+        BufferState::Exited(ref exited) if exited.exit_code == Some(0)
+    ));
+    assert!(matches!(
+        state.buffer(buffer_id),
+        Err(MuxError::NotFound(_))
+    ));
+}

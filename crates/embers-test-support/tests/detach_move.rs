@@ -140,6 +140,25 @@ async fn send_input(
     assert!(matches!(response, ServerResponse::Ok(_)));
 }
 
+async fn resize_buffer(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    cols: u16,
+    rows: u16,
+) {
+    let response = connection
+        .request(&ClientMessage::Input(InputRequest::Resize {
+            request_id: new_request_id(),
+            buffer_id,
+            cols,
+            rows,
+        }))
+        .await
+        .expect("resize request succeeds");
+
+    assert!(matches!(response, ServerResponse::Ok(_)));
+}
+
 async fn wait_for_capture_contains(
     connection: &mut TestConnection,
     buffer_id: embers_core::BufferId,
@@ -298,6 +317,79 @@ async fn move_request_replaces_target_leaf_without_killing_buffer() {
             .focused_leaf_id,
         Some(second_leaf)
     );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detach_and_reattach_preserve_runtime_identity_size_and_capture() {
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let session = create_session(&mut connection, "main").await;
+    let session_id = session.snapshot.session.id;
+
+    let primary = create_echo_buffer(&mut connection, "primary").await;
+    let attached = add_root_tab(&mut connection, session_id, "primary", primary.id).await;
+    let original_leaf = attached
+        .session
+        .focused_leaf_id
+        .expect("primary tab focuses leaf");
+    wait_for_capture_contains(&mut connection, primary.id, "ready").await;
+
+    let before_detach = get_buffer(&mut connection, primary.id).await;
+    resize_buffer(&mut connection, primary.id, 120, 33).await;
+    let resized = get_buffer(&mut connection, primary.id).await;
+    assert_eq!(resized.pty_size, embers_core::PtySize::new(120, 33));
+
+    let detach = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Detach {
+            request_id: new_request_id(),
+            buffer_id: primary.id,
+        }))
+        .await
+        .expect("detach request succeeds");
+    assert!(matches!(detach, ServerResponse::Ok(_)));
+
+    let detached = get_buffer(&mut connection, primary.id).await;
+    assert_eq!(detached.attachment_node_id, None);
+    assert_eq!(detached.pid, before_detach.pid);
+    assert_eq!(detached.pty_size, embers_core::PtySize::new(120, 33));
+    assert_eq!(detached.state, before_detach.state);
+
+    send_input(&mut connection, primary.id, "detached-still-live\n").await;
+    let detached_capture =
+        wait_for_capture_contains(&mut connection, primary.id, "seen:detached-still-live").await;
+    assert!(detached_capture.lines.join("\n").contains("ready"));
+
+    let replacement = create_echo_buffer(&mut connection, "replacement").await;
+    let replacement_snapshot =
+        add_root_tab(&mut connection, session_id, "replacement", replacement.id).await;
+    let target_leaf = replacement_snapshot
+        .session
+        .focused_leaf_id
+        .expect("replacement tab focuses target leaf");
+    assert_ne!(target_leaf, original_leaf);
+
+    let moved = connection
+        .request(&ClientMessage::Node(NodeRequest::MoveBufferToNode {
+            request_id: new_request_id(),
+            buffer_id: primary.id,
+            target_leaf_node_id: target_leaf,
+        }))
+        .await
+        .expect("move request succeeds");
+    assert!(matches!(moved, ServerResponse::SessionSnapshot(_)));
+
+    let reattached = get_buffer(&mut connection, primary.id).await;
+    assert_eq!(reattached.attachment_node_id, Some(target_leaf));
+    assert_eq!(reattached.pid, before_detach.pid);
+    assert_eq!(reattached.pty_size, embers_core::PtySize::new(120, 33));
+
+    send_input(&mut connection, primary.id, "reattached\n").await;
+    wait_for_capture_contains(&mut connection, primary.id, "seen:reattached").await;
 
     server.shutdown().await.expect("shutdown server");
 }
