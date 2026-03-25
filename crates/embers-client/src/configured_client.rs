@@ -1437,6 +1437,9 @@ where
         presentation: &PresentationModel,
         actions: &[Action],
     ) -> bool {
+        // When the focused pane is acting like a live terminal surface, prefer
+        // forwarding local search/select/navigation bindings to the program
+        // instead of stealing keys that fullscreen apps expect to receive.
         let Some(leaf) = presentation.focused_leaf() else {
             return false;
         };

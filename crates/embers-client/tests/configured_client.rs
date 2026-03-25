@@ -17,7 +17,9 @@ use embers_protocol::{
 };
 use tempfile::tempdir;
 
-use crate::support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
+use crate::support::{
+    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state,
+};
 
 const SECOND_SESSION_ID: SessionId = SessionId(2);
 const SECOND_ROOT_ID: NodeId = NodeId(200);
@@ -115,6 +117,23 @@ fn snapshot_response(
         title: None,
         cwd: None,
     }
+}
+
+fn push_send_input_refresh_responses(
+    transport: &FakeTransport,
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+) {
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(state, buffer_id, RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(state, SESSION_ID),
+    }));
 }
 
 fn second_session_state() -> embers_client::ClientState {
@@ -251,6 +270,169 @@ async fn configured_keybinding_executes_live_focus_action() {
     );
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: FOCUSED_BUFFER_ID,
+            bytes: b"x".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn leader_prefix_waits_without_forwarding_input() {
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn open_workspace_split(ctx) { action.notify("info", "workspace-split") }
+            define_action("workspace-split", open_workspace_split);
+            set_leader("<C-a>");
+            bind("normal", "<leader>ws", "workspace-split");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('a'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('w'),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+    assert!(configured.notifications().is_empty());
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('s'),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+    assert_eq!(configured.notifications(), ["workspace-split"]);
+}
+
+#[tokio::test]
+async fn reload_clears_pending_prefix_before_next_unmapped_key() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let tempdir = tempdir().unwrap();
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"
+            fn open_workspace_split(ctx) { action.notify("info", "workspace-split") }
+            define_action("workspace-split", open_workspace_split);
+            set_leader("<C-a>");
+            bind("normal", "<leader>ws", "workspace-split");
+        "#,
+    )
+    .unwrap();
+    let config = ConfigManager::load(
+        ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .unwrap();
+    let client = MuxClient::new(transport.clone());
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('a'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('w'),
+        )
+        .await
+        .unwrap();
+    assert!(transport.requests().is_empty());
+
+    configured.reload_config().unwrap();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: FOCUSED_BUFFER_ID,
+            bytes: b"x".to_vec(),
+        })
+    );
 }
 
 #[tokio::test]
@@ -729,6 +911,47 @@ async fn select_mode_yanks_selection_to_osc52() {
 }
 
 #[tokio::test]
+async fn copy_mode_blocks_unmapped_passthrough() {
+    let transport = FakeTransport::default();
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn enter_copy(ctx) { action.enter_mode("copy") }
+            define_action("enter-copy", enter_copy);
+            unbind("normal", "v");
+            bind("normal", "v", "enter-copy");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('v'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
 async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
     let mut initial_state = demo_state();
     let presentation = PresentationModel::project(
@@ -1136,6 +1359,85 @@ async fn event_hook_executes_real_actions() {
     );
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn scripted_send_keys_current_forwards_to_the_focused_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn send_current(ctx) { action.send_keys_current("abc") }
+            define_action("send-current", send_current);
+            bind("normal", "<C-g>", "send-current");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('g'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: FOCUSED_BUFFER_ID,
+            bytes: b"abc".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn scripted_send_bytes_can_target_a_specific_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    let target_buffer_id = BufferId(5);
+    push_send_input_refresh_responses(&transport, &state, target_buffer_id);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn send_popup(ctx) { action.send_bytes(5, "popup") }
+            define_action("send-popup", send_popup);
+            bind("normal", "<C-p>", "send-popup");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('p'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: target_buffer_id,
+            bytes: b"popup".to_vec(),
+        })
+    );
 }
 
 #[tokio::test]
