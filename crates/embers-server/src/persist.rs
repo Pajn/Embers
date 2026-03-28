@@ -21,7 +21,8 @@ use crate::model::{
 use crate::state::ServerState;
 
 const LEGACY_FORMAT_VERSION: u32 = 0;
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+const FIRST_VERSIONED_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedWorkspace {
@@ -69,15 +70,15 @@ pub struct PersistedBuffer {
     pub created_at_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[derive(Default)]
 pub enum PersistedBufferKind {
     #[default]
     Pty,
     Helper {
         source_buffer_id: u64,
         scope: PersistedHelperBufferScope,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         lines: Vec<String>,
     },
 }
@@ -281,7 +282,36 @@ fn migrate_workspace(
     version: u32,
 ) -> Result<PersistedWorkspace> {
     match version {
-        LEGACY_FORMAT_VERSION => {
+        LEGACY_FORMAT_VERSION | FIRST_VERSIONED_FORMAT_VERSION => {
+            let mut legacy_zoomed_nodes = BTreeMap::<u64, Vec<u64>>::new();
+            for node in &workspace.nodes {
+                if let PersistedNode::BufferView {
+                    id,
+                    session_id,
+                    zoomed: true,
+                    ..
+                } = node
+                {
+                    legacy_zoomed_nodes
+                        .entry(*session_id)
+                        .or_default()
+                        .push(*id);
+                }
+            }
+            for session in &mut workspace.sessions {
+                if session.zoomed_node.is_none() {
+                    match legacy_zoomed_nodes.get(&session.id).map(Vec::as_slice) {
+                        Some([]) | None => {}
+                        Some([node_id]) => session.zoomed_node = Some(*node_id),
+                        Some(node_ids) => {
+                            return Err(MuxError::internal(format!(
+                                "workspace session {} has multiple legacy zoomed nodes: {:?}",
+                                session.id, node_ids
+                            )));
+                        }
+                    }
+                }
+            }
             workspace.format_version = Some(CURRENT_FORMAT_VERSION);
             Ok(workspace)
         }
@@ -572,7 +602,7 @@ fn persisted_buffer_kind(kind: &BufferKind) -> PersistedBufferKind {
         BufferKind::Helper(helper) => PersistedBufferKind::Helper {
             source_buffer_id: helper.source_buffer_id.0,
             scope: persisted_helper_scope(helper.scope),
-            lines: helper.lines.clone(),
+            lines: Vec::new(),
         },
     }
 }
@@ -662,6 +692,78 @@ mod tests {
     }
 
     #[test]
+    fn load_current_workspace_migrates_v1_workspace() {
+        let workspace: PersistedWorkspace = serde_json::from_str(
+            r#"
+            {
+              "format_version": 1,
+              "sessions": [
+                {
+                  "id": 1,
+                  "name": "alpha",
+                  "root_node": 10,
+                  "floating": [],
+                  "focused_leaf": 10,
+                  "focused_floating": null,
+                  "created_at_ms": 1234
+                }
+              ],
+              "buffers": [
+                {
+                  "id": 20,
+                  "title": "shell",
+                  "command": ["sh"],
+                  "cwd": null,
+                  "env": {},
+                  "runtime_socket_path": null,
+                  "state": { "kind": "created" },
+                  "attachment": { "kind": "detached" },
+                  "pty_size": {
+                    "cols": 80,
+                    "rows": 24,
+                    "pixel_width": 0,
+                    "pixel_height": 0
+                  },
+                  "activity": "idle",
+                  "last_snapshot_seq": 0,
+                  "created_at_ms": 5678
+                }
+              ],
+              "nodes": [
+                {
+                  "kind": "buffer_view",
+                  "id": 10,
+                  "session_id": 1,
+                  "parent": null,
+                  "buffer_id": 20,
+                  "focused": true,
+                  "zoomed": true,
+                  "follow_output": true,
+                  "last_render_size": {
+                    "cols": 80,
+                    "rows": 24,
+                    "pixel_width": 0,
+                    "pixel_height": 0
+                  }
+                }
+              ],
+              "floating": [],
+              "next_session_id": 2,
+              "next_buffer_id": 21,
+              "next_node_id": 11,
+              "next_floating_id": 1
+            }
+            "#,
+        )
+        .expect("deserialize v1 workspace fixture");
+
+        let migrated = load_current_workspace(workspace).expect("v1 workspace migrates");
+        assert_eq!(migrated.format_version, Some(CURRENT_FORMAT_VERSION));
+        assert_eq!(migrated.sessions[0].zoomed_node, Some(10));
+        assert_eq!(migrated.buffers[0].kind, PersistedBufferKind::Pty);
+    }
+
+    #[test]
     fn load_current_workspace_rejects_unknown_format_versions() {
         let workspace = PersistedWorkspace {
             format_version: Some(CURRENT_FORMAT_VERSION + 1),
@@ -682,6 +784,108 @@ mod tests {
                 "internal error: unsupported workspace format version {}",
                 CURRENT_FORMAT_VERSION + 1
             )
+        );
+    }
+
+    #[test]
+    fn helper_buffer_kind_round_trips_through_persistence() {
+        for scope in [HelperBufferScope::Full, HelperBufferScope::Visible] {
+            let kind = BufferKind::Helper(HelperBuffer {
+                source_buffer_id: BufferId(42),
+                scope,
+                lines: vec!["alpha".to_owned(), "beta".to_owned()],
+            });
+
+            let persisted = persisted_buffer_kind(&kind);
+            let restored = restored_buffer_kind(persisted.clone());
+
+            assert_eq!(
+                restored,
+                BufferKind::Helper(HelperBuffer {
+                    source_buffer_id: BufferId(42),
+                    scope,
+                    lines: Vec::new(),
+                })
+            );
+            assert_eq!(restored_helper_scope(persisted_helper_scope(scope)), scope);
+            assert_eq!(
+                persisted,
+                PersistedBufferKind::Helper {
+                    source_buffer_id: 42,
+                    scope: persisted_helper_scope(scope),
+                    lines: Vec::new(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn helper_buffer_kind_restores_legacy_lines_when_present() {
+        let restored = restored_buffer_kind(PersistedBufferKind::Helper {
+            source_buffer_id: 42,
+            scope: PersistedHelperBufferScope::Visible,
+            lines: vec!["alpha".to_owned(), "beta".to_owned()],
+        });
+
+        assert_eq!(
+            restored,
+            BufferKind::Helper(HelperBuffer {
+                source_buffer_id: BufferId(42),
+                scope: HelperBufferScope::Visible,
+                lines: vec!["alpha".to_owned(), "beta".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn load_current_workspace_rejects_duplicate_legacy_zoomed_nodes() {
+        let workspace = PersistedWorkspace {
+            format_version: Some(FIRST_VERSIONED_FORMAT_VERSION),
+            sessions: vec![PersistedSession {
+                id: 1,
+                name: "alpha".to_owned(),
+                root_node: 10,
+                floating: Vec::new(),
+                focused_leaf: Some(10),
+                focused_floating: None,
+                zoomed_node: None,
+                created_at_ms: 1234,
+            }],
+            buffers: Vec::new(),
+            nodes: vec![
+                PersistedNode::BufferView {
+                    id: 10,
+                    session_id: 1,
+                    parent: None,
+                    buffer_id: 20,
+                    focused: true,
+                    zoomed: true,
+                    follow_output: true,
+                    last_render_size: PtySize::new(80, 24),
+                },
+                PersistedNode::BufferView {
+                    id: 11,
+                    session_id: 1,
+                    parent: None,
+                    buffer_id: 21,
+                    focused: false,
+                    zoomed: true,
+                    follow_output: true,
+                    last_render_size: PtySize::new(80, 24),
+                },
+            ],
+            floating: Vec::new(),
+            next_session_id: 2,
+            next_buffer_id: 22,
+            next_node_id: 12,
+            next_floating_id: 1,
+        };
+
+        let error = load_current_workspace(workspace)
+            .expect_err("duplicate legacy zoomed nodes should be rejected");
+        assert!(
+            error.to_string().contains("multiple legacy zoomed nodes"),
+            "unexpected error: {error}"
         );
     }
 

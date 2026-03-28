@@ -6,7 +6,7 @@
     <h2 class="func-name"> <code>fn</code> break_current_node </h2>
 
 ```rust,ignore
-fn break_current_node(_: ActionApi, destination: String) -> Action
+fn break_current_node(_: ActionApi, destination: "tab" | "floating") -> Action
 ```
 
 <div>
@@ -19,6 +19,8 @@ Description
 
 <div group="break_current_node" id="break_current_node-Description" class="tabcontent"  style="display: block;" >
 Break the current node into a new tab or floating window.
+`destination` accepts `tab` or `floating`.
+Example: `action.break_current_node("floating")`.
 </div>
 
 </div>
@@ -632,7 +634,7 @@ Insert a tab before the current tab.
     <h2 class="func-name"> <code>fn</code> join_buffer_here </h2>
 
 ```rust,ignore
-fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action
+fn join_buffer_here(_: ActionApi, buffer_id: int, placement: "tab-after" | "tab-before" | "left" | "right" | "up" | "down") -> Action
 ```
 
 <div>
@@ -645,6 +647,8 @@ Description
 
 <div group="join_buffer_here" id="join_buffer_here-Description" class="tabcontent"  style="display: block;" >
 Join a buffer at the current node.
+`placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
+Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
 
 </div>
@@ -889,7 +893,7 @@ Build a no-op action.
     <h2 class="func-name"> <code>fn</code> notify </h2>
 
 ```rust,ignore
-fn notify(_: ActionApi, level: String, message: String) -> Action
+fn notify(_: ActionApi, level: "info" | "warn" | "error", message: String) -> Action
 ```
 
 <div>
@@ -911,7 +915,7 @@ Emit a client notification.
     <h2 class="func-name"> <code>fn</code> open_buffer_history </h2>
 
 ```rust,ignore
-fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action
+fn open_buffer_history(_: ActionApi, buffer_id: int, scope: "visible" | "full", placement: "floating" | "tab") -> Action
 ```
 
 <div>
@@ -924,6 +928,8 @@ Description
 
 <div group="open_buffer_history" id="open_buffer_history-Description" class="tabcontent"  style="display: block;" >
 Open the history of a buffer in a new view.
+`scope` accepts `visible` or `full`. `placement` accepts `floating` or `tab`.
+Example: `action.open_buffer_history(12, "visible", "floating")`.
 </div>
 
 </div>
@@ -1485,7 +1491,7 @@ Send a key notation sequence to the focused buffer.
     <h2 class="func-name"> <code>fn</code> split_with </h2>
 
 ```rust,ignore
-fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action
+fn split_with(_: ActionApi, direction: "h" | "horizontal" | "v" | "vertical", tree: TreeSpec) -> Action
 ```
 
 <div>

@@ -14,6 +14,7 @@ assert_cmd.workspace = true
 embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
 embers-server = { path = "../embers-server" }
+fastrand.workspace = true
 libc.workspace = true
 portable-pty.workspace = true
 tempfile.workspace = true

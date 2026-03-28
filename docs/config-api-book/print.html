@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd58f06f.js";
+            window.path_to_searchindex_js = "searchindex-0ec70bca.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c8603eba.js"></script>
@@ -414,7 +414,7 @@ Remove a previously bound key sequence.
     
 <h2 class="func-name"> <code>fn</code> break_current_node </h2>
 
-<pre><code class="language-rust ignore">fn break_current_node(_: ActionApi, destination: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn break_current_node(_: ActionApi, destination: "tab" | "floating") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="break_current_node" id="link-break_current_node-Description" class="tablinks active" onclick="openTab(event, &#39;break_current_node&#39;, &#39;Description&#39;)">
@@ -424,6 +424,8 @@ Description
 
 <div group="break_current_node" id="break_current_node-Description" class="tabcontent" style="display: block;">
 Break the current node into a new tab or floating window.
+`destination` accepts `tab` or `floating`.
+Example: `action.break_current_node("floating")`.
 </div>
 
 </div>
@@ -1010,7 +1012,7 @@ Insert a tab before the current tab.
     
 <h2 class="func-name"> <code>fn</code> join_buffer_here </h2>
 
-<pre><code class="language-rust ignore">fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn join_buffer_here(_: ActionApi, buffer_id: int, placement: "tab-after" | "tab-before" | "left" | "right" | "up" | "down") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="join_buffer_here" id="link-join_buffer_here-Description" class="tablinks active" onclick="openTab(event, &#39;join_buffer_here&#39;, &#39;Description&#39;)">
@@ -1020,6 +1022,8 @@ Description
 
 <div group="join_buffer_here" id="join_buffer_here-Description" class="tabcontent" style="display: block;">
 Join a buffer at the current node.
+`placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
+Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
 
 </div>
@@ -1257,7 +1261,7 @@ Build a no-op action.
     
 <h2 class="func-name"> <code>fn</code> notify </h2>
 
-<pre><code class="language-rust ignore">fn notify(_: ActionApi, level: String, message: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn notify(_: ActionApi, level: "info" | "warn" | "error", message: String) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="notify" id="link-notify-Description" class="tablinks active" onclick="openTab(event, &#39;notify&#39;, &#39;Description&#39;)">
@@ -1278,7 +1282,7 @@ Emit a client notification.
     
 <h2 class="func-name"> <code>fn</code> open_buffer_history </h2>
 
-<pre><code class="language-rust ignore">fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn open_buffer_history(_: ActionApi, buffer_id: int, scope: "visible" | "full", placement: "floating" | "tab") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="open_buffer_history" id="link-open_buffer_history-Description" class="tablinks active" onclick="openTab(event, &#39;open_buffer_history&#39;, &#39;Description&#39;)">
@@ -1288,6 +1292,8 @@ Description
 
 <div group="open_buffer_history" id="open_buffer_history-Description" class="tabcontent" style="display: block;">
 Open the history of a buffer in a new view.
+`scope` accepts `visible` or `full`. `placement` accepts `floating` or `tab`.
+Example: `action.open_buffer_history(12, "visible", "floating")`.
 </div>
 
 </div>
@@ -1826,7 +1832,7 @@ Send a key notation sequence to the focused buffer.
     
 <h2 class="func-name"> <code>fn</code> split_with </h2>
 
-<pre><code class="language-rust ignore">fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn split_with(_: ActionApi, direction: "h" | "horizontal" | "v" | "vertical", tree: TreeSpec) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="split_with" id="link-split_with-Description" class="tablinks active" onclick="openTab(event, &#39;split_with&#39;, &#39;Description&#39;)">
@@ -2345,6 +2351,11 @@ Description
 Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
 <p><code>segment(_: UiApi, text: String) -&gt; BarSegment</code> produces plain text with default
 [<code>StyleSpec</code>] values and no click target.</p>
+<p>The overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> supports
+<code>fg</code>, <code>bg</code>, <code>bold</code>, <code>italic</code>, <code>underline</code>, <code>dim</code>, <code>blink</code>, and <code>target</code> keys to override
+styling and attach an optional interaction target. <code>dim</code> is a boolean that renders the
+text with reduced intensity for a muted appearance, and <code>blink</code> is a boolean that enables
+blinking text for that segment.</p>
 </div>
 
 </div>
@@ -2494,7 +2505,7 @@ Register the function used to format the tab bar.
     
 <h2 class="func-name"> <code>fn</code> break_current_node </h2>
 
-<pre><code class="language-rust ignore">fn break_current_node(_: ActionApi, destination: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn break_current_node(_: ActionApi, destination: "tab" | "floating") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="break_current_node" id="link-break_current_node-Description-1" class="tablinks active" onclick="openTab(event, &#39;break_current_node&#39;, &#39;Description&#39;)">
@@ -2504,6 +2515,8 @@ Description
 
 <div group="break_current_node" id="break_current_node-Description-1" class="tabcontent" style="display: block;">
 Break the current node into a new tab or floating window.
+`destination` accepts `tab` or `floating`.
+Example: `action.break_current_node("floating")`.
 </div>
 
 </div>
@@ -3090,7 +3103,7 @@ Insert a tab before the current tab.
     
 <h2 class="func-name"> <code>fn</code> join_buffer_here </h2>
 
-<pre><code class="language-rust ignore">fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn join_buffer_here(_: ActionApi, buffer_id: int, placement: "tab-after" | "tab-before" | "left" | "right" | "up" | "down") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="join_buffer_here" id="link-join_buffer_here-Description-1" class="tablinks active" onclick="openTab(event, &#39;join_buffer_here&#39;, &#39;Description&#39;)">
@@ -3100,6 +3113,8 @@ Description
 
 <div group="join_buffer_here" id="join_buffer_here-Description-1" class="tabcontent" style="display: block;">
 Join a buffer at the current node.
+`placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
+Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
 
 </div>
@@ -3337,7 +3352,7 @@ Build a no-op action.
     
 <h2 class="func-name"> <code>fn</code> notify </h2>
 
-<pre><code class="language-rust ignore">fn notify(_: ActionApi, level: String, message: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn notify(_: ActionApi, level: "info" | "warn" | "error", message: String) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="notify" id="link-notify-Description-1" class="tablinks active" onclick="openTab(event, &#39;notify&#39;, &#39;Description&#39;)">
@@ -3358,7 +3373,7 @@ Emit a client notification.
     
 <h2 class="func-name"> <code>fn</code> open_buffer_history </h2>
 
-<pre><code class="language-rust ignore">fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn open_buffer_history(_: ActionApi, buffer_id: int, scope: "visible" | "full", placement: "floating" | "tab") -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="open_buffer_history" id="link-open_buffer_history-Description-1" class="tablinks active" onclick="openTab(event, &#39;open_buffer_history&#39;, &#39;Description&#39;)">
@@ -3368,6 +3383,8 @@ Description
 
 <div group="open_buffer_history" id="open_buffer_history-Description-1" class="tabcontent" style="display: block;">
 Open the history of a buffer in a new view.
+`scope` accepts `visible` or `full`. `placement` accepts `floating` or `tab`.
+Example: `action.open_buffer_history(12, "visible", "floating")`.
 </div>
 
 </div>
@@ -3906,7 +3923,7 @@ Send a key notation sequence to the focused buffer.
     
 <h2 class="func-name"> <code>fn</code> split_with </h2>
 
-<pre><code class="language-rust ignore">fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn split_with(_: ActionApi, direction: "h" | "horizontal" | "v" | "vertical", tree: TreeSpec) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="split_with" id="link-split_with-Description-1" class="tablinks active" onclick="openTab(event, &#39;split_with&#39;, &#39;Description&#39;)">
@@ -6295,6 +6312,11 @@ Description
 Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
 <p><code>segment(_: UiApi, text: String) -&gt; BarSegment</code> produces plain text with default
 [<code>StyleSpec</code>] values and no click target.</p>
+<p>The overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> supports
+<code>fg</code>, <code>bg</code>, <code>bold</code>, <code>italic</code>, <code>underline</code>, <code>dim</code>, <code>blink</code>, and <code>target</code> keys to override
+styling and attach an optional interaction target. <code>dim</code> is a boolean that renders the
+text with reduced intensity for a muted appearance, and <code>blink</code> is a boolean that enables
+blinking text for that segment.</p>
 </div>
 
 </div>

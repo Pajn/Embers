@@ -287,7 +287,7 @@ fn write_page_set(
             .ok_or_else(|| format!("missing rendered page for {}", page.title))?;
         fs::write(
             output_dir.join(page.file),
-            trim_trailing_whitespace(&content),
+            trim_trailing_whitespace(&rewrite_generated_markdown(&content)),
         )?;
     }
     Ok(())
@@ -303,6 +303,66 @@ fn trim_trailing_whitespace(content: &str) -> String {
         trimmed.push('\n');
     }
     trimmed
+}
+
+fn rewrite_generated_markdown(content: &str) -> String {
+    rewrite_signature_literals(content)
+}
+
+#[cfg(test)]
+fn rewrite_generated_defs(path: &Path) -> Result<(), Box<dyn Error>> {
+    let content = fs::read_to_string(path)?;
+    fs::write(path, rewrite_signature_literals(&content))?;
+    Ok(())
+}
+
+// Rhai emits these signatures with generic `String`/`string` parameters, so docs generation
+// rewrites the exact `break_current_node`, `join_buffer_here`, `open_buffer_history`, `notify`,
+// and `split_with` patterns into literal unions after the fact. Both the markdown forms without
+// trailing semicolons and the defs forms with trailing semicolons are matched here, so upstream
+// Rhai signature changes will break these replacements and should be updated together.
+fn rewrite_signature_literals(content: &str) -> String {
+    content
+        .replace(
+            "fn break_current_node(_: ActionApi, destination: String) -> Action",
+            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action",
+        )
+        .replace(
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action",
+        )
+        .replace(
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action",
+        )
+        .replace(
+            "fn notify(_: ActionApi, level: String, message: String) -> Action",
+            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: String) -> Action",
+        )
+        .replace(
+            "fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action",
+            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action",
+        )
+        .replace(
+            "fn break_current_node(_: ActionApi, destination: string) -> Action;",
+            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action;",
+        )
+        .replace(
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action;",
+        )
+        .replace(
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action;",
+        )
+        .replace(
+            "fn notify(_: ActionApi, level: string, message: string) -> Action;",
+            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: string) -> Action;",
+        )
+        .replace(
+            "fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;",
+            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action;",
+        )
 }
 
 fn filter_item_for_page(item: &Item, page: &PageSpec<'_>) -> Option<Item> {
@@ -623,4 +683,86 @@ tabbar.set_formatter(format_tabs);
 mouse.set_click_focus(true);
 ```
 "##
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{rewrite_generated_defs, rewrite_generated_markdown, rewrite_signature_literals};
+
+    #[test]
+    fn rewrite_signature_literals_rewrites_known_markdown_and_defs_signatures() {
+        let input = concat!(
+            "fn break_current_node(_: ActionApi, destination: String) -> Action\n",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action\n",
+            "fn notify(_: ActionApi, level: String, message: String) -> Action\n",
+            "fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action\n",
+            "unchanged\n",
+            "fn break_current_node(_: ActionApi, destination: string) -> Action;\n",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;\n",
+            "fn notify(_: ActionApi, level: string, message: string) -> Action;\n",
+            "fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;\n",
+        );
+        let expected = concat!(
+            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action\n",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action\n",
+            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: String) -> Action\n",
+            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action\n",
+            "unchanged\n",
+            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action;\n",
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action;\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action;\n",
+            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: string) -> Action;\n",
+            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action;\n",
+        );
+
+        assert_eq!(rewrite_signature_literals(input), expected);
+        assert_eq!(
+            rewrite_signature_literals("already-correct"),
+            "already-correct"
+        );
+    }
+
+    #[test]
+    fn rewrite_generated_markdown_rewrites_signature_literals_and_is_idempotent() {
+        let input = "fn break_current_node(_: ActionApi, destination: String) -> Action";
+        let expected =
+            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action";
+
+        assert_eq!(rewrite_generated_markdown(input), expected);
+        assert_eq!(rewrite_generated_markdown(expected), expected);
+    }
+
+    #[test]
+    fn rewrite_generated_defs_updates_file_contents() {
+        let tempdir = tempdir().expect("create tempdir");
+        let path = tempdir.path().join("runtime.rhai");
+        let input = concat!(
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;\n",
+        );
+        let expected = concat!(
+            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action;\n",
+            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action;\n",
+        );
+
+        fs::write(&path, input).expect("write defs fixture");
+        rewrite_generated_defs(&path).expect("rewrite defs");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten defs"),
+            expected
+        );
+
+        rewrite_generated_defs(&path).expect("rewrite defs again");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read rewritten defs"),
+            expected
+        );
+    }
 }

@@ -4,7 +4,7 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Point, Rect, Result,
     SessionId, Size, SplitDirection,
 };
-use embers_protocol::{NodeRecordKind, SessionRecord};
+use embers_protocol::{FloatingRecord, NodeRecordKind, SessionRecord};
 
 use crate::state::ClientState;
 
@@ -92,43 +92,27 @@ impl PresentationModel {
             activity_by_node: BTreeMap::new(),
             buffer_count_by_node: BTreeMap::new(),
         };
-        if let Some(zoomed_node_id) = session.zoomed_node_id
-            && state.nodes.contains_key(&zoomed_node_id)
+        if let Some(zoomed_node_id) = session
+            .zoomed_node_id
+            .filter(|node_id| node_belongs_to_session(state, session, *node_id))
         {
-            projector.project_node(zoomed_node_id, root_bounds, None, false, Vec::new())?;
+            if let Some(window) = floating_ancestor_for_node(state, session, zoomed_node_id) {
+                project_floating_window(&mut projector, window, root_bounds, zoomed_node_id)?;
+            } else {
+                let is_root = zoomed_node_id == session.root_node_id;
+                projector.project_node(zoomed_node_id, root_bounds, None, is_root, Vec::new())?;
+            }
         } else {
             projector.project_node(session.root_node_id, root_bounds, None, true, Vec::new())?;
 
-            let overlay_bounds = root_bounds;
             for floating_id in &session.floating_ids {
                 let Some(window) = state.floating.get(floating_id) else {
                     continue;
                 };
-                if !window.visible {
+                if !node_belongs_to_session(state, session, window.root_node_id) {
                     continue;
                 }
-
-                let rect = clip_rect(geometry_rect(window.geometry), overlay_bounds);
-                if rect.size.width == 0 || rect.size.height == 0 {
-                    continue;
-                }
-
-                let content_rect = inset_border(rect);
-                projector.projection.floating.push(FloatingFrame {
-                    floating_id: window.id,
-                    rect,
-                    content_rect,
-                    title: window.title.clone(),
-                    focused: window.focused,
-                });
-
-                projector.project_node(
-                    window.root_node_id,
-                    content_rect,
-                    Some(window.id),
-                    false,
-                    Vec::new(),
-                )?;
+                project_floating_window(&mut projector, window, root_bounds, window.root_node_id)?;
             }
         }
 
@@ -201,6 +185,53 @@ impl PresentationModel {
             .rev()
             .find(|floating| floating.rect.contains(point))
     }
+}
+
+fn node_belongs_to_session(state: &ClientState, session: &SessionRecord, node_id: NodeId) -> bool {
+    let mut current = Some(node_id);
+    while let Some(candidate) = current {
+        let Some(node) = state.nodes.get(&candidate) else {
+            return false;
+        };
+        if node.session_id != session.id {
+            return false;
+        }
+        if candidate == session.root_node_id {
+            return true;
+        }
+        if floating_window_for_root(state, session, candidate).is_some() {
+            return true;
+        }
+        current = node.parent_id;
+    }
+    false
+}
+
+fn floating_window_for_root<'a>(
+    state: &'a ClientState,
+    session: &SessionRecord,
+    root_node_id: NodeId,
+) -> Option<&'a FloatingRecord> {
+    session
+        .floating_ids
+        .iter()
+        .filter_map(|floating_id| state.floating.get(floating_id))
+        .find(|window| window.root_node_id == root_node_id)
+}
+
+fn floating_ancestor_for_node<'a>(
+    state: &'a ClientState,
+    session: &SessionRecord,
+    node_id: NodeId,
+) -> Option<&'a FloatingRecord> {
+    let mut current = Some(node_id);
+    while let Some(candidate) = current {
+        if let Some(window) = floating_window_for_root(state, session, candidate) {
+            return Some(window);
+        }
+        current = state.nodes.get(&candidate).and_then(|node| node.parent_id);
+    }
+    None
 }
 
 #[derive(Default)]
@@ -638,10 +669,12 @@ fn inset_top(rect: Rect, amount: u16) -> Rect {
 mod zoom_tests {
     use super::PresentationModel;
     use crate::state::ClientState;
-    use embers_core::{ActivityState, BufferId, NodeId, PtySize, SessionId, Size};
+    use embers_core::{
+        ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
+    };
     use embers_protocol::{
-        BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, NodeRecord,
-        NodeRecordKind, SessionRecord, SplitRecord,
+        BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, FloatingRecord,
+        NodeRecord, NodeRecordKind, SessionRecord, SplitRecord, TabRecord, TabsRecord,
     };
 
     #[test]
@@ -732,6 +765,357 @@ mod zoom_tests {
         assert_eq!(presentation.leaves.len(), 1);
         assert_eq!(presentation.leaves[0].node_id, NodeId(3));
     }
+
+    #[test]
+    fn hidden_zoomed_floating_is_not_projected() {
+        let mut state = ClientState::default();
+        state.sessions.insert(
+            SessionId(1),
+            SessionRecord {
+                id: SessionId(1),
+                name: "main".to_owned(),
+                root_node_id: NodeId(1),
+                floating_ids: vec![FloatingId(30)],
+                focused_leaf_id: Some(NodeId(3)),
+                focused_floating_id: Some(FloatingId(30)),
+                zoomed_node_id: Some(NodeId(3)),
+            },
+        );
+        for (node_id, buffer_id, focused, zoomed) in [
+            (NodeId(1), BufferId(10), false, false),
+            (NodeId(3), BufferId(11), true, true),
+        ] {
+            state.nodes.insert(
+                node_id,
+                NodeRecord {
+                    id: node_id,
+                    session_id: SessionId(1),
+                    parent_id: None,
+                    kind: NodeRecordKind::BufferView,
+                    buffer_view: Some(BufferViewRecord {
+                        buffer_id,
+                        focused,
+                        zoomed,
+                        follow_output: true,
+                        last_render_size: PtySize::new(80, 24),
+                    }),
+                    split: None,
+                    tabs: None,
+                },
+            );
+            state.buffers.insert(
+                buffer_id,
+                BufferRecord {
+                    id: buffer_id,
+                    title: format!("buffer-{buffer_id}"),
+                    command: vec!["sh".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: Some(1),
+                    attachment_node_id: Some(node_id),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            );
+        }
+        state.floating.insert(
+            FloatingId(30),
+            FloatingRecord {
+                id: FloatingId(30),
+                session_id: SessionId(1),
+                root_node_id: NodeId(3),
+                title: Some("hidden".to_owned()),
+                geometry: FloatGeometry::new(4, 4, 20, 10),
+                focused: true,
+                visible: false,
+                close_on_empty: true,
+            },
+        );
+
+        let presentation = PresentationModel::project(
+            &state,
+            SessionId(1),
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("project hidden zoomed floating");
+        assert!(presentation.floating.is_empty());
+        assert!(presentation.leaves.is_empty());
+        assert!(presentation.root_tabs.is_none());
+        assert_eq!(presentation.focused_floating_id(), None);
+    }
+
+    #[test]
+    fn zoomed_descendant_of_floating_root_keeps_floating_projection() {
+        let mut state = ClientState::default();
+        state.sessions.insert(
+            SessionId(1),
+            SessionRecord {
+                id: SessionId(1),
+                name: "main".to_owned(),
+                root_node_id: NodeId(1),
+                floating_ids: vec![FloatingId(30)],
+                focused_leaf_id: Some(NodeId(12)),
+                focused_floating_id: Some(FloatingId(30)),
+                zoomed_node_id: Some(NodeId(12)),
+            },
+        );
+        state.nodes.insert(
+            NodeId(1),
+            NodeRecord {
+                id: NodeId(1),
+                session_id: SessionId(1),
+                parent_id: None,
+                kind: NodeRecordKind::BufferView,
+                buffer_view: Some(BufferViewRecord {
+                    buffer_id: BufferId(10),
+                    focused: false,
+                    zoomed: false,
+                    follow_output: true,
+                    last_render_size: PtySize::new(80, 24),
+                }),
+                split: None,
+                tabs: None,
+            },
+        );
+        state.nodes.insert(
+            NodeId(10),
+            NodeRecord {
+                id: NodeId(10),
+                session_id: SessionId(1),
+                parent_id: None,
+                kind: NodeRecordKind::Split,
+                buffer_view: None,
+                split: Some(SplitRecord {
+                    direction: embers_core::SplitDirection::Vertical,
+                    child_ids: vec![NodeId(11), NodeId(12)],
+                    sizes: vec![1, 1],
+                }),
+                tabs: None,
+            },
+        );
+        for (node_id, buffer_id, focused, zoomed) in [
+            (NodeId(11), BufferId(11), false, false),
+            (NodeId(12), BufferId(12), true, true),
+        ] {
+            state.nodes.insert(
+                node_id,
+                NodeRecord {
+                    id: node_id,
+                    session_id: SessionId(1),
+                    parent_id: Some(NodeId(10)),
+                    kind: NodeRecordKind::BufferView,
+                    buffer_view: Some(BufferViewRecord {
+                        buffer_id,
+                        focused,
+                        zoomed,
+                        follow_output: true,
+                        last_render_size: PtySize::new(80, 24),
+                    }),
+                    split: None,
+                    tabs: None,
+                },
+            );
+            state.buffers.insert(
+                buffer_id,
+                BufferRecord {
+                    id: buffer_id,
+                    title: format!("buffer-{buffer_id}"),
+                    command: vec!["sh".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: Some(1),
+                    attachment_node_id: Some(node_id),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            );
+        }
+        state.buffers.insert(
+            BufferId(10),
+            BufferRecord {
+                id: BufferId(10),
+                title: "buffer-10".to_owned(),
+                command: vec!["sh".to_owned()],
+                cwd: None,
+                kind: BufferRecordKind::Pty,
+                state: BufferRecordState::Running,
+                pid: Some(1),
+                attachment_node_id: Some(NodeId(1)),
+                read_only: false,
+                helper_source_buffer_id: None,
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+                env: Default::default(),
+            },
+        );
+        state.floating.insert(
+            FloatingId(30),
+            FloatingRecord {
+                id: FloatingId(30),
+                session_id: SessionId(1),
+                root_node_id: NodeId(10),
+                title: Some("popup".to_owned()),
+                geometry: FloatGeometry::new(4, 4, 20, 10),
+                focused: true,
+                visible: true,
+                close_on_empty: true,
+            },
+        );
+
+        let presentation = PresentationModel::project(
+            &state,
+            SessionId(1),
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("project zoomed floating descendant");
+
+        assert_eq!(presentation.floating.len(), 1);
+        assert_eq!(presentation.floating[0].floating_id, FloatingId(30));
+        assert_eq!(presentation.leaves.len(), 1);
+        assert_eq!(presentation.leaves[0].node_id, NodeId(12));
+        assert_eq!(presentation.leaves[0].floating_id, Some(FloatingId(30)));
+        assert_eq!(presentation.focused_floating_id(), Some(FloatingId(30)));
+    }
+
+    #[test]
+    fn zoomed_root_tabs_preserve_root_tabs_frame() {
+        let mut state = ClientState::default();
+        state.sessions.insert(
+            SessionId(1),
+            SessionRecord {
+                id: SessionId(1),
+                name: "main".to_owned(),
+                root_node_id: NodeId(1),
+                floating_ids: Vec::new(),
+                focused_leaf_id: Some(NodeId(2)),
+                focused_floating_id: None,
+                zoomed_node_id: Some(NodeId(1)),
+            },
+        );
+        state.nodes.insert(
+            NodeId(1),
+            NodeRecord {
+                id: NodeId(1),
+                session_id: SessionId(1),
+                parent_id: None,
+                kind: NodeRecordKind::Tabs,
+                buffer_view: None,
+                split: None,
+                tabs: Some(TabsRecord {
+                    active: 0,
+                    tabs: vec![TabRecord {
+                        title: "main".to_owned(),
+                        child_id: NodeId(2),
+                    }],
+                }),
+            },
+        );
+        state.nodes.insert(
+            NodeId(2),
+            NodeRecord {
+                id: NodeId(2),
+                session_id: SessionId(1),
+                parent_id: Some(NodeId(1)),
+                kind: NodeRecordKind::BufferView,
+                buffer_view: Some(BufferViewRecord {
+                    buffer_id: BufferId(10),
+                    focused: true,
+                    zoomed: false,
+                    follow_output: true,
+                    last_render_size: PtySize::new(80, 24),
+                }),
+                split: None,
+                tabs: None,
+            },
+        );
+        state.buffers.insert(
+            BufferId(10),
+            BufferRecord {
+                id: BufferId(10),
+                title: "buffer-10".to_owned(),
+                command: vec!["sh".to_owned()],
+                cwd: None,
+                kind: BufferRecordKind::Pty,
+                state: BufferRecordState::Running,
+                pid: Some(1),
+                attachment_node_id: Some(NodeId(2)),
+                read_only: false,
+                helper_source_buffer_id: None,
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+                env: Default::default(),
+            },
+        );
+
+        let presentation = PresentationModel::project(
+            &state,
+            SessionId(1),
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("project zoomed root tabs");
+
+        let root_tabs = presentation
+            .root_tabs
+            .as_ref()
+            .expect("root tabs frame exists");
+        assert_eq!(root_tabs.node_id, NodeId(1));
+        assert!(root_tabs.is_root);
+    }
+}
+
+fn project_floating_window(
+    projector: &mut Projector<'_>,
+    window: &FloatingRecord,
+    bounds: Rect,
+    node_id: NodeId,
+) -> Result<()> {
+    if !window.visible {
+        return Ok(());
+    }
+
+    let rect = clip_rect(geometry_rect(window.geometry), bounds);
+    if rect.size.width == 0 || rect.size.height == 0 {
+        return Ok(());
+    }
+
+    let content_rect = inset_border(rect);
+    projector.projection.floating.push(FloatingFrame {
+        floating_id: window.id,
+        rect,
+        content_rect,
+        title: window.title.clone(),
+        focused: window.focused,
+    });
+    projector.project_node(node_id, content_rect, Some(window.id), false, Vec::new())
 }
 
 fn inset_border(rect: Rect) -> Rect {

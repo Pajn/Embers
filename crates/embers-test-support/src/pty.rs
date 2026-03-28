@@ -1,30 +1,33 @@
 use std::io::{Read, Write};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use embers_core::{MuxError, PtySize, Result};
 use portable_pty::{
-    CommandBuilder, MasterPty, NativePtySystem, PtySize as PortableSize, PtySystem,
+    CommandBuilder, MasterPty, NativePtySystem, PtyPair, PtySize as PortableSize, PtySystem,
 };
 
 const OUTPUT_TAIL_CHARS: usize = 2000;
+static PTY_AVAILABLE: OnceLock<()> = OnceLock::new();
 
 /// Checks if PTY devices are available on this system.
 /// Returns true if we can successfully open a PTY pair.
 pub fn is_pty_available() -> bool {
-    let pty_system = NativePtySystem::default();
-    pty_system
-        .openpty(PortableSize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .is_ok()
+    if PTY_AVAILABLE.get().is_some() {
+        return true;
+    }
+    if PtyHarness::openpty_with_retry(PtySize::new(80, 24)).is_ok() {
+        let _ = PTY_AVAILABLE.set(());
+        true
+    } else {
+        false
+    }
 }
 
 pub struct PtyHarness {
+    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
     writer: Box<dyn Write + Send>,
@@ -39,51 +42,65 @@ impl PtyHarness {
     /// Initial delay between retries on PTY allocation failure
     const RETRY_DELAY: Duration = Duration::from_millis(100);
 
-    pub fn spawn(command: &str, args: &[&str], size: PtySize) -> Result<Self> {
+    /// Maximum random jitter added to retry backoff so concurrent probes do not align exactly.
+    const RETRY_JITTER_MS: u64 = 25;
+
+    fn openpty_with_retry(size: PtySize) -> Result<PtyPair> {
         let pty_system = NativePtySystem::default();
         let mut last_error = None;
 
         for attempt in 0..=Self::MAX_RETRIES {
-            let open_result = pty_system.openpty(PortableSize {
+            match pty_system.openpty(PortableSize {
                 rows: size.rows,
                 cols: size.cols,
                 pixel_width: size.pixel_width,
                 pixel_height: size.pixel_height,
-            });
-
-            let pair = match open_result {
-                Ok(pair) => pair,
+            }) {
+                Ok(pair) => return Ok(pair),
                 Err(error) => {
                     last_error = Some(error);
                     if attempt < Self::MAX_RETRIES {
-                        // Small delay before retry to allow OS to reclaim PTY resources
-                        thread::sleep(Self::RETRY_DELAY * (attempt + 1) as u32);
+                        let base_delay = Self::RETRY_DELAY * (attempt + 1) as u32;
+                        let jitter =
+                            Duration::from_millis(fastrand::u64(..Self::RETRY_JITTER_MS.max(1)));
+                        thread::sleep(base_delay + jitter);
                     }
-                    continue;
                 }
-            };
-
-            // PTY opened successfully, now proceed with spawning the command
-            // These operations are unlikely to fail if openpty succeeded
-            let mut command_builder = CommandBuilder::new(command);
-            for arg in args {
-                command_builder.arg(arg);
             }
+        }
 
-            let child = pair
-                .slave
-                .spawn_command(command_builder)
-                .map_err(|error| MuxError::pty(error.to_string()))?;
-            let mut reader = pair
-                .master
-                .try_clone_reader()
-                .map_err(|error| MuxError::pty(error.to_string()))?;
-            let writer = pair
-                .master
-                .take_writer()
-                .map_err(|error| MuxError::pty(error.to_string()))?;
-            let (tx, rx) = mpsc::channel();
-            let reader_join = thread::spawn(move || {
+        Err(MuxError::pty(format!(
+            "failed to openpty after {} attempts: {}",
+            Self::MAX_RETRIES + 1,
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown error".to_owned())
+        )))
+    }
+
+    pub fn spawn(command: &str, args: &[&str], size: PtySize) -> Result<Self> {
+        let mut command_builder = CommandBuilder::new(command);
+        for arg in args {
+            command_builder.arg(arg);
+        }
+
+        let pair = Self::openpty_with_retry(size)?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| MuxError::pty(error.to_string()))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| MuxError::pty(error.to_string()))?;
+        let mut child = pair
+            .slave
+            .spawn_command(command_builder)
+            .map_err(|error| MuxError::pty(error.to_string()))?;
+        let (tx, rx) = mpsc::channel();
+        let reader_join = thread::Builder::new()
+            .name("pty-reader".to_owned())
+            .spawn(move || {
                 let mut buffer = [0_u8; 1024];
                 loop {
                     match reader.read(&mut buffer) {
@@ -97,22 +114,25 @@ impl PtyHarness {
                         Err(_) => break,
                     }
                 }
-            });
+            })
+            .map_err(|error| {
+                let mut message = format!("failed to spawn PTY reader thread: {error}");
+                if let Err(kill_error) = child.kill() {
+                    message.push_str(&format!("; failed to kill child: {kill_error}"));
+                }
+                if let Err(wait_error) = child.wait() {
+                    message.push_str(&format!("; failed to reap child: {wait_error}"));
+                }
+                MuxError::pty(message)
+            })?;
 
-            return Ok(Self {
-                master: pair.master,
-                child,
-                writer,
-                output_rx: rx,
-                reader_join: Some(reader_join),
-            });
-        }
-
-        Err(MuxError::pty(format!(
-            "failed to openpty after {} attempts: {}",
-            Self::MAX_RETRIES + 1,
-            last_error.unwrap()
-        )))
+        Ok(Self {
+            master: pair.master,
+            child,
+            writer,
+            output_rx: rx,
+            reader_join: Some(reader_join),
+        })
     }
 
     pub fn write_all(&mut self, input: &str) -> Result<()> {
@@ -183,7 +203,6 @@ impl PtyHarness {
         if let Some(join) = self.reader_join.take() {
             let _ = join.join();
         }
-        let _ = &self.master;
         Ok(())
     }
 }
@@ -191,6 +210,7 @@ impl PtyHarness {
 impl Drop for PtyHarness {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
         if let Some(join) = self.reader_join.take() {
             let _ = join.join();
         }
