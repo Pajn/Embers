@@ -28,6 +28,7 @@ enum MessageKind : ubyte {
   ClientsResponse = 33,
   ClientResponse = 34,
   BufferLocationResponse = 35,
+  BufferWithLocationResponse = 36,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -77,6 +78,7 @@ enum BufferOp : ubyte {
   GetLocation = 8,
   Reveal = 9,
   OpenHistory = 10,
+  Inspect = 11,
 }
 
 enum NodeOp : ubyte {
@@ -137,6 +139,7 @@ enum BufferStateWire : ubyte {
   Created = 0,
   Running = 1,
   Exited = 2,
+  // Value 3 is intentionally reserved; the codec rejects unknown states explicitly.
   Interrupted = 4,
 }
 
@@ -186,81 +189,81 @@ table PingRequest {
 }
 
 table SessionRequest {
-  op:SessionOp = Create;
-  session_id:ulong = 0;
-  buffer_id:ulong = 0;
-  child_node_id:ulong = 0;
-  name:string;
-  title:string;
-  force:bool = false;
-  index:uint = 0;
+  op:SessionOp = Create (id: 0);
+  session_id:ulong = 0 (id: 1);
+  buffer_id:ulong = 0 (id: 2);
+  child_node_id:ulong = 0 (id: 3);
+  name:string (id: 4);
+  title:string (id: 5);
+  force:bool = false (id: 6);
+  index:uint = 0 (id: 7);
 }
 
 table BufferRequest {
-  op:BufferOp = Create;
-  buffer_id:ulong = 0;
-  session_id:ulong = 0;
-  client_id:ulong = 0;
-  attached_only:bool = false;
-  detached_only:bool = false;
-  force:bool = false;
-  start_line:ulong = 0;
-  line_count:uint = 0;
-  history_scope:BufferHistoryScopeWire = Full;
-  history_placement:BufferHistoryPlacementWire = Tab;
-  title:string;
-  command:[string];
-  cwd:string;
-  env_keys:[string];
-  env_values:[string];
+  op:BufferOp = Create (id: 0);
+  buffer_id:ulong = 0 (id: 1);
+  session_id:ulong = 0 (id: 2);
+  attached_only:bool = false (id: 3);
+  detached_only:bool = false (id: 4);
+  force:bool = false (id: 5);
+  start_line:ulong = 0 (id: 6);
+  line_count:uint = 0 (id: 7);
+  title:string (id: 8);
+  command:[string] (id: 9);
+  cwd:string (id: 10);
+  env_keys:[string] (id: 11);
+  env_values:[string] (id: 12);
+  client_id:ulong = 0 (id: 13);
+  history_scope:BufferHistoryScopeWire = Full (id: 14);
+  history_placement:BufferHistoryPlacementWire = Tab (id: 15);
 }
 
 table NodeRequest {
-  op:NodeOp = GetTree;
-  session_id:ulong = 0;
-  node_id:ulong = 0;
-  leaf_node_id:ulong = 0;
-  tabs_node_id:ulong = 0;
-  child_node_id:ulong = 0;
-  target_leaf_node_id:ulong = 0;
-  buffer_id:ulong = 0;
-  new_buffer_id:ulong = 0;
-  title:string;
-  index:uint = 0;
-  active:uint = 0;
-  direction:SplitDirectionWire = Horizontal;
-  break_destination:NodeBreakDestinationWire = Tab;
-  join_placement:NodeJoinPlacementWire = Left;
-  sizes:[ushort];
-  child_node_ids:[ulong];
-  titles:[string];
-  insert_before:bool = false;
-  first_node_id:ulong = 0;
-  second_node_id:ulong = 0;
-  sibling_node_id:ulong = 0;
+  op:NodeOp = GetTree (id: 0);
+  session_id:ulong = 0 (id: 1);
+  node_id:ulong = 0 (id: 2);
+  leaf_node_id:ulong = 0 (id: 3);
+  tabs_node_id:ulong = 0 (id: 4);
+  child_node_id:ulong = 0 (id: 5);
+  target_leaf_node_id:ulong = 0 (id: 6);
+  buffer_id:ulong = 0 (id: 7);
+  new_buffer_id:ulong = 0 (id: 8);
+  title:string (id: 9);
+  index:uint = 0 (id: 10);
+  active:uint = 0 (id: 11);
+  direction:SplitDirectionWire = Horizontal (id: 12);
+  sizes:[ushort] (id: 13);
+  child_node_ids:[ulong] (id: 14);
+  titles:[string] (id: 15);
+  insert_before:bool = false (id: 16);
+  break_destination:NodeBreakDestinationWire = Tab (id: 17);
+  join_placement:NodeJoinPlacementWire = Left (id: 18);
+  first_node_id:ulong = 0 (id: 19);
+  second_node_id:ulong = 0 (id: 20);
+  sibling_node_id:ulong = 0 (id: 21);
 }
 
 table FloatingRequest {
-  op:FloatingOp = Create;
-  floating_id:ulong = 0;
-  session_id:ulong = 0;
-  root_node_id:ulong = 0;
-  buffer_id:ulong = 0;
-  title:string;
-  x:ushort = 0;
-  y:ushort = 0;
-  width:ushort = 0;
-  height:ushort = 0;
-  focus:bool = true;
-  close_on_empty:bool = true;
+  op:FloatingOp = Create (id: 0);
+  floating_id:ulong = 0 (id: 1);
+  session_id:ulong = 0 (id: 2);
+  root_node_id:ulong = 0 (id: 3);
+  buffer_id:ulong = 0 (id: 4);
+  title:string (id: 5);
+  x:ushort = 0 (id: 6);
+  y:ushort = 0 (id: 7);
+  width:ushort = 0 (id: 8);
+  height:ushort = 0 (id: 9);
+  focus:bool = true (id: 10);
+  close_on_empty:bool = true (id: 11);
 }
 
 table InputRequest {
-  op:InputOp = Send;
-  buffer_id:ulong = 0;
-  bytes:[ubyte];
-  cols:ushort = 0;
-  rows:ushort = 0;
+  op:InputOp = Send (id: 0);
+  buffer_id:ulong = 0 (id: 1);
+  bytes:[ubyte] (id: 2);
+  cols:ushort = 0 (id: 3);
+  rows:ushort = 0 (id: 4);
 }
 
 table SubscribeRequest {
@@ -289,37 +292,37 @@ table ErrorResponse {
 }
 
 table SessionRecord {
-  id:ulong;
-  name:string;
-  root_node_id:ulong;
-  floating_ids:[ulong];
-  focused_leaf_id:ulong = 0;
-  focused_floating_id:ulong = 0;
-  zoomed_node_id:ulong = 0;
+  id:ulong (id: 0);
+  name:string (id: 1);
+  root_node_id:ulong (id: 2);
+  floating_ids:[ulong] (id: 3);
+  focused_leaf_id:ulong = 0 (id: 4);
+  focused_floating_id:ulong = 0 (id: 5);
+  zoomed_node_id:ulong = 0 (id: 6);
 }
 
 table BufferRecord {
-  id:ulong;
-  title:string;
-  command:[string];
-  cwd:string;
-  kind:BufferKindWire = Pty;
-  state:BufferStateWire = Created;
-  pid:uint = 0;
-  has_pid:bool = false;
-  attachment_node_id:ulong = 0;
-  read_only:bool = false;
-  helper_source_buffer_id:ulong = 0;
-  helper_scope:BufferHistoryScopeWire = Full;
-  has_helper_scope:bool = false;
-  pty_cols:ushort = 0;
-  pty_rows:ushort = 0;
-  activity:ActivityStateWire = Idle;
-  last_snapshot_seq:ulong = 0;
-  exit_code:int = 0;
-  has_exit_code:bool = false;
-  env_keys:[string];
-  env_values:[string];
+  id:ulong (id: 0);
+  title:string (id: 1);
+  command:[string] (id: 2);
+  cwd:string (id: 3);
+  state:BufferStateWire = Created (id: 4);
+  pid:uint = 0 (id: 5);
+  has_pid:bool = false (id: 6);
+  attachment_node_id:ulong = 0 (id: 7);
+  pty_cols:ushort = 0 (id: 8);
+  pty_rows:ushort = 0 (id: 9);
+  activity:ActivityStateWire = Idle (id: 10);
+  last_snapshot_seq:ulong = 0 (id: 11);
+  exit_code:int = 0 (id: 12);
+  has_exit_code:bool = false (id: 13);
+  env_keys:[string] (id: 14);
+  env_values:[string] (id: 15);
+  kind:BufferKindWire = Pty (id: 16);
+  read_only:bool = false (id: 17);
+  helper_source_buffer_id:ulong = 0 (id: 18);
+  helper_scope:BufferHistoryScopeWire = Full (id: 19);
+  has_helper_scope:bool = false (id: 20);
 }
 
 table BufferViewRecord {
@@ -422,14 +425,20 @@ table ClientResponse {
 }
 
 table BufferLocation {
-  buffer_id:ulong;
-  session_id:ulong = 0;
-  node_id:ulong = 0;
-  floating_id:ulong = 0;
+  buffer_id:ulong (id: 0);
+  session_id:ulong = 0 (id: 1);
+  node_id:ulong = 0 (id: 2);
+  floating_id:ulong = 0 (id: 3);
 }
 
 table BufferLocationResponse {
-  location:BufferLocation;
+  location:BufferLocation (id: 0);
+}
+
+table BufferWithLocationResponse {
+  buffer:BufferRecord (id: 0);
+  location:BufferLocation (id: 1);
+  at_root_tab:bool = false (id: 2);
 }
 
 table CursorState {
@@ -518,45 +527,46 @@ table ClientChangedEvent {
 }
 
 table Envelope {
-  request_id:ulong = 0;
-  kind:MessageKind = None;
-  ping_request:PingRequest;
-  session_request:SessionRequest;
-  buffer_request:BufferRequest;
-  node_request:NodeRequest;
-  floating_request:FloatingRequest;
-  input_request:InputRequest;
-  subscribe_request:SubscribeRequest;
-  unsubscribe_request:UnsubscribeRequest;
-  client_request:ClientRequest;
+  request_id:ulong = 0 (id: 0);
+  kind:MessageKind = None (id: 1);
+  ping_request:PingRequest (id: 2);
+  session_request:SessionRequest (id: 3);
+  buffer_request:BufferRequest (id: 4);
+  node_request:NodeRequest (id: 5);
+  floating_request:FloatingRequest (id: 6);
+  input_request:InputRequest (id: 7);
+  subscribe_request:SubscribeRequest (id: 8);
+  unsubscribe_request:UnsubscribeRequest (id: 9);
+  client_request:ClientRequest (id: 10);
 
-  ping_response:PingResponse;
-  ok_response:OkResponse;
-  error_response:ErrorResponse;
-  sessions_response:SessionsResponse;
-  session_snapshot_response:SessionSnapshotResponse;
-  buffers_response:BuffersResponse;
-  buffer_response:BufferResponse;
-  floating_list_response:FloatingListResponse;
-  floating_response:FloatingResponse;
-  subscription_ack_response:SubscriptionAckResponse;
-  snapshot_response:SnapshotResponse;
-  visible_snapshot_response:VisibleSnapshotResponse;
-  scrollback_slice_response:ScrollbackSliceResponse;
-  clients_response:ClientsResponse;
-  client_response:ClientResponse;
-  buffer_location_response:BufferLocationResponse;
+  ping_response:PingResponse (id: 11);
+  ok_response:OkResponse (id: 12);
+  error_response:ErrorResponse (id: 13);
+  sessions_response:SessionsResponse (id: 14);
+  session_snapshot_response:SessionSnapshotResponse (id: 15);
+  buffers_response:BuffersResponse (id: 16);
+  buffer_response:BufferResponse (id: 17);
+  floating_list_response:FloatingListResponse (id: 18);
+  floating_response:FloatingResponse (id: 19);
+  subscription_ack_response:SubscriptionAckResponse (id: 20);
+  snapshot_response:SnapshotResponse (id: 21);
+  visible_snapshot_response:VisibleSnapshotResponse (id: 22);
+  scrollback_slice_response:ScrollbackSliceResponse (id: 23);
+  clients_response:ClientsResponse (id: 24);
+  client_response:ClientResponse (id: 25);
 
-  session_created_event:SessionCreatedEvent;
-  session_closed_event:SessionClosedEvent;
-  buffer_created_event:BufferCreatedEvent;
-  buffer_detached_event:BufferDetachedEvent;
-  node_changed_event:NodeChangedEvent;
-  floating_changed_event:FloatingChangedEvent;
-  focus_changed_event:FocusChangedEvent;
-  render_invalidated_event:RenderInvalidatedEvent;
-  session_renamed_event:SessionRenamedEvent;
-  client_changed_event:ClientChangedEvent;
+  session_created_event:SessionCreatedEvent (id: 26);
+  session_closed_event:SessionClosedEvent (id: 27);
+  buffer_created_event:BufferCreatedEvent (id: 28);
+  buffer_detached_event:BufferDetachedEvent (id: 29);
+  node_changed_event:NodeChangedEvent (id: 30);
+  floating_changed_event:FloatingChangedEvent (id: 31);
+  focus_changed_event:FocusChangedEvent (id: 32);
+  render_invalidated_event:RenderInvalidatedEvent (id: 33);
+  session_renamed_event:SessionRenamedEvent (id: 34);
+  client_changed_event:ClientChangedEvent (id: 35);
+  buffer_location_response:BufferLocationResponse (id: 36);
+  buffer_with_location_response:BufferWithLocationResponse (id: 37);
 }
 
 root_type Envelope;

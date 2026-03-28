@@ -25,6 +25,7 @@ embers-core = { path = "../embers-core" }
 embers-protocol = { path = "../embers-protocol" }
 embers-server = { path = "../embers-server" }
 libc.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
@@ -32,6 +33,7 @@ unicode-width.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 embers-test-support = { path = "../embers-test-support" }
+filetime = "0.2"
 predicates.workspace = true
 tempfile.workspace = true
 

@@ -79,22 +79,15 @@ pub fn buffer_location(
 ) -> Result<BufferLocation> {
     let buffer = state.buffer(buffer_id)?;
     let node_id = match buffer.attachment {
-        BufferAttachment::Attached(node_id) => Some(node_id),
-        BufferAttachment::Detached => None,
+        BufferAttachment::Attached(node_id) => node_id,
+        BufferAttachment::Detached => return Ok(BufferLocation::detached(buffer_id)),
     };
-    let session_id = node_id
-        .map(|node_id| state.node(node_id).map(|node| node.session_id()))
-        .transpose()?;
-    let floating_id = node_id
-        .map(|node_id| state.floating_id_for_node(node_id))
-        .transpose()?
-        .flatten();
+    let session_id = state.node(node_id)?.session_id();
+    let floating_id = state.floating_id_for_node(node_id)?;
 
-    Ok(BufferLocation {
-        buffer_id,
-        session_id,
-        node_id,
-        floating_id,
+    Ok(match floating_id {
+        Some(floating_id) => BufferLocation::floating(buffer_id, session_id, node_id, floating_id),
+        None => BufferLocation::session(buffer_id, session_id, node_id),
     })
 }
 

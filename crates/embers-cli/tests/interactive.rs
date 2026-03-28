@@ -1,21 +1,23 @@
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, new_request_id};
 use embers_protocol::{
-    BufferRequest, ClientMessage, InputRequest, ServerResponse, SessionSnapshot,
+    BufferRequest, ClientMessage, InputRequest, ServerResponse, SessionRequest, SessionSnapshot,
     VisibleSnapshotResponse,
 };
-use embers_test_support::{PtyHarness, TestConnection, TestServer, cargo_bin, cargo_bin_path};
-use tokio::sync::Mutex;
-
-use std::sync::OnceLock;
-
-fn test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use embers_test_support::{
+    PtyHarness, TestConnection, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path,
+};
+use filetime::FileTime;
 
 use crate::support::{require_pty, run_cli, session_snapshot_by_name, stdout};
 
@@ -31,16 +33,23 @@ const PAGE_UP_ATTEMPTS: usize = 4;
 /// of orphaned __serve processes when dropped.
 struct SpawnedEmbers {
     socket_path: PathBuf,
+    started_server: bool,
 }
 
 impl SpawnedEmbers {
-    fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+    fn new(socket_path: PathBuf, started_server: bool) -> Self {
+        Self {
+            socket_path,
+            started_server,
+        }
     }
 }
 
 impl Drop for SpawnedEmbers {
     fn drop(&mut self) {
+        if !self.started_server {
+            return;
+        }
         // Kill any orphaned __serve process for our socket
         kill_orphaned_server(&self.socket_path);
     }
@@ -51,29 +60,199 @@ impl Drop for SpawnedEmbers {
 fn kill_orphaned_server(socket_path: &Path) {
     let pid_path = socket_path.with_extension("pid");
 
-    // Try to read and kill the PID from the pid file
-    if let Ok(pid_str) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
-        && pid > 0
+    let matched_pid = try_signal_server(&pid_path, socket_path, libc::SIGTERM);
+    if let Some(matched_pid) = matched_pid
+        && wait_for_server_exit(matched_pid, socket_path)
     {
-        // SAFETY: pid comes from our own pid file
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+        if read_pid(&pid_path) == Some(matched_pid) {
+            let _ = fs::remove_file(&pid_path);
+        }
+        return;
     }
 
     // Wait briefly for graceful shutdown
     std::thread::sleep(Duration::from_millis(50));
 
-    // Force kill if still alive
-    if let Ok(pid_str) = fs::read_to_string(&pid_path)
-        && let Ok(pid) = pid_str.trim().parse::<i32>()
-        && pid > 0
+    let matched_pid = try_signal_server(&pid_path, socket_path, libc::SIGKILL);
+    if let Some(matched_pid) = matched_pid
+        && wait_for_server_exit(matched_pid, socket_path)
+        && read_pid(&pid_path) == Some(matched_pid)
     {
-        // SAFETY: pid comes from our own pid file
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _ = fs::remove_file(&pid_path);
+    }
+}
+
+fn try_signal_server(pid_path: &Path, socket_path: &Path, signal: i32) -> Option<i32> {
+    let pid = read_pid(pid_path)?;
+    if !pid_matches_serve_process(pid, socket_path) {
+        return None;
+    }
+    // SAFETY: pid was read from our pid file and verified against the active __serve command line.
+    unsafe { libc::kill(pid, signal) };
+    Some(pid)
+}
+
+fn wait_for_server_exit(pid: i32, socket_path: &Path) -> bool {
+    for _ in 0..20 {
+        if !pid_matches_serve_process(pid, socket_path) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    !pid_matches_serve_process(pid, socket_path)
+}
+
+fn read_pid(pid_path: &Path) -> Option<i32> {
+    let pid = fs::read_to_string(pid_path).ok()?;
+    let pid = pid.trim().parse::<i32>().ok()?;
+    (pid > 0).then_some(pid)
+}
+
+fn pid_matches_serve_process(pid: i32, socket_path: &Path) -> bool {
+    let expected_binary = cargo_bin_path("embers");
+    let Some((exe_path, argv)) = process_exe_and_argv(pid) else {
+        return false;
+    };
+
+    same_path(&exe_path, &expected_binary)
+        && argv
+            .first()
+            .is_some_and(|arg| same_path(Path::new(arg.as_os_str()), &expected_binary))
+        && argv.get(1).is_some_and(|arg| arg == OsStr::new("__serve"))
+        && argv.windows(2).any(|window| {
+            window[0] == OsStr::new("--socket")
+                && same_path(Path::new(window[1].as_os_str()), socket_path)
+        })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn process_exe_and_argv(pid: i32) -> Option<(PathBuf, Vec<OsString>)> {
+    let exe_path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv = split_nul_args(&cmdline)?;
+    Some((exe_path, argv))
+}
+
+#[cfg(target_os = "macos")]
+fn process_exe_and_argv(pid: i32) -> Option<(PathBuf, Vec<OsString>)> {
+    let exe_path = process_exe_path(pid)?;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = 0usize;
+    // SAFETY: `mib` names the procargs sysctl and `size` is a valid output parameter.
+    let size_result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            u32::try_from(mib.len()).ok()?,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if size_result != 0 || size == 0 {
+        return None;
     }
 
-    // Clean up pid file
-    let _ = fs::remove_file(&pid_path);
+    let mut bytes = vec![0u8; size];
+    // SAFETY: `bytes` is allocated to the kernel-reported size and all pointers remain valid.
+    let read_result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            u32::try_from(mib.len()).ok()?,
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read_result != 0 || size == 0 {
+        return None;
+    }
+    bytes.truncate(size);
+    let argv = parse_macos_argv(&bytes)?;
+    Some((exe_path, argv))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn process_exe_and_argv(_pid: i32) -> Option<(PathBuf, Vec<OsString>)> {
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn split_nul_args(bytes: &[u8]) -> Option<Vec<OsString>> {
+    let args = bytes
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| OsString::from_vec(arg.to_vec()))
+        .collect::<Vec<_>>();
+    (!args.is_empty()).then_some(args)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_argv(bytes: &[u8]) -> Option<Vec<OsString>> {
+    let argc =
+        i32::from_ne_bytes(bytes.get(..std::mem::size_of::<i32>())?.try_into().ok()?) as usize;
+    let mut index = std::mem::size_of::<i32>();
+    while bytes.get(index).is_some_and(|byte| *byte != 0) {
+        index += 1;
+    }
+    while bytes.get(index).is_some_and(|byte| *byte == 0) {
+        index += 1;
+    }
+
+    let mut argv = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| *byte != 0) {
+            index += 1;
+        }
+        if start == index {
+            return None;
+        }
+        argv.push(OsString::from_vec(bytes[start..index].to_vec()));
+        while bytes.get(index).is_some_and(|byte| *byte == 0) {
+            index += 1;
+        }
+    }
+
+    (!argv.is_empty()).then_some(argv)
+}
+
+#[cfg(target_os = "macos")]
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_pidpath(pid: i32, buffer: *mut libc::c_void, buffersize: u32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn process_exe_path(pid: i32) -> Option<PathBuf> {
+    let mut buffer = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+    // SAFETY: `buffer` is a valid writable output buffer for `proc_pidpath`.
+    let length = unsafe {
+        proc_pidpath(
+            pid,
+            buffer.as_mut_ptr().cast(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+
+    // SAFETY: successful `proc_pidpath` writes a NUL-terminated path into `buffer`.
+    let path = unsafe { CStr::from_ptr(buffer.as_ptr().cast()) };
+    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    left == right
+        || fs::canonicalize(left)
+            .ok()
+            .zip(fs::canonicalize(right).ok())
+            .is_some_and(|(left, right)| left == right)
 }
 
 /// Spawn an embers client process with the given arguments and return a guard
@@ -83,6 +262,7 @@ fn kill_orphaned_server(socket_path: &Path) {
 fn spawn_embers(args: &[&str], socket_path: PathBuf) -> (SpawnedEmbers, PtyHarness) {
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
+    let started_server = !socket_path.exists() && !socket_path.with_extension("pid").exists();
     let path = format!(
         "PATH={}:{}",
         binary_dir.display(),
@@ -97,7 +277,7 @@ fn spawn_embers(args: &[&str], socket_path: PathBuf) -> (SpawnedEmbers, PtyHarne
     let argv = env_and_args.iter().map(String::as_str).collect::<Vec<_>>();
     let harness = PtyHarness::spawn("/usr/bin/env", &argv, PtySize::new(80, 24))
         .expect("spawn embers in pty");
-    (SpawnedEmbers::new(socket_path), harness)
+    (SpawnedEmbers::new(socket_path, started_server), harness)
 }
 
 async fn wait_for_socket(socket_path: &Path) {
@@ -228,44 +408,42 @@ fn split_child_order(
     snapshot: &SessionSnapshot,
     first_pane_id: u64,
     second_pane_id: u64,
-) -> [u64; 2] {
-    snapshot
-        .nodes
-        .iter()
-        .find_map(|node| {
-            let split = node.split.as_ref()?;
-            let child_ids = split
-                .child_ids
-                .iter()
-                .map(|child| child.0)
-                .collect::<Vec<_>>();
-            if child_ids.len() == 2
-                && child_ids.contains(&first_pane_id)
-                && child_ids.contains(&second_pane_id)
-            {
-                Some([child_ids[0], child_ids[1]])
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| {
-            panic!("split containing panes {first_pane_id} and {second_pane_id} exists")
-        })
+) -> Option<[u64; 2]> {
+    snapshot.nodes.iter().find_map(|node| {
+        let split = node.split.as_ref()?;
+        let child_ids = split
+            .child_ids
+            .iter()
+            .map(|child| child.0)
+            .collect::<Vec<_>>();
+        if child_ids.len() == 2
+            && child_ids.contains(&first_pane_id)
+            && child_ids.contains(&second_pane_id)
+        {
+            Some([child_ids[0], child_ids[1]])
+        } else {
+            None
+        }
+    })
 }
 
-fn disable_echo_in_pane(server: &TestServer, pane_id: u64) {
-    run_cli(
-        server,
-        [
-            "send-keys",
-            "-t",
-            &pane_id.to_string(),
-            "--enter",
-            "--",
-            "stty",
-            "-echo",
-        ],
-    );
+async fn disable_echo_in_pane(server: &TestServer, pane_id: u64) {
+    let marker = format!("__ECHO_DISABLED_{pane_id}__");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_containing_pane(&mut connection, pane_id).await;
+    let buffer_id = pane_buffer_id(&snapshot, pane_id);
+    send_buffer_input(
+        &mut connection,
+        buffer_id,
+        format!("stty -echo; printf '{marker}\\n'\r").as_bytes(),
+    )
+    .await;
+    connection
+        .wait_for_capture_contains(buffer_id, &marker, IO_TIMEOUT)
+        .await
+        .expect("echo-disable marker appears");
 }
 
 async fn send_buffer_input(connection: &mut TestConnection, buffer_id: BufferId, bytes: &[u8]) {
@@ -334,6 +512,32 @@ async fn wait_for_target_pane_buffer(
     }
 }
 
+async fn session_snapshot_containing_pane(
+    connection: &mut TestConnection,
+    pane_id: u64,
+) -> SessionSnapshot {
+    let response = connection
+        .request(&ClientMessage::Session(SessionRequest::List {
+            request_id: new_request_id(),
+        }))
+        .await
+        .expect("list sessions succeeds");
+    let sessions = match response {
+        ServerResponse::Sessions(response) => response.sessions,
+        other => panic!("expected sessions response, got {other:?}"),
+    };
+    for session in sessions {
+        let snapshot = connection
+            .session_snapshot(session.id)
+            .await
+            .expect("session snapshot succeeds");
+        if snapshot.nodes.iter().any(|node| node.id == NodeId(pane_id)) {
+            return snapshot;
+        }
+    }
+    panic!("pane {pane_id} missing from all sessions");
+}
+
 async fn wait_for_split_child_order(
     connection: &mut TestConnection,
     session_name: &str,
@@ -344,7 +548,8 @@ async fn wait_for_split_child_order(
     let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
     loop {
         let snapshot = session_snapshot_by_name(connection, session_name).await;
-        if split_child_order(&snapshot, pane_a, pane_b) == expected {
+        let current_order = split_child_order(&snapshot, pane_a, pane_b);
+        if current_order == Some(expected) {
             return snapshot;
         }
 
@@ -352,7 +557,7 @@ async fn wait_for_split_child_order(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for split order {:?}; last order {:?}",
             expected,
-            split_child_order(&snapshot, pane_a, pane_b)
+            current_order
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -386,7 +591,7 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embers_without_subcommand_starts_server_and_client() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -429,7 +634,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_subcommand_connects_to_running_server() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -478,7 +683,7 @@ async fn attach_subcommand_connects_to_running_server() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_commands_can_switch_and_detach_a_live_attached_client() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -540,7 +745,7 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -611,8 +816,8 @@ async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn page_up_enters_local_scrollback_and_shows_indicator() {
-    let _guard = test_lock().lock().await;
+async fn page_up_enters_local_scrollback() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -636,7 +841,7 @@ async fn page_up_enters_local_scrollback_and_shows_indicator() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_selection_yank_emits_osc52_clipboard_sequence() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -668,7 +873,7 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scripted_input_bindings_reach_the_live_terminal_in_pty() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -743,7 +948,7 @@ async fn scripted_input_bindings_reach_the_live_terminal_in_pty() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -806,12 +1011,21 @@ async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
         r#"bind("normal", "<C-g>", action.send_bytes_current("echo after-reload\r"))"#,
     )
     .expect("write reloaded config");
-    tokio::time::sleep(Duration::from_millis(700)).await;
-
-    harness.write_all("\x07").expect("trigger reloaded binding");
-    harness
-        .read_until_contains("after-reload", IO_TIMEOUT)
-        .expect("reloaded binding renders");
+    filetime::set_file_mtime(&config_path, FileTime::now()).expect("bump reloaded config mtime");
+    let reload_deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        harness.write_all("\x07").expect("trigger reloaded binding");
+        if harness
+            .read_until_contains("after-reload", Duration::from_millis(200))
+            .is_ok()
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < reload_deadline,
+            "timed out waiting for reloaded binding to activate"
+        );
+    }
 
     let output = run_pane_command(&mut harness, "echo still-live", "still-live");
     assert!(
@@ -826,7 +1040,7 @@ async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -861,7 +1075,7 @@ async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes(
         .trim()
         .parse::<u64>()
         .expect("split-window returns new pane id");
-    disable_echo_in_pane(&server, moving_pane_id);
+    disable_echo_in_pane(&server, moving_pane_id).await;
 
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -895,7 +1109,8 @@ async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes(
         .read_until_contains("split-live", IO_TIMEOUT)
         .expect("split output renders in attached client");
 
-    let initial_order = split_child_order(&snapshot, anchor_pane_id, moving_pane_id);
+    let initial_order = split_child_order(&snapshot, anchor_pane_id, moving_pane_id)
+        .expect("split containing anchor and moving panes exists");
     let expected_order = if initial_order == [anchor_pane_id, moving_pane_id] {
         run_cli(
             &server,
@@ -994,7 +1209,7 @@ async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_output() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }
@@ -1025,6 +1240,7 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
     let snapshot = session_snapshot_by_name(&mut connection, "main").await;
     let hidden_pane_id = root_tab_child_id(&snapshot, "bg").0;
     let hidden_buffer_id = pane_buffer_id(&snapshot, hidden_pane_id);
+    disable_echo_in_pane(&server, hidden_pane_id).await;
 
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
     let socket_path = server.socket_path().to_path_buf();
@@ -1039,7 +1255,7 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
     send_buffer_input(
         &mut connection,
         hidden_buffer_id,
-        b"printf 'hidden-bell\\a\\n'; sleep 0.5\r",
+        b"printf 'hidden-bell\\n\\a'; sleep 0.5\r",
     )
     .await;
     connection
@@ -1063,7 +1279,7 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
-    let _guard = test_lock().lock().await;
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     if !require_pty() {
         return;
     }

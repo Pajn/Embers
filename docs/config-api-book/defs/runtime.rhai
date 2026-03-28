@@ -14,14 +14,21 @@ fn bar(_: UiApi, left: array, center: array, right: array) -> BarSpec;
 ///
 /// `segment(_: UiApi, text: String) -> BarSegment` produces plain text with default
 /// [`StyleSpec`] values and no click target.
+///
+/// The overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports
+/// `fg`, `bg`, `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override
+/// styling and attach an optional interaction target. `dim` is a boolean that renders the
+/// text with reduced intensity for a muted appearance, and `blink` is a boolean that enables
+/// blinking text for that segment.
 fn segment(_: UiApi, text: string) -> BarSegment;
 
 /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
 ///
 /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-/// `bold`, `italic`, `underline`, `dim`, and `target` keys to override styling and attach an
-/// optional interaction target. `dim` is a boolean that renders the text with reduced
-/// intensity for a muted appearance.
+/// `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override styling and
+/// attach an optional interaction target. `dim` is a boolean that renders the text with
+/// reduced intensity for a muted appearance, and `blink` is a boolean that enables blinking
+/// text for that segment.
 fn segment(_: UiApi, text: string, options: map) -> BarSegment;
 
 /// Read an environment variable, if it is set.
@@ -132,6 +139,8 @@ fn tabs(_: TreeApi, tabs: array) -> TreeSpec;
 fn tabs_with_active(_: TreeApi, tabs: array, active: int) -> TreeSpec;
 
 /// Break the current node into a new tab or floating window.
+/// `destination` accepts `tab` or `floating`.
+/// Example: `action.break_current_node("floating")`.
 fn break_current_node(_: ActionApi, destination: string) -> Action;
 
 /// Cancel the active search.
@@ -222,6 +231,8 @@ fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeS
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Join a buffer at the current node.
+/// `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
+/// Example: `action.join_buffer_here(12, "tab-after")`.
 fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;
 
 /// Kill the currently focused buffer.
@@ -269,6 +280,8 @@ fn noop(_: ActionApi) -> Action;
 fn notify(_: ActionApi, level: string, message: string) -> Action;
 
 /// Open the history of a buffer in a new view.
+/// `scope` accepts `visible` or `full`. `placement` accepts `floating` or `tab`.
+/// Example: `action.open_buffer_history(12, "visible", "floating")`.
 fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;
 
 /// Open a floating view around the provided tree.

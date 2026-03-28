@@ -918,11 +918,11 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, BufferHistoryPlacement, BufferHistoryScope, ImmutableString, Map,
-        NativeCallContext, NavigationDirection, NodeBreakDestination, NodeJoinPlacement, TreeSpec,
-        parse_action_array, parse_buffer_id, parse_bytes, parse_floating_id,
-        parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
-        parse_node_id, parse_notify_level, parse_split_direction, runtime_error_at,
+        Action, ActionApi, Array, ImmutableString, Map, NativeCallContext, NavigationDirection,
+        TreeSpec, parse_action_array, parse_buffer_history_placement, parse_buffer_history_scope,
+        parse_buffer_id, parse_bytes, parse_floating_id, parse_floating_options,
+        parse_floating_spec, parse_index, parse_key_sequence, parse_node_break_destination,
+        parse_node_id, parse_node_join_placement, parse_notify_level, parse_split_direction,
         with_call_position,
     };
 
@@ -1300,6 +1300,8 @@ mod documented_action_api {
     }
 
     /// Open the history of a buffer in a new view.
+    /// `scope` accepts `visible` or `full`. `placement` accepts `floating` or `tab`.
+    /// Example: `action.open_buffer_history(12, "visible", "floating")`.
     #[rhai_fn(return_raw, name = "open_buffer_history")]
     pub fn open_buffer_history(
         ctx: NativeCallContext,
@@ -1310,24 +1312,10 @@ mod documented_action_api {
     ) -> RhaiResultOf<Action> {
         let position = ctx.call_position();
         with_call_position(ctx, || {
-            let scope = match scope {
-                "visible" => BufferHistoryScope::Visible,
-                "full" => BufferHistoryScope::Full,
-                _ => {
-                    return Err(runtime_error_at("invalid scope", position));
-                }
-            };
-            let placement = match placement {
-                "floating" => BufferHistoryPlacement::Floating,
-                "tab" => BufferHistoryPlacement::Tab,
-                _ => {
-                    return Err(runtime_error_at("invalid placement", position));
-                }
-            };
             Ok(Action::OpenBufferHistory {
                 buffer_id: parse_buffer_id(buffer_id)?,
-                scope,
-                placement,
+                scope: parse_buffer_history_scope(scope, position)?,
+                placement: parse_buffer_history_placement(placement, position)?,
             })
         })
     }
@@ -1374,6 +1362,8 @@ mod documented_action_api {
     }
 
     /// Break the current node into a new tab or floating window.
+    /// `destination` accepts `tab` or `floating`.
+    /// Example: `action.break_current_node("floating")`.
     #[rhai_fn(return_raw, name = "break_current_node")]
     pub fn break_current_node(
         ctx: NativeCallContext,
@@ -1382,19 +1372,16 @@ mod documented_action_api {
     ) -> RhaiResultOf<Action> {
         let position = ctx.call_position();
         with_call_position(ctx, || {
-            let destination = match destination {
-                "tab" => NodeBreakDestination::Tab,
-                "floating" => NodeBreakDestination::Floating,
-                _ => return Err(runtime_error_at("invalid destination", position)),
-            };
             Ok(Action::BreakNode {
                 node_id: None,
-                destination,
+                destination: parse_node_break_destination(destination, position)?,
             })
         })
     }
 
     /// Join a buffer at the current node.
+    /// `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
+    /// Example: `action.join_buffer_here(12, "tab-after")`.
     #[rhai_fn(return_raw, name = "join_buffer_here")]
     pub fn join_buffer_here(
         ctx: NativeCallContext,
@@ -1404,19 +1391,10 @@ mod documented_action_api {
     ) -> RhaiResultOf<Action> {
         let position = ctx.call_position();
         with_call_position(ctx, || {
-            let placement = match placement {
-                "tab-after" => NodeJoinPlacement::TabAfter,
-                "tab-before" => NodeJoinPlacement::TabBefore,
-                "left" => NodeJoinPlacement::Left,
-                "right" => NodeJoinPlacement::Right,
-                "up" => NodeJoinPlacement::Up,
-                "down" => NodeJoinPlacement::Down,
-                _ => return Err(runtime_error_at("invalid placement", position)),
-            };
             Ok(Action::JoinBufferAtNode {
                 node_id: None,
                 buffer_id: parse_buffer_id(buffer_id)?,
-                placement,
+                placement: parse_node_join_placement(placement, position)?,
             })
         })
     }
@@ -1985,6 +1963,12 @@ mod documented_ui_api {
     ///
     /// `segment(_: UiApi, text: String) -> BarSegment` produces plain text with default
     /// [`StyleSpec`] values and no click target.
+    ///
+    /// The overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports
+    /// `fg`, `bg`, `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override
+    /// styling and attach an optional interaction target. `dim` is a boolean that renders the
+    /// text with reduced intensity for a muted appearance, and `blink` is a boolean that enables
+    /// blinking text for that segment.
     #[rhai_fn(name = "segment")]
     pub fn segment(_: &mut UiApi, text: &str) -> BarSegment {
         BarSegment {
@@ -1997,9 +1981,10 @@ mod documented_ui_api {
     /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
     ///
     /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-    /// `bold`, `italic`, `underline`, `dim`, and `target` keys to override styling and attach an
-    /// optional interaction target. `dim` is a boolean that renders the text with reduced
-    /// intensity for a muted appearance.
+    /// `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override styling and
+    /// attach an optional interaction target. `dim` is a boolean that renders the text with
+    /// reduced intensity for a muted appearance, and `blink` is a boolean that enables blinking
+    /// text for that segment.
     #[rhai_fn(return_raw, name = "segment")]
     pub fn segment_with_options(
         ctx: NativeCallContext,
@@ -2493,6 +2478,60 @@ fn parse_split_direction(value: &str) -> ScriptResult<SplitDirection> {
     }
 }
 
+fn parse_buffer_history_scope(value: &str, position: Position) -> RhaiResultOf<BufferHistoryScope> {
+    match value {
+        "visible" => Ok(BufferHistoryScope::Visible),
+        "full" => Ok(BufferHistoryScope::Full),
+        _ => Err(runtime_error_at(
+            format!("invalid scope: {value}"),
+            position,
+        )),
+    }
+}
+
+fn parse_buffer_history_placement(
+    value: &str,
+    position: Position,
+) -> RhaiResultOf<BufferHistoryPlacement> {
+    match value {
+        "floating" => Ok(BufferHistoryPlacement::Floating),
+        "tab" => Ok(BufferHistoryPlacement::Tab),
+        _ => Err(runtime_error_at(
+            format!("invalid placement: {value}"),
+            position,
+        )),
+    }
+}
+
+fn parse_node_break_destination(
+    value: &str,
+    position: Position,
+) -> RhaiResultOf<NodeBreakDestination> {
+    match value {
+        "tab" => Ok(NodeBreakDestination::Tab),
+        "floating" => Ok(NodeBreakDestination::Floating),
+        _ => Err(runtime_error_at(
+            format!("invalid destination: {value}"),
+            position,
+        )),
+    }
+}
+
+fn parse_node_join_placement(value: &str, position: Position) -> RhaiResultOf<NodeJoinPlacement> {
+    match value {
+        "tab-after" => Ok(NodeJoinPlacement::TabAfter),
+        "tab-before" => Ok(NodeJoinPlacement::TabBefore),
+        "left" => Ok(NodeJoinPlacement::Left),
+        "right" => Ok(NodeJoinPlacement::Right),
+        "up" => Ok(NodeJoinPlacement::Up),
+        "down" => Ok(NodeJoinPlacement::Down),
+        _ => Err(runtime_error_at(
+            format!("invalid placement: {value}"),
+            position,
+        )),
+    }
+}
+
 fn dynamic_option_custom<T: Clone + Send + Sync + 'static>(value: Option<T>) -> Dynamic {
     value.map(Dynamic::from).unwrap_or(Dynamic::UNIT)
 }
@@ -2599,9 +2638,23 @@ fn runtime_error_at(message: impl Into<String>, position: Position) -> Box<EvalA
 #[cfg(test)]
 mod tests {
     use super::{
-        Dynamic, Map, parse_bar_target, parse_buffer_spawn, parse_notify_level,
-        parse_split_direction,
+        Action, Dynamic, Map, StyleSpec, parse_bar_target, parse_buffer_history_placement,
+        parse_buffer_history_scope, parse_buffer_spawn, parse_node_break_destination,
+        parse_node_join_placement, parse_notify_level, parse_segment_options,
+        parse_split_direction, register_documented_registration_runtime_api, registration_scope,
     };
+    use embers_core::BufferId;
+    use embers_protocol::{
+        BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+    };
+    use rhai::{Engine, Position};
+
+    fn eval_action(script: &str) -> Result<Action, Box<rhai::EvalAltResult>> {
+        let mut engine = Engine::new();
+        register_documented_registration_runtime_api(&mut engine);
+        let mut scope = registration_scope();
+        engine.eval_with_scope(&mut scope, script)
+    }
 
     #[test]
     fn parse_levels_accepts_draft_names() {
@@ -2614,6 +2667,145 @@ mod tests {
     fn parse_split_direction_accepts_words() {
         assert!(parse_split_direction("horizontal").is_ok());
         assert!(parse_split_direction("vertical").is_ok());
+    }
+
+    #[test]
+    fn parse_history_and_node_enums_accept_known_literals() {
+        let position = Position::NONE;
+        for (literal, scope) in [
+            ("visible", BufferHistoryScope::Visible),
+            ("full", BufferHistoryScope::Full),
+        ] {
+            assert!(
+                parse_buffer_history_scope(literal, position).is_ok(),
+                "scope literal {literal:?} should parse"
+            );
+            assert_eq!(
+                eval_action(&format!(
+                    "action.open_buffer_history(12, {literal:?}, \"floating\")"
+                ))
+                .expect("history builder should parse"),
+                Action::OpenBufferHistory {
+                    buffer_id: BufferId(12),
+                    scope,
+                    placement: BufferHistoryPlacement::Floating,
+                }
+            );
+        }
+        for (literal, placement) in [
+            ("floating", BufferHistoryPlacement::Floating),
+            ("tab", BufferHistoryPlacement::Tab),
+        ] {
+            assert!(
+                parse_buffer_history_placement(literal, position).is_ok(),
+                "placement literal {literal:?} should parse"
+            );
+            assert_eq!(
+                eval_action(&format!(
+                    "action.open_buffer_history(12, \"full\", {literal:?})"
+                ))
+                .expect("history placement builder should parse"),
+                Action::OpenBufferHistory {
+                    buffer_id: BufferId(12),
+                    scope: BufferHistoryScope::Full,
+                    placement,
+                }
+            );
+        }
+        for (literal, destination) in [
+            ("tab", NodeBreakDestination::Tab),
+            ("floating", NodeBreakDestination::Floating),
+        ] {
+            assert!(
+                parse_node_break_destination(literal, position).is_ok(),
+                "break destination literal {literal:?} should parse"
+            );
+            assert_eq!(
+                eval_action(&format!("action.break_current_node({literal:?})"))
+                    .expect("break builder should parse"),
+                Action::BreakNode {
+                    node_id: None,
+                    destination,
+                }
+            );
+        }
+        for (literal, placement) in [
+            ("tab-after", NodeJoinPlacement::TabAfter),
+            ("tab-before", NodeJoinPlacement::TabBefore),
+            ("left", NodeJoinPlacement::Left),
+            ("right", NodeJoinPlacement::Right),
+            ("up", NodeJoinPlacement::Up),
+            ("down", NodeJoinPlacement::Down),
+        ] {
+            assert!(
+                parse_node_join_placement(literal, position).is_ok(),
+                "join placement literal {literal:?} should parse"
+            );
+            assert_eq!(
+                eval_action(&format!("action.join_buffer_here(12, {literal:?})"))
+                    .expect("join builder should parse"),
+                Action::JoinBufferAtNode {
+                    node_id: None,
+                    buffer_id: BufferId(12),
+                    placement,
+                }
+            );
+        }
+
+        for literal in ["", "invalid"] {
+            assert!(
+                parse_buffer_history_scope(literal, position)
+                    .expect_err("invalid scope should fail")
+                    .to_string()
+                    .contains(&format!("invalid scope: {literal}"))
+            );
+            assert!(
+                parse_buffer_history_placement(literal, position)
+                    .expect_err("invalid placement should fail")
+                    .to_string()
+                    .contains(&format!("invalid placement: {literal}"))
+            );
+            assert!(
+                eval_action(&format!(
+                    "action.open_buffer_history(12, {literal:?}, \"floating\")"
+                ))
+                .expect_err("history scope builder should fail")
+                .to_string()
+                .contains(&format!("invalid scope: {literal}"))
+            );
+            assert!(
+                eval_action(&format!(
+                    "action.open_buffer_history(12, \"full\", {literal:?})"
+                ))
+                .expect_err("history placement builder should fail")
+                .to_string()
+                .contains(&format!("invalid placement: {literal}"))
+            );
+            assert!(
+                parse_node_break_destination(literal, position)
+                    .expect_err("invalid destination should fail")
+                    .to_string()
+                    .contains(&format!("invalid destination: {literal}"))
+            );
+            assert!(
+                eval_action(&format!("action.break_current_node({literal:?})"))
+                    .expect_err("break builder should fail")
+                    .to_string()
+                    .contains(&format!("invalid destination: {literal}"))
+            );
+            assert!(
+                parse_node_join_placement(literal, position)
+                    .expect_err("invalid join placement should fail")
+                    .to_string()
+                    .contains(&format!("invalid placement: {literal}"))
+            );
+            assert!(
+                eval_action(&format!("action.join_buffer_here(12, {literal:?})"))
+                    .expect_err("join builder should fail")
+                    .to_string()
+                    .contains(&format!("invalid placement: {literal}"))
+            );
+        }
     }
 
     #[test]
@@ -2642,5 +2834,21 @@ mod tests {
             error.to_string(),
             "Runtime error: unknown bar target option(s): bogus"
         );
+    }
+
+    #[test]
+    fn parse_segment_options_preserves_blink_flag() {
+        let mut options = Map::new();
+        options.insert("blink".into(), Dynamic::TRUE);
+
+        let (style, target) = parse_segment_options(options).expect("segment options parse");
+        assert_eq!(
+            style,
+            StyleSpec {
+                blink: true,
+                ..StyleSpec::default()
+            }
+        );
+        assert_eq!(target, None);
     }
 }

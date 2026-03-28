@@ -334,6 +334,136 @@ fn zoom_toggle_tracks_session_zoomed_node_and_clears_on_close() {
 }
 
 #[test]
+fn zooming_moves_focus_into_the_zoomed_subtree() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let detached = new_buffer(&mut state, "logs");
+
+    state
+        .join_buffer_at_node(leaf_id, detached, NodeJoinPlacement::Right)
+        .expect("join right");
+    let detached_view = attached_view(&state, detached);
+    state
+        .focus_leaf(session_id, detached_view)
+        .expect("focus detached view");
+
+    state.zoom_node(leaf_id).expect("zoom leaf");
+
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        Some(leaf_id)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(leaf_id)
+    );
+    assert!(matches!(
+        state.node(leaf_id).expect("leaf"),
+        Node::BufferView(view) if view.view.focused
+    ));
+    assert!(matches!(
+        state.node(detached_view).expect("detached leaf"),
+        Node::BufferView(view) if !view.view.focused
+    ));
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn closing_zoomed_tab_clears_session_zoom() {
+    let mut state = ServerState::new();
+    let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, second_leaf) = new_leaf(&mut state, session_id, "second");
+    state
+        .add_root_tab(session_id, "second", second_leaf)
+        .expect("add second root tab");
+    let root_tabs = state.root_tabs(session_id).expect("root tabs");
+    state.switch_tab(root_tabs, 0).expect("focus first tab");
+
+    state.toggle_zoom_node(leaf_id).expect("zoom leaf");
+    state.close_tab(root_tabs, 0).expect("close zoomed tab");
+
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        None
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(second_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_floating,
+        None
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn zooming_inactive_tab_is_rejected() {
+    let mut state = ServerState::new();
+    let (session_id, _, first_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, second_leaf) = new_leaf(&mut state, session_id, "second");
+    let root_tabs = state.root_tabs(session_id).expect("root tabs");
+    state
+        .add_root_tab(session_id, "second", second_leaf)
+        .expect("add second root tab");
+
+    assert!(state.zoom_node(first_leaf).is_err());
+    assert!(state.toggle_zoom_node(first_leaf).is_err());
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        None
+    );
+    state.validate().expect("state remains valid");
+
+    state.switch_tab(root_tabs, 0).expect("focus first tab");
+    state.zoom_node(first_leaf).expect("zoom visible tab");
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        Some(first_leaf)
+    );
+}
+
+#[test]
+fn closing_zoomed_floating_clears_session_zoom() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let popup_buffer = new_buffer(&mut state, "popup");
+    let floating_id = state
+        .create_floating_from_buffer(
+            session_id,
+            popup_buffer,
+            FloatGeometry::new(5, 3, 40, 12),
+            Some("popup".to_owned()),
+        )
+        .expect("create floating");
+    let floating_root = state
+        .floating_window(floating_id)
+        .expect("floating")
+        .root_node;
+
+    state
+        .toggle_zoom_node(floating_root)
+        .expect("zoom floating");
+    state
+        .close_floating(floating_id)
+        .expect("close zoomed floating");
+
+    assert_eq!(
+        state.session(session_id).expect("session").zoomed_node,
+        None
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_floating,
+        None
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
 fn swap_and_reorder_operate_only_on_siblings() {
     let mut state = ServerState::new();
     let (session_id, _, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
@@ -357,13 +487,37 @@ fn swap_and_reorder_operate_only_on_siblings() {
     };
     let first_child = split.children[0];
     let second_child = split.children[1];
+    let non_sibling = match state.node(first_child).expect("nested split") {
+        Node::Split(split) => split.children[0],
+        other => panic!("expected nested split, got {other:?}"),
+    };
 
     state
         .swap_sibling_nodes(first_child, second_child)
         .expect("swap siblings");
+    let swapped_children = match state.node(root).expect("root split") {
+        Node::Split(split) => split.children.clone(),
+        other => panic!("expected split after swap, got {other:?}"),
+    };
+    assert_eq!(swapped_children[0], second_child);
+    assert_eq!(swapped_children[1], first_child);
+    assert!(
+        state.swap_sibling_nodes(non_sibling, second_child).is_err(),
+        "non-siblings should not swap"
+    );
+    assert!(
+        state.move_node_before(non_sibling, second_child).is_err(),
+        "non-siblings should not reorder"
+    );
     state
         .move_node_before(first_child, second_child)
         .expect("move sibling before");
+    let restored_children = match state.node(root).expect("root split") {
+        Node::Split(split) => split.children.clone(),
+        other => panic!("expected split after reorder, got {other:?}"),
+    };
+    assert_eq!(restored_children[0], first_child);
+    assert_eq!(restored_children[1], second_child);
     state.validate().expect("state remains valid");
 }
 
@@ -386,6 +540,67 @@ fn break_node_to_floating_preserves_subtree_and_focuses_popup() {
         .expect("floating exists");
     assert_eq!(floating.root_node, new_leaf);
     assert_eq!(session.focused_floating, Some(floating.id));
+    assert_eq!(session.focused_leaf, Some(new_leaf));
+    match state.node(new_leaf).expect("new floating leaf exists") {
+        Node::BufferView(leaf) => assert!(leaf.view.focused),
+        other => panic!("expected floating root leaf, got {other:?}"),
+    }
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn breaking_existing_floating_to_floating_preserves_geometry_and_title() {
+    let mut state = ServerState::new();
+    let (session_id, _, _) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, popup_leaf) = new_leaf(&mut state, session_id, "popup");
+    let geometry = FloatGeometry::new(7, 8, 30, 12);
+    let floating_id = state
+        .create_floating_window_with_options(
+            session_id,
+            popup_leaf,
+            geometry,
+            Some("popup".to_owned()),
+            false,
+            true,
+        )
+        .expect("create floating window");
+
+    state
+        .break_node(popup_leaf, true)
+        .expect("breaking an existing floating root to floating is a no-op");
+
+    let session = state.session(session_id).expect("session");
+    assert_eq!(session.floating, vec![floating_id]);
+    let floating = state.floating_window(floating_id).expect("floating exists");
+    assert_eq!(floating.root_node, popup_leaf);
+    assert_eq!(floating.geometry, geometry);
+    assert_eq!(floating.title.as_deref(), Some("popup"));
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn breaking_existing_tab_to_tab_preserves_order() {
+    let mut state = ServerState::new();
+    let (session_id, _, first_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, second_leaf) = new_leaf(&mut state, session_id, "beta");
+    state
+        .add_root_tab(session_id, "beta", second_leaf)
+        .expect("add second root tab");
+    let root_tabs = state.root_tabs(session_id).expect("root tabs");
+    let before = match state.node(root_tabs).expect("root tabs") {
+        Node::Tabs(tabs) => tabs.tabs.iter().map(|tab| tab.child).collect::<Vec<_>>(),
+        other => panic!("expected root tabs, got {other:?}"),
+    };
+
+    state
+        .break_node(first_leaf, false)
+        .expect("breaking an existing tab to a tab is a no-op");
+
+    let after = match state.node(root_tabs).expect("root tabs") {
+        Node::Tabs(tabs) => tabs.tabs.iter().map(|tab| tab.child).collect::<Vec<_>>(),
+        other => panic!("expected root tabs, got {other:?}"),
+    };
+    assert_eq!(after, before);
     state.validate().expect("state remains valid");
 }
 
@@ -399,14 +614,64 @@ fn join_buffer_at_node_can_insert_tabs_and_splits() {
         .join_buffer_at_node(leaf_id, detached, NodeJoinPlacement::Right)
         .expect("join right");
     let root = root_tab_child(&state, session_id, 0);
-    assert!(matches!(state.node(root).expect("root"), Node::Split(_)));
+    let detached_view = attached_view(&state, detached);
+    match state.node(root).expect("root") {
+        Node::Split(split) => assert_eq!(split.children, vec![leaf_id, detached_view]),
+        other => panic!("expected split root, got {other:?}"),
+    }
+    let target_root = root;
 
     let detached_again = state.create_buffer("logs", vec!["sh".to_owned()], None);
     state
         .join_buffer_at_node(root, detached_again, NodeJoinPlacement::TabAfter)
         .expect("join after as tab");
     let root = session_root(&state, session_id);
-    assert!(matches!(state.node(root).expect("root"), Node::Tabs(_)));
+    let detached_again_view = attached_view(&state, detached_again);
+    let root_tabs = match state.node(root).expect("root") {
+        Node::Tabs(tabs) => tabs,
+        other => panic!("expected root tabs, got {other:?}"),
+    };
+    let children = root_tabs
+        .tabs
+        .iter()
+        .map(|tab| tab.child)
+        .collect::<Vec<_>>();
+    assert_eq!(children, vec![target_root, detached_again_view]);
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn join_buffer_at_node_rejects_buffers_already_contained_by_target() {
+    let mut state = ServerState::new();
+    let (session_id, buffer_id, leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+
+    let error = state
+        .join_buffer_at_node(leaf_id, buffer_id, NodeJoinPlacement::Right)
+        .expect_err("joining a buffer into its own view should fail");
+
+    assert!(matches!(error, embers_core::MuxError::Conflict(_)));
+    assert_eq!(attached_view(&state, buffer_id), leaf_id);
+    assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn join_buffer_at_node_rejects_attached_buffers_from_other_sessions() {
+    let mut state = ServerState::new();
+    let (target_session_id, _, target_leaf_id) = seed_single_leaf_session(&mut state, "alpha");
+    let (source_session_id, source_buffer_id, source_leaf_id) =
+        seed_single_leaf_session(&mut state, "beta");
+    let target_before = reachable_nodes(&state, target_session_id);
+    let source_before = reachable_nodes(&state, source_session_id);
+
+    let error = state
+        .join_buffer_at_node(target_leaf_id, source_buffer_id, NodeJoinPlacement::Right)
+        .expect_err("cross-session rehoming should fail");
+
+    assert!(matches!(error, embers_core::MuxError::Conflict(_)));
+    assert_eq!(attached_view(&state, source_buffer_id), source_leaf_id);
+    assert_eq!(reachable_nodes(&state, target_session_id), target_before);
+    assert_eq!(reachable_nodes(&state, source_session_id), source_before);
     state.validate().expect("state remains valid");
 }
 
@@ -554,6 +819,98 @@ fn focus_leaf_rejects_hidden_floating_leaves_without_mutating_focus() {
 }
 
 #[test]
+fn create_floating_window_rolls_back_when_focus_fails() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let empty_tabs = state
+        .create_tabs_node(session_id, Vec::new(), 0)
+        .expect("create empty tabs root");
+
+    let error = state
+        .create_floating_window_with_options(
+            session_id,
+            empty_tabs,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("popup".to_owned()),
+            true,
+            true,
+        )
+        .expect_err("empty floating root should not be focusable");
+
+    assert!(matches!(error, embers_core::MuxError::NotFound(_)));
+    assert_eq!(
+        state.session(session_id).expect("session").floating,
+        Vec::new()
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_floating,
+        None
+    );
+    assert!(
+        matches!(state.node(empty_tabs), Ok(Node::Tabs(_))),
+        "empty tabs node should remain a tabs container"
+    );
+    assert_eq!(
+        state
+            .node_parent(empty_tabs)
+            .expect("empty tabs parent lookup"),
+        None
+    );
+    assert_eq!(
+        state
+            .floating_id_for_node(empty_tabs)
+            .expect("floating lookup"),
+        None
+    );
+    state.validate().expect("state should be valid");
+}
+
+#[test]
+fn break_node_rolls_back_when_breaking_to_floating_cannot_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, _) = seed_single_leaf_session(&mut state, "alpha");
+    let empty_tabs = state
+        .create_tabs_node(session_id, Vec::new(), 0)
+        .expect("create empty tabs root");
+    state
+        .add_root_tab(session_id, "scratch", empty_tabs)
+        .expect("attach empty tabs to root tabs");
+    let focused_leaf_before = state.session(session_id).expect("session").focused_leaf;
+
+    let error = state
+        .break_node(empty_tabs, true)
+        .expect_err("empty tabs cannot become a focused floating window");
+
+    assert!(matches!(error, embers_core::MuxError::NotFound(_)));
+    assert_eq!(
+        state.session(session_id).expect("session").floating,
+        Vec::new()
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        focused_leaf_before
+    );
+    assert_eq!(root_tab_child(&state, session_id, 1), empty_tabs);
+    assert_eq!(
+        state
+            .node_parent(empty_tabs)
+            .expect("empty tabs parent lookup"),
+        state.root_tabs(session_id).ok()
+    );
+    assert_eq!(
+        state
+            .floating_id_for_node(empty_tabs)
+            .expect("floating lookup"),
+        None
+    );
+    state.validate().expect("state should be valid");
+}
+
+#[test]
 fn add_tab_from_buffer_rolls_back_when_hidden_floating_cannot_focus() {
     let mut state = ServerState::new();
     let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
@@ -603,6 +960,124 @@ fn add_tab_from_buffer_rolls_back_when_hidden_floating_cannot_focus() {
     assert_eq!(
         state.session(session_id).expect("session").focused_leaf,
         Some(root_leaf)
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn break_node_into_hidden_tabs_branch_preserves_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (_, split_left) = new_leaf(&mut state, session_id, "split-left");
+    let (_, split_right) = new_leaf(&mut state, session_id, "split-right");
+    let split_root = state
+        .create_split_node(
+            session_id,
+            SplitDirection::Vertical,
+            vec![split_left, split_right],
+        )
+        .expect("create hidden split");
+    let (_, other_leaf) = new_leaf(&mut state, session_id, "other");
+    let hidden_tabs = state
+        .create_tabs_node(
+            session_id,
+            vec![
+                embers_server::TabEntry::new("split", split_root),
+                embers_server::TabEntry::new("other", other_leaf),
+            ],
+            0,
+        )
+        .expect("create hidden tabs");
+    let floating_id = state
+        .create_floating_window_with_options(
+            session_id,
+            hidden_tabs,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("popup".to_owned()),
+            false,
+            true,
+        )
+        .expect("create floating window");
+    state
+        .floating
+        .get_mut(&floating_id)
+        .expect("floating exists")
+        .visible = false;
+    state
+        .focus_leaf(session_id, root_leaf)
+        .expect("refocus root");
+
+    state
+        .break_node(split_right, false)
+        .expect("breaking a hidden node into a hidden tabs branch should succeed");
+
+    let hidden_children = match state.node(hidden_tabs).expect("hidden tabs") {
+        Node::Tabs(tabs) => tabs.tabs.iter().map(|tab| tab.child).collect::<Vec<_>>(),
+        other => panic!("expected hidden tabs, got {other:?}"),
+    };
+    assert!(hidden_children.contains(&split_right));
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    assert_eq!(
+        state
+            .floating_id_for_node(split_right)
+            .expect("floating lookup"),
+        Some(floating_id)
+    );
+    state.validate().expect("state remains valid");
+}
+
+#[test]
+fn join_buffer_at_node_into_hidden_floating_preserves_focus() {
+    let mut state = ServerState::new();
+    let (session_id, _, root_leaf) = seed_single_leaf_session(&mut state, "alpha");
+    let (popup_buffer, popup_leaf) = new_leaf(&mut state, session_id, "popup");
+    let floating_id = state
+        .create_floating_window_with_options(
+            session_id,
+            popup_leaf,
+            FloatGeometry::new(4, 4, 20, 10),
+            Some("popup".to_owned()),
+            false,
+            true,
+        )
+        .expect("create floating window");
+    state
+        .floating
+        .get_mut(&floating_id)
+        .expect("floating exists")
+        .visible = false;
+
+    let detached_buffer = new_buffer(&mut state, "detached");
+
+    state
+        .join_buffer_at_node(popup_leaf, detached_buffer, NodeJoinPlacement::Right)
+        .expect("hidden floating leaf should allow joining without stealing focus");
+
+    let detached_view = attached_view(&state, detached_buffer);
+    let floating_root = state
+        .floating_window(floating_id)
+        .expect("floating")
+        .root_node;
+    match state.node(floating_root).expect("floating root") {
+        Node::Split(split) => assert_eq!(split.children, vec![popup_leaf, detached_view]),
+        other => panic!("expected floating split root, got {other:?}"),
+    }
+    assert_eq!(
+        state.buffer(popup_buffer).expect("popup buffer").attachment,
+        BufferAttachment::Attached(popup_leaf)
+    );
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(root_leaf)
+    );
+    assert_eq!(
+        state
+            .floating_id_for_node(detached_view)
+            .expect("floating lookup"),
+        Some(floating_id)
     );
     state.validate().expect("state remains valid");
 }

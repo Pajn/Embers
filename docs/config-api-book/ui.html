@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bd58f06f.js";
+            window.path_to_searchindex_js = "searchindex-0ec70bca.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c8603eba.js"></script>
@@ -214,6 +214,11 @@ Description
 Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
 <p><code>segment(_: UiApi, text: String) -&gt; BarSegment</code> produces plain text with default
 [<code>StyleSpec</code>] values and no click target.</p>
+<p>The overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> supports
+<code>fg</code>, <code>bg</code>, <code>bold</code>, <code>italic</code>, <code>underline</code>, <code>dim</code>, <code>blink</code>, and <code>target</code> keys to override
+styling and attach an optional interaction target. <code>dim</code> is a boolean that renders the
+text with reduced intensity for a muted appearance, and <code>blink</code> is a boolean that enables
+blinking text for that segment.</p>
 </div>
 
 </div>

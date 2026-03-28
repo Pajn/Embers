@@ -101,6 +101,10 @@ pub enum BufferRequest {
         request_id: RequestId,
         buffer_id: BufferId,
     },
+    Inspect {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
     Detach {
         request_id: RequestId,
         buffer_id: BufferId,
@@ -131,14 +135,14 @@ pub enum BufferRequest {
     Reveal {
         request_id: RequestId,
         buffer_id: BufferId,
-        client_id: Option<u64>,
+        client_id: Option<NonZeroU64>,
     },
     OpenHistory {
         request_id: RequestId,
         buffer_id: BufferId,
         scope: BufferHistoryScope,
         placement: BufferHistoryPlacement,
-        client_id: Option<u64>,
+        client_id: Option<NonZeroU64>,
     },
 }
 
@@ -148,6 +152,7 @@ impl BufferRequest {
             Self::Create { request_id, .. }
             | Self::List { request_id, .. }
             | Self::Get { request_id, .. }
+            | Self::Inspect { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Kill { request_id, .. }
             | Self::Capture { request_id, .. }
@@ -172,12 +177,96 @@ pub enum BufferHistoryPlacement {
     Floating,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferLocationAttachment {
+    Detached,
+    Session {
+        session_id: SessionId,
+        node_id: NodeId,
+    },
+    Floating {
+        session_id: SessionId,
+        node_id: NodeId,
+        floating_id: FloatingId,
+    },
+}
+
+impl BufferLocationAttachment {
+    pub const fn session_id(self) -> Option<SessionId> {
+        match self {
+            Self::Detached => None,
+            Self::Session { session_id, .. } | Self::Floating { session_id, .. } => {
+                Some(session_id)
+            }
+        }
+    }
+
+    pub const fn node_id(self) -> Option<NodeId> {
+        match self {
+            Self::Detached => None,
+            Self::Session { node_id, .. } | Self::Floating { node_id, .. } => Some(node_id),
+        }
+    }
+
+    pub const fn floating_id(self) -> Option<FloatingId> {
+        match self {
+            Self::Floating { floating_id, .. } => Some(floating_id),
+            Self::Detached | Self::Session { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferLocation {
     pub buffer_id: BufferId,
-    pub session_id: Option<SessionId>,
-    pub node_id: Option<NodeId>,
-    pub floating_id: Option<FloatingId>,
+    pub attachment: BufferLocationAttachment,
+}
+
+impl BufferLocation {
+    pub const fn detached(buffer_id: BufferId) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Detached,
+        }
+    }
+
+    pub const fn session(buffer_id: BufferId, session_id: SessionId, node_id: NodeId) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Session {
+                session_id,
+                node_id,
+            },
+        }
+    }
+
+    pub const fn floating(
+        buffer_id: BufferId,
+        session_id: SessionId,
+        node_id: NodeId,
+        floating_id: FloatingId,
+    ) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Floating {
+                session_id,
+                node_id,
+                floating_id,
+            },
+        }
+    }
+
+    pub const fn session_id(self) -> Option<SessionId> {
+        self.attachment.session_id()
+    }
+
+    pub const fn node_id(self) -> Option<NodeId> {
+        self.attachment.node_id()
+    }
+
+    pub const fn floating_id(self) -> Option<FloatingId> {
+        self.attachment.floating_id()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -517,6 +606,32 @@ pub struct BufferRecord {
     pub env: BTreeMap<String, String>,
 }
 
+impl BufferRecord {
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        match self.kind {
+            BufferRecordKind::Pty => {
+                if self.helper_source_buffer_id.is_some() {
+                    return Err(
+                        "buffer_record.kind=pty cannot set helper_source_buffer_id".to_owned()
+                    );
+                }
+                if self.helper_scope.is_some() {
+                    return Err("buffer_record.kind=pty cannot set helper_scope".to_owned());
+                }
+            }
+            BufferRecordKind::Helper => {
+                if self.helper_source_buffer_id.is_some() ^ self.helper_scope.is_some() {
+                    return Err(
+                        "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeRecordKind {
     BufferView,
@@ -663,6 +778,86 @@ pub struct BufferLocationResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferWithLocationResponse {
+    pub(crate) request_id: RequestId,
+    pub(crate) buffer: BufferRecord,
+    pub(crate) location: BufferLocation,
+    pub(crate) at_root_tab: bool,
+}
+
+impl BufferWithLocationResponse {
+    pub fn new(
+        request_id: RequestId,
+        buffer: BufferRecord,
+        location: BufferLocation,
+        at_root_tab: bool,
+    ) -> std::result::Result<Self, String> {
+        if buffer.id != location.buffer_id {
+            return Err(
+                "buffer_with_location_response.buffer.id must equal location.buffer_id".to_owned(),
+            );
+        }
+        buffer.validate()?;
+        match (buffer.attachment_node_id, location.node_id()) {
+            (Some(buffer_node_id), Some(location_node_id))
+                if buffer_node_id == location_node_id => {}
+            (Some(buffer_node_id), Some(location_node_id)) => {
+                return Err(format!(
+                    "buffer_with_location_response.buffer.attachment_node_id {buffer_node_id} must equal location node_id {location_node_id}"
+                ));
+            }
+            (Some(buffer_node_id), None) => {
+                return Err(format!(
+                    "buffer_with_location_response.buffer.attachment_node_id {buffer_node_id} requires an attached location"
+                ));
+            }
+            (None, Some(location_node_id)) => {
+                return Err(format!(
+                    "buffer_with_location_response.location node_id {location_node_id} requires buffer.attachment_node_id"
+                ));
+            }
+            (None, None) => {}
+        }
+        if at_root_tab
+            && !matches!(
+                location.attachment,
+                BufferLocationAttachment::Session { .. }
+            )
+        {
+            return Err(
+                "buffer_with_location_response.at_root_tab requires a session location".to_owned(),
+            );
+        }
+        Ok(Self {
+            request_id,
+            buffer,
+            location,
+            at_root_tab,
+        })
+    }
+
+    pub fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub fn buffer(&self) -> &BufferRecord {
+        &self.buffer
+    }
+
+    pub fn location(&self) -> &BufferLocation {
+        &self.location
+    }
+
+    pub fn at_root_tab(&self) -> bool {
+        self.at_root_tab
+    }
+
+    pub fn into_parts(self) -> (RequestId, BufferRecord, BufferLocation) {
+        (self.request_id, self.buffer, self.location)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotResponse {
     pub request_id: RequestId,
     pub buffer_id: BufferId,
@@ -715,6 +910,7 @@ pub enum ServerResponse {
     Clients(ClientsResponse),
     Client(ClientResponse),
     BufferLocation(BufferLocationResponse),
+    BufferWithLocation(BufferWithLocationResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -736,6 +932,7 @@ impl ServerResponse {
             Self::Clients(response) => Some(response.request_id),
             Self::Client(response) => Some(response.request_id),
             Self::BufferLocation(response) => Some(response.request_id),
+            Self::BufferWithLocation(response) => Some(response.request_id()),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use embers_core::RequestId;
+use embers_core::{ErrorCode, RequestId};
 use embers_protocol::{BufferRequest, ClientMessage, InputRequest, ServerResponse};
 use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
@@ -274,6 +274,7 @@ async fn buffer_show_and_history_open_helper_buffers() {
         .session
         .focused_leaf_id
         .expect("focused pane exists");
+    let session_id = snapshot.session.id;
     let buffer_id = snapshot
         .nodes
         .iter()
@@ -310,7 +311,7 @@ async fn buffer_show_and_history_open_helper_buffers() {
     let shown_stdout = stdout(&shown);
     assert!(shown_stdout.contains(&format!("id\t{buffer_id}")));
     assert!(shown_stdout.contains("kind\tpty"));
-    assert!(shown_stdout.contains(&format!("location\tsession:1\tnode:{leaf}")));
+    assert!(shown_stdout.contains(&format!("location\tsession:{session_id} node:{leaf}")));
 
     let opened = run_cli(
         &server,
@@ -366,8 +367,13 @@ async fn buffer_show_and_history_open_helper_buffers() {
         .await
         .expect("helper send request returns a response");
     assert!(
-        matches!(send, ServerResponse::Error(_)),
-        "helper buffers reject input, got {send:?}"
+        matches!(
+            send,
+            ServerResponse::Error(ref response)
+                if response.error.code == ErrorCode::Conflict
+                    && response.error.message.contains("read-only")
+        ),
+        "helper buffers should reject input with a read-only conflict, got {send:?}"
     );
 
     server.shutdown().await.expect("shutdown server");
@@ -375,6 +381,7 @@ async fn buffer_show_and_history_open_helper_buffers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn node_commands_cover_zoom_swap_break_join_and_reorder() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "alpha"]);
@@ -482,6 +489,10 @@ async fn node_commands_cover_zoom_swap_break_join_and_reorder() {
     );
     let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
     assert_eq!(snapshot.floating.len(), 1);
+    assert_eq!(
+        snapshot.floating[0].root_node_id,
+        embers_core::NodeId(second_pane_id)
+    );
 
     let detached = connection
         .request(&ClientMessage::Buffer(BufferRequest::Create {
@@ -510,12 +521,28 @@ async fn node_commands_cover_zoom_swap_break_join_and_reorder() {
         ],
     );
     let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
-    assert!(
-        snapshot
-            .nodes
-            .iter()
-            .any(|node| node.tabs.as_ref().is_some_and(|tabs| tabs.tabs.len() >= 2)),
-        "join-buffer created or reused a tabs container"
+    let (first_index, detached_index) = snapshot
+        .nodes
+        .iter()
+        .find_map(|node| {
+            node.tabs.as_ref().and_then(|tabs| {
+                let first_index = tabs.tabs.iter().position(|tab| tab.child_id.0 == first_pane_id)?;
+                let detached_index = tabs.tabs.iter().position(|tab| {
+                    snapshot
+                        .nodes
+                        .iter()
+                        .find(|candidate| candidate.id == tab.child_id)
+                        .and_then(|candidate| candidate.buffer_view.as_ref())
+                        .is_some_and(|view| view.buffer_id == detached_buffer_id)
+                })?;
+                Some((first_index, detached_index))
+            })
+        })
+        .expect("join-buffer attached the detached buffer into the same tabs container as the first pane");
+    assert_eq!(
+        detached_index,
+        first_index + 1,
+        "join-buffer placed the detached buffer immediately after the first pane"
     );
 
     server.shutdown().await.expect("shutdown server");

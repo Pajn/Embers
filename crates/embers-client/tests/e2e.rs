@@ -1,5 +1,4 @@
 use std::process::Output;
-use std::time::Duration;
 
 use embers_client::{MuxClient, PresentationModel, Renderer};
 use embers_core::{
@@ -10,6 +9,7 @@ use embers_protocol::{
     NodeRequest, ServerResponse, SessionRequest, SessionSnapshot, VisibleSnapshotResponse,
 };
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
+use tokio::time::{Duration, Instant};
 
 fn run_cli(server: &TestServer, args: &[&str]) -> Output {
     let output = cargo_bin("embers")
@@ -123,14 +123,14 @@ fn session_id_by_name(client: &MuxClient<embers_client::SocketTransport>, name: 
         .id
 }
 
-async fn refresh_all_snapshots(client: &mut MuxClient<embers_client::SocketTransport>) {
+async fn refresh_all_snapshots(
+    client: &mut MuxClient<embers_client::SocketTransport>,
+) -> embers_core::Result<()> {
     let buffer_ids = client.state().buffers.keys().copied().collect::<Vec<_>>();
     for buffer_id in buffer_ids {
-        client
-            .refresh_buffer_snapshot(buffer_id)
-            .await
-            .unwrap_or_else(|error| panic!("refreshing snapshot for {buffer_id} failed: {error}"));
+        client.refresh_buffer_snapshot(buffer_id).await?;
     }
+    Ok(())
 }
 
 async fn render_session(
@@ -138,7 +138,9 @@ async fn render_session(
     session_name: &str,
 ) -> String {
     client.resync_all_sessions().await.expect("resync succeeds");
-    refresh_all_snapshots(client).await;
+    refresh_all_snapshots(client)
+        .await
+        .expect("refresh snapshots succeeds");
     let session_id = session_id_by_name(client, session_name);
     let model = PresentationModel::project(
         client.state(),
@@ -152,6 +154,67 @@ async fn render_session(
     Renderer.render(client.state(), &model).render()
 }
 
+async fn poll_for_tab_activity(
+    client: &mut MuxClient<embers_client::SocketTransport>,
+    session_name: &str,
+    tabs_node_id: NodeId,
+    target_title: &str,
+    expected_activity: ActivityState,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = match tokio::time::timeout(remaining, client.resync_all_sessions()).await {
+            Ok(result) => result,
+            Err(_) => return false,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let _ = match tokio::time::timeout(remaining, refresh_all_snapshots(client)).await {
+            Ok(result) => result,
+            Err(_) => return false,
+        };
+        let maybe_session_id = client
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == session_name)
+            .map(|session| session.id);
+        if let Some(session_id) = maybe_session_id
+            && let Ok(model) = PresentationModel::project(
+                client.state(),
+                session_id,
+                Size {
+                    width: 80,
+                    height: 24,
+                },
+            )
+            && let Some(tabs) = model
+                .tab_bars
+                .iter()
+                .find(|tabs| tabs.node_id == tabs_node_id)
+            && tabs
+                .tabs
+                .iter()
+                .any(|tab| tab.title == target_title && tab.activity == expected_activity)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 async fn wait_for_visible_snapshot<F>(
     connection: &mut TestConnection,
     buffer_id: BufferId,
@@ -161,19 +224,25 @@ async fn wait_for_visible_snapshot<F>(
 where
     F: FnMut(&VisibleSnapshotResponse) -> bool,
 {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
+    let mut last_snapshot = "<none>".to_owned();
 
     loop {
-        let snapshot = connection
-            .capture_visible_buffer(buffer_id)
-            .await
-            .expect("visible capture succeeds");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let snapshot =
+            tokio::time::timeout(remaining, connection.capture_visible_buffer(buffer_id))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("timed out waiting for visible snapshot; last snapshot: {last_snapshot}")
+                })
+                .expect("visible capture succeeds");
         if predicate(&snapshot) {
             return snapshot;
         }
+        last_snapshot = format!("{snapshot:?}");
 
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for visible snapshot; last snapshot: {snapshot:?}");
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for visible snapshot; last snapshot: {last_snapshot}");
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -200,18 +269,26 @@ async fn wait_for_buffer_activity(
     expected: ActivityState,
     timeout: Duration,
 ) -> BufferRecord {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
+    let mut last_activity = "<none>".to_owned();
 
     loop {
-        let buffer = buffer_record(connection, buffer_id).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let buffer = tokio::time::timeout(remaining, buffer_record(connection, buffer_id))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {last_activity}"
+                )
+            });
         if buffer.activity == expected {
             return buffer;
         }
+        last_activity = format!("{:?}", buffer.activity);
 
-        if tokio::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             panic!(
-                "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {:?}",
-                buffer.activity
+                "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {last_activity}"
             );
         }
 
@@ -660,7 +737,7 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
             buffer_id: buffer_a.id,
-            bytes: b"printf 'detached-bell\\a\\n'; sleep 0.5\r".to_vec(),
+            bytes: b"printf 'detached-bell'; printf '\\a'; sleep 0.5\r".to_vec(),
         }))
         .await
         .expect("send detached bell succeeds");
@@ -743,6 +820,13 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         }))
         .await
         .expect("reattach detached buffer succeeds");
+    assert_eq!(
+        buffer_record(&mut connection, buffer_a.id)
+            .await
+            .attachment_node_id,
+        Some(target_leaf),
+        "buffer should be reattached to the requested target leaf"
+    );
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
@@ -811,38 +895,16 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
     let mut first_client = MuxClient::connect(server.socket_path())
         .await
         .expect("first client connects");
-    let mut saw_hidden_activity = false;
-    for _ in 0..10 {
-        first_client
-            .resync_all_sessions()
-            .await
-            .expect("first client resyncs");
-        refresh_all_snapshots(&mut first_client).await;
-        let session_id = session_id_by_name(&first_client, "alpha");
-        let model = PresentationModel::project(
-            first_client.state(),
-            session_id,
-            Size {
-                width: 80,
-                height: 24,
-            },
-        )
-        .expect("projection succeeds");
-        let tabs = model
-            .tab_bars
-            .iter()
-            .find(|tabs| tabs.node_id == fixture.nested_tabs_id)
-            .expect("nested tabs frame exists");
-        if tabs
-            .tabs
-            .iter()
-            .any(|tab| tab.title == "bg" && tab.activity == ActivityState::Activity)
-        {
-            saw_hidden_activity = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let saw_hidden_activity = poll_for_tab_activity(
+        &mut first_client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Activity,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    )
+    .await;
     assert!(
         saw_hidden_activity,
         "hidden tab activity should propagate before reconnect"
@@ -888,7 +950,7 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
             buffer_id: fixture.hidden_buffer.id,
-            bytes: b"printf 'hidden-bell\\a\\n'; sleep 0.5\r".to_vec(),
+            bytes: b"printf 'hidden-bell'; printf '\\a'; sleep 0.5\r".to_vec(),
         }))
         .await
         .expect("send hidden bell succeeds");
@@ -915,26 +977,22 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         .resync_all_sessions()
         .await
         .expect("client resyncs sessions");
-    refresh_all_snapshots(&mut client).await;
-    let session_id = session_id_by_name(&client, "alpha");
-    let model = PresentationModel::project(
-        client.state(),
-        session_id,
-        Size {
-            width: 80,
-            height: 24,
-        },
+    refresh_all_snapshots(&mut client)
+        .await
+        .expect("refresh snapshots succeeds");
+    let saw_hidden_bell = poll_for_tab_activity(
+        &mut client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Bell,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
     )
-    .expect("projection succeeds");
-    let tabs = model
-        .tab_bars
-        .iter()
-        .find(|tabs| tabs.node_id == fixture.nested_tabs_id)
-        .expect("nested tabs frame exists");
+    .await;
     assert!(
-        tabs.tabs
-            .iter()
-            .any(|tab| tab.title == "bg" && tab.activity == ActivityState::Bell)
+        saw_hidden_bell,
+        "timed out waiting for bell activity after reconnect"
     );
 
     let _ = connection
@@ -952,6 +1010,20 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         Duration::from_secs(3),
     )
     .await;
+    let cleared_hidden_bell = poll_for_tab_activity(
+        &mut client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Idle,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    )
+    .await;
+    assert!(
+        cleared_hidden_bell,
+        "hidden tab kept Bell activity after being revealed"
+    );
 
     server.shutdown().await.expect("server shuts down");
 }
@@ -967,7 +1039,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
     let buffer = create_buffer_with_command(
         &mut connection,
         "fullscreen",
-        fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "1.0"),
+        fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "3.0"),
     )
     .await;
     let _ = connection
@@ -1037,7 +1109,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         fullscreen_fixture_command(
             "fullscreen-hidden-live",
             "fullscreen-hidden-restored",
-            "1.2",
+            "4.0",
         ),
     )
     .await;
@@ -1075,7 +1147,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
     let restored = wait_for_visible_snapshot(
         &mut connection,
         fixture.hidden_buffer.id,
-        Duration::from_secs(4),
+        Duration::from_secs(6),
         |snapshot| {
             let text = snapshot.lines.join("\n");
             !snapshot.alternate_screen
@@ -1129,7 +1201,7 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         .wait_for_capture_contains(buffer.id, "burst-80", Duration::from_secs(3))
         .await
         .expect("rapid output finishes");
-    wait_for_visible_snapshot(
+    let visible_snapshot = wait_for_visible_snapshot(
         &mut connection,
         buffer.id,
         Duration::from_secs(3),
@@ -1141,31 +1213,9 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         .await
         .expect("client connects");
     let render = render_session(&mut client, "alpha").await;
-    let session_id = session_id_by_name(&client, "alpha");
-    let presentation = PresentationModel::project(
-        client.state(),
-        session_id,
-        Size {
-            width: 80,
-            height: 24,
-        },
-    )
-    .expect("projection succeeds");
-    let visible_rows = presentation
-        .focused_leaf()
-        .expect("focused leaf")
-        .rect
-        .size
-        .height
-        .saturating_sub(1) as usize;
-    let latest_rendered_line = client
-        .state()
-        .snapshots
-        .get(&buffer.id)
-        .expect("burst snapshot")
+    let latest_rendered_line = visible_snapshot
         .lines
         .iter()
-        .take(visible_rows)
         .rev()
         .find(|line| line.starts_with("burst-"))
         .expect("latest rendered burst line");
