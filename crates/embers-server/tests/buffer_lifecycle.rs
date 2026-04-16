@@ -107,6 +107,46 @@ fn closing_a_view_detaches_but_preserves_running_buffer() {
 }
 
 #[test]
+fn focusing_a_leaf_clears_recorded_activity() {
+    let mut state = ServerState::new();
+    let session_id = state.create_session("main");
+    let first_buffer = state.create_buffer("first", vec!["/bin/sh".to_owned()], None);
+    let first_view = state
+        .create_buffer_view(session_id, first_buffer)
+        .expect("create first view");
+    state
+        .add_root_tab(session_id, "first", first_view)
+        .expect("attach first view");
+
+    let second_buffer = state.create_buffer("second", vec!["/bin/sh".to_owned()], None);
+    let second_view = state
+        .create_buffer_view(session_id, second_buffer)
+        .expect("create second view");
+    state
+        .add_root_tab(session_id, "second", second_view)
+        .expect("attach second view");
+    state
+        .focus_leaf(session_id, second_view)
+        .expect("focus second leaf");
+
+    state
+        .set_buffer_activity(first_buffer, ActivityState::Bell)
+        .expect("mark first buffer active");
+
+    state
+        .focus_leaf(session_id, first_view)
+        .expect("focus hidden first leaf");
+
+    assert_eq!(
+        state
+            .buffer(first_buffer)
+            .expect("first buffer exists")
+            .activity,
+        ActivityState::Idle
+    );
+}
+
+#[test]
 fn resize_updates_buffer_size_for_attached_and_detached_buffers() {
     let mut state = ServerState::new();
     let session_id = state.create_session("main");
@@ -134,4 +174,29 @@ fn resize_updates_buffer_size_for_attached_and_detached_buffers() {
         state.buffer(buffer_id).expect("buffer exists").pty_size,
         PtySize::new(90, 20)
     );
+}
+
+#[test]
+fn exited_detached_buffers_can_be_removed_cleanly() {
+    let mut state = ServerState::new();
+    let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+
+    state
+        .mark_buffer_running(buffer_id, Some(88))
+        .expect("mark running");
+    state
+        .mark_buffer_exited(buffer_id, Some(0))
+        .expect("mark exited");
+
+    let removed = state
+        .remove_buffer(buffer_id)
+        .expect("remove detached exited buffer");
+    assert!(matches!(
+        removed.state,
+        BufferState::Exited(ref exited) if exited.exit_code == Some(0)
+    ));
+    assert!(matches!(
+        state.buffer(buffer_id),
+        Err(MuxError::NotFound(_))
+    ));
 }

@@ -367,19 +367,16 @@ impl BufferRuntimeHandle {
 impl BufferRuntimeInner {
     fn join_threads_blocking(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        let mut threads = match self.threads.lock() {
-            Ok(threads) => threads,
+        let poller = match self.threads.lock() {
+            Ok(mut threads) => threads.poller.take(),
             Err(poisoned) => {
                 error!(
                     %self.buffer_id,
                     "buffer runtime thread registry lock poisoned during shutdown"
                 );
-                poisoned.into_inner()
+                poisoned.into_inner().poller.take()
             }
         };
-        let poller = threads.poller.take();
-        drop(threads);
-
         if let Some(poller) = poller
             && poller.thread().id() != thread::current().id()
         {
@@ -528,6 +525,12 @@ impl KeeperSurface {
     }
 }
 
+/// Maximum retries for PTY allocation in runtime keeper
+const KEEPER_PTY_MAX_RETRIES: usize = 3;
+
+/// Delay between PTY allocation retries
+const KEEPER_PTY_RETRY_DELAY: Duration = Duration::from_millis(100);
+
 pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let Some(program) = cli.command.first() else {
         return Err(MuxError::invalid_input(
@@ -545,9 +548,36 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let _cleanup = SocketCleanup::new(cli.socket_path.clone());
 
     let pty_system = NativePtySystem::default();
-    let pair = pty_system
-        .openpty(to_portable_size(cli.size))
-        .map_err(|error| MuxError::pty(error.to_string()))?;
+    let mut last_error = None;
+
+    // Try to open PTY with retries.
+    let mut pair = None;
+    for attempt in 0..=KEEPER_PTY_MAX_RETRIES {
+        match pty_system.openpty(to_portable_size(cli.size)) {
+            Ok(opened_pair) => {
+                pair = Some(opened_pair);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < KEEPER_PTY_MAX_RETRIES {
+                    thread::sleep(KEEPER_PTY_RETRY_DELAY * (attempt + 1) as u32);
+                }
+            }
+        }
+    }
+    let pair = match pair {
+        Some(pair) => pair,
+        None => {
+            // Safe: each failed retry stores the PTY allocation error before continuing.
+            let error =
+                last_error.expect("openpty retry loop must capture an error before failing");
+            return Err(MuxError::pty(format!(
+                "failed to openpty after {} attempts: {error}",
+                KEEPER_PTY_MAX_RETRIES + 1
+            )));
+        }
+    };
 
     let mut command_builder = CommandBuilder::new(program);
     command_builder.args(&cli.command[1..]);
@@ -677,6 +707,18 @@ fn handle_keeper_request(
 }
 
 impl KeeperRuntime {
+    fn ensure_running(&self) -> Result<()> {
+        if self
+            .exit_code
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper exit lock poisoned"))?
+            .is_some()
+        {
+            return Err(MuxError::conflict("buffer runtime has already exited"));
+        }
+        Ok(())
+    }
+
     fn status(&self) -> Result<KeeperStatus> {
         let exit_code = *self
             .exit_code
@@ -703,14 +745,7 @@ impl KeeperRuntime {
     }
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
-        if self
-            .exit_code
-            .lock()
-            .map_err(|_| MuxError::internal("runtime keeper exit lock poisoned"))?
-            .is_some()
-        {
-            return Err(MuxError::conflict("buffer runtime has already exited"));
-        }
+        self.ensure_running()?;
         let mut writer = self
             .writer
             .lock()
@@ -721,6 +756,7 @@ impl KeeperRuntime {
     }
 
     fn resize(&self, size: PtySize) -> Result<()> {
+        self.ensure_running()?;
         let master = self
             .master
             .lock()
@@ -766,6 +802,7 @@ impl KeeperRuntime {
     }
 
     fn kill(&self) -> Result<()> {
+        self.ensure_running()?;
         let mut killer = self
             .killer
             .lock()

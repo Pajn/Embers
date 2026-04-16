@@ -164,6 +164,10 @@ impl ClientState {
         }
     }
 
+    pub fn apply_buffer_record(&mut self, buffer: BufferRecord) {
+        self.buffers.insert(buffer.id, buffer);
+    }
+
     pub fn apply_buffer_snapshot(&mut self, snapshot: VisibleSnapshotResponse) {
         if let Some(buffer) = self.buffers.get_mut(&snapshot.buffer_id) {
             buffer.last_snapshot_seq = snapshot.sequence;

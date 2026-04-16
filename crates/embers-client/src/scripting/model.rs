@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use embers_core::{BufferId, FloatingId, NodeId, SplitDirection};
+use embers_core::{BufferId, FloatingId, NodeId, SessionId, SplitDirection};
+use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+};
 
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
@@ -36,6 +39,11 @@ pub enum Action {
     },
     RevealBuffer {
         buffer_id: BufferId,
+    },
+    OpenBufferHistory {
+        buffer_id: BufferId,
+        scope: BufferHistoryScope,
+        placement: BufferHistoryPlacement,
     },
     SplitCurrent {
         direction: SplitDirection,
@@ -81,6 +89,36 @@ pub enum Action {
         focus: bool,
         close_on_empty: bool,
     },
+    ZoomNode {
+        node_id: Option<NodeId>,
+    },
+    UnzoomNode {
+        session_id: Option<SessionId>,
+    },
+    ToggleZoomNode {
+        node_id: Option<NodeId>,
+    },
+    SwapSiblingNodes {
+        first_node_id: Option<NodeId>,
+        second_node_id: NodeId,
+    },
+    BreakNode {
+        node_id: Option<NodeId>,
+        destination: NodeBreakDestination,
+    },
+    JoinBufferAtNode {
+        node_id: Option<NodeId>,
+        buffer_id: BufferId,
+        placement: NodeJoinPlacement,
+    },
+    MoveNodeBefore {
+        node_id: Option<NodeId>,
+        sibling_node_id: NodeId,
+    },
+    MoveNodeAfter {
+        node_id: Option<NodeId>,
+        sibling_node_id: NodeId,
+    },
     SendKeys {
         buffer_id: Option<BufferId>,
         keys: KeySequence,
@@ -99,6 +137,7 @@ pub enum Action {
     EnterSearchMode,
     SearchNext,
     SearchPrev,
+    CommitSearch,
     CancelSearch,
     EnterSelect {
         kind: SelectionKind,

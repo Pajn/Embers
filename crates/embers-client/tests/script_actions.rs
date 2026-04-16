@@ -7,6 +7,9 @@ use embers_client::{
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
+use embers_protocol::{
+    BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+};
 
 use crate::support::{SESSION_ID, demo_state};
 
@@ -46,6 +49,17 @@ fn action_helpers_roundtrip_to_typed_actions() {
             fn select_move_action(ctx) { action.select_move_left() }
             fn yank_action(ctx) { action.yank_selection() }
             fn notify_user_action(ctx) { action.notify("info", "hello") }
+            fn open_history_action(ctx) {
+                action.open_buffer_history(4, "visible", "floating")
+            }
+            fn zoom_action(ctx) { action.zoom_current_node() }
+            fn unzoom_action(ctx) { action.unzoom_current_session() }
+            fn toggle_zoom_action(ctx) { action.toggle_zoom_node(7) }
+            fn swap_nodes_action(ctx) { action.swap_current_node(8) }
+            fn break_node_action(ctx) { action.break_current_node("tab") }
+            fn join_buffer_action(ctx) { action.join_buffer_here(9, "tab-after") }
+            fn move_before_action(ctx) { action.move_current_node_before(10) }
+            fn move_after_action(ctx) { action.move_node_after(11, 12) }
 
             define_action("enter-copy", enter_copy_action);
             define_action("focus-left", focus_left_action);
@@ -67,6 +81,15 @@ fn action_helpers_roundtrip_to_typed_actions() {
             define_action("select-move", select_move_action);
             define_action("yank", yank_action);
             define_action("notify-user", notify_user_action);
+            define_action("open-history", open_history_action);
+            define_action("zoom", zoom_action);
+            define_action("unzoom", unzoom_action);
+            define_action("toggle-zoom", toggle_zoom_action);
+            define_action("swap-nodes", swap_nodes_action);
+            define_action("break-node", break_node_action);
+            define_action("join-buffer", join_buffer_action);
+            define_action("move-before", move_before_action);
+            define_action("move-after", move_after_action);
         "#,
     );
     let context = demo_context();
@@ -250,6 +273,67 @@ fn action_helpers_roundtrip_to_typed_actions() {
             message: "hello".to_owned(),
         }]
     );
+    let ctx = demo_context();
+    assert_eq!(
+        engine
+            .run_named_action("open-history", ctx.clone())
+            .unwrap(),
+        vec![Action::OpenBufferHistory {
+            buffer_id: BufferId(4),
+            scope: BufferHistoryScope::Visible,
+            placement: BufferHistoryPlacement::Floating,
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("zoom", ctx.clone()).unwrap(),
+        vec![Action::ZoomNode { node_id: None }]
+    );
+    assert_eq!(
+        engine.run_named_action("unzoom", ctx.clone()).unwrap(),
+        vec![Action::UnzoomNode { session_id: None }]
+    );
+    assert_eq!(
+        engine.run_named_action("toggle-zoom", ctx.clone()).unwrap(),
+        vec![Action::ToggleZoomNode {
+            node_id: Some(NodeId(7)),
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("swap-nodes", ctx.clone()).unwrap(),
+        vec![Action::SwapSiblingNodes {
+            first_node_id: None,
+            second_node_id: NodeId(8),
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("break-node", ctx.clone()).unwrap(),
+        vec![Action::BreakNode {
+            node_id: None,
+            destination: NodeBreakDestination::Tab,
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("join-buffer", ctx.clone()).unwrap(),
+        vec![Action::JoinBufferAtNode {
+            node_id: None,
+            buffer_id: BufferId(9),
+            placement: NodeJoinPlacement::TabAfter,
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("move-before", ctx.clone()).unwrap(),
+        vec![Action::MoveNodeBefore {
+            node_id: None,
+            sibling_node_id: NodeId(10),
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("move-after", ctx).unwrap(),
+        vec![Action::MoveNodeAfter {
+            node_id: Some(NodeId(11)),
+            sibling_node_id: NodeId(12),
+        }]
+    );
 }
 
 #[test]
@@ -300,6 +384,215 @@ fn invalid_action_shapes_fail_cleanly() {
         error
             .to_string()
             .contains("send_bytes expects an array of integers")
+    );
+}
+
+#[test]
+fn open_buffer_history_rejects_invalid_scope() {
+    let engine = load_engine(
+        r#"
+            fn bad_scope(ctx) { action.open_buffer_history(1, "invalid-scope", "floating") }
+            define_action("bad-scope", bad_scope);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-scope", demo_context())
+        .expect_err("invalid scope should fail");
+
+    assert!(error.to_string().contains("invalid scope"));
+}
+
+#[test]
+fn open_buffer_history_rejects_invalid_placement() {
+    let engine = load_engine(
+        r#"
+            fn bad_placement(ctx) { action.open_buffer_history(1, "visible", "invalid-placement") }
+            define_action("bad-placement", bad_placement);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-placement", demo_context())
+        .expect_err("invalid placement should fail");
+
+    assert!(error.to_string().contains("invalid placement"));
+}
+
+#[test]
+fn break_node_rejects_invalid_destination() {
+    let engine = load_engine(
+        r#"
+            fn bad_dest(ctx) { action.break_current_node("invalid-dest") }
+            define_action("bad-dest", bad_dest);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-dest", demo_context())
+        .expect_err("invalid destination should fail");
+
+    assert!(error.to_string().contains("invalid destination"));
+}
+
+#[test]
+fn join_buffer_rejects_invalid_placement() {
+    let engine = load_engine(
+        r#"
+            fn bad_place(ctx) { action.join_buffer_here(1, "invalid-place") }
+            define_action("bad-place", bad_place);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-place", demo_context())
+        .expect_err("invalid placement should fail");
+
+    assert!(error.to_string().contains("invalid placement"));
+}
+
+#[test]
+fn commit_search_and_cancel_search_roundtrip() {
+    let engine = load_engine(
+        r#"
+            fn commit_search_action(ctx) { action.commit_search() }
+            fn cancel_search_action(ctx) { action.cancel_search() }
+            define_action("commit-search", commit_search_action);
+            define_action("cancel-search", cancel_search_action);
+        "#,
+    );
+
+    assert_eq!(
+        engine
+            .run_named_action("commit-search", demo_context())
+            .unwrap(),
+        vec![Action::CommitSearch]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("cancel-search", demo_context())
+            .unwrap(),
+        vec![Action::CancelSearch]
+    );
+}
+
+#[test]
+fn toggle_zoom_node_rejects_negative_node_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_zoom(ctx) { action.toggle_zoom_node(-1) }
+            define_action("bad-zoom", bad_zoom);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-zoom", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn swap_current_node_rejects_negative_node_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_swap(ctx) { action.swap_current_node(-5) }
+            define_action("bad-swap", bad_swap);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-swap", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_current_node_before_rejects_negative_sibling_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_current_node_before(-3) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_node_after_rejects_negative_sibling_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_node_after(-1, 5) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn move_node_after_rejects_negative_target_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_move(ctx) { action.move_node_after(1, -5) }
+            define_action("bad-move", bad_move);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-move", demo_context())
+        .expect_err("negative node id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn open_buffer_history_rejects_negative_buffer_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_history(ctx) { action.open_buffer_history(-1, "visible", "floating") }
+            define_action("bad-history", bad_history);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-history", demo_context())
+        .expect_err("negative buffer id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("buffer id must be zero or greater")
     );
 }
 

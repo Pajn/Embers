@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use embers_core::{
     ActivityState, BufferId, CursorPosition, CursorShape, CursorState, ErrorCode, FloatGeometry,
     FloatingId, NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
@@ -67,6 +69,10 @@ fn client_message_families_round_trip() {
             request_id: RequestId(12),
             buffer_id: BufferId(20),
         }),
+        ClientMessage::Buffer(BufferRequest::Inspect {
+            request_id: RequestId(120),
+            buffer_id: BufferId(20),
+        }),
         ClientMessage::Buffer(BufferRequest::Detach {
             request_id: RequestId(13),
             buffer_id: BufferId(20),
@@ -89,6 +95,34 @@ fn client_message_families_round_trip() {
             buffer_id: BufferId(20),
             start_line: 4,
             line_count: 8,
+        }),
+        ClientMessage::Buffer(BufferRequest::GetLocation {
+            request_id: RequestId(153),
+            buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::Reveal {
+            request_id: RequestId(154),
+            buffer_id: BufferId(20),
+            client_id: Some(NonZeroU64::new(7).expect("non-zero client id")),
+        }),
+        ClientMessage::Buffer(BufferRequest::OpenHistory {
+            request_id: RequestId(155),
+            buffer_id: BufferId(20),
+            scope: BufferHistoryScope::Visible,
+            placement: BufferHistoryPlacement::Floating,
+            client_id: None,
+        }),
+        ClientMessage::Buffer(BufferRequest::Reveal {
+            request_id: RequestId(156),
+            buffer_id: BufferId(21),
+            client_id: None,
+        }),
+        ClientMessage::Buffer(BufferRequest::OpenHistory {
+            request_id: RequestId(157),
+            buffer_id: BufferId(21),
+            scope: BufferHistoryScope::Full,
+            placement: BufferHistoryPlacement::Tab,
+            client_id: Some(NonZeroU64::new(8).expect("non-zero client id")),
         }),
         ClientMessage::Node(NodeRequest::GetTree {
             request_id: RequestId(16),
@@ -163,6 +197,79 @@ fn client_message_families_round_trip() {
             node_id: NodeId(35),
             sizes: vec![3, 2, 1],
         }),
+        ClientMessage::Node(NodeRequest::Zoom {
+            request_id: RequestId(241),
+            node_id: NodeId(35),
+        }),
+        ClientMessage::Node(NodeRequest::Unzoom {
+            request_id: RequestId(242),
+            session_id: SessionId(10),
+        }),
+        ClientMessage::Node(NodeRequest::ToggleZoom {
+            request_id: RequestId(243),
+            node_id: NodeId(35),
+        }),
+        ClientMessage::Node(NodeRequest::SwapSiblings {
+            request_id: RequestId(244),
+            first_node_id: NodeId(50),
+            second_node_id: NodeId(51),
+        }),
+        ClientMessage::Node(NodeRequest::BreakNode {
+            request_id: RequestId(245),
+            node_id: NodeId(35),
+            destination: NodeBreakDestination::Floating,
+        }),
+        ClientMessage::Node(NodeRequest::BreakNode {
+            request_id: RequestId(249),
+            node_id: NodeId(36),
+            destination: NodeBreakDestination::Tab,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(246),
+            node_id: NodeId(35),
+            buffer_id: BufferId(22),
+            placement: NodeJoinPlacement::TabAfter,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(250),
+            node_id: NodeId(36),
+            buffer_id: BufferId(23),
+            placement: NodeJoinPlacement::TabBefore,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(251),
+            node_id: NodeId(37),
+            buffer_id: BufferId(24),
+            placement: NodeJoinPlacement::Left,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(252),
+            node_id: NodeId(38),
+            buffer_id: BufferId(25),
+            placement: NodeJoinPlacement::Right,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(253),
+            node_id: NodeId(39),
+            buffer_id: BufferId(26),
+            placement: NodeJoinPlacement::Up,
+        }),
+        ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+            request_id: RequestId(254),
+            node_id: NodeId(40),
+            buffer_id: BufferId(27),
+            placement: NodeJoinPlacement::Down,
+        }),
+        ClientMessage::Node(NodeRequest::MoveNodeBefore {
+            request_id: RequestId(247),
+            node_id: NodeId(35),
+            sibling_node_id: NodeId(36),
+        }),
+        ClientMessage::Node(NodeRequest::MoveNodeAfter {
+            request_id: RequestId(248),
+            node_id: NodeId(35),
+            sibling_node_id: NodeId(36),
+        }),
         ClientMessage::Floating(FloatingRequest::Create {
             request_id: RequestId(25),
             session_id: SessionId(10),
@@ -217,8 +324,13 @@ fn client_message_families_round_trip() {
 #[test]
 fn server_envelope_families_round_trip() {
     let snapshot = sample_snapshot();
+    let snapshot_without_zoom = sample_snapshot_without_zoom();
     let session = snapshot.session.clone();
     let buffers = snapshot.buffers.clone();
+    let detached_buffer = BufferRecord {
+        attachment_node_id: None,
+        ..buffers[2].clone()
+    };
     let floating = snapshot.floating.clone();
 
     let envelopes = vec![
@@ -245,6 +357,10 @@ fn server_envelope_families_round_trip() {
             request_id: RequestId(34),
             snapshot: snapshot.clone(),
         })),
+        ServerEnvelope::Response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(341),
+            snapshot: snapshot_without_zoom.clone(),
+        })),
         ServerEnvelope::Response(ServerResponse::Buffers(BuffersResponse {
             request_id: RequestId(35),
             buffers: buffers.clone(),
@@ -252,6 +368,41 @@ fn server_envelope_families_round_trip() {
         ServerEnvelope::Response(ServerResponse::Buffer(BufferResponse {
             request_id: RequestId(36),
             buffer: buffers[0].clone(),
+        })),
+        ServerEnvelope::Response(ServerResponse::BufferWithLocation(
+            BufferWithLocationResponse::new(
+                RequestId(360),
+                buffers[1].clone(),
+                BufferLocation::floating(BufferId(12), SessionId(10), NodeId(23), FloatingId(70)),
+                false,
+            )
+            .expect("buffer and location ids match"),
+        )),
+        ServerEnvelope::Response(ServerResponse::BufferWithLocation(
+            BufferWithLocationResponse::new(
+                RequestId(363),
+                detached_buffer,
+                BufferLocation::detached(buffers[2].id),
+                false,
+            )
+            .expect("buffer and location ids match"),
+        )),
+        ServerEnvelope::Response(ServerResponse::BufferWithLocation(
+            BufferWithLocationResponse::new(
+                RequestId(364),
+                buffers[0].clone(),
+                BufferLocation::session(BufferId(11), SessionId(10), NodeId(21)),
+                false,
+            )
+            .expect("buffer and location ids match"),
+        )),
+        ServerEnvelope::Response(ServerResponse::BufferLocation(BufferLocationResponse {
+            request_id: RequestId(361),
+            location: BufferLocation::session(BufferId(11), SessionId(10), NodeId(21)),
+        })),
+        ServerEnvelope::Response(ServerResponse::BufferLocation(BufferLocationResponse {
+            request_id: RequestId(362),
+            location: BufferLocation::detached(BufferId(13)),
         })),
         ServerEnvelope::Response(ServerResponse::FloatingList(FloatingListResponse {
             request_id: RequestId(37),
@@ -345,6 +496,7 @@ fn sample_snapshot() -> SessionSnapshot {
             floating_ids: vec![FloatingId(30)],
             focused_leaf_id: Some(NodeId(21)),
             focused_floating_id: Some(FloatingId(30)),
+            zoomed_node_id: Some(NodeId(24)),
         },
         nodes: vec![
             NodeRecord {
@@ -434,6 +586,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 BufferRecordState::Running,
                 ActivityState::Activity,
                 None,
+                false,
             ),
             sample_buffer_record(
                 BufferId(12),
@@ -441,6 +594,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 BufferRecordState::Exited,
                 ActivityState::Bell,
                 Some(0),
+                false,
             ),
             sample_buffer_record(
                 BufferId(13),
@@ -448,6 +602,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 BufferRecordState::Created,
                 ActivityState::Idle,
                 None,
+                true,
             ),
         ],
         floating: vec![FloatingRecord {
@@ -463,21 +618,47 @@ fn sample_snapshot() -> SessionSnapshot {
     }
 }
 
+fn sample_snapshot_without_zoom() -> SessionSnapshot {
+    let mut snapshot = sample_snapshot();
+    snapshot.session.zoomed_node_id = None;
+    for node in &mut snapshot.nodes {
+        if let Some(buffer_view) = node.buffer_view.as_mut() {
+            buffer_view.zoomed = false;
+        }
+    }
+    snapshot
+}
+
 fn sample_buffer_record(
     id: BufferId,
     attachment_node_id: Option<NodeId>,
     state: BufferRecordState,
     activity: ActivityState,
     exit_code: Option<i32>,
+    is_helper: bool,
 ) -> BufferRecord {
+    let (kind, read_only, helper_source_buffer_id, helper_scope) = if is_helper {
+        (
+            BufferRecordKind::Helper,
+            true,
+            Some(BufferId(12)),
+            Some(BufferHistoryScope::Visible),
+        )
+    } else {
+        (BufferRecordKind::Pty, false, None, None)
+    };
     BufferRecord {
         id,
         title: format!("buffer-{id}"),
         command: vec!["bash".to_owned(), "-lc".to_owned(), "echo mux".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        kind,
         state,
         pid: Some(4242),
         attachment_node_id,
+        read_only,
+        helper_source_buffer_id,
+        helper_scope,
         pty_size: PtySize::new(120, 40),
         activity,
         last_snapshot_seq: 9,

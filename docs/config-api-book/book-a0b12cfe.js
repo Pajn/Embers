@@ -651,7 +651,8 @@ aria-label="Show hidden lines"></button>';
         if (e.altKey || e.ctrlKey || e.metaKey) {
             return;
         }
-        if (window.search && window.search.hasFocus()) {
+        if (window.__EMBERS_CONFIG_API_SEARCH__
+            && window.__EMBERS_CONFIG_API_SEARCH__.hasFocus()) {
             return;
         }
         const html = document.querySelector('html');

@@ -5,16 +5,53 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, IdAllocator, MuxError, NodeId, PtySize,
     Result, SessionId, SplitDirection, Timestamp,
 };
+use embers_protocol::NodeJoinPlacement;
 
 use crate::model::{
-    Buffer, BufferAttachment, BufferState, BufferViewNode, BufferViewState, ExitedBuffer,
-    FloatingWindow, InterruptedBuffer, Node, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
+    ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
+    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
     CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
     persisted_node, persisted_session, restored_buffer, restored_floating, restored_node,
     restored_session,
 };
+
+const DEFAULT_FLOATING_WIDTH_PADDING: u16 = 8;
+const DEFAULT_FLOATING_HEIGHT_PADDING: u16 = 4;
+const DEFAULT_FLOATING_MIN_WIDTH: u16 = 40;
+const DEFAULT_FLOATING_MAX_WIDTH: u16 = 120;
+const DEFAULT_FLOATING_MIN_HEIGHT: u16 = 10;
+const DEFAULT_FLOATING_MAX_HEIGHT: u16 = 40;
+
+#[derive(Clone, Debug)]
+enum ParentSlotSnapshot {
+    Split {
+        index: usize,
+        size: u16,
+        last_focused_descendant: Option<NodeId>,
+    },
+    Tabs {
+        index: usize,
+        tab: TabEntry,
+        active: usize,
+        last_focused_descendant: Option<NodeId>,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum NodeOwnerSnapshot {
+    Parent {
+        parent_id: NodeId,
+        slot: ParentSlotSnapshot,
+    },
+    Floating {
+        window: FloatingWindow,
+        index: usize,
+        focused_floating: Option<FloatingId>,
+    },
+}
 
 #[derive(Debug)]
 pub struct ServerState {
@@ -322,6 +359,7 @@ impl ServerState {
                 floating: Vec::new(),
                 focused_leaf: None,
                 focused_floating: None,
+                zoomed_node: None,
                 created_at: Timestamp::now(),
             },
         );
@@ -348,6 +386,28 @@ impl ServerState {
         self.buffers
             .insert(buffer_id, Buffer::new(buffer_id, title, command, cwd, env));
         buffer_id
+    }
+
+    pub fn create_helper_buffer(
+        &mut self,
+        title: impl Into<String>,
+        source_buffer_id: BufferId,
+        scope: HelperBufferScope,
+        cwd: Option<PathBuf>,
+        lines: Vec<String>,
+    ) -> Result<BufferId> {
+        let source_pty_size = self.buffer(source_buffer_id)?.pty_size;
+        let buffer_id = self.buffer_ids.next();
+        let mut buffer = Buffer::new(buffer_id, title, Vec::new(), cwd, BTreeMap::new());
+        buffer.pty_size = source_pty_size;
+        buffer.last_snapshot_seq = 1;
+        buffer.kind = BufferKind::Helper(HelperBuffer {
+            source_buffer_id,
+            scope,
+            lines,
+        });
+        self.buffers.insert(buffer_id, buffer);
+        Ok(buffer_id)
     }
 
     pub fn remove_buffer(&mut self, buffer_id: BufferId) -> Result<Buffer> {
@@ -459,6 +519,19 @@ impl ServerState {
         session_id: SessionId,
         buffer_id: BufferId,
     ) -> Result<NodeId> {
+        let node_id = self.create_unattached_buffer_view(session_id, buffer_id)?;
+        if let Err(error) = self.attach_buffer(buffer_id, node_id) {
+            self.nodes.remove(&node_id);
+            return Err(error);
+        }
+        Ok(node_id)
+    }
+
+    fn create_unattached_buffer_view(
+        &mut self,
+        session_id: SessionId,
+        buffer_id: BufferId,
+    ) -> Result<NodeId> {
         self.ensure_session_exists(session_id)?;
         self.buffer(buffer_id)?;
 
@@ -473,10 +546,6 @@ impl ServerState {
                 view: BufferViewState::default(),
             }),
         );
-        if let Err(error) = self.attach_buffer(buffer_id, node_id) {
-            self.nodes.remove(&node_id);
-            return Err(error);
-        }
         Ok(node_id)
     }
 
@@ -563,7 +632,7 @@ impl ServerState {
                 session_id,
                 parent: None,
                 tabs,
-                active: active.min(active.saturating_sub(0)),
+                active,
                 last_focused_descendant: None,
             }),
         );
@@ -587,6 +656,43 @@ impl ServerState {
         title: Option<String>,
     ) -> Result<FloatingId> {
         self.create_floating_window_with_options(session_id, root_node, geometry, title, true, true)
+    }
+
+    pub fn default_floating_geometry(&self, session_id: SessionId) -> Result<FloatGeometry> {
+        let session = self.session(session_id)?;
+        let anchor_leaf = session
+            .focused_leaf
+            .or(self.resolve_visible_leaf(session.root_node)?)
+            .or(self.resolve_first_leaf(session.root_node)?);
+        let size = self
+            .visible_node_size(session.root_node)?
+            .or(anchor_leaf
+                .map(|leaf_id| match self.node(leaf_id)? {
+                    Node::BufferView(node) => Ok(node.view.last_render_size),
+                    _ => Err(MuxError::internal(format!(
+                        "floating geometry anchor {leaf_id} is not a buffer view"
+                    ))),
+                })
+                .transpose()?)
+            .unwrap_or(PtySize::new(80, 24));
+        let width = Self::default_floating_dimension(
+            size.cols,
+            DEFAULT_FLOATING_WIDTH_PADDING,
+            DEFAULT_FLOATING_MIN_WIDTH,
+            DEFAULT_FLOATING_MAX_WIDTH,
+        );
+        let height = Self::default_floating_dimension(
+            size.rows,
+            DEFAULT_FLOATING_HEIGHT_PADDING,
+            DEFAULT_FLOATING_MIN_HEIGHT,
+            DEFAULT_FLOATING_MAX_HEIGHT,
+        );
+        Ok(FloatGeometry::new(
+            size.cols.saturating_sub(width) / 2,
+            size.rows.saturating_sub(height) / 2,
+            width,
+            height,
+        ))
     }
 
     pub fn create_floating_window_with_options(
@@ -632,8 +738,12 @@ impl ServerState {
             },
         );
         self.session_mut(session_id)?.floating.push(floating_id);
-        if focus {
-            self.focus_floating(floating_id)?;
+        if focus && let Err(error) = self.focus_floating(floating_id) {
+            self.floating.remove(&floating_id);
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.floating.retain(|id| *id != floating_id);
+            }
+            return Err(error);
         }
         Ok(floating_id)
     }
@@ -660,20 +770,27 @@ impl ServerState {
         close_on_empty: bool,
     ) -> Result<FloatingId> {
         let root_node = self.create_buffer_view(session_id, buffer_id)?;
-        self.create_floating_window_with_options(
+        match self.create_floating_window_with_options(
             session_id,
             root_node,
             geometry,
             title,
             focus,
             close_on_empty,
-        )
+        ) {
+            Ok(floating_id) => Ok(floating_id),
+            Err(error) => {
+                self.discard_buffer_view(root_node);
+                Err(error)
+            }
+        }
     }
 
     pub fn close_floating(&mut self, floating_id: FloatingId) -> Result<()> {
         let floating = self.remove_floating_window(floating_id)?;
         let session_id = floating.session_id;
         self.remove_subtree_nodes(floating.root_node)?;
+        self.normalize_zoomed_node(session_id)?;
         self.heal_focus(session_id)
     }
 
@@ -717,7 +834,7 @@ impl ServerState {
             Node::Tabs(tabs) => tabs.tabs.len(),
             _ => return Err(MuxError::invalid_input("node is not a tabs container")),
         };
-        self.add_tab_sibling_at(tabs_id, append_index, title, child)
+        self.add_tab_sibling_at_with_focus(tabs_id, append_index, title, child, true)
     }
 
     pub fn add_tab_sibling_at(
@@ -726,6 +843,17 @@ impl ServerState {
         index: usize,
         title: impl Into<String>,
         child: NodeId,
+    ) -> Result<usize> {
+        self.add_tab_sibling_at_with_focus(tabs_id, index, title, child, true)
+    }
+
+    fn add_tab_sibling_at_with_focus(
+        &mut self,
+        tabs_id: NodeId,
+        index: usize,
+        title: impl Into<String>,
+        child: NodeId,
+        do_focus: bool,
     ) -> Result<usize> {
         let session_id = self.node_session_id(tabs_id)?;
         self.ensure_node_belongs_to(child, session_id)?;
@@ -774,10 +902,12 @@ impl ServerState {
             index
         };
 
-        if let Some(leaf) = self.resolve_focus_candidate(child)? {
-            self.focus_leaf(session_id, leaf)?;
-        } else {
-            self.heal_focus(session_id)?;
+        if do_focus {
+            if let Some(leaf) = self.resolve_focus_candidate(child)? {
+                self.focus_leaf(session_id, leaf)?;
+            } else {
+                self.heal_focus(session_id)?;
+            }
         }
 
         Ok(index)
@@ -870,6 +1000,17 @@ impl ServerState {
         sibling: NodeId,
         insert_before: bool,
     ) -> Result<NodeId> {
+        self.wrap_node_in_split_with_focus(node_id, direction, sibling, insert_before, true)
+    }
+
+    fn wrap_node_in_split_with_focus(
+        &mut self,
+        node_id: NodeId,
+        direction: SplitDirection,
+        sibling: NodeId,
+        insert_before: bool,
+        do_focus: bool,
+    ) -> Result<NodeId> {
         let session_id = self.node_session_id(node_id)?;
         self.ensure_node_belongs_to(sibling, session_id)?;
         if node_id == sibling {
@@ -915,10 +1056,12 @@ impl ServerState {
         self.set_parent(node_id, Some(split_id))?;
         self.set_parent(sibling, Some(split_id))?;
         self.repoint_owner_reference(session_id, old_parent, node_id, split_id)?;
-        if let Some(leaf) = self.resolve_focus_candidate(sibling)? {
-            self.focus_leaf(session_id, leaf)?;
-        } else {
-            self.heal_focus(session_id)?;
+        if do_focus {
+            if let Some(leaf) = self.resolve_focus_candidate(sibling)? {
+                self.focus_leaf(session_id, leaf)?;
+            } else {
+                self.heal_focus(session_id)?;
+            }
         }
         Ok(split_id)
     }
@@ -1212,6 +1355,312 @@ impl ServerState {
         self.focus_leaf(target_session, target_leaf)
     }
 
+    pub fn zoom_node(&mut self, node_id: NodeId) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        self.ensure_node_visible_in_session(session_id, node_id)?;
+        self.refocus_zoomed_subtree(session_id, node_id)?;
+        self.session_mut(session_id)?.zoomed_node = Some(node_id);
+        Ok(())
+    }
+
+    pub fn unzoom_session(&mut self, session_id: SessionId) -> Result<()> {
+        self.session_mut(session_id)?.zoomed_node = None;
+        Ok(())
+    }
+
+    pub fn toggle_zoom_node(&mut self, node_id: NodeId) -> Result<()> {
+        let session_id = self.node_session_id(node_id)?;
+        if self.session(session_id)?.zoomed_node == Some(node_id) {
+            self.session_mut(session_id)?.zoomed_node = None;
+        } else {
+            self.ensure_node_visible_in_session(session_id, node_id)?;
+            self.refocus_zoomed_subtree(session_id, node_id)?;
+            self.session_mut(session_id)?.zoomed_node = Some(node_id);
+        }
+        Ok(())
+    }
+
+    pub fn swap_sibling_nodes(
+        &mut self,
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    ) -> Result<()> {
+        if first_node_id == second_node_id {
+            return Ok(());
+        }
+        let parent_id = self.shared_parent(first_node_id, second_node_id)?;
+        match self.node_mut(parent_id)? {
+            Node::Split(split) => {
+                let first = split
+                    .children
+                    .iter()
+                    .position(|child| *child == first_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {first_node_id} is not a child of split {parent_id}"
+                        ))
+                    })?;
+                let second = split
+                    .children
+                    .iter()
+                    .position(|child| *child == second_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {second_node_id} is not a child of split {parent_id}"
+                        ))
+                    })?;
+                split.children.swap(first, second);
+                split.sizes.swap(first, second);
+            }
+            Node::Tabs(tabs) => {
+                let first = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == first_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {first_node_id} is not a child of tabs {parent_id}"
+                        ))
+                    })?;
+                let second = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == second_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {second_node_id} is not a child of tabs {parent_id}"
+                        ))
+                    })?;
+                tabs.tabs.swap(first, second);
+                match tabs.active {
+                    active if active == first => tabs.active = second,
+                    active if active == second => tabs.active = first,
+                    _ => {}
+                }
+            }
+            Node::BufferView(_) => {
+                return Err(MuxError::invalid_input(
+                    "buffer views do not have sibling children",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn move_node_before(&mut self, node_id: NodeId, sibling_node_id: NodeId) -> Result<()> {
+        self.reorder_sibling_node(node_id, sibling_node_id, true)
+    }
+
+    pub fn move_node_after(&mut self, node_id: NodeId, sibling_node_id: NodeId) -> Result<()> {
+        self.reorder_sibling_node(node_id, sibling_node_id, false)
+    }
+
+    pub fn break_node(&mut self, node_id: NodeId, to_floating: bool) -> Result<()> {
+        if to_floating
+            && self.node_parent(node_id)?.is_none()
+            && self.floating_id_by_root(node_id).is_some()
+        {
+            return Ok(());
+        }
+        if !to_floating
+            && let Some(parent_id) = self.node_parent(node_id)?
+            && matches!(self.node(parent_id)?, Node::Tabs(_))
+        {
+            return Ok(());
+        }
+        let session_id = self.node_session_id(node_id)?;
+        let title = self.default_tab_title(node_id)?;
+        let do_focus = self.is_node_visible_in_session(session_id, node_id)?;
+        let owner_snapshot = self.capture_node_owner_snapshot(node_id)?;
+        let (old_parent, _) = self.detach_node_from_owner(node_id)?;
+
+        let result = if to_floating {
+            let geometry = self.default_floating_geometry(session_id)?;
+            self.create_floating_window_with_options(
+                session_id,
+                node_id,
+                geometry,
+                Some(title),
+                true,
+                true,
+            )
+            .map(|_| ())
+        } else {
+            let tabs_id = self
+                .nearest_tabs_ancestor(old_parent)?
+                .unwrap_or(self.ensure_root_tabs_container(session_id)?);
+            let insert_index = match self.node(tabs_id)? {
+                Node::Tabs(tabs) => tabs.tabs.len(),
+                _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+            };
+            self.add_tab_sibling_at_with_focus(tabs_id, insert_index, title, node_id, do_focus)
+                .map(|_| ())
+        };
+        if let Err(error) = result {
+            self.rollback_detached_node(node_id, owner_snapshot)
+                .map_err(|rollback_error| {
+                    MuxError::internal(format!(
+                        "failed to roll back break_node({node_id}) after {error}: {rollback_error}"
+                    ))
+                })?;
+            return Err(error);
+        }
+
+        if let Some(parent_id) = old_parent {
+            self.normalize_upwards(parent_id)?;
+        }
+        self.normalize_zoomed_node(session_id)?;
+        Ok(())
+    }
+
+    pub fn join_buffer_at_node(
+        &mut self,
+        node_id: NodeId,
+        buffer_id: BufferId,
+        placement: NodeJoinPlacement,
+    ) -> Result<()> {
+        let target_session = self.node_session_id(node_id)?;
+        let do_focus = self.is_node_visible_in_session(target_session, node_id)?;
+        let mut created_tabs_wrapper = None;
+        let source_view = match self.buffer(buffer_id)?.attachment {
+            BufferAttachment::Attached(source_view) => {
+                let source_session = self.node_session_id(source_view)?;
+                if source_session != target_session {
+                    return Err(MuxError::conflict(format!(
+                        "buffer {buffer_id} is attached in session {source_session} and cannot be joined into session {target_session}"
+                    )));
+                }
+                if source_view == node_id || self.node_is_descendant_of(source_view, node_id)? {
+                    return Err(MuxError::conflict(format!(
+                        "buffer {buffer_id} is already contained by node {node_id} via view {source_view}"
+                    )));
+                }
+                Some(source_view)
+            }
+            BufferAttachment::Detached => None,
+        };
+
+        let new_view = if source_view.is_some() {
+            self.create_unattached_buffer_view(target_session, buffer_id)?
+        } else {
+            self.create_buffer_view(target_session, buffer_id)?
+        };
+        let result = match placement {
+            NodeJoinPlacement::Left => self
+                .wrap_node_in_split_with_focus(
+                    node_id,
+                    SplitDirection::Vertical,
+                    new_view,
+                    true,
+                    do_focus,
+                )
+                .map(|_| ()),
+            NodeJoinPlacement::Right => self
+                .wrap_node_in_split_with_focus(
+                    node_id,
+                    SplitDirection::Vertical,
+                    new_view,
+                    false,
+                    do_focus,
+                )
+                .map(|_| ()),
+            NodeJoinPlacement::Up => self
+                .wrap_node_in_split_with_focus(
+                    node_id,
+                    SplitDirection::Horizontal,
+                    new_view,
+                    true,
+                    do_focus,
+                )
+                .map(|_| ()),
+            NodeJoinPlacement::Down => self
+                .wrap_node_in_split_with_focus(
+                    node_id,
+                    SplitDirection::Horizontal,
+                    new_view,
+                    false,
+                    do_focus,
+                )
+                .map(|_| ()),
+            NodeJoinPlacement::TabBefore | NodeJoinPlacement::TabAfter => {
+                let title = self.buffer(buffer_id)?.title.clone();
+                let tabs_id = if matches!(self.node(node_id)?, Node::Tabs(_)) {
+                    node_id
+                } else if matches!(
+                    self.node_parent(node_id)?
+                        .map(|id| self.node(id))
+                        .transpose()?,
+                    Some(Node::Tabs(_))
+                ) {
+                    self.node_parent(node_id)?.expect("checked parent exists")
+                } else {
+                    let tabs_id =
+                        self.wrap_node_in_tabs(node_id, self.default_tab_title(node_id)?)?;
+                    created_tabs_wrapper = Some(tabs_id);
+                    tabs_id
+                };
+                let insert_index = {
+                    let tabs = match self.node(tabs_id)? {
+                        Node::Tabs(tabs) => tabs,
+                        _ => return Err(MuxError::invalid_input("node is not a tabs container")),
+                    };
+                    let len = tabs.tabs.len();
+                    if tabs_id == node_id {
+                        let active = tabs.active.min(len);
+                        match placement {
+                            NodeJoinPlacement::TabBefore => active,
+                            NodeJoinPlacement::TabAfter => active.saturating_add(1).min(len),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        let current = tabs
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.child == node_id)
+                            .ok_or_else(|| {
+                                MuxError::not_found(format!(
+                                    "node {node_id} is not a child of tabs {tabs_id}"
+                                ))
+                            })?;
+                        match placement {
+                            NodeJoinPlacement::TabBefore => current,
+                            NodeJoinPlacement::TabAfter => current.saturating_add(1).min(len),
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+                self.add_tab_sibling_at_with_focus(tabs_id, insert_index, title, new_view, do_focus)
+                    .map(|_| ())
+            }
+        };
+
+        if let Err(error) = result {
+            self.discard_buffer_view(new_view);
+            if let Some(tabs_id) = created_tabs_wrapper
+                && self.nodes.contains_key(&tabs_id)
+            {
+                let _ = self.normalize_upwards(tabs_id);
+            }
+            return Err(error);
+        }
+        if let Some(source_view) = source_view {
+            if let Err(error) = self.close_node(source_view) {
+                match self.close_node(new_view) {
+                    Ok(()) => {}
+                    Err(rollback_error) => {
+                        return Err(MuxError::internal(format!(
+                            "failed to close original view {source_view} after joining buffer {buffer_id}: {error}; rollback failed while closing new view {new_view}: {rollback_error}"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+            self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Attached(new_view);
+        }
+        self.normalize_zoomed_node(target_session)?;
+        Ok(())
+    }
+
     pub fn detach_buffer(&mut self, buffer_id: BufferId) -> Result<()> {
         match self.buffer(buffer_id)?.attachment {
             BufferAttachment::Attached(node_id) => self.close_node(node_id),
@@ -1222,6 +1671,7 @@ impl ServerState {
     pub fn focus_leaf(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
         self.ensure_leaf_belongs_to(leaf_id, session_id)?;
         self.ensure_leaf_is_focusable(session_id, leaf_id)?;
+        let buffer_id = self.buffer_view_buffer_id(leaf_id)?;
         self.clear_session_focus(session_id)?;
         self.set_leaf_focus(leaf_id, true)?;
 
@@ -1258,6 +1708,8 @@ impl ServerState {
             }
             child = parent;
         }
+
+        self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
 
         Ok(())
     }
@@ -1317,6 +1769,7 @@ impl ServerState {
         self.set_parent(child, None)?;
         self.remove_subtree_nodes(child)?;
         self.normalize_upwards(tabs_id)?;
+        self.normalize_zoomed_node(session_id)?;
         self.heal_focus(session_id)
     }
 
@@ -1339,6 +1792,7 @@ impl ServerState {
             )));
         }
 
+        self.normalize_zoomed_node(session_id)?;
         self.heal_focus(session_id)
     }
 
@@ -1371,6 +1825,7 @@ impl ServerState {
         } else {
             self.heal_focus(session_id)?;
         }
+        self.normalize_zoomed_node(session_id)?;
         Ok(())
     }
 
@@ -1438,6 +1893,26 @@ impl ServerState {
                     )));
                 }
             }
+
+            if let Some(zoomed_node) = session.zoomed_node {
+                if !self.nodes.contains_key(&zoomed_node) {
+                    return Err(MuxError::conflict(format!(
+                        "zoomed node {zoomed_node} is missing from session {}",
+                        session.id
+                    )));
+                }
+                if self.node(zoomed_node)?.session_id() != session.id {
+                    return Err(MuxError::conflict(format!(
+                        "zoomed node {zoomed_node} belongs to the wrong session"
+                    )));
+                }
+                if !self.is_node_visible_in_session(session.id, zoomed_node)? {
+                    return Err(MuxError::conflict(format!(
+                        "zoomed node {zoomed_node} is not visible in session {}",
+                        session.id
+                    )));
+                }
+            }
         }
 
         if seen.len() != self.nodes.len() {
@@ -1494,6 +1969,7 @@ impl ServerState {
             }),
         );
         self.session_mut(session_id)?.root_node = new_root;
+        self.session_mut(session_id)?.zoomed_node = None;
         self.heal_focus(session_id)
     }
 
@@ -1540,6 +2016,22 @@ impl ServerState {
         let session = self.session_mut(session_id)?;
         session.focused_leaf = None;
         session.focused_floating = None;
+        Ok(())
+    }
+
+    fn refocus_zoomed_subtree(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
+        self.ensure_node_visible_in_session(session_id, node_id)?;
+        if let Some(focused_leaf) = self.session(session_id)?.focused_leaf
+            && self.node_is_descendant_of(focused_leaf, node_id)?
+        {
+            return Ok(());
+        }
+
+        if let Some(focus_candidate) = self.resolve_focus_candidate(node_id)? {
+            self.focus_leaf(session_id, focus_candidate)?;
+        } else {
+            self.clear_session_focus(session_id)?;
+        }
         Ok(())
     }
 
@@ -1658,6 +2150,292 @@ impl ServerState {
         self.ensure_leaf(node_id)
     }
 
+    fn shared_parent(&self, first_node_id: NodeId, second_node_id: NodeId) -> Result<NodeId> {
+        if first_node_id == second_node_id {
+            return Err(MuxError::invalid_input(
+                "sibling operations require two distinct nodes",
+            ));
+        }
+        let first_parent = self.node_parent(first_node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {first_node_id} has no parent"))
+        })?;
+        let second_parent = self.node_parent(second_node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {second_node_id} has no parent"))
+        })?;
+        if first_parent != second_parent {
+            return Err(MuxError::conflict(
+                "node ergonomics are restricted to siblings with the same parent".to_owned(),
+            ));
+        }
+        Ok(first_parent)
+    }
+
+    fn reorder_sibling_node(
+        &mut self,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+        before: bool,
+    ) -> Result<()> {
+        if node_id == sibling_node_id {
+            return Ok(());
+        }
+        let parent_id = self.shared_parent(node_id, sibling_node_id)?;
+        match self.node_mut(parent_id)? {
+            Node::Split(split) => {
+                let from = split
+                    .children
+                    .iter()
+                    .position(|child| *child == node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("node {node_id} is not in split {parent_id}"))
+                    })?;
+                let target = split
+                    .children
+                    .iter()
+                    .position(|child| *child == sibling_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {sibling_node_id} is not in split {parent_id}"
+                        ))
+                    })?;
+                let child = split.children.remove(from);
+                let size = split.sizes.remove(from);
+                let mut insert_at = target;
+                if from < target {
+                    insert_at = insert_at.saturating_sub(1);
+                }
+                if !before {
+                    insert_at = insert_at.saturating_add(1);
+                }
+                split.children.insert(insert_at, child);
+                split.sizes.insert(insert_at, size);
+            }
+            Node::Tabs(tabs) => {
+                let from = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("node {node_id} is not in tabs {parent_id}"))
+                    })?;
+                let target = tabs
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.child == sibling_node_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!(
+                            "node {sibling_node_id} is not in tabs {parent_id}"
+                        ))
+                    })?;
+                let tab = tabs.tabs.remove(from);
+                let mut insert_at = target;
+                if from < target {
+                    insert_at = insert_at.saturating_sub(1);
+                }
+                if !before {
+                    insert_at = insert_at.saturating_add(1);
+                }
+                tabs.tabs.insert(insert_at, tab);
+                if tabs.active == from {
+                    tabs.active = insert_at;
+                } else if from < tabs.active && insert_at >= tabs.active {
+                    tabs.active = tabs.active.saturating_sub(1);
+                } else if from > tabs.active && insert_at <= tabs.active {
+                    tabs.active = tabs.active.saturating_add(1);
+                }
+            }
+            Node::BufferView(_) => {
+                return Err(MuxError::invalid_input(
+                    "buffer views do not have sibling children",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn detach_node_from_owner(
+        &mut self,
+        node_id: NodeId,
+    ) -> Result<(Option<NodeId>, Option<FloatingId>)> {
+        if self.is_session_root(node_id) {
+            return Err(MuxError::conflict(
+                "session root cannot be broken out of its owner".to_owned(),
+            ));
+        }
+        if let Some(parent_id) = self.node_parent(node_id)? {
+            self.remove_child(parent_id, node_id)?;
+            return Ok((Some(parent_id), None));
+        }
+        if let Some(floating_id) = self.floating_id_by_root(node_id) {
+            let _ = self.remove_floating_window(floating_id)?;
+            return Ok((None, Some(floating_id)));
+        }
+        Err(MuxError::invalid_input(format!(
+            "node {node_id} has no owning container"
+        )))
+    }
+
+    fn capture_node_owner_snapshot(&self, node_id: NodeId) -> Result<NodeOwnerSnapshot> {
+        if let Some(parent_id) = self.node_parent(node_id)? {
+            let slot = match self.node(parent_id)? {
+                Node::Split(split) => {
+                    let index = split
+                        .children
+                        .iter()
+                        .position(|child| *child == node_id)
+                        .ok_or_else(|| {
+                            MuxError::not_found(format!(
+                                "node {node_id} is not a child of parent {parent_id}"
+                            ))
+                        })?;
+                    ParentSlotSnapshot::Split {
+                        index,
+                        size: split.sizes.get(index).copied().unwrap_or(1),
+                        last_focused_descendant: split.last_focused_descendant,
+                    }
+                }
+                Node::Tabs(tabs) => {
+                    let index = tabs
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.child == node_id)
+                        .ok_or_else(|| {
+                            MuxError::not_found(format!(
+                                "node {node_id} is not a child of parent {parent_id}"
+                            ))
+                        })?;
+                    ParentSlotSnapshot::Tabs {
+                        index,
+                        tab: tabs.tabs[index].clone(),
+                        active: tabs.active,
+                        last_focused_descendant: tabs.last_focused_descendant,
+                    }
+                }
+                Node::BufferView(_) => {
+                    return Err(MuxError::invalid_input(
+                        "buffer views do not own child nodes".to_owned(),
+                    ));
+                }
+            };
+            return Ok(NodeOwnerSnapshot::Parent { parent_id, slot });
+        }
+        if let Some(floating_id) = self.floating_id_by_root(node_id) {
+            let window = self.floating_window(floating_id)?.clone();
+            let session = self.session(window.session_id)?;
+            let index = session
+                .floating
+                .iter()
+                .position(|candidate| *candidate == floating_id)
+                .ok_or_else(|| {
+                    MuxError::not_found(format!(
+                        "floating window {floating_id} is not registered in session {}",
+                        window.session_id
+                    ))
+                })?;
+            return Ok(NodeOwnerSnapshot::Floating {
+                window,
+                index,
+                focused_floating: session.focused_floating,
+            });
+        }
+        Err(MuxError::invalid_input(format!(
+            "node {node_id} has no owning container"
+        )))
+    }
+
+    fn rollback_detached_node(&mut self, node_id: NodeId, owner: NodeOwnerSnapshot) -> Result<()> {
+        if self.node_parent(node_id)?.is_some() || self.floating_id_by_root(node_id).is_some() {
+            let _ = self.detach_node_from_owner(node_id)?;
+        }
+        self.restore_node_owner(node_id, owner)
+    }
+
+    fn restore_node_owner(&mut self, node_id: NodeId, owner: NodeOwnerSnapshot) -> Result<()> {
+        match owner {
+            NodeOwnerSnapshot::Parent { parent_id, slot } => {
+                match slot {
+                    ParentSlotSnapshot::Split {
+                        index,
+                        size,
+                        last_focused_descendant,
+                    } => {
+                        let split = match self.node_mut(parent_id)? {
+                            Node::Split(split) => split,
+                            _ => return Err(MuxError::invalid_input("node is not a split")),
+                        };
+                        let insert_index = index.min(split.children.len());
+                        split.children.insert(insert_index, node_id);
+                        split
+                            .sizes
+                            .insert(insert_index.min(split.sizes.len()), size);
+                        split.last_focused_descendant = last_focused_descendant;
+                    }
+                    ParentSlotSnapshot::Tabs {
+                        index,
+                        tab,
+                        active,
+                        last_focused_descendant,
+                    } => {
+                        let tabs = match self.node_mut(parent_id)? {
+                            Node::Tabs(tabs) => tabs,
+                            _ => {
+                                return Err(MuxError::invalid_input(
+                                    "node is not a tabs container",
+                                ));
+                            }
+                        };
+                        let insert_index = index.min(tabs.tabs.len());
+                        tabs.tabs.insert(insert_index, tab);
+                        tabs.active = active.min(tabs.tabs.len().saturating_sub(1));
+                        tabs.last_focused_descendant = last_focused_descendant;
+                    }
+                }
+                self.set_parent(node_id, Some(parent_id))
+            }
+            NodeOwnerSnapshot::Floating {
+                window,
+                index,
+                focused_floating,
+            } => {
+                let session_id = window.session_id;
+                let floating_id = window.id;
+                self.floating.insert(floating_id, window);
+                let session = self.session_mut(session_id)?;
+                let insert_index = index.min(session.floating.len());
+                session.floating.insert(insert_index, floating_id);
+                session.focused_floating = focused_floating;
+                self.set_parent(node_id, None)
+            }
+        }
+    }
+
+    fn nearest_tabs_ancestor(&self, mut node_id: Option<NodeId>) -> Result<Option<NodeId>> {
+        while let Some(current) = node_id {
+            if matches!(self.node(current)?, Node::Tabs(_)) {
+                return Ok(Some(current));
+            }
+            node_id = self.node_parent(current)?;
+        }
+        Ok(None)
+    }
+
+    fn normalize_zoomed_node(&mut self, session_id: SessionId) -> Result<()> {
+        let keep = match self.session(session_id)?.zoomed_node {
+            Some(node_id)
+                if self
+                    .nodes
+                    .get(&node_id)
+                    .is_some_and(|node| node.session_id() == session_id)
+                    && self.is_node_visible_in_session(session_id, node_id)? =>
+            {
+                Some(node_id)
+            }
+            _ => None,
+        };
+        self.session_mut(session_id)?.zoomed_node = keep;
+        Ok(())
+    }
+
     fn is_session_root(&self, node_id: NodeId) -> bool {
         self.sessions
             .values()
@@ -1671,7 +2449,7 @@ impl ServerState {
             .map(|floating| floating.id)
     }
 
-    fn floating_id_for_node(&self, node_id: NodeId) -> Result<Option<FloatingId>> {
+    pub fn floating_id_for_node(&self, node_id: NodeId) -> Result<Option<FloatingId>> {
         let root = self.top_root_for_node(node_id)?;
         Ok(self.floating_id_by_root(root))
     }
@@ -1719,6 +2497,15 @@ impl ServerState {
             return Ok(floating.visible && self.is_node_visible_from(root, node_id)?);
         }
         Ok(false)
+    }
+
+    fn ensure_node_visible_in_session(&self, session_id: SessionId, node_id: NodeId) -> Result<()> {
+        if self.is_node_visible_in_session(session_id, node_id)? {
+            return Ok(());
+        }
+        Err(MuxError::invalid_input(format!(
+            "node {node_id} is not visible in session {session_id}"
+        )))
     }
 
     fn subtree_contains(&self, root_id: NodeId, needle: NodeId) -> Result<bool> {
@@ -1953,7 +2740,7 @@ impl ServerState {
         }
 
         if let Node::BufferView(leaf) = self.node(node_id)? {
-            self.detach_buffer_raw(leaf.buffer_id)?;
+            self.detach_buffer_if_attached_to(leaf.buffer_id, leaf.id)?;
         }
 
         self.nodes.remove(&node_id);
@@ -1965,19 +2752,94 @@ impl ServerState {
         Ok(())
     }
 
+    fn detach_buffer_if_attached_to(&mut self, buffer_id: BufferId, node_id: NodeId) -> Result<()> {
+        if matches!(
+            self.buffer(buffer_id),
+            Ok(buffer) if buffer.attachment == BufferAttachment::Attached(node_id)
+        ) {
+            self.detach_buffer_raw(buffer_id)?;
+        }
+        Ok(())
+    }
+
     fn discard_buffer_view(&mut self, node_id: NodeId) {
         if self.node_parent(node_id).ok().flatten().is_some() && self.close_node(node_id).is_ok() {
             return;
         }
 
-        let buffer_id = match self.node(node_id) {
-            Ok(Node::BufferView(leaf)) => Some(leaf.buffer_id),
+        let buffer = match self.node(node_id) {
+            Ok(Node::BufferView(leaf)) => Some((leaf.buffer_id, leaf.id)),
             _ => None,
         };
-        if let Some(buffer_id) = buffer_id {
-            let _ = self.detach_buffer_raw(buffer_id);
+        if let Some((buffer_id, leaf_id)) = buffer {
+            let _ = self.detach_buffer_if_attached_to(buffer_id, leaf_id);
         }
         self.nodes.remove(&node_id);
+    }
+
+    fn default_floating_dimension(total: u16, padding: u16, min: u16, max: u16) -> u16 {
+        let available = total.saturating_sub(padding).max(1);
+        available.min(max).max(min.min(total.max(1)))
+    }
+
+    fn visible_node_size(&self, node_id: NodeId) -> Result<Option<PtySize>> {
+        match self.node(node_id)? {
+            Node::BufferView(node) => Ok(Some(node.view.last_render_size)),
+            Node::Split(split) => {
+                let child_sizes = split
+                    .children
+                    .iter()
+                    .map(|child_id| self.visible_node_size(*child_id))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                if child_sizes.is_empty() {
+                    return Ok(None);
+                }
+                let divider_count =
+                    u16::try_from(child_sizes.len().saturating_sub(1)).unwrap_or(u16::MAX);
+                let (cols, rows) = match split.direction {
+                    SplitDirection::Horizontal => (
+                        child_sizes.iter().map(|size| size.cols).max().unwrap_or(0),
+                        child_sizes
+                            .iter()
+                            .fold(0_u16, |total, size| total.saturating_add(size.rows))
+                            .saturating_add(divider_count),
+                    ),
+                    SplitDirection::Vertical => (
+                        child_sizes
+                            .iter()
+                            .fold(0_u16, |total, size| total.saturating_add(size.cols))
+                            .saturating_add(divider_count),
+                        child_sizes.iter().map(|size| size.rows).max().unwrap_or(0),
+                    ),
+                };
+                Ok(Some(PtySize {
+                    cols,
+                    rows,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                }))
+            }
+            Node::Tabs(tabs) => {
+                let Some(active) = tabs.tabs.get(tabs.active) else {
+                    return Ok(None);
+                };
+                self.visible_node_size(active.child)
+            }
+        }
+    }
+
+    fn node_is_descendant_of(&self, node_id: NodeId, ancestor_id: NodeId) -> Result<bool> {
+        let mut current = Some(node_id);
+        while let Some(candidate) = current {
+            if candidate == ancestor_id {
+                return Ok(true);
+            }
+            current = self.node_parent(candidate)?;
+        }
+        Ok(false)
     }
 
     fn ensure_leaf_is_focusable(&self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {

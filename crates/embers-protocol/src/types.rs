@@ -101,6 +101,10 @@ pub enum BufferRequest {
         request_id: RequestId,
         buffer_id: BufferId,
     },
+    Inspect {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
     Detach {
         request_id: RequestId,
         buffer_id: BufferId,
@@ -124,6 +128,22 @@ pub enum BufferRequest {
         start_line: u64,
         line_count: u32,
     },
+    GetLocation {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    Reveal {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        client_id: Option<NonZeroU64>,
+    },
+    OpenHistory {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        scope: BufferHistoryScope,
+        placement: BufferHistoryPlacement,
+        client_id: Option<NonZeroU64>,
+    },
 }
 
 impl BufferRequest {
@@ -132,12 +152,120 @@ impl BufferRequest {
             Self::Create { request_id, .. }
             | Self::List { request_id, .. }
             | Self::Get { request_id, .. }
+            | Self::Inspect { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Kill { request_id, .. }
             | Self::Capture { request_id, .. }
             | Self::CaptureVisible { request_id, .. }
-            | Self::ScrollbackSlice { request_id, .. } => *request_id,
+            | Self::ScrollbackSlice { request_id, .. }
+            | Self::GetLocation { request_id, .. }
+            | Self::Reveal { request_id, .. }
+            | Self::OpenHistory { request_id, .. } => *request_id,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferHistoryScope {
+    Full,
+    Visible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferHistoryPlacement {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferLocationAttachment {
+    Detached,
+    Session {
+        session_id: SessionId,
+        node_id: NodeId,
+    },
+    Floating {
+        session_id: SessionId,
+        node_id: NodeId,
+        floating_id: FloatingId,
+    },
+}
+
+impl BufferLocationAttachment {
+    pub const fn session_id(self) -> Option<SessionId> {
+        match self {
+            Self::Detached => None,
+            Self::Session { session_id, .. } | Self::Floating { session_id, .. } => {
+                Some(session_id)
+            }
+        }
+    }
+
+    pub const fn node_id(self) -> Option<NodeId> {
+        match self {
+            Self::Detached => None,
+            Self::Session { node_id, .. } | Self::Floating { node_id, .. } => Some(node_id),
+        }
+    }
+
+    pub const fn floating_id(self) -> Option<FloatingId> {
+        match self {
+            Self::Floating { floating_id, .. } => Some(floating_id),
+            Self::Detached | Self::Session { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferLocation {
+    pub buffer_id: BufferId,
+    pub attachment: BufferLocationAttachment,
+}
+
+impl BufferLocation {
+    pub const fn detached(buffer_id: BufferId) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Detached,
+        }
+    }
+
+    pub const fn session(buffer_id: BufferId, session_id: SessionId, node_id: NodeId) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Session {
+                session_id,
+                node_id,
+            },
+        }
+    }
+
+    pub const fn floating(
+        buffer_id: BufferId,
+        session_id: SessionId,
+        node_id: NodeId,
+        floating_id: FloatingId,
+    ) -> Self {
+        Self {
+            buffer_id,
+            attachment: BufferLocationAttachment::Floating {
+                session_id,
+                node_id,
+                floating_id,
+            },
+        }
+    }
+
+    pub const fn session_id(self) -> Option<SessionId> {
+        self.attachment.session_id()
+    }
+
+    pub const fn node_id(self) -> Option<NodeId> {
+        self.attachment.node_id()
+    }
+
+    pub const fn floating_id(self) -> Option<FloatingId> {
+        self.attachment.floating_id()
     }
 }
 
@@ -216,6 +344,44 @@ pub enum NodeRequest {
         node_id: NodeId,
         sizes: Vec<u16>,
     },
+    Zoom {
+        request_id: RequestId,
+        node_id: NodeId,
+    },
+    Unzoom {
+        request_id: RequestId,
+        session_id: SessionId,
+    },
+    ToggleZoom {
+        request_id: RequestId,
+        node_id: NodeId,
+    },
+    SwapSiblings {
+        request_id: RequestId,
+        first_node_id: NodeId,
+        second_node_id: NodeId,
+    },
+    BreakNode {
+        request_id: RequestId,
+        node_id: NodeId,
+        destination: NodeBreakDestination,
+    },
+    JoinBufferAtNode {
+        request_id: RequestId,
+        node_id: NodeId,
+        buffer_id: BufferId,
+        placement: NodeJoinPlacement,
+    },
+    MoveNodeBefore {
+        request_id: RequestId,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+    },
+    MoveNodeAfter {
+        request_id: RequestId,
+        node_id: NodeId,
+        sibling_node_id: NodeId,
+    },
 }
 
 impl NodeRequest {
@@ -233,9 +399,33 @@ impl NodeRequest {
             | Self::Focus { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
-            | Self::Resize { request_id, .. } => *request_id,
+            | Self::Resize { request_id, .. }
+            | Self::Zoom { request_id, .. }
+            | Self::Unzoom { request_id, .. }
+            | Self::ToggleZoom { request_id, .. }
+            | Self::SwapSiblings { request_id, .. }
+            | Self::BreakNode { request_id, .. }
+            | Self::JoinBufferAtNode { request_id, .. }
+            | Self::MoveNodeBefore { request_id, .. }
+            | Self::MoveNodeAfter { request_id, .. } => *request_id,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeBreakDestination {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeJoinPlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    TabBefore,
+    TabAfter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,6 +577,13 @@ pub struct SessionRecord {
     pub floating_ids: Vec<FloatingId>,
     pub focused_leaf_id: Option<NodeId>,
     pub focused_floating_id: Option<FloatingId>,
+    pub zoomed_node_id: Option<NodeId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferRecordKind {
+    Pty,
+    Helper,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,14 +592,44 @@ pub struct BufferRecord {
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<String>,
+    pub kind: BufferRecordKind,
     pub state: BufferRecordState,
     pub pid: Option<u32>,
     pub attachment_node_id: Option<NodeId>,
+    pub read_only: bool,
+    pub helper_source_buffer_id: Option<BufferId>,
+    pub helper_scope: Option<BufferHistoryScope>,
     pub pty_size: PtySize,
     pub activity: ActivityState,
     pub last_snapshot_seq: u64,
     pub exit_code: Option<i32>,
     pub env: BTreeMap<String, String>,
+}
+
+impl BufferRecord {
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        match self.kind {
+            BufferRecordKind::Pty => {
+                if self.helper_source_buffer_id.is_some() {
+                    return Err(
+                        "buffer_record.kind=pty cannot set helper_source_buffer_id".to_owned()
+                    );
+                }
+                if self.helper_scope.is_some() {
+                    return Err("buffer_record.kind=pty cannot set helper_scope".to_owned());
+                }
+            }
+            BufferRecordKind::Helper => {
+                if self.helper_source_buffer_id.is_some() ^ self.helper_scope.is_some() {
+                    return Err(
+                        "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +772,97 @@ pub struct ClientResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferLocationResponse {
+    pub request_id: RequestId,
+    pub location: BufferLocation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferWithLocationResponse {
+    pub(crate) request_id: RequestId,
+    pub(crate) buffer: BufferRecord,
+    pub(crate) location: BufferLocation,
+    pub(crate) at_root_tab: bool,
+}
+
+impl BufferWithLocationResponse {
+    pub fn new(
+        request_id: RequestId,
+        buffer: BufferRecord,
+        location: BufferLocation,
+        at_root_tab: bool,
+    ) -> std::result::Result<Self, String> {
+        if buffer.id != location.buffer_id {
+            return Err(
+                "buffer_with_location_response.buffer.id must equal location.buffer_id".to_owned(),
+            );
+        }
+        buffer.validate()?;
+        match (buffer.attachment_node_id, location.node_id()) {
+            (Some(buffer_node_id), Some(location_node_id))
+                if buffer_node_id == location_node_id => {}
+            (Some(buffer_node_id), Some(location_node_id)) => {
+                return Err(format!(
+                    "buffer_with_location_response.buffer.attachment_node_id {buffer_node_id} must equal location node_id {location_node_id}"
+                ));
+            }
+            (Some(buffer_node_id), None) => {
+                return Err(format!(
+                    "buffer_with_location_response.buffer.attachment_node_id {buffer_node_id} requires an attached location"
+                ));
+            }
+            (None, Some(location_node_id)) => {
+                return Err(format!(
+                    "buffer_with_location_response.location node_id {location_node_id} requires buffer.attachment_node_id"
+                ));
+            }
+            (None, None) => {}
+        }
+        if at_root_tab
+            && !matches!(
+                location.attachment,
+                BufferLocationAttachment::Session { .. }
+            )
+        {
+            return Err(
+                "buffer_with_location_response.at_root_tab requires a session location".to_owned(),
+            );
+        }
+        Ok(Self {
+            request_id,
+            buffer,
+            location,
+            at_root_tab,
+        })
+    }
+
+    pub fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    pub fn buffer(&self) -> &BufferRecord {
+        &self.buffer
+    }
+
+    pub fn location(&self) -> &BufferLocation {
+        &self.location
+    }
+
+    pub fn at_root_tab(&self) -> bool {
+        self.at_root_tab
+    }
+
+    pub fn into_parts(self) -> (RequestId, BufferRecord, BufferLocation, bool) {
+        (
+            self.request_id,
+            self.buffer,
+            self.location,
+            self.at_root_tab,
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotResponse {
     pub request_id: RequestId,
     pub buffer_id: BufferId,
@@ -596,6 +914,8 @@ pub enum ServerResponse {
     SubscriptionAck(SubscriptionAckResponse),
     Clients(ClientsResponse),
     Client(ClientResponse),
+    BufferLocation(BufferLocationResponse),
+    BufferWithLocation(BufferWithLocationResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -616,6 +936,8 @@ impl ServerResponse {
             Self::SubscriptionAck(response) => Some(response.request_id),
             Self::Clients(response) => Some(response.request_id),
             Self::Client(response) => Some(response.request_id),
+            Self::BufferLocation(response) => Some(response.request_id),
+            Self::BufferWithLocation(response) => Some(response.request_id()),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),

@@ -13,15 +13,17 @@ use embers_core::{
     BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, WireError, request_span,
 };
 use embers_protocol::{
-    BufferCreatedEvent, BufferDetachedEvent, BufferRequest, BufferResponse, BuffersResponse,
-    ClientChangedEvent, ClientMessage, ClientRecord, ClientRequest, ClientResponse,
-    ClientsResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
-    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
-    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
-    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
-    SubscriptionAckResponse, VisibleSnapshotResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame_no_flush,
+    BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
+    BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferRequest,
+    BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent, ClientMessage,
+    ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
+    FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent, FrameType,
+    InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
+    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
+    SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
+    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -29,8 +31,11 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
+use crate::model::{BufferKind, HelperBufferScope, Node};
 use crate::persist::{load_workspace, save_workspace};
-use crate::protocol::{buffer_record, floating_record, session_record, session_snapshot};
+use crate::protocol::{
+    buffer_location, buffer_record, floating_record, session_record, session_snapshot,
+};
 use crate::{
     BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeStatus,
     BufferRuntimeUpdate, BufferState, ServerConfig, ServerState, TabEntry,
@@ -531,7 +536,7 @@ impl Runtime {
                 (resp, events, None)
             }
             ClientMessage::Buffer(request) => {
-                let (resp, events) = self.dispatch_buffer(request).await;
+                let (resp, events) = self.dispatch_buffer(connection_id, request).await;
                 (resp, events, None)
             }
             ClientMessage::Node(request) => {
@@ -855,6 +860,7 @@ impl Runtime {
 
     async fn dispatch_buffer(
         self: &Arc<Self>,
+        connection_id: u64,
         request: BufferRequest,
     ) -> (ServerResponse, Vec<ServerEvent>) {
         match request {
@@ -977,6 +983,35 @@ impl Runtime {
                 ),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            BufferRequest::Inspect {
+                request_id,
+                buffer_id,
+            } => {
+                let state = self.state.lock().await;
+                match state.buffer(buffer_id) {
+                    Ok(buffer) => match buffer_location(&state, buffer_id).and_then(|location| {
+                        location_is_root_tab(&state, &location)
+                            .map(|at_root_tab| (location, at_root_tab))
+                    }) {
+                        Ok((location, at_root_tab)) => match BufferWithLocationResponse::new(
+                            request_id,
+                            buffer_record(buffer),
+                            location,
+                            at_root_tab,
+                        ) {
+                            Ok(response) => {
+                                (ServerResponse::BufferWithLocation(response), Vec::new())
+                            }
+                            Err(error) => (
+                                mux_error_response(Some(request_id), MuxError::protocol(error)),
+                                Vec::new(),
+                            ),
+                        },
+                        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                    },
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
             BufferRequest::Detach {
                 request_id,
                 buffer_id,
@@ -1048,6 +1083,120 @@ impl Runtime {
                 Ok(snapshot) => (ServerResponse::ScrollbackSlice(snapshot), Vec::new()),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            BufferRequest::GetLocation {
+                request_id,
+                buffer_id,
+            } => {
+                let state = self.state.lock().await;
+                match buffer_location(&state, buffer_id) {
+                    Ok(location) => (
+                        ServerResponse::BufferLocation(BufferLocationResponse {
+                            request_id,
+                            location,
+                        }),
+                        Vec::new(),
+                    ),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            BufferRequest::Reveal {
+                request_id,
+                buffer_id,
+                client_id,
+            } => match self
+                .reveal_buffer(
+                    connection_id,
+                    client_id.map(std::num::NonZeroU64::get),
+                    buffer_id,
+                )
+                .await
+            {
+                Ok((location, events)) => (
+                    ServerResponse::BufferLocation(BufferLocationResponse {
+                        request_id,
+                        location,
+                    }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::OpenHistory {
+                request_id,
+                buffer_id,
+                scope,
+                placement,
+                client_id,
+            } => match self
+                .open_history_buffer(
+                    connection_id,
+                    client_id.map(std::num::NonZeroU64::get),
+                    buffer_id,
+                    scope,
+                    placement,
+                )
+                .await
+            {
+                Ok((location, mut reveal_events)) => {
+                    let mut events = Vec::new();
+                    let (buffer, at_root_tab) = {
+                        let state = self.state.lock().await;
+                        match state.buffer(location.buffer_id) {
+                            Ok(buffer) => match location_is_root_tab(&state, &location) {
+                                Ok(at_root_tab) => (buffer_record(buffer), at_root_tab),
+                                Err(error) => {
+                                    return (
+                                        mux_error_response(Some(request_id), error),
+                                        Vec::new(),
+                                    );
+                                }
+                            },
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        }
+                    };
+                    events.push(ServerEvent::BufferCreated(BufferCreatedEvent {
+                        buffer: buffer.clone(),
+                    }));
+                    match &location.attachment {
+                        BufferLocationAttachment::Floating {
+                            session_id,
+                            floating_id,
+                            ..
+                        } => {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id: *session_id,
+                                floating_id: Some(*floating_id),
+                            }));
+                        }
+                        BufferLocationAttachment::Session { session_id, .. }
+                            if !reveal_events.iter().any(|event| {
+                            matches!(
+                                event,
+                                ServerEvent::NodeChanged(NodeChangedEvent { session_id: changed })
+                                    if *changed == *session_id
+                            )
+                        }) =>
+                        {
+                            events.push(ServerEvent::NodeChanged(NodeChangedEvent {
+                                session_id: *session_id,
+                            }));
+                        }
+                        BufferLocationAttachment::Detached
+                        | BufferLocationAttachment::Session { .. } => {}
+                    }
+                    events.append(&mut reveal_events);
+                    match BufferWithLocationResponse::new(request_id, buffer, location, at_root_tab)
+                    {
+                        Ok(response) => (ServerResponse::BufferWithLocation(response), events),
+                        Err(error) => (
+                            mux_error_response(Some(request_id), MuxError::protocol(error)),
+                            Vec::new(),
+                        ),
+                    }
+                }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
         }
     }
 
@@ -1060,40 +1209,52 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 bytes,
-            } => match self.buffer_runtime(buffer_id).await {
-                Ok(runtime) => match runtime.write(bytes).await {
-                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+            } => {
+                if let Err(error) = self.ensure_buffer_accepts_input(buffer_id).await {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                match self.buffer_runtime(buffer_id).await {
+                    Ok(runtime) => match runtime.write(bytes).await {
+                        Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                    },
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                },
-                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-            },
+                }
+            }
             InputRequest::Resize {
                 request_id,
                 buffer_id,
                 cols,
                 rows,
             } => {
-                let runtime = match self.buffer_runtime(buffer_id).await {
-                    Ok(runtime) => runtime,
-                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
-                };
-                let size = {
+                let (size, is_helper) = {
                     let state = self.state.lock().await;
                     match state.buffer(buffer_id) {
-                        Ok(buffer) => PtySize {
-                            cols,
-                            rows,
-                            pixel_width: buffer.pty_size.pixel_width,
-                            pixel_height: buffer.pty_size.pixel_height,
-                        },
+                        Ok(buffer) => (
+                            PtySize {
+                                cols,
+                                rows,
+                                pixel_width: buffer.pty_size.pixel_width,
+                                pixel_height: buffer.pty_size.pixel_height,
+                            },
+                            matches!(&buffer.kind, BufferKind::Helper(_)),
+                        ),
                         Err(error) => {
                             return (mux_error_response(Some(request_id), error), Vec::new());
                         }
                     }
                 };
 
-                if let Err(error) = runtime.resize(size).await {
-                    return (mux_error_response(Some(request_id), error), Vec::new());
+                if !is_helper {
+                    let runtime = match self.buffer_runtime(buffer_id).await {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            return (mux_error_response(Some(request_id), error), Vec::new());
+                        }
+                    };
+                    if let Err(error) = runtime.resize(size).await {
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
                 }
 
                 {
@@ -1429,6 +1590,148 @@ impl Runtime {
                 }
                 layout_snapshot_response(&state, request_id, session_id)
             }
+            embers_protocol::NodeRequest::Zoom {
+                request_id,
+                node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.zoom_node(node_id) {
+                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::Unzoom {
+                request_id,
+                session_id,
+            } => match state.unzoom_session(session_id) {
+                Ok(()) => layout_ok_response(&state, request_id, session_id),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            embers_protocol::NodeRequest::ToggleZoom {
+                request_id,
+                node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.toggle_zoom_node(node_id) {
+                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::SwapSiblings {
+                request_id,
+                first_node_id,
+                second_node_id,
+            } => {
+                let session_id = match state.node(first_node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.swap_sibling_nodes(first_node_id, second_node_id) {
+                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::BreakNode {
+                request_id,
+                node_id,
+                destination,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                let into_floating =
+                    matches!(destination, embers_protocol::NodeBreakDestination::Floating);
+                let previous_floating_id = match state.floating_id_for_node(node_id) {
+                    Ok(floating_id) => floating_id,
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.break_node(node_id, into_floating) {
+                    Ok(()) => {
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        let (response, mut events) =
+                            layout_ok_response(&state, request_id, session_id);
+                        if previous_floating_id != current_floating_id {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: current_floating_id,
+                            }));
+                        }
+                        (response, events)
+                    }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::JoinBufferAtNode {
+                request_id,
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.join_buffer_at_node(node_id, buffer_id, placement) {
+                    Ok(()) => {
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        let (response, mut events) =
+                            layout_ok_response(&state, request_id, session_id);
+                        if current_floating_id.is_some() {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: current_floating_id,
+                            }));
+                        }
+                        (response, events)
+                    }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::MoveNodeBefore {
+                request_id,
+                node_id,
+                sibling_node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.move_node_before(node_id, sibling_node_id) {
+                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            embers_protocol::NodeRequest::MoveNodeAfter {
+                request_id,
+                node_id,
+                sibling_node_id,
+            } => {
+                let session_id = match state.node(node_id) {
+                    Ok(node) => node.session_id(),
+                    Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
+                };
+                match state.move_node_after(node_id, sibling_node_id) {
+                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
         }
     }
 
@@ -1644,17 +1947,382 @@ impl Runtime {
         }
     }
 
+    async fn ensure_buffer_accepts_input(&self, buffer_id: BufferId) -> Result<()> {
+        let state = self.state.lock().await;
+        let buffer = state.buffer(buffer_id)?;
+        if matches!(&buffer.kind, BufferKind::Helper(_)) {
+            return Err(MuxError::conflict(format!(
+                "buffer {buffer_id} is read-only"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn resolve_reveal_client_id(
+        &self,
+        connection_id: u64,
+        requested: Option<u64>,
+    ) -> Result<u64> {
+        if let Some(client_id) = requested {
+            if self.clients.lock().await.contains_key(&client_id) {
+                return Ok(client_id);
+            }
+            return Err(MuxError::not_found(format!("unknown client {client_id}")));
+        }
+
+        let clients = self.clients.lock().await;
+        if clients
+            .get(&connection_id)
+            .is_some_and(|client| client.current_session_id.is_some())
+        {
+            return Ok(connection_id);
+        }
+
+        let mut attached_clients = clients
+            .iter()
+            .filter_map(|(client_id, client)| client.current_session_id.map(|_| *client_id));
+        match (attached_clients.next(), attached_clients.next()) {
+            (Some(client_id), None) => Ok(client_id),
+            (None, _) => Err(MuxError::conflict(
+                "no interactive client is currently attached",
+            )),
+            (Some(_), Some(_)) => Err(MuxError::conflict(
+                "multiple interactive clients are attached; specify a client",
+            )),
+        }
+    }
+
+    async fn has_attached_client(&self) -> bool {
+        self.clients
+            .lock()
+            .await
+            .values()
+            .any(|client| client.current_session_id.is_some())
+    }
+
+    async fn resolve_optional_reveal_client_id(
+        &self,
+        connection_id: u64,
+        requested_client_id: Option<u64>,
+    ) -> Result<Option<u64>> {
+        if requested_client_id.is_some() || self.has_attached_client().await {
+            self.resolve_reveal_client_id(connection_id, requested_client_id)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn focus_revealed_buffer(
+        &self,
+        buffer_id: BufferId,
+        client_id: Option<u64>,
+    ) -> Result<(embers_protocol::BufferLocation, Vec<ServerEvent>)> {
+        let (location, mut events, client_event) = {
+            let mut state = self.state.lock().await;
+            let location = buffer_location(&state, buffer_id)?;
+            let (session_id, node_id) = match location.attachment {
+                BufferLocationAttachment::Detached => {
+                    return Ok((location, Vec::new()));
+                }
+                BufferLocationAttachment::Session {
+                    session_id,
+                    node_id,
+                }
+                | BufferLocationAttachment::Floating {
+                    session_id,
+                    node_id,
+                    ..
+                } => (session_id, node_id),
+            };
+            if let Some(client_id) = client_id {
+                let mut clients = self.clients.lock().await;
+                let previous_session_id = clients
+                    .get(&client_id)
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("client {client_id} was not found"))
+                    })?
+                    .current_session_id;
+                state.focus_leaf(session_id, node_id)?;
+                let mut events = vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+                if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                    events.push(ServerEvent::FocusChanged(focus_event));
+                }
+                clients
+                    .get_mut(&client_id)
+                    .expect("client existence was checked above")
+                    .current_session_id = Some(session_id);
+                let subscriptions = self.subscriptions.lock().await;
+                let mut subscribed_all_sessions = false;
+                let mut subscribed_session_ids = Vec::new();
+                for subscription in subscriptions.values() {
+                    if subscription.connection_id != client_id {
+                        continue;
+                    }
+                    match subscription.session_id {
+                        Some(session_id) => subscribed_session_ids.push(session_id),
+                        None => subscribed_all_sessions = true,
+                    }
+                }
+                subscribed_session_ids.sort_by_key(|session_id| session_id.0);
+                subscribed_session_ids.dedup();
+                let client_event = ServerEvent::ClientChanged(ClientChangedEvent {
+                    client: ClientRecord {
+                        id: client_id,
+                        current_session_id: Some(session_id),
+                        subscribed_all_sessions,
+                        subscribed_session_ids,
+                    },
+                    previous_session_id,
+                });
+                let location = buffer_location(&state, buffer_id)?;
+                (location, events, Some(client_event))
+            } else {
+                state.focus_leaf(session_id, node_id)?;
+                let mut events = vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+                if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                    events.push(ServerEvent::FocusChanged(focus_event));
+                }
+                let location = buffer_location(&state, buffer_id)?;
+                (location, events, None)
+            }
+        };
+        if let Some(client_event) = client_event {
+            events.push(client_event);
+        }
+        Ok((location, events))
+    }
+
+    async fn reveal_buffer(
+        &self,
+        connection_id: u64,
+        requested_client_id: Option<u64>,
+        buffer_id: BufferId,
+    ) -> Result<(embers_protocol::BufferLocation, Vec<ServerEvent>)> {
+        let target_client_id = self
+            .resolve_optional_reveal_client_id(connection_id, requested_client_id)
+            .await?;
+        let location = {
+            let state = self.state.lock().await;
+            buffer_location(&state, buffer_id)?
+        };
+        if matches!(location.attachment, BufferLocationAttachment::Detached) {
+            return Ok((location, Vec::new()));
+        }
+        self.focus_revealed_buffer(buffer_id, target_client_id)
+            .await
+    }
+
+    async fn open_history_buffer(
+        &self,
+        connection_id: u64,
+        requested_client_id: Option<u64>,
+        source_buffer_id: BufferId,
+        scope: BufferHistoryScope,
+        placement: BufferHistoryPlacement,
+    ) -> Result<(embers_protocol::BufferLocation, Vec<ServerEvent>)> {
+        let (source_title, source_cwd, source_location, helper_lines) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(source_buffer_id)?;
+            let location = buffer_location(&state, source_buffer_id)?;
+            let helper_lines = match &buffer.kind {
+                BufferKind::Helper(helper) => Some(match scope {
+                    BufferHistoryScope::Full => helper.lines.clone(),
+                    BufferHistoryScope::Visible => {
+                        let visible_limit = usize::from(buffer.pty_size.rows).max(1);
+                        let start = helper.lines.len().saturating_sub(visible_limit);
+                        helper.lines[start..].to_vec()
+                    }
+                }),
+                BufferKind::Pty => None,
+            };
+            (
+                buffer.title.clone(),
+                buffer.cwd.clone(),
+                location,
+                helper_lines,
+            )
+        };
+        let target_client_id = self
+            .resolve_optional_reveal_client_id(connection_id, requested_client_id)
+            .await?;
+
+        let target_session_id = match source_location.attachment {
+            BufferLocationAttachment::Session { session_id, .. }
+            | BufferLocationAttachment::Floating { session_id, .. } => session_id,
+            BufferLocationAttachment::Detached => {
+                let client_id = target_client_id.ok_or_else(|| {
+                    MuxError::conflict(
+                        "history for detached buffers requires an attached client session",
+                    )
+                })?;
+                let clients = self.clients.lock().await;
+                clients
+                    .get(&client_id)
+                    .and_then(|client| client.current_session_id)
+                    .ok_or_else(|| {
+                        MuxError::conflict(
+                            "history for detached buffers requires an attached client session",
+                        )
+                    })?
+            }
+        };
+
+        let lines = match helper_lines {
+            Some(lines) => lines,
+            None => match scope {
+                BufferHistoryScope::Full => {
+                    self.capture_snapshot(RequestId(0), source_buffer_id)
+                        .await?
+                        .lines
+                }
+                BufferHistoryScope::Visible => {
+                    self.capture_visible_snapshot(RequestId(0), source_buffer_id)
+                        .await?
+                        .lines
+                }
+            },
+        };
+
+        let helper_scope = match scope {
+            BufferHistoryScope::Full => HelperBufferScope::Full,
+            BufferHistoryScope::Visible => HelperBufferScope::Visible,
+        };
+        let helper_title = format!("{} history", source_title);
+        let helper_buffer_id = {
+            let mut state = self.state.lock().await;
+            let helper_buffer_id = state.create_helper_buffer(
+                helper_title.clone(),
+                source_buffer_id,
+                helper_scope,
+                source_cwd,
+                lines,
+            )?;
+            let placement_result = match placement {
+                BufferHistoryPlacement::Tab => {
+                    state.add_root_tab_from_buffer(
+                        target_session_id,
+                        helper_title,
+                        helper_buffer_id,
+                    )?;
+                    Ok(())
+                }
+                BufferHistoryPlacement::Floating => {
+                    let geometry = state.default_floating_geometry(target_session_id)?;
+                    state.create_floating_from_buffer(
+                        target_session_id,
+                        helper_buffer_id,
+                        geometry,
+                        Some(helper_title),
+                    )?;
+                    Ok(())
+                }
+            };
+            if let Err(error) = placement_result {
+                let _ = state.remove_buffer(helper_buffer_id);
+                return Err(error);
+            }
+            helper_buffer_id
+        };
+
+        match self
+            .focus_revealed_buffer(helper_buffer_id, target_client_id)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                let rollback_result = (|| -> Result<()> {
+                    let helper_location = buffer_location(&state, helper_buffer_id)?;
+                    match helper_location.attachment {
+                        BufferLocationAttachment::Detached => {}
+                        BufferLocationAttachment::Session { node_id, .. } => {
+                            state.close_node(node_id)?;
+                        }
+                        BufferLocationAttachment::Floating { floating_id, .. } => {
+                            state.close_floating(floating_id)?;
+                        }
+                    }
+                    state.remove_buffer(helper_buffer_id)?;
+                    Ok(())
+                })();
+                match rollback_result {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => {
+                        debug!(
+                            %helper_buffer_id,
+                            %error,
+                            %rollback_error,
+                            "failed to roll back helper buffer after focus failure"
+                        );
+                        Err(MuxError::internal(format!(
+                            "{error}; rollback also failed: {rollback_error}"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
     async fn capture_snapshot(
         &self,
         request_id: RequestId,
         buffer_id: BufferId,
     ) -> Result<SnapshotResponse> {
-        let buffer = {
+        enum SnapshotSource {
+            Helper {
+                sequence: u64,
+                size: PtySize,
+                lines: Vec<String>,
+                title: String,
+                cwd: Option<String>,
+            },
+            Runtime {
+                title: String,
+                cwd: Option<PathBuf>,
+            },
+        }
+
+        let source = {
             let state = self.state.lock().await;
-            state.buffer(buffer_id)?.clone()
+            let buffer = state.buffer(buffer_id)?;
+            match &buffer.kind {
+                BufferKind::Helper(helper) => SnapshotSource::Helper {
+                    sequence: buffer.last_snapshot_seq,
+                    size: buffer.pty_size,
+                    lines: helper.lines.clone(),
+                    title: buffer.title.clone(),
+                    cwd: buffer.cwd.as_ref().map(|path| path.display().to_string()),
+                },
+                _ => SnapshotSource::Runtime {
+                    title: buffer.title.clone(),
+                    cwd: buffer.cwd.clone(),
+                },
+            }
+        };
+        let (buffer_title, buffer_cwd) = match source {
+            SnapshotSource::Helper {
+                sequence,
+                size,
+                lines,
+                title,
+                cwd,
+            } => {
+                return Ok(SnapshotResponse {
+                    request_id,
+                    buffer_id,
+                    sequence,
+                    size,
+                    lines,
+                    title: Some(title),
+                    cwd,
+                });
+            }
+            SnapshotSource::Runtime { title, cwd } => (title, cwd),
         };
         let runtime = self.buffer_runtime(buffer_id).await?;
-        let snapshot = runtime.capture_snapshot(buffer.cwd.clone()).await?;
+        let snapshot = runtime.capture_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
 
         Ok(SnapshotResponse {
@@ -1663,8 +2331,8 @@ impl Runtime {
             sequence: snapshot.sequence,
             size: snapshot.size,
             lines: snapshot.lines,
-            title: snapshot.title.or(Some(buffer.title)),
-            cwd: buffer.cwd.map(|path| path.display().to_string()),
+            title: snapshot.title.or(Some(buffer_title)),
+            cwd: buffer_cwd.map(|path| path.display().to_string()),
         })
     }
 
@@ -1673,12 +2341,74 @@ impl Runtime {
         request_id: RequestId,
         buffer_id: BufferId,
     ) -> Result<VisibleSnapshotResponse> {
-        let buffer = {
+        enum VisibleSnapshotSource {
+            Helper {
+                sequence: u64,
+                size: PtySize,
+                lines: Vec<String>,
+                title: String,
+                cwd: Option<String>,
+                viewport_top_line: u64,
+                total_lines: u64,
+            },
+            Runtime {
+                cwd: Option<PathBuf>,
+            },
+        }
+
+        let source = {
             let state = self.state.lock().await;
-            state.buffer(buffer_id)?.clone()
+            let buffer = state.buffer(buffer_id)?;
+            match &buffer.kind {
+                BufferKind::Helper(helper) => {
+                    let viewport_height = usize::from(buffer.pty_size.rows.max(1));
+                    let viewport_start = helper.lines.len().saturating_sub(viewport_height);
+                    VisibleSnapshotSource::Helper {
+                        sequence: buffer.last_snapshot_seq,
+                        size: buffer.pty_size,
+                        lines: helper.lines.iter().skip(viewport_start).cloned().collect(),
+                        title: buffer.title.clone(),
+                        cwd: buffer.cwd.as_ref().map(|path| path.display().to_string()),
+                        viewport_top_line: u64::try_from(viewport_start).unwrap_or(u64::MAX),
+                        total_lines: u64::try_from(helper.lines.len()).unwrap_or(u64::MAX),
+                    }
+                }
+                _ => VisibleSnapshotSource::Runtime {
+                    cwd: buffer.cwd.clone(),
+                },
+            }
+        };
+        let buffer_cwd = match source {
+            VisibleSnapshotSource::Helper {
+                sequence,
+                size,
+                lines,
+                title,
+                cwd,
+                viewport_top_line,
+                total_lines,
+            } => {
+                return Ok(VisibleSnapshotResponse {
+                    request_id,
+                    buffer_id,
+                    sequence,
+                    size,
+                    lines,
+                    title: Some(title),
+                    cwd,
+                    viewport_top_line,
+                    total_lines,
+                    alternate_screen: false,
+                    mouse_reporting: false,
+                    focus_reporting: false,
+                    bracketed_paste: false,
+                    cursor: None,
+                });
+            }
+            VisibleSnapshotSource::Runtime { cwd } => cwd,
         };
         let runtime = self.buffer_runtime(buffer_id).await?;
-        let snapshot = runtime.capture_visible_snapshot(buffer.cwd.clone()).await?;
+        let snapshot = runtime.capture_visible_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
 
         Ok(VisibleSnapshotResponse {
@@ -1706,6 +2436,35 @@ impl Runtime {
         start_line: u64,
         line_count: u32,
     ) -> Result<ScrollbackSliceResponse> {
+        let helper_slice = {
+            let state = self.state.lock().await;
+            match &state.buffer(buffer_id)?.kind {
+                BufferKind::Helper(helper) => {
+                    let total_lines = u64::try_from(helper.lines.len()).unwrap_or(u64::MAX);
+                    let start = usize::try_from(start_line)
+                        .unwrap_or(usize::MAX)
+                        .min(helper.lines.len());
+                    let end = start
+                        .saturating_add(usize::try_from(line_count).unwrap_or(usize::MAX))
+                        .min(helper.lines.len());
+                    Some((
+                        u64::try_from(start).unwrap_or(u64::MAX),
+                        total_lines,
+                        helper.lines[start..end].to_vec(),
+                    ))
+                }
+                BufferKind::Pty => None,
+            }
+        };
+        if let Some((start_line, total_lines, lines)) = helper_slice {
+            return Ok(ScrollbackSliceResponse {
+                request_id,
+                buffer_id,
+                start_line,
+                total_lines,
+                lines,
+            });
+        }
         let runtime = self.buffer_runtime(buffer_id).await?;
         let slice = runtime
             .capture_scrollback_slice(start_line, line_count)
@@ -1731,7 +2490,7 @@ impl Runtime {
                 false
             } else {
                 buffer.last_snapshot_seq = update.sequence;
-                buffer.activity = update.activity;
+                buffer.activity = max_activity(buffer.activity, update.activity);
                 if let Some(title) = update.title {
                     match title {
                         Some(title) => buffer.title = title,
@@ -2026,6 +2785,25 @@ impl Runtime {
     }
 }
 
+fn location_is_root_tab(state: &ServerState, location: &BufferLocation) -> Result<bool> {
+    let BufferLocationAttachment::Session {
+        session_id,
+        node_id,
+    } = location.attachment
+    else {
+        return Ok(false);
+    };
+    let root_tabs_id = match state.root_tabs(session_id) {
+        Ok(root_tabs_id) => root_tabs_id,
+        Err(embers_core::MuxError::Conflict(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let Node::Tabs(tabs) = state.node(root_tabs_id)? else {
+        return Ok(false);
+    };
+    Ok(tabs.tabs.iter().any(|tab| tab.child == node_id))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionExit {
     Closed,
@@ -2220,25 +2998,45 @@ fn focus_changed_event(
         })
 }
 
+fn layout_changed_events(
+    state: &ServerState,
+    session_id: embers_core::SessionId,
+) -> Result<Vec<ServerEvent>> {
+    state.session(session_id)?;
+    let mut events = vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+    if let Some(focus_event) = focus_changed_event(state, session_id) {
+        events.push(ServerEvent::FocusChanged(focus_event));
+    }
+    Ok(events)
+}
+
+fn layout_ok_response(
+    state: &ServerState,
+    request_id: RequestId,
+    session_id: embers_core::SessionId,
+) -> (ServerResponse, Vec<ServerEvent>) {
+    match layout_changed_events(state, session_id) {
+        Ok(events) => (ServerResponse::Ok(OkResponse { request_id }), events),
+        Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+    }
+}
+
 fn layout_snapshot_response(
     state: &ServerState,
     request_id: RequestId,
     session_id: embers_core::SessionId,
 ) -> (ServerResponse, Vec<ServerEvent>) {
     match session_snapshot(state, session_id) {
-        Ok(snapshot) => {
-            let mut events = vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
-            if let Some(focus_event) = focus_changed_event(state, session_id) {
-                events.push(ServerEvent::FocusChanged(focus_event));
-            }
-            (
+        Ok(snapshot) => match layout_changed_events(state, session_id) {
+            Ok(events) => (
                 ServerResponse::SessionSnapshot(SessionSnapshotResponse {
                     request_id,
                     snapshot,
                 }),
                 events,
-            )
-        }
+            ),
+            Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+        },
         Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
     }
 }
@@ -2291,11 +3089,28 @@ fn apply_runtime_status(
     if let Some(title) = &status.title {
         let _ = state.set_buffer_title(buffer_id, title.clone());
     }
-    let _ = state.set_buffer_activity(buffer_id, status.activity);
+    if let Some(buffer) = state.buffers.get(&buffer_id) {
+        let current_activity = buffer.activity;
+        let _ =
+            state.set_buffer_activity(buffer_id, max_activity(current_activity, status.activity));
+    }
     if status.running {
         let _ = state.mark_buffer_running(buffer_id, status.pid);
     } else {
         let _ = state.mark_buffer_exited(buffer_id, status.exit_code);
+    }
+}
+
+fn max_activity(
+    left: embers_core::ActivityState,
+    right: embers_core::ActivityState,
+) -> embers_core::ActivityState {
+    use embers_core::ActivityState;
+
+    match (left, right) {
+        (ActivityState::Bell, _) | (_, ActivityState::Bell) => ActivityState::Bell,
+        (ActivityState::Activity, _) | (_, ActivityState::Activity) => ActivityState::Activity,
+        _ => ActivityState::Idle,
     }
 }
 
@@ -2315,12 +3130,16 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use embers_core::ActivityState;
-    use embers_protocol::{ServerEnvelope, ServerEvent};
+    use embers_core::{ActivityState, FloatGeometry, MuxError, RequestId};
+    use embers_protocol::{
+        BufferHistoryPlacement, BufferHistoryScope, InputRequest, NodeJoinPlacement, NodeRequest,
+        ServerEnvelope, ServerEvent, ServerResponse,
+    };
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
     use super::{Runtime, ShutdownSignal, Subscription, wait_for_shutdown};
+    use crate::model::HelperBufferScope;
     use crate::{BufferRuntimeUpdate, BufferState, ServerState};
 
     use tokio::time::{Duration, timeout};
@@ -2547,5 +3366,157 @@ mod tests {
         let buffer = state.buffer(buffer_id).expect("buffer exists");
         assert!(matches!(buffer.state, BufferState::Interrupted(_)));
         assert_eq!(buffer.runtime_socket_path(), None);
+    }
+
+    #[tokio::test]
+    async fn open_history_for_detached_buffers_requires_attached_session_before_capture() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let buffer_id = state.create_buffer("detached", vec!["/bin/sh".to_owned()], None);
+        let runtime = Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+        );
+
+        let error = runtime
+            .open_history_buffer(
+                1,
+                None,
+                buffer_id,
+                BufferHistoryScope::Visible,
+                BufferHistoryPlacement::Tab,
+            )
+            .await
+            .expect_err("detached history requires an attached client session");
+
+        assert!(matches!(
+            error,
+            MuxError::Conflict(message)
+                if message == "history for detached buffers requires an attached client session"
+        ));
+    }
+
+    #[tokio::test]
+    async fn resizing_helper_buffers_updates_visible_snapshot_viewport() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let source_buffer_id = state.create_buffer("source", vec!["/bin/sh".to_owned()], None);
+        let helper_buffer_id = state
+            .create_helper_buffer(
+                "source history",
+                source_buffer_id,
+                HelperBufferScope::Visible,
+                None,
+                vec![
+                    "line-1".to_owned(),
+                    "line-2".to_owned(),
+                    "line-3".to_owned(),
+                    "line-4".to_owned(),
+                    "line-5".to_owned(),
+                ],
+            )
+            .expect("create helper buffer");
+        let runtime = Arc::new(Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+        ));
+
+        let (response, events) = runtime
+            .dispatch_input(InputRequest::Resize {
+                request_id: RequestId(1),
+                buffer_id: helper_buffer_id,
+                cols: 80,
+                rows: 3,
+            })
+            .await;
+
+        assert!(matches!(
+            response,
+            ServerResponse::Ok(response) if response.request_id == RequestId(1)
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [ServerEvent::RenderInvalidated(event)] if event.buffer_id == helper_buffer_id
+        ));
+
+        let snapshot = runtime
+            .capture_visible_snapshot(RequestId(2), helper_buffer_id)
+            .await
+            .expect("capture visible snapshot succeeds");
+
+        assert_eq!(snapshot.size.rows, 3);
+        assert_eq!(snapshot.total_lines, 5);
+        assert_eq!(snapshot.viewport_top_line, 2);
+        assert_eq!(
+            snapshot.lines,
+            vec![
+                "line-3".to_owned(),
+                "line-4".to_owned(),
+                "line-5".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn join_buffer_at_node_emits_floating_changed_for_existing_floating() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("alpha");
+        let root_buffer_id = state.create_buffer("root", vec!["/bin/sh".to_owned()], None);
+        let root_leaf = state
+            .create_buffer_view(session_id, root_buffer_id)
+            .expect("create root leaf");
+        state
+            .add_root_tab(session_id, "main", root_leaf)
+            .expect("attach root leaf");
+
+        let popup_buffer_id = state.create_buffer("popup", vec!["/bin/sh".to_owned()], None);
+        let popup_leaf = state
+            .create_buffer_view(session_id, popup_buffer_id)
+            .expect("create popup leaf");
+        let floating_id = state
+            .create_floating_window_with_options(
+                session_id,
+                popup_leaf,
+                FloatGeometry::new(4, 4, 20, 10),
+                Some("popup".to_owned()),
+                false,
+                true,
+            )
+            .expect("create floating");
+
+        let detached_buffer_id = state.create_buffer("logs", vec!["/bin/sh".to_owned()], None);
+        let runtime = Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+        );
+
+        let (response, events) = runtime
+            .dispatch_node(NodeRequest::JoinBufferAtNode {
+                request_id: RequestId(1),
+                node_id: popup_leaf,
+                buffer_id: detached_buffer_id,
+                placement: NodeJoinPlacement::Right,
+            })
+            .await;
+
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::FloatingChanged(changed)
+                    if changed.session_id == session_id
+                        && changed.floating_id == Some(floating_id)
+            )
+        }));
     }
 }

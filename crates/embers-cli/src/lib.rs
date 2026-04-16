@@ -20,9 +20,11 @@ use embers_core::{
     new_request_id,
 };
 use embers_protocol::{
-    BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord,
-    FloatingRequest, FloatingResponse, NodeRequest, PingRequest, ProtocolClient, ServerResponse,
-    SessionRecord, SessionRequest, SessionSnapshot, SnapshotResponse,
+    BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
+    BufferLocationResponse, BufferRequest, BufferResponse, ClientMessage, ClientRecord,
+    ClientRequest, FloatingRecord, FloatingRequest, FloatingResponse, NodeBreakDestination,
+    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SnapshotResponse,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -143,6 +145,14 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: String,
     },
+    Buffer {
+        #[command(subcommand)]
+        command: BufferCommand,
+    },
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
     #[command(name = "new-window")]
     NewWindow {
         #[arg(short = 't', long = "target")]
@@ -241,6 +251,94 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BufferCommand {
+    Show {
+        buffer_id: u64,
+    },
+    Reveal {
+        buffer_id: u64,
+        #[arg(long)]
+        client: Option<NonZeroU64>,
+    },
+    History {
+        buffer_id: u64,
+        #[arg(long, default_value = "full")]
+        scope: HistoryScopeArg,
+        #[arg(long, default_value = "tab")]
+        placement: HistoryPlacementArg,
+        #[arg(long)]
+        client: Option<NonZeroU64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    Zoom {
+        node_id: u64,
+    },
+    Unzoom {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
+    ToggleZoom {
+        node_id: u64,
+    },
+    Swap {
+        first_node_id: u64,
+        second_node_id: u64,
+    },
+    Break {
+        node_id: u64,
+        #[arg(long = "to")]
+        destination: BreakDestinationArg,
+    },
+    JoinBuffer {
+        node_id: u64,
+        buffer_id: u64,
+        #[arg(long = "as", default_value = "tab-after")]
+        placement: JoinPlacementArg,
+    },
+    MoveBefore {
+        node_id: u64,
+        sibling_id: u64,
+    },
+    MoveAfter {
+        node_id: u64,
+        sibling_id: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum HistoryScopeArg {
+    Full,
+    Visible,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum HistoryPlacementArg {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum BreakDestinationArg {
+    Tab,
+    Floating,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum JoinPlacementArg {
+    Left,
+    Right,
+    Up,
+    Down,
+    #[value(name = "tab-before")]
+    TabBefore,
+    #[value(name = "tab-after")]
+    TabAfter,
 }
 
 async fn execute(socket: &Path, command: Command) -> Result<String> {
@@ -377,6 +475,177 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 ))),
             }
         }
+        Command::Buffer { command } => match command {
+            BufferCommand::Show { buffer_id } => {
+                let requested_buffer_id = BufferId(buffer_id);
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::Inspect {
+                        request_id: new_request_id(),
+                        buffer_id: requested_buffer_id,
+                    }))
+                    .await?;
+                let (buffer, location, _) = expect_buffer_with_location(response, "buffer show")?;
+                ensure_matching_buffer_id("buffer show", requested_buffer_id, buffer.id)?;
+                Ok(format_buffer_details(&buffer, &location))
+            }
+            BufferCommand::Reveal { buffer_id, client } => {
+                let requested_buffer_id = BufferId(buffer_id);
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::Reveal {
+                        request_id: new_request_id(),
+                        buffer_id: requested_buffer_id,
+                        client_id: client,
+                    }))
+                    .await?;
+                let location = expect_buffer_location(response, "buffer reveal")?;
+                ensure_matching_buffer_id(
+                    "buffer reveal",
+                    requested_buffer_id,
+                    location.buffer_id,
+                )?;
+                if matches!(location.attachment, BufferLocationAttachment::Detached) {
+                    return Err(MuxError::conflict(format!(
+                        "buffer {} is detached; use attach-buffer or node join-buffer",
+                        buffer_id
+                    )));
+                }
+                Ok(format_buffer_location_line(&location))
+            }
+            BufferCommand::History {
+                buffer_id,
+                scope,
+                placement,
+                client,
+            } => {
+                let requested_scope = history_scope(scope);
+                let requested_placement = history_placement(placement);
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::OpenHistory {
+                        request_id: new_request_id(),
+                        buffer_id: BufferId(buffer_id),
+                        scope: requested_scope,
+                        placement: requested_placement,
+                        client_id: client,
+                    }))
+                    .await?;
+                let (buffer, location, at_root_tab) =
+                    expect_buffer_with_location(response, "buffer history")?;
+                ensure_history_response(
+                    BufferId(buffer_id),
+                    requested_scope,
+                    requested_placement,
+                    &buffer,
+                    &location,
+                    at_root_tab,
+                )?;
+                Ok(format_buffer_location_line(&location))
+            }
+        },
+        Command::Node { command } => match command {
+            NodeCommand::Zoom { node_id } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::Zoom {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::Zoom")?;
+                Ok(String::new())
+            }
+            NodeCommand::Unzoom { target } => {
+                let session = connection.resolve_session_record(target.as_deref()).await?;
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::Unzoom {
+                        request_id: new_request_id(),
+                        session_id: session.id,
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::Unzoom")?;
+                Ok(String::new())
+            }
+            NodeCommand::ToggleZoom { node_id } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::ToggleZoom")?;
+                Ok(String::new())
+            }
+            NodeCommand::Swap {
+                first_node_id,
+                second_node_id,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::SwapSiblings {
+                        request_id: new_request_id(),
+                        first_node_id: NodeId(first_node_id),
+                        second_node_id: NodeId(second_node_id),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::Swap")?;
+                Ok(String::new())
+            }
+            NodeCommand::Break {
+                node_id,
+                destination,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::BreakNode {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        destination: break_destination(destination),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::Break")?;
+                Ok(String::new())
+            }
+            NodeCommand::JoinBuffer {
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        buffer_id: BufferId(buffer_id),
+                        placement: join_placement(placement),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::JoinBuffer")?;
+                Ok(String::new())
+            }
+            NodeCommand::MoveBefore {
+                node_id,
+                sibling_id,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        sibling_node_id: NodeId(sibling_id),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::MoveBefore")?;
+                Ok(String::new())
+            }
+            NodeCommand::MoveAfter {
+                node_id,
+                sibling_id,
+            } => {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::MoveNodeAfter {
+                        request_id: new_request_id(),
+                        node_id: NodeId(node_id),
+                        sibling_node_id: NodeId(sibling_id),
+                    }))
+                    .await?;
+                expect_ok(response, "NodeCommand::MoveAfter")?;
+                Ok(String::new())
+            }
+        },
         Command::NewWindow {
             target,
             title,
@@ -1327,6 +1596,59 @@ fn expect_capture(response: ServerResponse, operation: &str) -> Result<SnapshotR
     }
 }
 
+fn expect_buffer_location(response: ServerResponse, operation: &str) -> Result<BufferLocation> {
+    match response {
+        ServerResponse::BufferLocation(BufferLocationResponse { location, .. }) => Ok(location),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
+fn expect_ok(response: ServerResponse, operation: &str) -> Result<()> {
+    match response {
+        ServerResponse::Ok(_) => Ok(()),
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
+fn expect_buffer_with_location(
+    response: ServerResponse,
+    operation: &str,
+) -> Result<(embers_protocol::BufferRecord, BufferLocation, bool)> {
+    match response {
+        ServerResponse::BufferWithLocation(response) => {
+            let (_, buffer, location, at_root_tab) = response.into_parts();
+            if buffer.id != location.buffer_id {
+                return Err(MuxError::protocol(format!(
+                    "{operation} returned buffer {} but location was for buffer {}",
+                    buffer.id, location.buffer_id
+                )));
+            }
+            Ok((buffer, location, at_root_tab))
+        }
+        other => Err(MuxError::protocol(format!(
+            "unexpected response to {operation}: {other:?}"
+        ))),
+    }
+}
+
+fn ensure_matching_buffer_id(
+    operation: &str,
+    requested_buffer_id: BufferId,
+    actual_buffer_id: BufferId,
+) -> Result<()> {
+    if actual_buffer_id == requested_buffer_id {
+        return Ok(());
+    }
+
+    Err(MuxError::protocol(format!(
+        "{operation} returned buffer {actual_buffer_id} for requested buffer {requested_buffer_id}"
+    )))
+}
+
 fn format_sessions(sessions: &[SessionRecord]) -> String {
     sessions
         .iter()
@@ -1379,6 +1701,82 @@ fn format_clients(clients: &[ClientRecord], sessions: &[SessionRecord]) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_buffer_details(
+    buffer: &embers_protocol::BufferRecord,
+    location: &BufferLocation,
+) -> String {
+    let mut lines = vec![
+        format!("id\t{}", buffer.id),
+        format!(
+            "title\t{}",
+            serde_json::to_string(&buffer.title).expect("buffer titles serialize to JSON")
+        ),
+        format!("state\t{}", buffer_state_label(buffer.state)),
+        format!("kind\t{}", buffer_kind_label(buffer.kind)),
+        format!("read_only\t{}", usize::from(buffer.read_only)),
+        format!("location\t{}", format_buffer_location_inline(location)),
+    ];
+    if let Some(source_buffer_id) = buffer.helper_source_buffer_id {
+        lines.push(format!("source_buffer\t{}", source_buffer_id));
+    }
+    if let Some(scope) = buffer.helper_scope {
+        lines.push(format!("history_scope\t{}", history_scope_label(scope)));
+    }
+    if !buffer.command.is_empty() {
+        let serialized_args =
+            serde_json::to_string(&buffer.command).expect("buffer commands serialize to JSON");
+        lines.push(format!("command\t{serialized_args}"));
+    }
+    if let Some(cwd) = &buffer.cwd {
+        let serialized_cwd =
+            serde_json::to_string(cwd).expect("buffer working directories serialize to JSON");
+        lines.push(format!("cwd\t{serialized_cwd}"));
+    }
+    lines.join("\n")
+}
+
+fn format_buffer_location_line(location: &BufferLocation) -> String {
+    format!(
+        "{}\t{}",
+        location.buffer_id,
+        format_buffer_location_value(location)
+    )
+}
+
+fn format_buffer_location_inline(location: &BufferLocation) -> String {
+    match location.attachment {
+        BufferLocationAttachment::Floating {
+            session_id,
+            node_id,
+            floating_id,
+        } => {
+            format!("session:{session_id} node:{node_id} floating:{floating_id}")
+        }
+        BufferLocationAttachment::Session {
+            session_id,
+            node_id,
+        } => format!("session:{session_id} node:{node_id}"),
+        BufferLocationAttachment::Detached => "detached".to_owned(),
+    }
+}
+
+fn format_buffer_location_value(location: &BufferLocation) -> String {
+    match location.attachment {
+        BufferLocationAttachment::Floating {
+            session_id,
+            node_id,
+            floating_id,
+        } => {
+            format!("session:{session_id}\tnode:{node_id}\tfloating:{floating_id}")
+        }
+        BufferLocationAttachment::Session {
+            session_id,
+            node_id,
+        } => format!("session:{session_id}\tnode:{node_id}"),
+        BufferLocationAttachment::Detached => "detached".to_owned(),
+    }
 }
 
 fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
@@ -1630,6 +2028,136 @@ fn buffer_state_label(state: embers_protocol::BufferRecordState) -> &'static str
     }
 }
 
+fn buffer_kind_label(kind: embers_protocol::BufferRecordKind) -> &'static str {
+    match kind {
+        embers_protocol::BufferRecordKind::Pty => "pty",
+        embers_protocol::BufferRecordKind::Helper => "helper",
+    }
+}
+
+fn history_scope_label(scope: BufferHistoryScope) -> &'static str {
+    match scope {
+        BufferHistoryScope::Full => "full",
+        BufferHistoryScope::Visible => "visible",
+    }
+}
+
+fn history_scope(scope: HistoryScopeArg) -> BufferHistoryScope {
+    match scope {
+        HistoryScopeArg::Full => BufferHistoryScope::Full,
+        HistoryScopeArg::Visible => BufferHistoryScope::Visible,
+    }
+}
+
+fn history_placement(placement: HistoryPlacementArg) -> BufferHistoryPlacement {
+    match placement {
+        HistoryPlacementArg::Tab => BufferHistoryPlacement::Tab,
+        HistoryPlacementArg::Floating => BufferHistoryPlacement::Floating,
+    }
+}
+
+fn ensure_history_attachment(
+    buffer_id: BufferId,
+    requested_placement: BufferHistoryPlacement,
+    location: &BufferLocation,
+) -> Result<()> {
+    match (requested_placement, &location.attachment) {
+        (BufferHistoryPlacement::Tab, BufferLocationAttachment::Session { .. })
+        | (BufferHistoryPlacement::Floating, BufferLocationAttachment::Floating { .. }) => Ok(()),
+        (_, BufferLocationAttachment::Detached) => Err(MuxError::protocol(format!(
+            "buffer history returned detached helper location for buffer {buffer_id}"
+        ))),
+        (BufferHistoryPlacement::Tab, BufferLocationAttachment::Floating { .. }) => {
+            Err(MuxError::protocol(format!(
+                "buffer history returned unexpected attachment for buffer {buffer_id}: expected Tab"
+            )))
+        }
+        (BufferHistoryPlacement::Floating, BufferLocationAttachment::Session { .. }) => {
+            Err(MuxError::protocol(format!(
+                "buffer history returned unexpected attachment for buffer {buffer_id}: expected Floating"
+            )))
+        }
+    }
+}
+
+fn ensure_history_response(
+    source_buffer_id: BufferId,
+    requested_scope: BufferHistoryScope,
+    requested_placement: BufferHistoryPlacement,
+    buffer: &embers_protocol::BufferRecord,
+    location: &BufferLocation,
+    at_root_tab: bool,
+) -> Result<()> {
+    if buffer.kind != embers_protocol::BufferRecordKind::Helper {
+        return Err(MuxError::protocol(format!(
+            "buffer history returned buffer {} with unexpected kind {:?}",
+            buffer.id, buffer.kind
+        )));
+    }
+    if buffer.helper_source_buffer_id != Some(source_buffer_id) {
+        return Err(MuxError::protocol(format!(
+            "buffer history returned helper {} for source {:?} instead of {source_buffer_id}",
+            buffer.id, buffer.helper_source_buffer_id
+        )));
+    }
+    if buffer.helper_scope != Some(requested_scope) {
+        return Err(MuxError::protocol(format!(
+            "buffer history returned helper {} with scope {:?} instead of {:?}",
+            buffer.id, buffer.helper_scope, requested_scope
+        )));
+    }
+
+    let (session_id, node_id) = match &location.attachment {
+        BufferLocationAttachment::Session {
+            session_id,
+            node_id,
+        }
+        | BufferLocationAttachment::Floating {
+            session_id,
+            node_id,
+            ..
+        } => (*session_id, *node_id),
+        BufferLocationAttachment::Detached => {
+            ensure_history_attachment(source_buffer_id, requested_placement, location)?;
+            unreachable!("detached buffer history attachments should fail validation")
+        }
+    };
+    if buffer.attachment_node_id != Some(node_id) {
+        return Err(MuxError::protocol(format!(
+            "buffer history returned helper {} attached to {:?} but location pointed at {node_id}",
+            buffer.id, buffer.attachment_node_id
+        )));
+    }
+
+    ensure_history_attachment(source_buffer_id, requested_placement, location)?;
+
+    if matches!(requested_placement, BufferHistoryPlacement::Tab) && !at_root_tab {
+        return Err(MuxError::protocol(format!(
+            "buffer history returned helper node {node_id} outside session {session_id} root tabs"
+        )));
+    }
+
+    Ok(())
+}
+
+fn break_destination(destination: BreakDestinationArg) -> NodeBreakDestination {
+    match destination {
+        BreakDestinationArg::Tab => NodeBreakDestination::Tab,
+        BreakDestinationArg::Floating => NodeBreakDestination::Floating,
+    }
+}
+
+fn join_placement(placement: JoinPlacementArg) -> NodeJoinPlacement {
+    match placement {
+        JoinPlacementArg::Left => NodeJoinPlacement::Left,
+        JoinPlacementArg::Right => NodeJoinPlacement::Right,
+        JoinPlacementArg::Up => NodeJoinPlacement::Up,
+        JoinPlacementArg::Down => NodeJoinPlacement::Down,
+        JoinPlacementArg::TabBefore => NodeJoinPlacement::TabBefore,
+        JoinPlacementArg::TabAfter => NodeJoinPlacement::TabAfter,
+    }
+}
+
 fn split_scoped_required(target: &str, label: &str) -> Result<(Option<String>, String)> {
     let (session, selector) = split_scoped_target(Some(target));
     let selector =
@@ -1673,9 +2201,11 @@ fn default_title(command: &[String], fallback: &str) -> String {
 mod tests {
     #[cfg(windows)]
     use base64::Engine as _;
-    use clap::Parser;
-    use embers_core::NodeId;
-    use embers_protocol::{TabRecord, TabsRecord};
+    use clap::{Parser, error::ErrorKind};
+    use embers_core::{ActivityState, BufferId, FloatingId, NodeId, PtySize, SessionId};
+    use embers_protocol::{
+        BufferLocation, BufferRecord, BufferRecordKind, BufferRecordState, TabRecord, TabsRecord,
+    };
     #[cfg(windows)]
     use std::ffi::OsString;
     #[cfg(unix)]
@@ -1686,7 +2216,11 @@ mod tests {
     use std::os::windows::ffi::OsStringExt;
     use std::path::Path;
 
-    use super::{Cli, resolve_window_index, split_scoped_required, split_scoped_target};
+    use super::{
+        BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
+        JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
+        resolve_window_index, split_scoped_required, split_scoped_target,
+    };
 
     #[test]
     fn parser_accepts_global_socket_after_subcommand() {
@@ -1803,5 +2337,324 @@ mod tests {
             resolve_window_index(&tabs, Some("0")).expect("zero resolves"),
             0
         );
+    }
+
+    #[test]
+    fn buffer_details_location_row_uses_single_tab_delimiter() {
+        let details = format_buffer_details(
+            &BufferRecord {
+                id: BufferId(7),
+                title: "logs".to_owned(),
+                command: vec!["/bin/sh".to_owned()],
+                cwd: Some("/tmp".to_owned()),
+                kind: BufferRecordKind::Pty,
+                pid: None,
+                env: Default::default(),
+                state: BufferRecordState::Running,
+                attachment_node_id: Some(NodeId(3)),
+                read_only: false,
+                helper_source_buffer_id: None,
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+            },
+            &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
+        );
+
+        let location_line = details
+            .lines()
+            .find(|line| line.starts_with("location\t"))
+            .expect("location row present");
+        assert_eq!(location_line.matches('\t').count(), 1);
+    }
+
+    #[test]
+    fn buffer_details_command_row_preserves_argument_boundaries() {
+        let details = format_buffer_details(
+            &BufferRecord {
+                id: BufferId(8),
+                title: "script".to_owned(),
+                command: vec![
+                    "/bin/sh".to_owned(),
+                    "-lc".to_owned(),
+                    "printf '%s\\n' 'hello world'".to_owned(),
+                ],
+                cwd: None,
+                kind: BufferRecordKind::Pty,
+                pid: None,
+                env: Default::default(),
+                state: BufferRecordState::Running,
+                attachment_node_id: Some(NodeId(4)),
+                read_only: false,
+                helper_source_buffer_id: None,
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+            },
+            &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
+        );
+
+        let command_line = details
+            .lines()
+            .find(|line| line.starts_with("command\t"))
+            .expect("command row present");
+        let serialized_args = command_line
+            .strip_prefix("command\t")
+            .expect("command row prefix present");
+        let command: Vec<String> =
+            serde_json::from_str(serialized_args).expect("command row uses JSON");
+        assert_eq!(
+            command,
+            vec![
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                "printf '%s\\n' 'hello world'".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn buffer_details_title_and_cwd_rows_use_json() {
+        let details = format_buffer_details(
+            &BufferRecord {
+                id: BufferId(9),
+                title: "build\tlogs\nstderr".to_owned(),
+                command: Vec::new(),
+                cwd: Some("/tmp/work\tspace\nhere".to_owned()),
+                kind: BufferRecordKind::Pty,
+                pid: None,
+                env: Default::default(),
+                state: BufferRecordState::Running,
+                attachment_node_id: Some(NodeId(5)),
+                read_only: false,
+                helper_source_buffer_id: None,
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+            },
+            &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
+        );
+
+        let title_line = details
+            .lines()
+            .find(|line| line.starts_with("title\t"))
+            .expect("title row present");
+        let cwd_line = details
+            .lines()
+            .find(|line| line.starts_with("cwd\t"))
+            .expect("cwd row present");
+
+        let title = title_line
+            .strip_prefix("title\t")
+            .expect("title row prefix present");
+        let cwd = cwd_line
+            .strip_prefix("cwd\t")
+            .expect("cwd row prefix present");
+
+        assert_eq!(
+            serde_json::from_str::<String>(title).expect("title row uses JSON"),
+            "build\tlogs\nstderr"
+        );
+        assert_eq!(
+            serde_json::from_str::<String>(cwd).expect("cwd row uses JSON"),
+            "/tmp/work\tspace\nhere"
+        );
+    }
+
+    #[test]
+    fn buffer_subcommands_parse_expected_flags_and_defaults() {
+        let history =
+            Cli::try_parse_from(["embers", "buffer", "history", "7"]).expect("history parses");
+        match history.command {
+            Some(Command::Buffer {
+                command:
+                    BufferCommand::History {
+                        buffer_id,
+                        scope,
+                        placement,
+                        client,
+                    },
+            }) => {
+                assert_eq!(buffer_id, 7);
+                assert!(matches!(scope, HistoryScopeArg::Full));
+                assert!(matches!(placement, HistoryPlacementArg::Tab));
+                assert_eq!(client, None);
+            }
+            other => panic!("expected buffer history command, got {other:?}"),
+        }
+
+        let history_with_flags = Cli::try_parse_from([
+            "embers",
+            "buffer",
+            "history",
+            "9",
+            "--scope",
+            "visible",
+            "--placement",
+            "floating",
+            "--client",
+            "5",
+        ])
+        .expect("history flags parse");
+        match history_with_flags.command {
+            Some(Command::Buffer {
+                command:
+                    BufferCommand::History {
+                        buffer_id,
+                        scope,
+                        placement,
+                        client,
+                    },
+            }) => {
+                assert_eq!(buffer_id, 9);
+                assert!(matches!(scope, HistoryScopeArg::Visible));
+                assert!(matches!(placement, HistoryPlacementArg::Floating));
+                assert_eq!(client.map(std::num::NonZeroU64::get), Some(5));
+            }
+            other => panic!("expected flagged buffer history command, got {other:?}"),
+        }
+
+        let reveal = Cli::try_parse_from(["embers", "buffer", "reveal", "11", "--client", "6"])
+            .expect("reveal parses");
+        match reveal.command {
+            Some(Command::Buffer {
+                command: BufferCommand::Reveal { buffer_id, client },
+            }) => {
+                assert_eq!(buffer_id, 11);
+                assert_eq!(client.map(std::num::NonZeroU64::get), Some(6));
+            }
+            other => panic!("expected buffer reveal command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_attachment_validation_accepts_matching_locations() {
+        assert!(
+            ensure_history_attachment(
+                BufferId(7),
+                embers_protocol::BufferHistoryPlacement::Tab,
+                &BufferLocation::session(BufferId(70), SessionId(1), NodeId(3)),
+            )
+            .is_ok()
+        );
+        assert!(
+            ensure_history_attachment(
+                BufferId(7),
+                embers_protocol::BufferHistoryPlacement::Floating,
+                &BufferLocation::floating(BufferId(71), SessionId(1), NodeId(4), FloatingId(5)),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn history_attachment_validation_rejects_mismatched_locations() {
+        let floating_error = ensure_history_attachment(
+            BufferId(7),
+            embers_protocol::BufferHistoryPlacement::Floating,
+            &BufferLocation::session(BufferId(70), SessionId(1), NodeId(3)),
+        )
+        .expect_err("floating history should reject tab helper");
+        assert!(floating_error.to_string().contains("expected Floating"));
+
+        let tab_error = ensure_history_attachment(
+            BufferId(7),
+            embers_protocol::BufferHistoryPlacement::Tab,
+            &BufferLocation::floating(BufferId(71), SessionId(1), NodeId(4), FloatingId(5)),
+        )
+        .expect_err("tab history should reject floating helper");
+        assert!(tab_error.to_string().contains("expected Tab"));
+    }
+
+    #[test]
+    fn node_subcommands_parse_expected_flags_and_reject_legacy_shortcuts() {
+        let break_to_floating =
+            Cli::try_parse_from(["embers", "node", "break", "11", "--to", "floating"])
+                .expect("break parses");
+        match break_to_floating.command {
+            Some(Command::Node {
+                command:
+                    NodeCommand::Break {
+                        node_id,
+                        destination,
+                    },
+            }) => {
+                assert_eq!(node_id, 11);
+                assert!(matches!(destination, BreakDestinationArg::Floating));
+            }
+            other => panic!("expected node break command, got {other:?}"),
+        }
+
+        let join_after = Cli::try_parse_from([
+            "embers",
+            "node",
+            "join-buffer",
+            "21",
+            "34",
+            "--as",
+            "tab-after",
+        ])
+        .expect("join-buffer tab-after parses");
+        match join_after.command {
+            Some(Command::Node {
+                command:
+                    NodeCommand::JoinBuffer {
+                        node_id,
+                        buffer_id,
+                        placement,
+                    },
+            }) => {
+                assert_eq!(node_id, 21);
+                assert_eq!(buffer_id, 34);
+                assert!(matches!(placement, JoinPlacementArg::TabAfter));
+            }
+            other => panic!("expected node join-buffer command, got {other:?}"),
+        }
+
+        let join_default = Cli::try_parse_from(["embers", "node", "join-buffer", "21", "34"])
+            .expect("join-buffer default parses");
+        match join_default.command {
+            Some(Command::Node {
+                command: NodeCommand::JoinBuffer { placement, .. },
+            }) => {
+                assert!(matches!(placement, JoinPlacementArg::TabAfter));
+            }
+            other => panic!("expected default node join-buffer command, got {other:?}"),
+        }
+
+        let join_before = Cli::try_parse_from([
+            "embers",
+            "node",
+            "join-buffer",
+            "21",
+            "34",
+            "--as",
+            "tab-before",
+        ])
+        .expect("join-buffer tab-before parses");
+        match join_before.command {
+            Some(Command::Node {
+                command: NodeCommand::JoinBuffer { placement, .. },
+            }) => {
+                assert!(matches!(placement, JoinPlacementArg::TabBefore));
+            }
+            other => panic!("expected node join-buffer command, got {other:?}"),
+        }
+
+        let legacy_tab_after =
+            Cli::try_parse_from(["embers", "node", "join-buffer", "21", "34", "--tab-after"])
+                .expect_err("legacy --tab-after should be rejected");
+        assert_eq!(legacy_tab_after.kind(), ErrorKind::UnknownArgument);
+
+        let legacy_tab_before =
+            Cli::try_parse_from(["embers", "node", "join-buffer", "21", "34", "--tab-before"])
+                .expect_err("legacy --tab-before should be rejected");
+        assert_eq!(legacy_tab_before.kind(), ErrorKind::UnknownArgument);
     }
 }

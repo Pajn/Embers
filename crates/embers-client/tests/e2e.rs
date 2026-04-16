@@ -1,15 +1,15 @@
 use std::process::Output;
-use std::time::Duration;
 
 use embers_client::{MuxClient, PresentationModel, Renderer};
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, SessionId, Size, SplitDirection, new_request_id,
 };
 use embers_protocol::{
-    BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest, NodeRequest,
-    ServerResponse, SessionRequest, SessionSnapshot,
+    BufferRecord, BufferRequest, BufferResponse, BuffersResponse, ClientMessage, FloatingRequest,
+    NodeRequest, ServerResponse, SessionRequest, SessionSnapshot, VisibleSnapshotResponse,
 };
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
+use tokio::time::{Duration, Instant};
 
 fn run_cli(server: &TestServer, args: &[&str]) -> Output {
     let output = cargo_bin("embers")
@@ -49,11 +49,19 @@ async fn create_buffer(
     connection: &mut TestConnection,
     title: &str,
 ) -> embers_protocol::BufferRecord {
+    create_buffer_with_command(connection, title, vec!["/bin/sh".to_owned()]).await
+}
+
+async fn create_buffer_with_command(
+    connection: &mut TestConnection,
+    title: &str,
+    command: Vec<String>,
+) -> embers_protocol::BufferRecord {
     let response = connection
         .request(&ClientMessage::Buffer(BufferRequest::Create {
             request_id: new_request_id(),
             title: Some(title.to_owned()),
-            command: vec!["/bin/sh".to_owned()],
+            command,
             cwd: None,
             env: Default::default(),
         }))
@@ -115,14 +123,14 @@ fn session_id_by_name(client: &MuxClient<embers_client::SocketTransport>, name: 
         .id
 }
 
-async fn refresh_all_snapshots(client: &mut MuxClient<embers_client::SocketTransport>) {
+async fn refresh_all_snapshots(
+    client: &mut MuxClient<embers_client::SocketTransport>,
+) -> embers_core::Result<()> {
     let buffer_ids = client.state().buffers.keys().copied().collect::<Vec<_>>();
     for buffer_id in buffer_ids {
-        client
-            .refresh_buffer_snapshot(buffer_id)
-            .await
-            .unwrap_or_else(|error| panic!("refreshing snapshot for {buffer_id} failed: {error}"));
+        client.refresh_buffer_snapshot(buffer_id).await?;
     }
+    Ok(())
 }
 
 async fn render_session(
@@ -130,7 +138,9 @@ async fn render_session(
     session_name: &str,
 ) -> String {
     client.resync_all_sessions().await.expect("resync succeeds");
-    refresh_all_snapshots(client).await;
+    refresh_all_snapshots(client)
+        .await
+        .expect("refresh snapshots succeeds");
     let session_id = session_id_by_name(client, session_name);
     let model = PresentationModel::project(
         client.state(),
@@ -142,6 +152,241 @@ async fn render_session(
     )
     .expect("projection succeeds");
     Renderer.render(client.state(), &model).render()
+}
+
+async fn poll_for_tab_activity(
+    client: &mut MuxClient<embers_client::SocketTransport>,
+    session_name: &str,
+    tabs_node_id: NodeId,
+    target_title: &str,
+    expected_activity: ActivityState,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> embers_core::Result<bool> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match tokio::time::timeout(remaining, client.resync_all_sessions()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(false),
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match tokio::time::timeout(remaining, refresh_all_snapshots(client)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(false),
+        }
+        let maybe_session_id = client
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == session_name)
+            .map(|session| session.id);
+        if let Some(session_id) = maybe_session_id
+            && let Ok(model) = PresentationModel::project(
+                client.state(),
+                session_id,
+                Size {
+                    width: 80,
+                    height: 24,
+                },
+            )
+            && let Some(tabs) = model
+                .tab_bars
+                .iter()
+                .find(|tabs| tabs.node_id == tabs_node_id)
+            && tabs
+                .tabs
+                .iter()
+                .any(|tab| tab.title == target_title && tab.activity == expected_activity)
+        {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+async fn wait_for_visible_snapshot<F>(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    timeout: Duration,
+    mut predicate: F,
+) -> VisibleSnapshotResponse
+where
+    F: FnMut(&VisibleSnapshotResponse) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    let mut last_snapshot = "<none>".to_owned();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let snapshot =
+            tokio::time::timeout(remaining, connection.capture_visible_buffer(buffer_id))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("timed out waiting for visible snapshot; last snapshot: {last_snapshot}")
+                })
+                .expect("visible capture succeeds");
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+        last_snapshot = format!("{snapshot:?}");
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for visible snapshot; last snapshot: {last_snapshot}");
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn buffer_record(connection: &mut TestConnection, buffer_id: BufferId) -> BufferRecord {
+    match connection
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: new_request_id(),
+            buffer_id,
+        }))
+        .await
+        .expect("get buffer succeeds")
+    {
+        ServerResponse::Buffer(BufferResponse { buffer, .. }) => buffer,
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+}
+
+async fn wait_for_buffer_activity(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    expected: ActivityState,
+    timeout: Duration,
+) -> BufferRecord {
+    let deadline = Instant::now() + timeout;
+    let mut last_activity = "<none>".to_owned();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let buffer = tokio::time::timeout(remaining, buffer_record(connection, buffer_id))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {last_activity}"
+                )
+            });
+        if buffer.activity == expected {
+            return buffer;
+        }
+        last_activity = format!("{:?}", buffer.activity);
+
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for buffer {buffer_id} activity {expected:?}; last activity: {last_activity}"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+struct HiddenTabFixture {
+    nested_tabs_id: NodeId,
+    hidden_buffer: BufferRecord,
+}
+
+async fn create_hidden_tab_fixture(connection: &mut TestConnection) -> HiddenTabFixture {
+    let hidden_buffer = create_buffer(connection, "hidden").await;
+    create_hidden_tab_fixture_with_buffer(connection, hidden_buffer).await
+}
+
+async fn create_hidden_tab_fixture_with_buffer(
+    connection: &mut TestConnection,
+    hidden_buffer: BufferRecord,
+) -> HiddenTabFixture {
+    let session = create_session(connection, "alpha").await;
+    let buffer_a = create_buffer(connection, "main").await;
+    let session = match connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "main".to_owned(),
+            buffer_id: Some(buffer_a.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add root tab succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    let main_leaf = session.session.focused_leaf_id.expect("main leaf exists");
+
+    let session = match connection
+        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
+            request_id: new_request_id(),
+            node_id: main_leaf,
+            title: "main".to_owned(),
+        }))
+        .await
+        .expect("wrap main leaf in tabs succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    let nested_tabs_id = node(&session, main_leaf)
+        .parent_id
+        .expect("wrapped main leaf has tabs parent");
+
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::AddTab {
+            request_id: new_request_id(),
+            tabs_node_id: nested_tabs_id,
+            title: "bg".to_owned(),
+            buffer_id: Some(hidden_buffer.id),
+            child_node_id: None,
+            index: 1,
+        }))
+        .await
+        .expect("add hidden tab succeeds");
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: nested_tabs_id,
+            index: 0,
+        }))
+        .await
+        .expect("select visible tab succeeds");
+
+    HiddenTabFixture {
+        nested_tabs_id,
+        hidden_buffer,
+    }
+}
+
+fn fullscreen_fixture_command(
+    live_title: &str,
+    restored_title: &str,
+    sleep_secs: &str,
+) -> Vec<String> {
+    vec![
+        "/bin/sh".to_owned(),
+        "-lc".to_owned(),
+        format!(
+            "printf 'main-before\\n'; \
+             printf '\\033]0;{live_title}\\007\\033[?1049h\\033[2J\\033[Hfullscreen-live\\033[3;10Hcursor-target'; \
+             sleep {sleep_secs}; \
+             printf '\\033]0;{restored_title}\\007\\033[?1049lrestored-after\\n'"
+        ),
+    ]
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -463,6 +708,52 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         }))
         .await
         .expect("detach succeeds");
+    assert!(
+        buffer_record(&mut connection, buffer_a.id)
+            .await
+            .attachment_node_id
+            .is_none()
+    );
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf detached-output\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send detached output succeeds");
+    connection
+        .wait_for_capture_contains(buffer_a.id, "detached-output", Duration::from_secs(3))
+        .await
+        .expect("detached buffer captures output");
+    wait_for_buffer_activity(
+        &mut connection,
+        buffer_a.id,
+        ActivityState::Activity,
+        Duration::from_secs(3),
+    )
+    .await;
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer_a.id,
+            bytes: b"printf 'detached-bell'; printf '\\a'; sleep 0.5\r".to_vec(),
+        }))
+        .await
+        .expect("send detached bell succeeds");
+    connection
+        .wait_for_capture_contains(buffer_a.id, "detached-bell", Duration::from_secs(3))
+        .await
+        .expect("detached buffer captures bell marker");
+    wait_for_buffer_activity(
+        &mut connection,
+        buffer_a.id,
+        ActivityState::Bell,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let popup = match connection
         .request(&ClientMessage::Floating(FloatingRequest::Create {
@@ -481,6 +772,10 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         ServerResponse::Floating(response) => response.floating,
         other => panic!("expected floating response, got {other:?}"),
     };
+    assert_eq!(
+        buffer_record(&mut connection, buffer_a.id).await.activity,
+        ActivityState::Idle
+    );
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
@@ -527,6 +822,13 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         }))
         .await
         .expect("reattach detached buffer succeeds");
+    assert_eq!(
+        buffer_record(&mut connection, buffer_a.id)
+            .await
+            .attachment_node_id,
+        Some(target_leaf),
+        "buffer should be reattached to the requested target leaf"
+    );
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
@@ -566,101 +868,49 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
         .await
         .expect("protocol connection");
 
-    let session = create_session(&mut connection, "alpha").await;
-    let buffer_a = create_buffer(&mut connection, "main").await;
-    let session = match connection
-        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
-            request_id: new_request_id(),
-            session_id: session.session.id,
-            title: "main".to_owned(),
-            buffer_id: Some(buffer_a.id),
-            child_node_id: None,
-        }))
-        .await
-        .expect("add root tab succeeds")
-    {
-        ServerResponse::SessionSnapshot(response) => response.snapshot,
-        other => panic!("expected session snapshot response, got {other:?}"),
-    };
-    let main_leaf = session.session.focused_leaf_id.expect("main leaf exists");
-
-    let session = match connection
-        .request(&ClientMessage::Node(NodeRequest::WrapInTabs {
-            request_id: new_request_id(),
-            node_id: main_leaf,
-            title: "main".to_owned(),
-        }))
-        .await
-        .expect("wrap main leaf in tabs succeeds")
-    {
-        ServerResponse::SessionSnapshot(response) => response.snapshot,
-        other => panic!("expected session snapshot response, got {other:?}"),
-    };
-    let nested_tabs_id = node(&session, main_leaf)
-        .parent_id
-        .expect("wrapped main leaf has tabs parent");
-
-    let buffer_b = create_buffer(&mut connection, "hidden").await;
-    let _ = connection
-        .request(&ClientMessage::Node(NodeRequest::AddTab {
-            request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
-            title: "bg".to_owned(),
-            buffer_id: Some(buffer_b.id),
-            child_node_id: None,
-            index: 1,
-        }))
-        .await
-        .expect("add hidden tab succeeds");
-    let _ = connection
-        .request(&ClientMessage::Node(NodeRequest::SelectTab {
-            request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
-            index: 0,
-        }))
-        .await
-        .expect("select visible tab succeeds");
+    let fixture = create_hidden_tab_fixture(&mut connection).await;
 
     let _ = connection
         .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
             request_id: new_request_id(),
-            buffer_id: buffer_b.id,
+            buffer_id: fixture.hidden_buffer.id,
             bytes: b"printf hidden-activity\\n\r".to_vec(),
         }))
         .await
         .expect("send to hidden buffer succeeds");
     connection
-        .wait_for_capture_contains(buffer_b.id, "hidden-activity", Duration::from_secs(3))
+        .wait_for_capture_contains(
+            fixture.hidden_buffer.id,
+            "hidden-activity",
+            Duration::from_secs(3),
+        )
         .await
         .expect("hidden buffer captures output");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Activity,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let mut first_client = MuxClient::connect(server.socket_path())
         .await
         .expect("first client connects");
-    first_client
-        .resync_all_sessions()
-        .await
-        .expect("first client resyncs");
-    refresh_all_snapshots(&mut first_client).await;
-    let session_id = session_id_by_name(&first_client, "alpha");
-    let model = PresentationModel::project(
-        first_client.state(),
-        session_id,
-        Size {
-            width: 80,
-            height: 24,
-        },
+    let saw_hidden_activity = poll_for_tab_activity(
+        &mut first_client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Activity,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
     )
-    .expect("projection succeeds");
-    let tabs = model
-        .tab_bars
-        .iter()
-        .find(|tabs| tabs.node_id == nested_tabs_id)
-        .expect("nested tabs frame exists");
+    .await
+    .expect("poll hidden activity succeeds");
     assert!(
-        tabs.tabs
-            .iter()
-            .any(|tab| tab.title == "bg" && tab.activity != ActivityState::Idle)
+        saw_hidden_activity,
+        "hidden tab activity should propagate before reconnect"
     );
 
     drop(first_client);
@@ -668,17 +918,314 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
     let _ = connection
         .request(&ClientMessage::Node(NodeRequest::SelectTab {
             request_id: new_request_id(),
-            tabs_node_id: nested_tabs_id,
+            tabs_node_id: fixture.nested_tabs_id,
             index: 1,
         }))
         .await
         .expect("select hidden tab succeeds");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Idle,
+        Duration::from_secs(3),
+    )
+    .await;
 
     let mut second_client = MuxClient::connect(server.socket_path())
         .await
         .expect("second client connects");
     let render = render_session(&mut second_client, "alpha").await;
     assert!(render.contains("hidden-activity"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_bell_is_visible_to_clients_until_revealed() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let fixture = create_hidden_tab_fixture(&mut connection).await;
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: fixture.hidden_buffer.id,
+            bytes: b"printf 'hidden-bell'; printf '\\a'; sleep 0.5\r".to_vec(),
+        }))
+        .await
+        .expect("send hidden bell succeeds");
+    connection
+        .wait_for_capture_contains(
+            fixture.hidden_buffer.id,
+            "hidden-bell",
+            Duration::from_secs(3),
+        )
+        .await
+        .expect("hidden bell marker appears");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Bell,
+        Duration::from_secs(3),
+    )
+    .await;
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    client
+        .resync_all_sessions()
+        .await
+        .expect("client resyncs sessions");
+    refresh_all_snapshots(&mut client)
+        .await
+        .expect("refresh snapshots succeeds");
+    let saw_hidden_bell = poll_for_tab_activity(
+        &mut client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Bell,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    )
+    .await
+    .expect("poll hidden bell succeeds");
+    assert!(
+        saw_hidden_bell,
+        "timed out waiting for bell activity after reconnect"
+    );
+
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: fixture.nested_tabs_id,
+            index: 1,
+        }))
+        .await
+        .expect("select hidden tab succeeds");
+    wait_for_buffer_activity(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        ActivityState::Idle,
+        Duration::from_secs(3),
+    )
+    .await;
+    let cleared_hidden_bell = poll_for_tab_activity(
+        &mut client,
+        "alpha",
+        fixture.nested_tabs_id,
+        "bg",
+        ActivityState::Idle,
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+    )
+    .await
+    .expect("poll cleared hidden bell succeeds");
+    assert!(
+        cleared_hidden_bell,
+        "hidden tab kept Bell activity after being revealed"
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "fullscreen",
+        fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "3.0"),
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "fullscreen".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add fullscreen tab succeeds");
+
+    let live = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(3),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-live-title")
+                && text.contains("fullscreen-live")
+                && text.contains("cursor-target")
+        },
+    )
+    .await;
+    let live_text = live.lines.join("\n");
+    assert!(!live_text.contains("main-before"));
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let render = render_session(&mut client, "alpha").await;
+    assert!(render.contains("fullscreen-live"));
+    assert!(render.contains("cursor-target"));
+    assert!(!render.contains("main-before"));
+
+    let restored = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(4),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            !snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("primary-restored-title")
+                && text.contains("main-before")
+                && text.contains("restored-after")
+        },
+    )
+    .await;
+    let restored_text = restored.lines.join("\n");
+    assert!(!restored_text.contains("fullscreen-live"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let hidden_buffer = create_buffer_with_command(
+        &mut connection,
+        "fullscreen-hidden",
+        fullscreen_fixture_command(
+            "fullscreen-hidden-live",
+            "fullscreen-hidden-restored",
+            "4.0",
+        ),
+    )
+    .await;
+    let fixture = create_hidden_tab_fixture_with_buffer(&mut connection, hidden_buffer).await;
+
+    wait_for_visible_snapshot(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        Duration::from_secs(3),
+        |snapshot| {
+            snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-hidden-live")
+                && snapshot.lines.join("\n").contains("fullscreen-live")
+        },
+    )
+    .await;
+
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: new_request_id(),
+            tabs_node_id: fixture.nested_tabs_id,
+            index: 1,
+        }))
+        .await
+        .expect("select fullscreen tab succeeds");
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let live_render = render_session(&mut client, "alpha").await;
+    assert!(live_render.contains("fullscreen-live"));
+    assert!(live_render.contains("cursor-target"));
+    assert!(!live_render.contains("main-before"));
+
+    let restored = wait_for_visible_snapshot(
+        &mut connection,
+        fixture.hidden_buffer.id,
+        Duration::from_secs(6),
+        |snapshot| {
+            let text = snapshot.lines.join("\n");
+            !snapshot.alternate_screen
+                && snapshot.title.as_deref() == Some("fullscreen-hidden-restored")
+                && text.contains("main-before")
+                && text.contains("restored-after")
+        },
+    )
+    .await;
+    assert!(!restored.lines.join("\n").contains("fullscreen-live"));
+
+    let restored_render = render_session(&mut client, "alpha").await;
+    assert!(restored_render.contains("main-before"));
+    assert!(restored_render.contains("restored-after"));
+    assert!(!restored_render.contains("fullscreen-live"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rapid_terminal_output_renders_latest_visible_snapshot() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "burst",
+        vec![
+            "/bin/sh".to_owned(),
+            "-lc".to_owned(),
+            "i=1; while [ $i -le 80 ]; do printf 'burst-%02d\\n' \"$i\"; i=$((i+1)); done"
+                .to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "burst".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add burst tab succeeds");
+
+    connection
+        .wait_for_capture_contains(buffer.id, "burst-80", Duration::from_secs(3))
+        .await
+        .expect("rapid output finishes");
+    let visible_snapshot = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(3),
+        |snapshot| snapshot.total_lines >= 80 && snapshot.lines.join("\n").contains("burst-80"),
+    )
+    .await;
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let render = render_session(&mut client, "alpha").await;
+    let latest_rendered_line = visible_snapshot
+        .lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("burst-"))
+        .expect("latest rendered burst line");
+    assert!(render.contains(latest_rendered_line));
+    assert!(!render.contains("burst-01"));
 
     server.shutdown().await.expect("server shuts down");
 }

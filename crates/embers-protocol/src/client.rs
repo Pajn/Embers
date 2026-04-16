@@ -2,33 +2,63 @@ use std::path::Path;
 
 use embers_core::RequestId;
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 
 use crate::codec::{ProtocolError, decode_server_envelope, encode_client_message};
 use crate::framing::{FrameType, RawFrame, read_frame, write_frame};
 use crate::types::{ClientMessage, ServerEnvelope, ServerResponse};
 
+type ReaderItem = Result<Option<ServerEnvelope>, ProtocolError>;
+
 #[derive(Debug)]
 pub struct ProtocolClient {
-    stream: UnixStream,
+    writer: OwnedWriteHalf,
+    reader_rx: mpsc::Receiver<ReaderItem>,
+    reader_reached_eof: bool,
+    reader_abort_handle: AbortHandle,
 }
 
 impl ProtocolClient {
+    const READER_CHANNEL_CAPACITY: usize = 64;
+
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self, ProtocolError> {
         let stream = UnixStream::connect(path).await?;
-        Ok(Self { stream })
+        Ok(Self::from_stream(stream))
     }
 
-    pub async fn send(&mut self, message: &ClientMessage) -> Result<(), ProtocolError> {
-        let payload = encode_client_message(message)?;
-        let frame = RawFrame::new(FrameType::Request, message.request_id(), payload);
-        write_frame(&mut self.stream, &frame).await
+    fn from_stream(stream: UnixStream) -> Self {
+        let (reader, writer) = stream.into_split();
+        let (reader_tx, reader_rx) = mpsc::channel(Self::READER_CHANNEL_CAPACITY);
+        let reader_task = tokio::spawn(async move {
+            Self::run_reader(reader, reader_tx).await;
+        });
+        let reader_abort_handle = reader_task.abort_handle();
+
+        Self {
+            writer,
+            reader_rx,
+            reader_reached_eof: false,
+            reader_abort_handle,
+        }
     }
 
-    pub async fn recv(&mut self) -> Result<Option<ServerEnvelope>, ProtocolError> {
-        let Some(frame) = read_frame(&mut self.stream).await? else {
-            return Ok(None);
-        };
+    async fn run_reader(mut reader: OwnedReadHalf, reader_tx: mpsc::Sender<ReaderItem>) {
+        loop {
+            let next = match read_frame(&mut reader).await {
+                Ok(Some(frame)) => Self::decode_frame(frame).map(Some),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            };
+            let terminal = !matches!(next, Ok(Some(_)));
+            if reader_tx.send(next).await.is_err() || terminal {
+                break;
+            }
+        }
+    }
 
+    fn decode_frame(frame: RawFrame) -> Result<ServerEnvelope, ProtocolError> {
         let envelope = decode_server_envelope(&frame.payload)?;
 
         match (frame.frame_type, envelope) {
@@ -40,7 +70,7 @@ impl ProtocolClient {
                         actual: response_id,
                     });
                 }
-                Ok(Some(ServerEnvelope::Response(response)))
+                Ok(ServerEnvelope::Response(response))
             }
             (FrameType::Event, ServerEnvelope::Event(event)) => {
                 if frame.request_id != RequestId(0) {
@@ -49,7 +79,7 @@ impl ProtocolClient {
                         actual: frame.request_id,
                     });
                 }
-                Ok(Some(ServerEnvelope::Event(event)))
+                Ok(ServerEnvelope::Event(event))
             }
             (FrameType::Response, ServerEnvelope::Event(_)) => {
                 Err(ProtocolError::UnexpectedFrameKind {
@@ -64,6 +94,24 @@ impl ProtocolClient {
                 })
             }
             (FrameType::Request, _) => Err(ProtocolError::UnexpectedFrameType(FrameType::Request)),
+        }
+    }
+
+    pub async fn send(&mut self, message: &ClientMessage) -> Result<(), ProtocolError> {
+        let payload = encode_client_message(message)?;
+        let frame = RawFrame::new(FrameType::Request, message.request_id(), payload);
+        write_frame(&mut self.writer, &frame).await
+    }
+
+    pub async fn recv(&mut self) -> Result<Option<ServerEnvelope>, ProtocolError> {
+        match self.reader_rx.recv().await {
+            Some(Ok(None)) => {
+                self.reader_reached_eof = true;
+                Ok(None)
+            }
+            Some(result) => result,
+            None if self.reader_reached_eof => Ok(None),
+            None => Err(ProtocolError::ReaderTaskExited),
         }
     }
 
@@ -98,22 +146,46 @@ impl ProtocolClient {
     }
 }
 
+impl Drop for ProtocolClient {
+    fn drop(&mut self) {
+        self.reader_abort_handle.abort();
+    }
+}
+
+#[cfg(test)]
+impl ProtocolClient {
+    fn abort_reader_task(&self) {
+        self.reader_abort_handle.abort();
+    }
+
+    fn drain_recv_buffer(&mut self) {
+        while let Ok(item) = self.reader_rx.try_recv() {
+            if matches!(item, Ok(None)) {
+                self.reader_reached_eof = true;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProtocolClient;
-    use embers_core::{ErrorCode, RequestId, WireError};
+    use embers_core::{ErrorCode, RequestId, SessionId, WireError};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
+    use tokio::time::{Duration, timeout};
 
-    use crate::codec::encode_server_envelope;
+    use crate::codec::{ProtocolError, encode_server_envelope};
     use crate::framing::{FrameType, RawFrame, read_frame, write_frame};
-    use crate::types::{ClientMessage, ErrorResponse, PingRequest, ServerEnvelope, ServerResponse};
+    use crate::types::{
+        ClientMessage, ErrorResponse, PingRequest, ServerEnvelope, ServerEvent, ServerResponse,
+        SessionClosedEvent,
+    };
 
     #[tokio::test]
     async fn request_accepts_unscoped_error_response() {
         let (mut server, client_stream) = UnixStream::pair().expect("create unix stream pair");
-        let mut client = ProtocolClient {
-            stream: client_stream,
-        };
+        let mut client = ProtocolClient::from_stream(client_stream);
 
         let request = ClientMessage::Ping(PingRequest {
             request_id: RequestId(7),
@@ -152,5 +224,63 @@ mod tests {
         }
 
         server_task.await.expect("server task joins");
+    }
+
+    #[tokio::test]
+    async fn recv_timeout_does_not_cancel_in_progress_frame_read() {
+        let (mut server, client_stream) = UnixStream::pair().expect("create unix stream pair");
+        let mut client = ProtocolClient::from_stream(client_stream);
+
+        let payload = encode_server_envelope(&ServerEnvelope::Event(ServerEvent::SessionClosed(
+            SessionClosedEvent {
+                session_id: SessionId(9),
+            },
+        )))
+        .expect("encode event");
+        let mut frame_bytes = Vec::with_capacity(13 + payload.len());
+        frame_bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame_bytes.push(FrameType::Event as u8);
+        frame_bytes.extend_from_slice(&0_u64.to_le_bytes());
+        frame_bytes.extend_from_slice(&payload);
+
+        server
+            .write_all(&frame_bytes[..5])
+            .await
+            .expect("write partial frame");
+
+        let timed_out = timeout(Duration::from_millis(20), client.recv()).await;
+        assert!(timed_out.is_err(), "partial frame should keep recv pending");
+
+        server
+            .write_all(&frame_bytes[5..])
+            .await
+            .expect("write remainder");
+
+        let envelope = timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("recv finishes after remainder arrives")
+            .expect("recv succeeds")
+            .expect("connection remains open");
+        assert!(matches!(
+            envelope,
+            ServerEnvelope::Event(ServerEvent::SessionClosed(SessionClosedEvent {
+                session_id
+            })) if session_id == SessionId(9)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recv_reports_reader_task_exit_when_channel_closes_without_eof() {
+        let (_server, client_stream) = UnixStream::pair().expect("create unix stream pair");
+        let mut client = ProtocolClient::from_stream(client_stream);
+
+        client.abort_reader_task();
+        client.drain_recv_buffer();
+
+        let error = timeout(Duration::from_secs(1), client.recv())
+            .await
+            .expect("recv returns after reader abort")
+            .expect_err("closed reader channel should error");
+        assert!(matches!(error, ProtocolError::ReaderTaskExited));
     }
 }

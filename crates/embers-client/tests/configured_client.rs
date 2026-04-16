@@ -8,15 +8,19 @@ use embers_client::{
 };
 use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
 use embers_protocol::{
-    BufferCreatedEvent, BufferRecord, BufferRecordState, BufferViewRecord, ClientChangedEvent,
-    ClientMessage, ClientRecord, ClientRequest, ClientResponse, FocusChangedEvent, InputRequest,
-    NodeRecord, NodeRecordKind, NodeRequest, OkResponse, RenderInvalidatedEvent,
-    ScrollbackSliceResponse, ServerEvent, ServerResponse, SessionRecord, SessionRequest,
-    SessionSnapshot, SessionSnapshotResponse, SnapshotResponse, VisibleSnapshotResponse,
+    BufferCreatedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferResponse,
+    BufferViewRecord, BuffersResponse, ClientChangedEvent, ClientMessage, ClientRecord,
+    ClientRequest, ClientResponse, FocusChangedEvent, InputRequest, NodeChangedEvent, NodeRecord,
+    NodeRecordKind, NodeRequest, OkResponse, RenderInvalidatedEvent, ScrollbackSliceResponse,
+    ServerEvent, ServerResponse, SessionCreatedEvent, SessionRecord, SessionRequest,
+    SessionSnapshot, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
+    VisibleSnapshotResponse,
 };
 use tempfile::tempdir;
 
-use crate::support::{FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state};
+use crate::support::{
+    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state,
+};
 
 const SECOND_SESSION_ID: SessionId = SessionId(2);
 const SECOND_ROOT_ID: NodeId = NodeId(200);
@@ -84,6 +88,17 @@ fn visible_snapshot_from_state(
     snapshot
 }
 
+fn buffer_response_from_state(
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+    request_id: RequestId,
+) -> BufferResponse {
+    BufferResponse {
+        request_id,
+        buffer: state.buffers.get(&buffer_id).unwrap().clone(),
+    }
+}
+
 fn scrollback_slice_response(
     buffer_id: BufferId,
     request_id: RequestId,
@@ -116,6 +131,41 @@ fn snapshot_response(
     }
 }
 
+fn push_send_input_refresh_responses(
+    transport: &FakeTransport,
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+) {
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(state, buffer_id, RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(state, SESSION_ID),
+    }));
+}
+
+fn expected_send_input_refresh_requests(buffer_id: BufferId, bytes: &[u8]) -> Vec<ClientMessage> {
+    vec![
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id,
+            bytes: bytes.to_vec(),
+        }),
+        ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+            request_id: RequestId(2),
+            buffer_id,
+        }),
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(3),
+            session_id: SESSION_ID,
+        }),
+    ]
+}
+
 fn second_session_state() -> embers_client::ClientState {
     let mut state = demo_state();
     state.sessions.insert(
@@ -127,6 +177,7 @@ fn second_session_state() -> embers_client::ClientState {
             floating_ids: Vec::new(),
             focused_leaf_id: Some(SECOND_ROOT_ID),
             focused_floating_id: None,
+            zoomed_node_id: None,
         },
     );
     state.nodes.insert(
@@ -154,9 +205,13 @@ fn second_session_state() -> embers_client::ClientState {
             title: "other pane".to_owned(),
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
+            kind: BufferRecordKind::Pty,
             state: BufferRecordState::Running,
             pid: None,
             attachment_node_id: Some(SECOND_ROOT_ID),
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
             pty_size: PtySize::new(80, 20),
             activity: ActivityState::Idle,
             last_snapshot_seq: 1,
@@ -245,6 +300,161 @@ async fn configured_keybinding_executes_live_focus_action() {
     );
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests(),
+        expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, b"x")
+    );
+}
+
+#[tokio::test]
+async fn leader_prefix_waits_without_forwarding_input() {
+    let client = MuxClient::new(FakeTransport::default());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn open_workspace_split(ctx) { action.notify("info", "workspace-split") }
+            define_action("workspace-split", open_workspace_split);
+            set_leader("<C-a>");
+            bind("normal", "<leader>ws", "workspace-split");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('a'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('w'),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+    assert!(configured.notifications().is_empty());
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('s'),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.client().transport().requests().is_empty());
+    assert_eq!(configured.notifications(), ["workspace-split"]);
+}
+
+#[tokio::test]
+async fn reload_clears_pending_prefix_before_next_unmapped_key() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let tempdir = tempdir().unwrap();
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"
+            fn open_workspace_split(ctx) { action.notify("info", "workspace-split") }
+            define_action("workspace-split", open_workspace_split);
+            set_leader("<C-a>");
+            bind("normal", "<leader>ws", "workspace-split");
+        "#,
+    )
+    .unwrap();
+    let config = ConfigManager::load(
+        ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .unwrap();
+    let client = MuxClient::new(transport.clone());
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('a'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('w'),
+        )
+        .await
+        .unwrap();
+    assert!(transport.requests().is_empty());
+
+    configured.reload_config().unwrap();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests(),
+        expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, b"x")
+    );
 }
 
 #[tokio::test]
@@ -723,6 +933,47 @@ async fn select_mode_yanks_selection_to_osc52() {
 }
 
 #[tokio::test]
+async fn copy_mode_blocks_unmapped_passthrough() {
+    let transport = FakeTransport::default();
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn enter_copy(ctx) { action.enter_mode("copy") }
+            define_action("enter-copy", enter_copy);
+            unbind("normal", "v");
+            bind("normal", "v", "enter-copy");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('v'),
+        )
+        .await
+        .unwrap();
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Char('x'),
+        )
+        .await
+        .unwrap();
+
+    assert!(transport.requests().is_empty());
+}
+
+#[tokio::test]
 async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
     let mut initial_state = demo_state();
     let presentation = PresentationModel::project(
@@ -945,10 +1196,15 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
     transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
         buffer_id: SECOND_BUFFER_ID,
     }));
+    transport.push_response(ServerResponse::Buffer(buffer_response_from_state(
+        &state,
+        SECOND_BUFFER_ID,
+        RequestId(1),
+    )));
     transport.push_response(ServerResponse::VisibleSnapshot(
-        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(1)),
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(2)),
     ));
-    let client = MuxClient::new(transport);
+    let client = MuxClient::new(transport.clone());
     let (config, _tempdir) = manager_from_source(
         r#"
             fn on_render(ctx) { action.notify("info", ctx.current_session().name()) }
@@ -972,6 +1228,197 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
 
     assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
     assert_eq!(configured.notifications(), ["other"]);
+    assert_eq!(
+        transport.requests(),
+        vec![
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+                request_id: RequestId(1),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(2),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn render_invalidated_events_refresh_buffer_activity_before_bell_hooks() {
+    let mut state = second_session_state();
+    state.buffers.get_mut(&SECOND_BUFFER_ID).unwrap().activity = ActivityState::Bell;
+
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    }));
+    transport.push_response(ServerResponse::Buffer(buffer_response_from_state(
+        &state,
+        SECOND_BUFFER_ID,
+        RequestId(1),
+    )));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(2)),
+    ));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_bell(ctx) { action.notify("info", ctx.current_session().name()) }
+            on("buffer_bell", on_bell);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = second_session_state();
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
+    assert_eq!(configured.notifications(), ["other"]);
+    assert_eq!(
+        transport.requests(),
+        vec![
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+                request_id: RequestId(1),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(2),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn render_session_refreshes_invalidated_snapshot_before_rendering_title_and_content() {
+    let transport = FakeTransport::default();
+    let mut stale_state = demo_state();
+    stale_state.apply_event(&ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: FOCUSED_BUFFER_ID,
+    }));
+
+    let mut refreshed_state = demo_state();
+    let snapshot = refreshed_state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap();
+    snapshot.lines = vec!["fresh render line".to_owned()];
+    snapshot.title = Some("fresh-title".to_owned());
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&refreshed_state, FOCUSED_BUFFER_ID, RequestId(1)),
+    ));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = stale_state;
+
+    let grid = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+    let rendered = grid.render();
+    let presentation = PresentationModel::project(
+        configured.client().state(),
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .expect("projection succeeds");
+
+    assert!(rendered.contains("fresh render line"));
+    assert!(!rendered.contains("logs visible"));
+    assert_eq!(
+        configured
+            .client()
+            .state()
+            .buffers
+            .get(&FOCUSED_BUFFER_ID)
+            .expect("focused buffer")
+            .title,
+        "fresh-title"
+    );
+    assert_eq!(
+        presentation.focused_leaf().expect("focused leaf").title,
+        "fresh-title"
+    );
+    assert!(configured.client().state().invalidated_buffers.is_empty());
+    assert_eq!(
+        transport.requests(),
+        vec![ClientMessage::Buffer(
+            embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(1),
+                buffer_id: FOCUSED_BUFFER_ID,
+            }
+        )]
+    );
+}
+
+#[tokio::test]
+async fn render_session_replaces_stale_scrolled_cache_when_snapshot_switches_to_alternate_screen() {
+    let transport = FakeTransport::default();
+    let mut stale_state = demo_state();
+    let view = stale_state
+        .view_state_mut(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    view.follow_output = false;
+    view.scroll_top_line = 12;
+    view.total_line_count = 60;
+    view.visible_lines = vec!["stale scrolled line".to_owned()];
+    stale_state.apply_event(&ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: FOCUSED_BUFFER_ID,
+    }));
+
+    let mut refreshed_state = demo_state();
+    let snapshot = refreshed_state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap();
+    snapshot.lines = vec!["alternate screen live".to_owned()];
+    snapshot.alternate_screen = true;
+    snapshot.viewport_top_line = 0;
+    snapshot.total_lines = 24;
+
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&refreshed_state, FOCUSED_BUFFER_ID, RequestId(1)),
+    ));
+
+    let client = MuxClient::new(transport);
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = stale_state;
+
+    let grid = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
+    let rendered = grid.render();
+
+    assert!(rendered.contains("alternate screen live"));
+    assert!(!rendered.contains("stale scrolled line"));
+    assert!(!rendered.contains("13/60"));
+    let view = configured
+        .client()
+        .state()
+        .view_state(FOCUSED_LEAF_ID)
+        .expect("focused view state");
+    assert!(view.alternate_screen);
+    assert_eq!(view.visible_lines, vec!["alternate screen live".to_owned()]);
 }
 
 #[tokio::test]
@@ -983,9 +1430,13 @@ async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
             title: "detached".to_owned(),
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
+            kind: BufferRecordKind::Pty,
             state: BufferRecordState::Running,
             pid: None,
             attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
             pty_size: PtySize::new(80, 20),
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,
@@ -1126,6 +1577,752 @@ async fn event_hook_executes_real_actions() {
     );
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn viewportless_event_hooks_still_run_explicit_node_actions() {
+    let transport = ScriptedTransport::default();
+    let state = second_session_state();
+    let second_session = state
+        .sessions
+        .get(&SECOND_SESSION_ID)
+        .expect("second session")
+        .clone();
+    transport.push_event(ServerEvent::SessionCreated(SessionCreatedEvent {
+        session: second_session.clone(),
+    }));
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(1),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(1),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::MoveNodeAfter {
+            request_id: RequestId(2),
+            node_id: FOCUSED_LEAF_ID,
+            sibling_node_id: LEFT_LEAF_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(2),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::List {
+            request_id: RequestId(3),
+        }),
+        ServerResponse::Sessions(SessionsResponse {
+            request_id: RequestId(3),
+            sessions: vec![
+                state
+                    .sessions
+                    .get(&SESSION_ID)
+                    .expect("primary session")
+                    .clone(),
+                second_session,
+            ],
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(4),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(4),
+            snapshot: session_snapshot_from_state(&state, SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(5),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(5),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(6),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(6),
+            buffers: Vec::new(),
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    *client.state_mut() = demo_state();
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_session(ctx) { action.move_node_after(32, 21) }
+            on("session_created", on_session);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::SessionCreated(_)));
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn viewportless_focus_buffer_actions_resolve_session_from_the_buffer() {
+    let transport = ScriptedTransport::default();
+    let mut state = second_session_state();
+    let mut focused_state = state.clone();
+    focused_state
+        .sessions
+        .get_mut(&SESSION_ID)
+        .expect("primary session")
+        .focused_leaf_id = Some(LEFT_LEAF_ID);
+    focused_state
+        .nodes
+        .get_mut(&LEFT_LEAF_ID)
+        .and_then(|node| node.buffer_view.as_mut())
+        .expect("left leaf")
+        .focused = true;
+    focused_state
+        .nodes
+        .get_mut(&FOCUSED_LEAF_ID)
+        .and_then(|node| node.buffer_view.as_mut())
+        .expect("previous focused leaf")
+        .focused = false;
+    state
+        .buffers
+        .get_mut(&BufferId(2))
+        .expect("buffer record")
+        .attachment_node_id = Some(FOCUSED_LEAF_ID);
+
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 77,
+            current_session_id: None,
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SECOND_SESSION_ID),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 77,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::GetLocation {
+            request_id: RequestId(2),
+            buffer_id: BufferId(2),
+        }),
+        ServerResponse::BufferLocation(embers_protocol::BufferLocationResponse {
+            request_id: RequestId(2),
+            location: embers_protocol::BufferLocation::session(
+                BufferId(2),
+                SESSION_ID,
+                LEFT_LEAF_ID,
+            ),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::Focus {
+            request_id: RequestId(3),
+            session_id: SESSION_ID,
+            node_id: LEFT_LEAF_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(3),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(4),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(4),
+            snapshot: session_snapshot_from_state(&focused_state, SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::List {
+            request_id: RequestId(5),
+        }),
+        ServerResponse::Sessions(SessionsResponse {
+            request_id: RequestId(5),
+            sessions: vec![
+                focused_state
+                    .sessions
+                    .get(&SESSION_ID)
+                    .expect("primary session")
+                    .clone(),
+                state
+                    .sessions
+                    .get(&SECOND_SESSION_ID)
+                    .expect("second session")
+                    .clone(),
+            ],
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(6),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(6),
+            snapshot: session_snapshot_from_state(&focused_state, SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(7),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(7),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(8),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(8),
+            buffers: Vec::new(),
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    *client.state_mut() = state;
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_client_changed(ctx) { action.focus_buffer(2) }
+            on("client_changed", on_client_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::ClientChanged(_)));
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn focus_buffer_actions_force_cross_session_focus_requests() {
+    let transport = ScriptedTransport::default();
+    let state = second_session_state();
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::GetLocation {
+            request_id: RequestId(1),
+            buffer_id: SECOND_BUFFER_ID,
+        }),
+        ServerResponse::BufferLocation(embers_protocol::BufferLocationResponse {
+            request_id: RequestId(1),
+            location: embers_protocol::BufferLocation::session(
+                SECOND_BUFFER_ID,
+                SECOND_SESSION_ID,
+                SECOND_ROOT_ID,
+            ),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::Focus {
+            request_id: RequestId(2),
+            session_id: SECOND_SESSION_ID,
+            node_id: SECOND_ROOT_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(2),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(3),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(3),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::List {
+            request_id: RequestId(4),
+        }),
+        ServerResponse::Sessions(SessionsResponse {
+            request_id: RequestId(4),
+            sessions: vec![
+                state
+                    .sessions
+                    .get(&SESSION_ID)
+                    .expect("primary session")
+                    .clone(),
+                state
+                    .sessions
+                    .get(&SECOND_SESSION_ID)
+                    .expect("second session")
+                    .clone(),
+            ],
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(5),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(5),
+            snapshot: session_snapshot_from_state(&state, SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(6),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(6),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(7),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(7),
+            buffers: Vec::new(),
+        }),
+    );
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn focus_other(ctx) { action.focus_buffer(70) }
+            define_action("focus-other", focus_other);
+            bind("normal", "<C-o>", "focus-other");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('o'),
+        )
+        .await
+        .unwrap();
+
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn cross_session_focus_actions_focus_out_the_active_session_buffer() {
+    let transport = FakeTransport::default();
+    let mut state = second_session_state();
+    state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("primary snapshot")
+        .focus_reporting = true;
+    state
+        .snapshots
+        .get_mut(&SECOND_BUFFER_ID)
+        .expect("secondary snapshot")
+        .focus_reporting = true;
+
+    transport.push_response(ServerResponse::BufferLocation(
+        embers_protocol::BufferLocationResponse {
+            request_id: RequestId(1),
+            location: embers_protocol::BufferLocation::session(
+                SECOND_BUFFER_ID,
+                SECOND_SESSION_ID,
+                SECOND_ROOT_ID,
+            ),
+        },
+    ));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(2),
+    }));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(4),
+        snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+    }));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(5),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(6)),
+    ));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, FOCUSED_BUFFER_ID, RequestId(7)),
+    ));
+    transport.push_response(ServerResponse::Sessions(SessionsResponse {
+        request_id: RequestId(8),
+        sessions: vec![
+            state
+                .sessions
+                .get(&SESSION_ID)
+                .expect("primary session")
+                .clone(),
+            state
+                .sessions
+                .get(&SECOND_SESSION_ID)
+                .expect("second session")
+                .clone(),
+        ],
+    }));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(9),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(10),
+        snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+    }));
+    transport.push_response(ServerResponse::Buffers(BuffersResponse {
+        request_id: RequestId(11),
+        buffers: Vec::new(),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn focus_other(ctx) { action.focus_buffer(70) }
+            define_action("focus-other", focus_other);
+            bind("normal", "<C-o>", "focus-other");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .expect("render current session");
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('o'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests(),
+        vec![
+            ClientMessage::Buffer(embers_protocol::BufferRequest::GetLocation {
+                request_id: RequestId(1),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Input(InputRequest::Send {
+                request_id: RequestId(2),
+                buffer_id: FOCUSED_BUFFER_ID,
+                bytes: b"\x1b[O".to_vec(),
+            }),
+            ClientMessage::Node(NodeRequest::Focus {
+                request_id: RequestId(3),
+                session_id: SECOND_SESSION_ID,
+                node_id: SECOND_ROOT_ID,
+            }),
+            ClientMessage::Session(SessionRequest::Get {
+                request_id: RequestId(4),
+                session_id: SECOND_SESSION_ID,
+            }),
+            ClientMessage::Input(InputRequest::Send {
+                request_id: RequestId(5),
+                buffer_id: SECOND_BUFFER_ID,
+                bytes: b"\x1b[I".to_vec(),
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(6),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(7),
+                buffer_id: FOCUSED_BUFFER_ID,
+            }),
+            ClientMessage::Session(SessionRequest::List {
+                request_id: RequestId(8),
+            }),
+            ClientMessage::Session(SessionRequest::Get {
+                request_id: RequestId(9),
+                session_id: SESSION_ID,
+            }),
+            ClientMessage::Session(SessionRequest::Get {
+                request_id: RequestId(10),
+                session_id: SECOND_SESSION_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+                request_id: RequestId(11),
+                session_id: None,
+                attached_only: false,
+                detached_only: true,
+            }),
+        ]
+    );
+    assert!(configured.notifications().is_empty());
+}
+
+#[tokio::test]
+async fn node_changed_focus_buffer_actions_use_active_session_for_shortcuts() {
+    let transport = ScriptedTransport::default();
+    let state = second_session_state();
+    transport.push_event(ServerEvent::NodeChanged(NodeChangedEvent {
+        session_id: SECOND_SESSION_ID,
+    }));
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(1),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(1),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(2),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(2),
+            buffers: Vec::new(),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::GetLocation {
+            request_id: RequestId(3),
+            buffer_id: SECOND_BUFFER_ID,
+        }),
+        ServerResponse::BufferLocation(embers_protocol::BufferLocationResponse {
+            request_id: RequestId(3),
+            location: embers_protocol::BufferLocation::session(
+                SECOND_BUFFER_ID,
+                SECOND_SESSION_ID,
+                SECOND_ROOT_ID,
+            ),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::Focus {
+            request_id: RequestId(4),
+            session_id: SECOND_SESSION_ID,
+            node_id: SECOND_ROOT_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(4),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(5),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(5),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::List {
+            request_id: RequestId(6),
+        }),
+        ServerResponse::Sessions(SessionsResponse {
+            request_id: RequestId(6),
+            sessions: vec![
+                state
+                    .sessions
+                    .get(&SESSION_ID)
+                    .expect("primary session")
+                    .clone(),
+                state
+                    .sessions
+                    .get(&SECOND_SESSION_ID)
+                    .expect("second session")
+                    .clone(),
+            ],
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(7),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(7),
+            snapshot: session_snapshot_from_state(&state, SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(8),
+            session_id: SECOND_SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(8),
+            snapshot: session_snapshot_from_state(&state, SECOND_SESSION_ID),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Buffer(embers_protocol::BufferRequest::List {
+            request_id: RequestId(9),
+            session_id: None,
+            attached_only: false,
+            detached_only: true,
+        }),
+        ServerResponse::Buffers(BuffersResponse {
+            request_id: RequestId(9),
+            buffers: Vec::new(),
+        }),
+    );
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_node_changed(ctx) { action.focus_buffer(70) }
+            on("node_changed", on_node_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .expect("render primary session");
+
+    let event = configured.process_next_event().await.unwrap();
+
+    assert!(matches!(event, ServerEvent::NodeChanged(_)));
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn scripted_send_keys_current_forwards_to_the_focused_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn send_current(ctx) { action.send_keys_current("abc") }
+            define_action("send-current", send_current);
+            bind("normal", "<C-g>", "send-current");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('g'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests(),
+        expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, b"abc")
+    );
+}
+
+#[tokio::test]
+async fn scripted_send_bytes_can_target_a_specific_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    let target_buffer_id = BufferId(5);
+    push_send_input_refresh_responses(&transport, &state, target_buffer_id);
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn send_popup(ctx) { action.send_bytes(5, "popup") }
+            define_action("send-popup", send_popup);
+            bind("normal", "<C-p>", "send-popup");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('p'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        transport.requests(),
+        expected_send_input_refresh_requests(target_buffer_id, b"popup")
+    );
 }
 
 #[tokio::test]
@@ -1415,5 +2612,103 @@ async fn detached_client_changed_hooks_have_no_current_session() {
 
     assert!(matches!(event, ServerEvent::ClientChanged(_)));
     assert_eq!(configured.notifications(), ["detached"]);
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn detached_client_changed_actions_require_current_session_context() {
+    let transport = ScriptedTransport::default();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 77,
+            current_session_id: None,
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SESSION_ID),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 77,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_client_changed(ctx) { action.focus_left() }
+            on("client_changed", on_client_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let error = configured
+        .process_next_event()
+        .await
+        .expect_err("missing context should fail the event hook");
+
+    assert!(error
+        .to_string()
+        .contains("cannot execute action FocusDirection { direction: Left } without current_session_id and current_viewport"));
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().expect("all requests consumed");
+}
+
+#[tokio::test]
+async fn detached_client_changed_unzoom_actions_require_current_session_context() {
+    let transport = ScriptedTransport::default();
+    transport.push_event(ServerEvent::ClientChanged(ClientChangedEvent {
+        client: ClientRecord {
+            id: 77,
+            current_session_id: None,
+            subscribed_all_sessions: true,
+            subscribed_session_ids: vec![],
+        },
+        previous_session_id: Some(SESSION_ID),
+    }));
+    transport.push_exchange(
+        ClientMessage::Client(ClientRequest::Get {
+            request_id: RequestId(1),
+            client_id: None,
+        }),
+        ServerResponse::Client(ClientResponse {
+            request_id: RequestId(1),
+            client: ClientRecord {
+                id: 77,
+                current_session_id: None,
+                subscribed_all_sessions: true,
+                subscribed_session_ids: vec![],
+            },
+        }),
+    );
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn on_client_changed(ctx) { action.unzoom_current_session() }
+            on("client_changed", on_client_changed);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let error = configured
+        .process_next_event()
+        .await
+        .expect_err("missing session should fail the unzoom event hook");
+
+    assert!(error.to_string().contains(
+        "cannot execute action UnzoomNode { session_id: None } without current_session_id"
+    ));
+    assert!(configured.notifications().is_empty());
     transport.assert_exhausted().expect("all requests consumed");
 }

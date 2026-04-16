@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use embers_core::{
     ActivityState, BufferId, CursorShape, CursorState, ErrorCode, FloatGeometry, FloatingId,
     NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
@@ -35,10 +37,351 @@ pub enum ProtocolError {
         expected: RequestId,
         actual: RequestId,
     },
+    #[error("reader task exited unexpectedly")]
+    ReaderTaskExited,
 }
 
 fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ProtocolError> {
     value.ok_or(ProtocolError::InvalidMessage(field))
+}
+
+fn decode_required_buffer_id(
+    buffer_id: u64,
+    field: &'static str,
+) -> Result<BufferId, ProtocolError> {
+    if buffer_id == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(BufferId(buffer_id))
+}
+
+fn decode_required_node_id(node_id: u64, field: &'static str) -> Result<NodeId, ProtocolError> {
+    if node_id == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(NodeId(node_id))
+}
+
+fn decode_required_session_id(
+    session_id: u64,
+    field: &'static str,
+) -> Result<SessionId, ProtocolError> {
+    if session_id == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(SessionId(session_id))
+}
+
+fn decode_required_floating_id(
+    floating_id: u64,
+    field: &'static str,
+) -> Result<FloatingId, ProtocolError> {
+    if floating_id == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(FloatingId(floating_id))
+}
+
+fn validate_nonzero_id(value: u64, field: &'static str) -> Result<(), ProtocolError> {
+    if value == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_required_buffer_id(
+    buffer_id: BufferId,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    validate_nonzero_id(buffer_id.0, field)
+}
+
+fn validate_required_node_id(node_id: NodeId, field: &'static str) -> Result<(), ProtocolError> {
+    validate_nonzero_id(node_id.0, field)
+}
+
+fn validate_required_session_id(
+    session_id: SessionId,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    validate_nonzero_id(session_id.0, field)
+}
+
+fn validate_optional_session_id(
+    session_id: Option<SessionId>,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if let Some(session_id) = session_id {
+        validate_required_session_id(session_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_required_floating_id(
+    floating_id: FloatingId,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    validate_nonzero_id(floating_id.0, field)
+}
+
+fn validate_optional_buffer_id(
+    buffer_id: Option<BufferId>,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if let Some(buffer_id) = buffer_id {
+        validate_required_buffer_id(buffer_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_node_id(
+    node_id: Option<NodeId>,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if let Some(node_id) = node_id {
+        validate_required_node_id(node_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_optional_floating_id(
+    floating_id: Option<FloatingId>,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if let Some(floating_id) = floating_id {
+        validate_required_floating_id(floating_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_required_session_ids(
+    session_ids: &[SessionId],
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    for session_id in session_ids {
+        validate_required_session_id(*session_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_required_floating_ids(
+    floating_ids: &[FloatingId],
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    for floating_id in floating_ids {
+        validate_required_floating_id(*floating_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_required_node_ids(
+    node_ids: &[NodeId],
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    for node_id in node_ids {
+        validate_required_node_id(*node_id, field)?;
+    }
+    Ok(())
+}
+
+fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
+    match req {
+        SessionRequest::Create { .. } | SessionRequest::List { .. } => Ok(()),
+        SessionRequest::AddRootTab {
+            session_id,
+            buffer_id,
+            child_node_id,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "session_request.session_id")?;
+            validate_optional_buffer_id(*buffer_id, "session_request.buffer_id")?;
+            validate_optional_node_id(*child_node_id, "session_request.child_node_id")
+        }
+        SessionRequest::Get { session_id, .. }
+        | SessionRequest::Close { session_id, .. }
+        | SessionRequest::Rename { session_id, .. }
+        | SessionRequest::SelectRootTab { session_id, .. }
+        | SessionRequest::RenameRootTab { session_id, .. }
+        | SessionRequest::CloseRootTab { session_id, .. } => {
+            validate_required_session_id(*session_id, "session_request.session_id")
+        }
+    }
+}
+
+fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
+    match req {
+        BufferRequest::Create { .. } => Ok(()),
+        BufferRequest::List { session_id, .. } => {
+            validate_optional_session_id(*session_id, "buffer_request.session_id")
+        }
+        BufferRequest::Get { buffer_id, .. }
+        | BufferRequest::Inspect { buffer_id, .. }
+        | BufferRequest::Detach { buffer_id, .. }
+        | BufferRequest::Kill { buffer_id, .. }
+        | BufferRequest::Capture { buffer_id, .. }
+        | BufferRequest::CaptureVisible { buffer_id, .. }
+        | BufferRequest::ScrollbackSlice { buffer_id, .. }
+        | BufferRequest::GetLocation { buffer_id, .. }
+        | BufferRequest::Reveal { buffer_id, .. }
+        | BufferRequest::OpenHistory { buffer_id, .. } => {
+            validate_required_buffer_id(*buffer_id, "buffer_request.buffer_id")
+        }
+    }
+}
+
+fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
+    match req {
+        NodeRequest::GetTree { session_id, .. } | NodeRequest::Unzoom { session_id, .. } => {
+            validate_required_session_id(*session_id, "node_request.session_id")
+        }
+        NodeRequest::Split {
+            leaf_node_id,
+            new_buffer_id,
+            ..
+        } => {
+            validate_required_node_id(*leaf_node_id, "node_request.leaf_node_id")?;
+            validate_required_buffer_id(*new_buffer_id, "node_request.new_buffer_id")
+        }
+        NodeRequest::CreateSplit {
+            session_id,
+            child_node_ids,
+            ..
+        }
+        | NodeRequest::CreateTabs {
+            session_id,
+            child_node_ids,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "node_request.session_id")?;
+            validate_required_node_ids(child_node_ids, "node_request.child_node_ids")
+        }
+        NodeRequest::ReplaceNode {
+            node_id,
+            child_node_id,
+            ..
+        }
+        | NodeRequest::WrapInSplit {
+            node_id,
+            child_node_id,
+            ..
+        } => {
+            validate_required_node_id(*node_id, "node_request.node_id")?;
+            validate_required_node_id(*child_node_id, "node_request.child_node_id")
+        }
+        NodeRequest::WrapInTabs { node_id, .. }
+        | NodeRequest::Close { node_id, .. }
+        | NodeRequest::Resize { node_id, .. }
+        | NodeRequest::Zoom { node_id, .. }
+        | NodeRequest::ToggleZoom { node_id, .. }
+        | NodeRequest::BreakNode { node_id, .. } => {
+            validate_required_node_id(*node_id, "node_request.node_id")
+        }
+        NodeRequest::AddTab {
+            tabs_node_id,
+            buffer_id,
+            child_node_id,
+            ..
+        } => {
+            validate_required_node_id(*tabs_node_id, "node_request.tabs_node_id")?;
+            validate_optional_buffer_id(*buffer_id, "node_request.buffer_id")?;
+            validate_optional_node_id(*child_node_id, "node_request.child_node_id")
+        }
+        NodeRequest::SelectTab { tabs_node_id, .. } => {
+            validate_required_node_id(*tabs_node_id, "node_request.tabs_node_id")
+        }
+        NodeRequest::Focus {
+            session_id,
+            node_id,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "node_request.session_id")?;
+            validate_required_node_id(*node_id, "node_request.node_id")
+        }
+        NodeRequest::MoveBufferToNode {
+            buffer_id,
+            target_leaf_node_id,
+            ..
+        } => {
+            validate_required_buffer_id(*buffer_id, "node_request.buffer_id")?;
+            validate_required_node_id(*target_leaf_node_id, "node_request.target_leaf_node_id")
+        }
+        NodeRequest::SwapSiblings {
+            first_node_id,
+            second_node_id,
+            ..
+        } => {
+            validate_required_node_id(*first_node_id, "node_request.first_node_id")?;
+            validate_required_node_id(*second_node_id, "node_request.second_node_id")
+        }
+        NodeRequest::JoinBufferAtNode {
+            node_id, buffer_id, ..
+        } => {
+            validate_required_node_id(*node_id, "node_request.node_id")?;
+            validate_required_buffer_id(*buffer_id, "node_request.buffer_id")
+        }
+        NodeRequest::MoveNodeBefore {
+            node_id,
+            sibling_node_id,
+            ..
+        }
+        | NodeRequest::MoveNodeAfter {
+            node_id,
+            sibling_node_id,
+            ..
+        } => {
+            validate_required_node_id(*node_id, "node_request.node_id")?;
+            validate_required_node_id(*sibling_node_id, "node_request.sibling_node_id")
+        }
+    }
+}
+
+fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
+    match req {
+        ClientRequest::List { .. } | ClientRequest::Get { .. } | ClientRequest::Detach { .. } => {
+            Ok(())
+        }
+        ClientRequest::Switch { session_id, .. } => {
+            validate_required_session_id(*session_id, "client_request.session_id")
+        }
+    }
+}
+
+fn validate_floating_request(req: &FloatingRequest) -> Result<(), ProtocolError> {
+    match req {
+        FloatingRequest::Create {
+            session_id,
+            root_node_id,
+            buffer_id,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "floating_request.session_id")?;
+            validate_optional_node_id(*root_node_id, "floating_request.root_node_id")?;
+            validate_optional_buffer_id(*buffer_id, "floating_request.buffer_id")
+        }
+        FloatingRequest::Close { floating_id, .. }
+        | FloatingRequest::Move { floating_id, .. }
+        | FloatingRequest::Focus { floating_id, .. } => {
+            validate_required_floating_id(*floating_id, "floating_request.floating_id")
+        }
+    }
+}
+
+fn validate_input_request(req: &InputRequest) -> Result<(), ProtocolError> {
+    match req {
+        InputRequest::Send { buffer_id, .. } | InputRequest::Resize { buffer_id, .. } => {
+            validate_required_buffer_id(*buffer_id, "input_request.buffer_id")
+        }
+    }
 }
 
 fn create_string_vector<'a>(
@@ -96,6 +439,92 @@ fn encode_cursor_state<'a>(
     )
 }
 
+fn encode_buffer_history_scope(scope: BufferHistoryScope) -> fb::BufferHistoryScopeWire {
+    match scope {
+        BufferHistoryScope::Full => fb::BufferHistoryScopeWire::Full,
+        BufferHistoryScope::Visible => fb::BufferHistoryScopeWire::Visible,
+    }
+}
+
+fn decode_buffer_history_scope(
+    scope: fb::BufferHistoryScopeWire,
+) -> Result<BufferHistoryScope, ProtocolError> {
+    match scope {
+        fb::BufferHistoryScopeWire::Full => Ok(BufferHistoryScope::Full),
+        fb::BufferHistoryScopeWire::Visible => Ok(BufferHistoryScope::Visible),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown buffer history scope",
+        )),
+    }
+}
+
+fn encode_buffer_history_placement(
+    placement: BufferHistoryPlacement,
+) -> fb::BufferHistoryPlacementWire {
+    match placement {
+        BufferHistoryPlacement::Tab => fb::BufferHistoryPlacementWire::Tab,
+        BufferHistoryPlacement::Floating => fb::BufferHistoryPlacementWire::Floating,
+    }
+}
+
+fn decode_buffer_history_placement(
+    placement: fb::BufferHistoryPlacementWire,
+) -> Result<BufferHistoryPlacement, ProtocolError> {
+    match placement {
+        fb::BufferHistoryPlacementWire::Tab => Ok(BufferHistoryPlacement::Tab),
+        fb::BufferHistoryPlacementWire::Floating => Ok(BufferHistoryPlacement::Floating),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown buffer history placement",
+        )),
+    }
+}
+
+fn encode_node_break_destination(
+    destination: NodeBreakDestination,
+) -> fb::NodeBreakDestinationWire {
+    match destination {
+        NodeBreakDestination::Tab => fb::NodeBreakDestinationWire::Tab,
+        NodeBreakDestination::Floating => fb::NodeBreakDestinationWire::Floating,
+    }
+}
+
+fn decode_node_break_destination(
+    destination: fb::NodeBreakDestinationWire,
+) -> Result<NodeBreakDestination, ProtocolError> {
+    match destination {
+        fb::NodeBreakDestinationWire::Tab => Ok(NodeBreakDestination::Tab),
+        fb::NodeBreakDestinationWire::Floating => Ok(NodeBreakDestination::Floating),
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown node break destination",
+        )),
+    }
+}
+
+fn encode_node_join_placement(placement: NodeJoinPlacement) -> fb::NodeJoinPlacementWire {
+    match placement {
+        NodeJoinPlacement::Left => fb::NodeJoinPlacementWire::Left,
+        NodeJoinPlacement::Right => fb::NodeJoinPlacementWire::Right,
+        NodeJoinPlacement::Up => fb::NodeJoinPlacementWire::Up,
+        NodeJoinPlacement::Down => fb::NodeJoinPlacementWire::Down,
+        NodeJoinPlacement::TabBefore => fb::NodeJoinPlacementWire::TabBefore,
+        NodeJoinPlacement::TabAfter => fb::NodeJoinPlacementWire::TabAfter,
+    }
+}
+
+fn decode_node_join_placement(
+    placement: fb::NodeJoinPlacementWire,
+) -> Result<NodeJoinPlacement, ProtocolError> {
+    match placement {
+        fb::NodeJoinPlacementWire::Left => Ok(NodeJoinPlacement::Left),
+        fb::NodeJoinPlacementWire::Right => Ok(NodeJoinPlacement::Right),
+        fb::NodeJoinPlacementWire::Up => Ok(NodeJoinPlacement::Up),
+        fb::NodeJoinPlacementWire::Down => Ok(NodeJoinPlacement::Down),
+        fb::NodeJoinPlacementWire::TabBefore => Ok(NodeJoinPlacement::TabBefore),
+        fb::NodeJoinPlacementWire::TabAfter => Ok(NodeJoinPlacement::TabAfter),
+        _ => Err(ProtocolError::InvalidMessage("unknown node join placement")),
+    }
+}
+
 fn decode_cursor_state(cursor: fb::CursorState<'_>) -> Result<CursorState, ProtocolError> {
     let shape = match cursor.shape() {
         fb::CursorShapeWire::Block => CursorShape::Block,
@@ -119,14 +548,14 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
 
     let envelope = match message {
         ClientMessage::Ping(req) => encode_ping_request(&mut builder, req),
-        ClientMessage::Session(req) => encode_session_request(&mut builder, req),
-        ClientMessage::Buffer(req) => encode_buffer_request(&mut builder, req),
-        ClientMessage::Node(req) => encode_node_request(&mut builder, req),
-        ClientMessage::Floating(req) => encode_floating_request(&mut builder, req),
-        ClientMessage::Input(req) => encode_input_request(&mut builder, req),
+        ClientMessage::Session(req) => encode_session_request(&mut builder, req)?,
+        ClientMessage::Buffer(req) => encode_buffer_request(&mut builder, req)?,
+        ClientMessage::Node(req) => encode_node_request(&mut builder, req)?,
+        ClientMessage::Floating(req) => encode_floating_request(&mut builder, req)?,
+        ClientMessage::Input(req) => encode_input_request(&mut builder, req)?,
         ClientMessage::Subscribe(req) => encode_subscribe_request(&mut builder, req),
         ClientMessage::Unsubscribe(req) => encode_unsubscribe_request(&mut builder, req),
-        ClientMessage::Client(req) => encode_client_request(&mut builder, req),
+        ClientMessage::Client(req) => encode_client_request(&mut builder, req)?,
     };
 
     builder.finish(envelope, Some("EMBR"));
@@ -158,7 +587,8 @@ fn encode_ping_request<'a>(
 fn encode_client_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &ClientRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_client_request(req)?;
     let (op, client_id, session_id) = match req {
         ClientRequest::List { .. } => (fb::ClientOp::List, 0, 0),
         ClientRequest::Get { client_id, .. } => (
@@ -191,7 +621,7 @@ fn encode_client_request<'a>(
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -199,13 +629,14 @@ fn encode_client_request<'a>(
             client_request: Some(client_req),
             ..Default::default()
         },
-    )
+    ))
 }
 
 fn encode_session_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &SessionRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_session_request(req)?;
     let (op, session_id, buffer_id, child_node_id, name_str, title_str, force, index) = match req {
         SessionRequest::Create { name, .. } => (
             fb::SessionOp::Create,
@@ -325,7 +756,7 @@ fn encode_session_request<'a>(
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -333,22 +764,26 @@ fn encode_session_request<'a>(
             session_request: Some(session_req),
             ..Default::default()
         },
-    )
+    ))
 }
 
 fn encode_buffer_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &BufferRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_buffer_request(req)?;
     let (
         op,
         buffer_id,
         session_id,
+        client_id,
         attached_only,
         detached_only,
         force,
         start_line,
         line_count,
+        history_scope,
+        history_placement,
         title_str,
         command_vec,
         cwd_str,
@@ -364,11 +799,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Create,
             0,
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             title.as_deref(),
             Some(command),
             cwd.as_deref(),
@@ -383,11 +821,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::List,
             0,
             session_id.map(|s| s.into()).unwrap_or(0),
+            0,
             *attached_only,
             *detached_only,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -397,11 +838,31 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Get,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Inspect { buffer_id, .. } => (
+            fb::BufferOp::Inspect,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -411,11 +872,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Detach,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -427,11 +891,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Kill,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             *force,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -441,11 +908,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::Capture,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -455,11 +925,14 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::CaptureVisible,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             0,
             0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
             None,
             None,
             None,
@@ -474,11 +947,75 @@ fn encode_buffer_request<'a>(
             fb::BufferOp::ScrollbackSlice,
             (*buffer_id).into(),
             0,
+            0,
             false,
             false,
             false,
             *start_line,
             *line_count,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::GetLocation { buffer_id, .. } => (
+            fb::BufferOp::GetLocation,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Reveal {
+            buffer_id,
+            client_id,
+            ..
+        } => (
+            fb::BufferOp::Reveal,
+            (*buffer_id).into(),
+            0,
+            encode_optional_buffer_client_id(*client_id)?,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::OpenHistory {
+            buffer_id,
+            scope,
+            placement,
+            client_id,
+            ..
+        } => (
+            fb::BufferOp::OpenHistory,
+            (*buffer_id).into(),
+            0,
+            encode_optional_buffer_client_id(*client_id)?,
+            false,
+            false,
+            false,
+            0,
+            0,
+            encode_buffer_history_scope(*scope),
+            encode_buffer_history_placement(*placement),
             None,
             None,
             None,
@@ -507,11 +1044,14 @@ fn encode_buffer_request<'a>(
             op,
             buffer_id,
             session_id,
+            client_id,
             attached_only,
             detached_only,
             force,
             start_line,
             line_count,
+            history_scope,
+            history_placement,
             title,
             command,
             cwd,
@@ -520,7 +1060,7 @@ fn encode_buffer_request<'a>(
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -528,13 +1068,329 @@ fn encode_buffer_request<'a>(
             buffer_request: Some(buffer_req),
             ..Default::default()
         },
+    ))
+}
+
+fn encode_optional_buffer_client_id(client_id: Option<NonZeroU64>) -> Result<u64, ProtocolError> {
+    Ok(client_id.map(NonZeroU64::get).unwrap_or(0))
+}
+
+fn validate_buffer_with_location_response(
+    response: &BufferWithLocationResponse,
+) -> Result<(), ProtocolError> {
+    validate_buffer_location(
+        response.location(),
+        "buffer_with_location_response.location",
+    )?;
+    validate_buffer_record(response.buffer())?;
+    BufferWithLocationResponse::new(
+        response.request_id(),
+        response.buffer().clone(),
+        *response.location(),
+        response.at_root_tab(),
     )
+    .map(|_| ())
+    .map_err(ProtocolError::InvalidMessageOwned)
+}
+
+fn validate_buffer_location(
+    location: &BufferLocation,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if location.buffer_id.0 == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field}.buffer_id must be non-zero"
+        )));
+    }
+
+    match location.attachment {
+        BufferLocationAttachment::Detached => Ok(()),
+        BufferLocationAttachment::Session {
+            session_id,
+            node_id,
+        } => {
+            if session_id.0 == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "{field}.session_id must be non-zero"
+                )));
+            }
+            if node_id.0 == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "{field}.node_id must be non-zero"
+                )));
+            }
+            Ok(())
+        }
+        BufferLocationAttachment::Floating {
+            session_id,
+            node_id,
+            floating_id,
+        } => {
+            if session_id.0 == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "{field}.session_id must be non-zero"
+                )));
+            }
+            if node_id.0 == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "{field}.node_id must be non-zero"
+                )));
+            }
+            if floating_id.0 == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "{field}.floating_id must be non-zero"
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_session_record(record: &SessionRecord) -> Result<(), ProtocolError> {
+    validate_required_session_id(record.id, "session_record.id")?;
+    validate_required_node_id(record.root_node_id, "session_record.root_node_id")?;
+    validate_required_floating_ids(&record.floating_ids, "session_record.floating_ids")?;
+    validate_optional_node_id(record.focused_leaf_id, "session_record.focused_leaf_id")?;
+    validate_optional_floating_id(
+        record.focused_floating_id,
+        "session_record.focused_floating_id",
+    )?;
+    validate_optional_node_id(record.zoomed_node_id, "session_record.zoomed_node_id")
+}
+
+fn validate_buffer_record(record: &BufferRecord) -> Result<(), ProtocolError> {
+    validate_required_buffer_id(record.id, "buffer_record.id")?;
+    validate_optional_node_id(
+        record.attachment_node_id,
+        "buffer_record.attachment_node_id",
+    )?;
+    validate_optional_buffer_id(
+        record.helper_source_buffer_id,
+        "buffer_record.helper_source_buffer_id",
+    )?;
+    record
+        .validate()
+        .map_err(ProtocolError::InvalidMessageOwned)
+}
+
+fn validate_node_record(record: &NodeRecord) -> Result<(), ProtocolError> {
+    validate_required_node_id(record.id, "node_record.id")?;
+    validate_required_session_id(record.session_id, "node_record.session_id")?;
+    validate_optional_node_id(record.parent_id, "node_record.parent_id")?;
+    if let Some(buffer_view) = &record.buffer_view {
+        validate_required_buffer_id(buffer_view.buffer_id, "node_record.buffer_view.buffer_id")?;
+    }
+    if let Some(split) = &record.split {
+        validate_required_node_ids(&split.child_ids, "node_record.split.child_ids")?;
+    }
+    if let Some(tabs) = &record.tabs {
+        for tab in &tabs.tabs {
+            validate_required_node_id(tab.child_id, "node_record.tabs.tabs.child_id")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_floating_record(record: &FloatingRecord) -> Result<(), ProtocolError> {
+    validate_required_floating_id(record.id, "floating_record.id")?;
+    validate_required_session_id(record.session_id, "floating_record.session_id")?;
+    validate_required_node_id(record.root_node_id, "floating_record.root_node_id")
+}
+
+fn validate_client_record(record: &ClientRecord) -> Result<(), ProtocolError> {
+    validate_nonzero_id(record.id, "client_record.id")?;
+    validate_optional_session_id(
+        record.current_session_id,
+        "client_record.current_session_id",
+    )?;
+    validate_required_session_ids(
+        &record.subscribed_session_ids,
+        "client_record.subscribed_session_ids",
+    )
+}
+
+fn validate_session_snapshot(snapshot: &SessionSnapshot) -> Result<(), ProtocolError> {
+    validate_session_record(&snapshot.session)?;
+    for node in &snapshot.nodes {
+        validate_node_record(node)?;
+    }
+    for buffer in &snapshot.buffers {
+        validate_buffer_record(buffer)?;
+    }
+    for floating in &snapshot.floating {
+        validate_floating_record(floating)?;
+    }
+    Ok(())
+}
+
+fn validate_server_response(response: &ServerResponse) -> Result<(), ProtocolError> {
+    match response {
+        ServerResponse::Pong(_) | ServerResponse::Ok(_) | ServerResponse::Error(_) => Ok(()),
+        ServerResponse::Sessions(response) => {
+            for session in &response.sessions {
+                validate_session_record(session)?;
+            }
+            Ok(())
+        }
+        ServerResponse::SessionSnapshot(response) => validate_session_snapshot(&response.snapshot),
+        ServerResponse::Buffers(response) => {
+            for buffer in &response.buffers {
+                validate_buffer_record(buffer)?;
+            }
+            Ok(())
+        }
+        ServerResponse::Buffer(response) => validate_buffer_record(&response.buffer),
+        ServerResponse::BufferWithLocation(response) => {
+            validate_buffer_with_location_response(response)
+        }
+        ServerResponse::FloatingList(response) => {
+            for floating in &response.floating {
+                validate_floating_record(floating)?;
+            }
+            Ok(())
+        }
+        ServerResponse::Floating(response) => validate_floating_record(&response.floating),
+        ServerResponse::SubscriptionAck(_) => Ok(()),
+        ServerResponse::Clients(response) => {
+            for client in &response.clients {
+                validate_client_record(client)?;
+            }
+            Ok(())
+        }
+        ServerResponse::Client(response) => validate_client_record(&response.client),
+        ServerResponse::BufferLocation(response) => {
+            validate_buffer_location(&response.location, "buffer_location_response.location")
+        }
+        ServerResponse::Snapshot(response) => {
+            validate_required_buffer_id(response.buffer_id, "snapshot_response.buffer_id")
+        }
+        ServerResponse::VisibleSnapshot(response) => {
+            validate_required_buffer_id(response.buffer_id, "visible_snapshot_response.buffer_id")
+        }
+        ServerResponse::ScrollbackSlice(response) => {
+            validate_required_buffer_id(response.buffer_id, "scrollback_slice_response.buffer_id")
+        }
+    }
+}
+
+fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
+    match event {
+        ServerEvent::SessionCreated(event) => validate_session_record(&event.session),
+        ServerEvent::SessionClosed(event) => {
+            validate_required_session_id(event.session_id, "session_closed_event.session_id")
+        }
+        ServerEvent::SessionRenamed(event) => {
+            validate_required_session_id(event.session_id, "session_renamed_event.session_id")
+        }
+        ServerEvent::BufferCreated(event) => validate_buffer_record(&event.buffer),
+        ServerEvent::BufferDetached(event) => {
+            validate_required_buffer_id(event.buffer_id, "buffer_detached_event.buffer_id")
+        }
+        ServerEvent::NodeChanged(event) => {
+            validate_required_session_id(event.session_id, "node_changed_event.session_id")
+        }
+        ServerEvent::FloatingChanged(event) => {
+            validate_required_session_id(event.session_id, "floating_changed_event.session_id")?;
+            validate_optional_floating_id(event.floating_id, "floating_changed_event.floating_id")
+        }
+        ServerEvent::FocusChanged(event) => {
+            validate_required_session_id(event.session_id, "focus_changed_event.session_id")?;
+            validate_optional_node_id(
+                event.focused_leaf_id,
+                "focus_changed_event.focused_leaf_id",
+            )?;
+            validate_optional_floating_id(
+                event.focused_floating_id,
+                "focus_changed_event.focused_floating_id",
+            )
+        }
+        ServerEvent::RenderInvalidated(event) => {
+            validate_required_buffer_id(event.buffer_id, "render_invalidated_event.buffer_id")
+        }
+        ServerEvent::ClientChanged(event) => {
+            validate_client_record(&event.client)?;
+            validate_optional_session_id(
+                event.previous_session_id,
+                "client_changed_event.previous_session_id",
+            )
+        }
+    }
+}
+
+fn validate_server_envelope(envelope: &ServerEnvelope) -> Result<(), ProtocolError> {
+    match envelope {
+        ServerEnvelope::Response(response) => validate_server_response(response),
+        ServerEnvelope::Event(event) => validate_server_event(event),
+    }
+}
+
+fn encode_buffer_location_fields(location: &BufferLocation) -> (u64, u64, u64, u64) {
+    match location.attachment {
+        BufferLocationAttachment::Detached => (location.buffer_id.into(), 0, 0, 0),
+        BufferLocationAttachment::Session {
+            session_id,
+            node_id,
+        } => (
+            location.buffer_id.into(),
+            session_id.into(),
+            node_id.into(),
+            0,
+        ),
+        BufferLocationAttachment::Floating {
+            session_id,
+            node_id,
+            floating_id,
+        } => (
+            location.buffer_id.into(),
+            session_id.into(),
+            node_id.into(),
+            floating_id.into(),
+        ),
+    }
+}
+
+fn decode_buffer_location(
+    buffer_id: u64,
+    session_id: u64,
+    node_id: u64,
+    floating_id: u64,
+    field: &'static str,
+) -> Result<BufferLocation, ProtocolError> {
+    if buffer_id == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field}.buffer_id must be non-zero"
+        )));
+    }
+
+    let buffer_id = BufferId(buffer_id);
+    match (session_id, node_id, floating_id) {
+        (0, 0, 0) => Ok(BufferLocation::detached(buffer_id)),
+        (session_id, node_id, 0) if session_id != 0 && node_id != 0 => Ok(BufferLocation::session(
+            buffer_id,
+            SessionId(session_id),
+            NodeId(node_id),
+        )),
+        (session_id, node_id, floating_id)
+            if session_id != 0 && node_id != 0 && floating_id != 0 =>
+        {
+            Ok(BufferLocation::floating(
+                buffer_id,
+                SessionId(session_id),
+                NodeId(node_id),
+                FloatingId(floating_id),
+            ))
+        }
+        _ => Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} has an invalid attachment combination"
+        ))),
+    }
 }
 
 fn encode_node_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &NodeRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_node_request(req)?;
     type EncodedNodeRequest<'a> = (
         fb::NodeOp,
         u64,
@@ -549,10 +1405,15 @@ fn encode_node_request<'a>(
         u32,
         u32,
         fb::SplitDirectionWire,
+        fb::NodeBreakDestinationWire,
+        fb::NodeJoinPlacementWire,
         Option<&'a Vec<u16>>,
         Option<Vec<u64>>,
         Option<Vec<String>>,
         bool,
+        u64,
+        u64,
+        u64,
     );
 
     let (
@@ -569,10 +1430,15 @@ fn encode_node_request<'a>(
         index,
         active,
         direction,
+        break_destination,
+        join_placement,
         sizes_vec,
         child_node_ids_vec,
         titles_vec,
         insert_before,
+        first_node_id,
+        second_node_id,
+        sibling_node_id,
     ): EncodedNodeRequest<'_> = match req {
         NodeRequest::GetTree { session_id, .. } => (
             fb::NodeOp::GetTree,
@@ -588,10 +1454,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Split {
             leaf_node_id,
@@ -617,10 +1488,15 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 None,
                 None,
                 None,
                 false,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::CreateSplit {
@@ -648,6 +1524,8 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 Some(sizes),
                 Some(
                     child_node_ids
@@ -657,6 +1535,9 @@ fn encode_node_request<'a>(
                 ),
                 None,
                 false,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::CreateTabs {
@@ -679,6 +1560,8 @@ fn encode_node_request<'a>(
             0,
             *active,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             Some(
                 child_node_ids
@@ -688,6 +1571,9 @@ fn encode_node_request<'a>(
             ),
             Some(titles.clone()),
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::ReplaceNode {
             node_id,
@@ -707,10 +1593,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::WrapInSplit {
             node_id,
@@ -737,10 +1628,15 @@ fn encode_node_request<'a>(
                 0,
                 0,
                 dir,
+                fb::NodeBreakDestinationWire::Tab,
+                fb::NodeJoinPlacementWire::Left,
                 None,
                 None,
                 None,
                 *insert_before,
+                0,
+                0,
+                0,
             )
         }
         NodeRequest::WrapInTabs { node_id, title, .. } => (
@@ -757,10 +1653,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::AddTab {
             tabs_node_id,
@@ -783,10 +1684,15 @@ fn encode_node_request<'a>(
             *index,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::SelectTab {
             tabs_node_id,
@@ -806,10 +1712,15 @@ fn encode_node_request<'a>(
             *index,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Focus {
             session_id,
@@ -829,10 +1740,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Close { node_id, .. } => (
             fb::NodeOp::Close,
@@ -848,10 +1764,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::MoveBufferToNode {
             buffer_id,
@@ -871,10 +1792,15 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             None,
             None,
             None,
             false,
+            0,
+            0,
+            0,
         ),
         NodeRequest::Resize { node_id, sizes, .. } => (
             fb::NodeOp::Resize,
@@ -890,10 +1816,228 @@ fn encode_node_request<'a>(
             0,
             0,
             fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
             Some(sizes),
             None,
             None,
             false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::Zoom { node_id, .. } => (
+            fb::NodeOp::Zoom,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::Unzoom { session_id, .. } => (
+            fb::NodeOp::Unzoom,
+            (*session_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::ToggleZoom { node_id, .. } => (
+            fb::NodeOp::ToggleZoom,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::SwapSiblings {
+            first_node_id,
+            second_node_id,
+            ..
+        } => (
+            fb::NodeOp::SwapSiblings,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            (*first_node_id).into(),
+            (*second_node_id).into(),
+            0,
+        ),
+        NodeRequest::BreakNode {
+            node_id,
+            destination,
+            ..
+        } => (
+            fb::NodeOp::BreakNode,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            encode_node_break_destination(*destination),
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::JoinBufferAtNode {
+            node_id,
+            buffer_id,
+            placement,
+            ..
+        } => (
+            fb::NodeOp::JoinBufferAtNode,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            (*buffer_id).into(),
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            encode_node_join_placement(*placement),
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::MoveNodeBefore {
+            node_id,
+            sibling_node_id,
+            ..
+        } => (
+            fb::NodeOp::MoveNodeBefore,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            (*sibling_node_id).into(),
+        ),
+        NodeRequest::MoveNodeAfter {
+            node_id,
+            sibling_node_id,
+            ..
+        } => (
+            fb::NodeOp::MoveNodeAfter,
+            0,
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            (*sibling_node_id).into(),
         ),
     };
 
@@ -917,14 +2061,19 @@ fn encode_node_request<'a>(
             index,
             active,
             direction,
+            break_destination,
+            join_placement,
             sizes,
             child_node_ids,
             titles,
             insert_before,
+            first_node_id,
+            second_node_id,
+            sibling_node_id,
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -932,13 +2081,14 @@ fn encode_node_request<'a>(
             node_request: Some(node_req),
             ..Default::default()
         },
-    )
+    ))
 }
 
 fn encode_floating_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &FloatingRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_floating_request(req)?;
     let (
         op,
         floating_id,
@@ -1032,7 +2182,7 @@ fn encode_floating_request<'a>(
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -1040,13 +2190,14 @@ fn encode_floating_request<'a>(
             floating_request: Some(floating_req),
             ..Default::default()
         },
-    )
+    ))
 }
 
 fn encode_input_request<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     req: &InputRequest,
-) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
+    validate_input_request(req)?;
     let (op, buffer_id, bytes_vec, cols, rows) = match req {
         InputRequest::Send {
             buffer_id, bytes, ..
@@ -1071,7 +2222,7 @@ fn encode_input_request<'a>(
         },
     );
 
-    fb::Envelope::create(
+    Ok(fb::Envelope::create(
         builder,
         &fb::EnvelopeArgs {
             request_id: req.request_id().into(),
@@ -1079,7 +2230,7 @@ fn encode_input_request<'a>(
             input_request: Some(input_req),
             ..Default::default()
         },
-    )
+    ))
 }
 
 fn encode_subscribe_request<'a>(
@@ -1128,6 +2279,7 @@ fn encode_unsubscribe_request<'a>(
 
 pub fn encode_server_envelope(envelope: &ServerEnvelope) -> Result<Vec<u8>, ProtocolError> {
     let mut builder = FlatBufferBuilder::new();
+    validate_server_envelope(envelope)?;
 
     let fb_envelope = match envelope {
         ServerEnvelope::Response(response) => encode_server_response(&mut builder, response),
@@ -1274,6 +2426,40 @@ fn encode_server_response<'a>(
                 },
             )
         }
+        ServerResponse::BufferWithLocation(r) => {
+            let buffer_record = r.buffer();
+            let location_record = r.location();
+            let buffer = encode_buffer_record(builder, buffer_record);
+            debug_assert_eq!(buffer_record.id, location_record.buffer_id);
+            let (buffer_id, session_id, node_id, floating_id) =
+                encode_buffer_location_fields(location_record);
+            let location = fb::BufferLocation::create(
+                builder,
+                &fb::BufferLocationArgs {
+                    buffer_id,
+                    session_id,
+                    node_id,
+                    floating_id,
+                },
+            );
+            let response = fb::BufferWithLocationResponse::create(
+                builder,
+                &fb::BufferWithLocationResponseArgs {
+                    buffer: Some(buffer),
+                    location: Some(location),
+                    at_root_tab: r.at_root_tab(),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id().into(),
+                    kind: fb::MessageKind::BufferWithLocationResponse,
+                    buffer_with_location_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::FloatingList(r) => {
             let floating_vec: Vec<_> = r
                 .floating
@@ -1369,6 +2555,34 @@ fn encode_server_response<'a>(
                     request_id: r.request_id.into(),
                     kind: fb::MessageKind::ClientResponse,
                     client_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerResponse::BufferLocation(r) => {
+            let (buffer_id, session_id, node_id, floating_id) =
+                encode_buffer_location_fields(&r.location);
+            let location = fb::BufferLocation::create(
+                builder,
+                &fb::BufferLocationArgs {
+                    buffer_id,
+                    session_id,
+                    node_id,
+                    floating_id,
+                },
+            );
+            let response = fb::BufferLocationResponse::create(
+                builder,
+                &fb::BufferLocationResponseArgs {
+                    location: Some(location),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::BufferLocationResponse,
+                    buffer_location_response: Some(response),
                     ..Default::default()
                 },
             )
@@ -1669,6 +2883,7 @@ fn encode_session_record<'a>(
             floating_ids: Some(floating_ids_vec),
             focused_leaf_id: record.focused_leaf_id.map(|n| n.into()).unwrap_or(0),
             focused_floating_id: record.focused_floating_id.map(|f| f.into()).unwrap_or(0),
+            zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
         },
     )
 }
@@ -1702,6 +2917,14 @@ fn encode_buffer_record<'a>(
         ActivityState::Activity => fb::ActivityStateWire::Activity,
         ActivityState::Bell => fb::ActivityStateWire::Bell,
     };
+    let kind = match record.kind {
+        BufferRecordKind::Pty => fb::BufferKindWire::Pty,
+        BufferRecordKind::Helper => fb::BufferKindWire::Helper,
+    };
+    let helper_scope = record
+        .helper_scope
+        .map(encode_buffer_history_scope)
+        .unwrap_or(fb::BufferHistoryScopeWire::Full);
 
     fb::BufferRecord::create(
         builder,
@@ -1710,10 +2933,18 @@ fn encode_buffer_record<'a>(
             title: Some(title),
             command: Some(command),
             cwd,
+            kind,
             state,
             pid: record.pid.unwrap_or(0),
             has_pid: record.pid.is_some(),
             attachment_node_id: record.attachment_node_id.map(|n| n.into()).unwrap_or(0),
+            read_only: record.read_only,
+            helper_source_buffer_id: record
+                .helper_source_buffer_id
+                .map(|id| id.into())
+                .unwrap_or(0),
+            helper_scope,
+            has_helper_scope: record.helper_scope.is_some(),
             pty_cols: record.pty_size.cols,
             pty_rows: record.pty_size.rows,
             activity,
@@ -1918,39 +3149,60 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 fb::SessionOp::List => SessionRequest::List { request_id },
                 fb::SessionOp::Get => SessionRequest::Get {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                 },
                 fb::SessionOp::Close => SessionRequest::Close {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     force: req.force(),
                 },
                 fb::SessionOp::Rename => SessionRequest::Rename {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     name: required(req.name(), "session_request.name")?.to_owned(),
                 },
                 fb::SessionOp::AddRootTab => SessionRequest::AddRootTab {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     title: required(req.title(), "session_request.title")?.to_owned(),
                     buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
                     child_node_id: (req.child_node_id() != 0).then(|| NodeId(req.child_node_id())),
                 },
                 fb::SessionOp::SelectRootTab => SessionRequest::SelectRootTab {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     index: req.index(),
                 },
                 fb::SessionOp::RenameRootTab => SessionRequest::RenameRootTab {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     index: req.index(),
                     title: required(req.title(), "session_request.title")?.to_owned(),
                 },
                 fb::SessionOp::CloseRootTab => SessionRequest::CloseRootTab {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
                     index: req.index(),
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
@@ -1985,30 +3237,80 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 },
                 fb::BufferOp::Get => BufferRequest::Get {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Inspect => BufferRequest::Inspect {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                 },
                 fb::BufferOp::Detach => BufferRequest::Detach {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                 },
                 fb::BufferOp::Kill => BufferRequest::Kill {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                     force: req.force(),
                 },
                 fb::BufferOp::Capture => BufferRequest::Capture {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                 },
                 fb::BufferOp::CaptureVisible => BufferRequest::CaptureVisible {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                 },
                 fb::BufferOp::ScrollbackSlice => BufferRequest::ScrollbackSlice {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
                     start_line: req.start_line(),
                     line_count: req.line_count(),
+                },
+                fb::BufferOp::GetLocation => BufferRequest::GetLocation {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Reveal => BufferRequest::Reveal {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                    client_id: NonZeroU64::new(req.client_id()),
+                },
+                fb::BufferOp::OpenHistory => BufferRequest::OpenHistory {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                    scope: decode_buffer_history_scope(req.history_scope())?,
+                    placement: decode_buffer_history_placement(req.history_placement())?,
+                    client_id: NonZeroU64::new(req.client_id()),
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown buffer op")),
             };
@@ -2019,7 +3321,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
             let node_request = match req.op() {
                 fb::NodeOp::GetTree => NodeRequest::GetTree {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
                 },
                 fb::NodeOp::Split => {
                     let direction = match req.direction() {
@@ -2029,9 +3334,15 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     };
                     NodeRequest::Split {
                         request_id,
-                        leaf_node_id: NodeId(req.leaf_node_id()),
+                        leaf_node_id: decode_required_node_id(
+                            req.leaf_node_id(),
+                            "node_request.leaf_node_id",
+                        )?,
                         direction,
-                        new_buffer_id: BufferId(req.new_buffer_id()),
+                        new_buffer_id: decode_required_buffer_id(
+                            req.new_buffer_id(),
+                            "node_request.new_buffer_id",
+                        )?,
                     }
                 }
                 fb::NodeOp::CreateSplit => {
@@ -2043,15 +3354,20 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let child_node_ids =
                         required(req.child_node_ids(), "node_request.child_node_ids")?
                             .iter()
-                            .map(NodeId)
-                            .collect();
+                            .map(|node_id| {
+                                decode_required_node_id(node_id, "node_request.child_node_ids")
+                            })
+                            .collect::<Result<_, _>>()?;
                     let sizes = req
                         .sizes()
                         .map(|sizes| sizes.iter().collect())
                         .unwrap_or_default();
                     NodeRequest::CreateSplit {
                         request_id,
-                        session_id: SessionId(req.session_id()),
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "node_request.session_id",
+                        )?,
                         direction,
                         child_node_ids,
                         sizes,
@@ -2061,15 +3377,20 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let child_node_ids =
                         required(req.child_node_ids(), "node_request.child_node_ids")?
                             .iter()
-                            .map(NodeId)
-                            .collect();
+                            .map(|node_id| {
+                                decode_required_node_id(node_id, "node_request.child_node_ids")
+                            })
+                            .collect::<Result<_, _>>()?;
                     let titles = required(req.titles(), "node_request.titles")?
                         .iter()
                         .map(|title| title.to_owned())
                         .collect();
                     NodeRequest::CreateTabs {
                         request_id,
-                        session_id: SessionId(req.session_id()),
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "node_request.session_id",
+                        )?,
                         child_node_ids,
                         titles,
                         active: req.active(),
@@ -2077,8 +3398,11 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 }
                 fb::NodeOp::ReplaceNode => NodeRequest::ReplaceNode {
                     request_id,
-                    node_id: NodeId(req.node_id()),
-                    child_node_id: NodeId(req.child_node_id()),
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                    child_node_id: decode_required_node_id(
+                        req.child_node_id(),
+                        "node_request.child_node_id",
+                    )?,
                 },
                 fb::NodeOp::WrapInSplit => {
                     let direction = match req.direction() {
@@ -2088,8 +3412,11 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     };
                     NodeRequest::WrapInSplit {
                         request_id,
-                        node_id: NodeId(req.node_id()),
-                        child_node_id: NodeId(req.child_node_id()),
+                        node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                        child_node_id: decode_required_node_id(
+                            req.child_node_id(),
+                            "node_request.child_node_id",
+                        )?,
                         direction,
                         insert_before: req.insert_before(),
                     }
@@ -2098,7 +3425,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let title = required(req.title(), "node_request.title")?;
                     NodeRequest::WrapInTabs {
                         request_id,
-                        node_id: NodeId(req.node_id()),
+                        node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                         title: title.to_owned(),
                     }
                 }
@@ -2106,7 +3433,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let title = required(req.title(), "node_request.title")?;
                     NodeRequest::AddTab {
                         request_id,
-                        tabs_node_id: NodeId(req.tabs_node_id()),
+                        tabs_node_id: decode_required_node_id(
+                            req.tabs_node_id(),
+                            "node_request.tabs_node_id",
+                        )?,
                         title: title.to_owned(),
                         buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
                         child_node_id: (req.child_node_id() != 0)
@@ -2116,31 +3446,99 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 }
                 fb::NodeOp::SelectTab => NodeRequest::SelectTab {
                     request_id,
-                    tabs_node_id: NodeId(req.tabs_node_id()),
+                    tabs_node_id: decode_required_node_id(
+                        req.tabs_node_id(),
+                        "node_request.tabs_node_id",
+                    )?,
                     index: req.index(),
                 },
                 fb::NodeOp::Focus => NodeRequest::Focus {
                     request_id,
-                    session_id: SessionId(req.session_id()),
-                    node_id: NodeId(req.node_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                 },
                 fb::NodeOp::Close => NodeRequest::Close {
                     request_id,
-                    node_id: NodeId(req.node_id()),
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                 },
                 fb::NodeOp::MoveBufferToNode => NodeRequest::MoveBufferToNode {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
-                    target_leaf_node_id: NodeId(req.target_leaf_node_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "node_request.buffer_id",
+                    )?,
+                    target_leaf_node_id: decode_required_node_id(
+                        req.target_leaf_node_id(),
+                        "node_request.target_leaf_node_id",
+                    )?,
                 },
                 fb::NodeOp::Resize => {
                     let sizes = required(req.sizes(), "node_request.sizes")?;
                     NodeRequest::Resize {
                         request_id,
-                        node_id: NodeId(req.node_id()),
+                        node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                         sizes: sizes.iter().collect(),
                     }
                 }
+                fb::NodeOp::Zoom => NodeRequest::Zoom {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                },
+                fb::NodeOp::Unzoom => NodeRequest::Unzoom {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                },
+                fb::NodeOp::ToggleZoom => NodeRequest::ToggleZoom {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                },
+                fb::NodeOp::SwapSiblings => NodeRequest::SwapSiblings {
+                    request_id,
+                    first_node_id: decode_required_node_id(
+                        req.first_node_id(),
+                        "node_request.first_node_id",
+                    )?,
+                    second_node_id: decode_required_node_id(
+                        req.second_node_id(),
+                        "node_request.second_node_id",
+                    )?,
+                },
+                fb::NodeOp::BreakNode => NodeRequest::BreakNode {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                    destination: decode_node_break_destination(req.break_destination())?,
+                },
+                fb::NodeOp::JoinBufferAtNode => NodeRequest::JoinBufferAtNode {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "node_request.buffer_id",
+                    )?,
+                    placement: decode_node_join_placement(req.join_placement())?,
+                },
+                fb::NodeOp::MoveNodeBefore => NodeRequest::MoveNodeBefore {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                    sibling_node_id: decode_required_node_id(
+                        req.sibling_node_id(),
+                        "node_request.sibling_node_id",
+                    )?,
+                },
+                fb::NodeOp::MoveNodeAfter => NodeRequest::MoveNodeAfter {
+                    request_id,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                    sibling_node_id: decode_required_node_id(
+                        req.sibling_node_id(),
+                        "node_request.sibling_node_id",
+                    )?,
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown node op")),
             };
             Ok(ClientMessage::Node(node_request))
@@ -2150,7 +3548,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
             let floating_request = match req.op() {
                 fb::FloatingOp::Create => FloatingRequest::Create {
                     request_id,
-                    session_id: SessionId(req.session_id()),
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "floating_request.session_id",
+                    )?,
                     root_node_id: (req.root_node_id() != 0).then(|| NodeId(req.root_node_id())),
                     buffer_id: (req.buffer_id() != 0).then(|| BufferId(req.buffer_id())),
                     geometry: FloatGeometry {
@@ -2165,11 +3566,17 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 },
                 fb::FloatingOp::Close => FloatingRequest::Close {
                     request_id,
-                    floating_id: FloatingId(req.floating_id()),
+                    floating_id: decode_required_floating_id(
+                        req.floating_id(),
+                        "floating_request.floating_id",
+                    )?,
                 },
                 fb::FloatingOp::Move => FloatingRequest::Move {
                     request_id,
-                    floating_id: FloatingId(req.floating_id()),
+                    floating_id: decode_required_floating_id(
+                        req.floating_id(),
+                        "floating_request.floating_id",
+                    )?,
                     geometry: FloatGeometry {
                         x: req.x(),
                         y: req.y(),
@@ -2179,7 +3586,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 },
                 fb::FloatingOp::Focus => FloatingRequest::Focus {
                     request_id,
-                    floating_id: FloatingId(req.floating_id()),
+                    floating_id: decode_required_floating_id(
+                        req.floating_id(),
+                        "floating_request.floating_id",
+                    )?,
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown floating op")),
             };
@@ -2192,13 +3602,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let bytes = required(req.bytes(), "input_request.bytes")?;
                     InputRequest::Send {
                         request_id,
-                        buffer_id: BufferId(req.buffer_id()),
+                        buffer_id: decode_required_buffer_id(
+                            req.buffer_id(),
+                            "input_request.buffer_id",
+                        )?,
                         bytes: bytes.iter().collect(),
                     }
                 }
                 fb::InputOp::Resize => InputRequest::Resize {
                     request_id,
-                    buffer_id: BufferId(req.buffer_id()),
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "input_request.buffer_id",
+                    )?,
                     cols: req.cols(),
                     rows: req.rows(),
                 },
@@ -2246,7 +3662,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     ClientRequest::Switch {
                         request_id,
                         client_id,
-                        session_id: SessionId(req.session_id()),
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "client_request.session_id",
+                        )?,
                     }
                 }
                 _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
@@ -2339,6 +3758,44 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::BufferWithLocationResponse => {
+            let resp = required(
+                envelope.buffer_with_location_response(),
+                "buffer_with_location_response",
+            )?;
+            let buffer = required(resp.buffer(), "buffer_with_location_response.buffer")?;
+            let location = required(resp.location(), "buffer_with_location_response.location")?;
+            if location.buffer_id() == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(
+                    "buffer_with_location_response.location.buffer_id must be non-zero".to_owned(),
+                ));
+            }
+            let buffer = decode_buffer_record(buffer)?;
+            let location = decode_buffer_location(
+                location.buffer_id(),
+                location.session_id(),
+                location.node_id(),
+                location.floating_id(),
+                "buffer_with_location_response.location",
+            )?;
+            if buffer.id != location.buffer_id {
+                return Err(ProtocolError::InvalidMessageOwned(format!(
+                    "buffer_with_location_response buffer id {} does not match location buffer id {}",
+                    buffer.id.0, location.buffer_id.0,
+                )));
+            }
+            Ok(ServerEnvelope::Response(
+                ServerResponse::BufferWithLocation(
+                    BufferWithLocationResponse::new(
+                        RequestId(envelope.request_id()),
+                        buffer,
+                        location,
+                        resp.at_root_tab(),
+                    )
+                    .map_err(ProtocolError::InvalidMessageOwned)?,
+                ),
+            ))
+        }
         fb::MessageKind::FloatingListResponse => {
             let resp = required(envelope.floating_list_response(), "floating_list_response")?;
             let floating = required(resp.floating(), "floating_list_response.floating")?;
@@ -2391,6 +3848,30 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 ClientResponse {
                     request_id: RequestId(envelope.request_id()),
                     client: decode_client_record(client)?,
+                },
+            )))
+        }
+        fb::MessageKind::BufferLocationResponse => {
+            let resp = required(
+                envelope.buffer_location_response(),
+                "buffer_location_response",
+            )?;
+            let location = required(resp.location(), "buffer_location_response.location")?;
+            if location.buffer_id() == 0 {
+                return Err(ProtocolError::InvalidMessageOwned(
+                    "buffer_location_response.location.buffer_id must be non-zero".to_owned(),
+                ));
+            }
+            Ok(ServerEnvelope::Response(ServerResponse::BufferLocation(
+                BufferLocationResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    location: decode_buffer_location(
+                        location.buffer_id(),
+                        location.session_id(),
+                        location.node_id(),
+                        location.floating_id(),
+                        "buffer_location_response.location",
+                    )?,
                 },
             )))
         }
@@ -2601,6 +4082,11 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
         } else {
             Some(FloatingId(record.focused_floating_id()))
         },
+        zoomed_node_id: if record.zoomed_node_id() == 0 {
+            None
+        } else {
+            Some(NodeId(record.zoomed_node_id()))
+        },
     })
 }
 
@@ -2624,12 +4110,23 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         _ => return Err(ProtocolError::InvalidMessage("unknown activity state")),
     };
     let env = decode_string_map(record.env_keys(), record.env_values(), "buffer_record.env")?;
+    let kind = match record.kind() {
+        fb::BufferKindWire::Pty => BufferRecordKind::Pty,
+        fb::BufferKindWire::Helper => BufferRecordKind::Helper,
+        _ => return Err(ProtocolError::InvalidMessage("unknown buffer kind")),
+    };
+    let helper_scope = if record.has_helper_scope() {
+        Some(decode_buffer_history_scope(record.helper_scope())?)
+    } else {
+        None
+    };
 
-    Ok(BufferRecord {
+    let record = BufferRecord {
         id: BufferId(record.id()),
         title: title.to_owned(),
         command,
         cwd: record.cwd().map(|c| c.to_owned()),
+        kind,
         state,
         pid: record.has_pid().then(|| record.pid()),
         attachment_node_id: if record.attachment_node_id() == 0 {
@@ -2637,6 +4134,13 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         } else {
             Some(NodeId(record.attachment_node_id()))
         },
+        read_only: record.read_only(),
+        helper_source_buffer_id: if record.helper_source_buffer_id() == 0 {
+            None
+        } else {
+            Some(BufferId(record.helper_source_buffer_id()))
+        },
+        helper_scope,
         pty_size: PtySize {
             cols: record.pty_cols(),
             rows: record.pty_rows(),
@@ -2651,7 +4155,11 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
             None
         },
         env,
-    })
+    };
+    record
+        .validate()
+        .map_err(ProtocolError::InvalidMessageOwned)?;
+    Ok(record)
 }
 
 fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolError> {
@@ -3193,5 +4701,933 @@ mod tests {
         let decoded = decode_server_envelope(&encoded).expect("decode should succeed");
 
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn encode_buffer_location_rejects_zero_buffer_id() {
+        let error = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferLocation(BufferLocationResponse {
+                request_id: RequestId(1),
+                location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
+            }),
+        ))
+        .expect_err("zero location buffer id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_location_response.location.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_with_location_rejects_zero_buffer_id() {
+        let error = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(0),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
+                at_root_tab: false,
+            }),
+        ))
+        .expect_err("zero location buffer id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.location.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_with_location_rejects_mismatched_buffer_ids() {
+        let error = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
+                at_root_tab: false,
+            }),
+        ))
+        .expect_err("mismatched buffer ids should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.buffer.id must equal location.buffer_id"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_with_location_rejects_attachment_mismatches() {
+        let attached_buffer_with_detached_location =
+            encode_server_envelope(&ServerEnvelope::Response(
+                ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                    request_id: RequestId(1),
+                    buffer: BufferRecord {
+                        id: BufferId(7),
+                        title: "helper".to_owned(),
+                        command: vec!["echo".to_owned()],
+                        cwd: None,
+                        kind: BufferRecordKind::Pty,
+                        state: BufferRecordState::Running,
+                        pid: None,
+                        attachment_node_id: Some(NodeId(3)),
+                        read_only: false,
+                        helper_source_buffer_id: None,
+                        helper_scope: None,
+                        pty_size: PtySize::new(80, 24),
+                        activity: ActivityState::Idle,
+                        last_snapshot_seq: 0,
+                        exit_code: None,
+                        env: Default::default(),
+                    },
+                    location: BufferLocation::detached(BufferId(7)),
+                    at_root_tab: false,
+                }),
+            ))
+            .expect_err("attached buffers require an attached location");
+        let detached_buffer_with_attached_location =
+            encode_server_envelope(&ServerEnvelope::Response(
+                ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                    request_id: RequestId(1),
+                    buffer: BufferRecord {
+                        id: BufferId(7),
+                        title: "helper".to_owned(),
+                        command: vec!["echo".to_owned()],
+                        cwd: None,
+                        kind: BufferRecordKind::Pty,
+                        state: BufferRecordState::Running,
+                        pid: None,
+                        attachment_node_id: None,
+                        read_only: false,
+                        helper_source_buffer_id: None,
+                        helper_scope: None,
+                        pty_size: PtySize::new(80, 24),
+                        activity: ActivityState::Idle,
+                        last_snapshot_seq: 0,
+                        exit_code: None,
+                        env: Default::default(),
+                    },
+                    location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
+                    at_root_tab: false,
+                }),
+            ))
+            .expect_err("detached buffers require a detached location");
+        let mismatched_node_ids = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(4)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
+                at_root_tab: false,
+            }),
+        ))
+        .expect_err("attached node ids must match");
+
+        assert!(matches!(
+            attached_buffer_with_detached_location,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.buffer.attachment_node_id 3 requires an attached location"
+        ));
+        assert!(matches!(
+            detached_buffer_with_attached_location,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.location node_id 3 requires buffer.attachment_node_id"
+        ));
+        assert!(matches!(
+            mismatched_node_ids,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.buffer.attachment_node_id 4 must equal location node_id 3"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_with_location_rejects_root_tab_flag_without_session_attachment() {
+        let error = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferWithLocation(BufferWithLocationResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                location: BufferLocation::floating(
+                    BufferId(7),
+                    SessionId(2),
+                    NodeId(3),
+                    FloatingId(9),
+                ),
+                at_root_tab: true,
+            }),
+        ))
+        .expect_err("root-tab flag requires a session location");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_with_location_response.at_root_tab requires a session location"
+        ));
+    }
+
+    #[test]
+    fn buffer_with_location_round_trips_root_tab_flag() {
+        let response = ServerEnvelope::Response(ServerResponse::BufferWithLocation(
+            BufferWithLocationResponse::new(
+                RequestId(1),
+                BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
+                true,
+            )
+            .expect("session locations can carry root-tab metadata"),
+        ));
+        let encoded = encode_server_envelope(&response).expect("encode response");
+        let decoded = decode_server_envelope(&encoded).expect("decode response");
+
+        assert!(matches!(
+            decoded,
+            ServerEnvelope::Response(ServerResponse::BufferWithLocation(response))
+                if response.at_root_tab()
+        ));
+    }
+
+    #[test]
+    fn buffer_with_location_constructor_rejects_invalid_nested_helper_buffer() {
+        let error = BufferWithLocationResponse::new(
+            RequestId(1),
+            BufferRecord {
+                id: BufferId(7),
+                title: "helper".to_owned(),
+                command: Vec::new(),
+                cwd: None,
+                kind: BufferRecordKind::Helper,
+                state: BufferRecordState::Created,
+                pid: None,
+                attachment_node_id: Some(NodeId(3)),
+                read_only: true,
+                helper_source_buffer_id: Some(BufferId(6)),
+                helper_scope: None,
+                pty_size: PtySize::new(80, 24),
+                activity: ActivityState::Idle,
+                last_snapshot_seq: 0,
+                exit_code: None,
+                env: Default::default(),
+            },
+            BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
+            false,
+        )
+        .expect_err("invalid helper buffer should be rejected");
+
+        assert_eq!(
+            error,
+            "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
+        );
+    }
+
+    #[test]
+    fn encode_buffer_rejects_helper_fields_on_pty_records() {
+        let invalid_source = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Buffer(BufferResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "shell".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: Some(BufferId(12)),
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            }),
+        ))
+        .expect_err("pty records must not carry helper source ids");
+        let invalid_scope = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Buffer(BufferResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "shell".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: Some(BufferHistoryScope::Visible),
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            }),
+        ))
+        .expect_err("pty records must not carry helper scopes");
+
+        assert!(matches!(
+            invalid_source,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.kind=pty cannot set helper_source_buffer_id"
+        ));
+        assert!(matches!(
+            invalid_scope,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.kind=pty cannot set helper_scope"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_rejects_incomplete_helper_metadata() {
+        let missing_scope = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Buffer(BufferResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Helper,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: true,
+                    helper_source_buffer_id: Some(BufferId(12)),
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            }),
+        ))
+        .expect_err("helper records must not omit helper scope");
+        let missing_source = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Buffer(BufferResponse {
+                request_id: RequestId(1),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Helper,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(3)),
+                    read_only: true,
+                    helper_source_buffer_id: None,
+                    helper_scope: Some(BufferHistoryScope::Visible),
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            }),
+        ))
+        .expect_err("helper records must not omit helper source ids");
+
+        assert!(matches!(
+            missing_scope,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
+        ));
+        assert!(matches!(
+            missing_source,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_location_rejects_zero_attached_ids() {
+        let zero_session = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferLocation(BufferLocationResponse {
+                request_id: RequestId(1),
+                location: BufferLocation {
+                    buffer_id: BufferId(5),
+                    attachment: BufferLocationAttachment::Session {
+                        session_id: SessionId(0),
+                        node_id: NodeId(3),
+                    },
+                },
+            }),
+        ))
+        .expect_err("zero session id should be rejected");
+        let zero_floating = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::BufferLocation(BufferLocationResponse {
+                request_id: RequestId(2),
+                location: BufferLocation {
+                    buffer_id: BufferId(5),
+                    attachment: BufferLocationAttachment::Floating {
+                        session_id: SessionId(2),
+                        node_id: NodeId(3),
+                        floating_id: FloatingId(0),
+                    },
+                },
+            }),
+        ))
+        .expect_err("zero floating id should be rejected");
+
+        assert!(matches!(
+            zero_session,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_location_response.location.session_id must be non-zero"
+        ));
+        assert!(matches!(
+            zero_floating,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_location_response.location.floating_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_records_reject_zero_optional_ids() {
+        let zero_zoomed_node = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Sessions(SessionsResponse {
+                request_id: RequestId(1),
+                sessions: vec![SessionRecord {
+                    id: SessionId(1),
+                    name: "main".to_owned(),
+                    root_node_id: NodeId(2),
+                    floating_ids: Vec::new(),
+                    focused_leaf_id: None,
+                    focused_floating_id: None,
+                    zoomed_node_id: Some(NodeId(0)),
+                }],
+            }),
+        ))
+        .expect_err("zero zoomed node id should be rejected");
+        let zero_attachment_node = encode_server_envelope(&ServerEnvelope::Response(
+            ServerResponse::Buffer(BufferResponse {
+                request_id: RequestId(2),
+                buffer: BufferRecord {
+                    id: BufferId(7),
+                    title: "helper".to_owned(),
+                    command: vec!["echo".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(0)),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            }),
+        ))
+        .expect_err("zero attachment node id should be rejected");
+
+        assert!(matches!(
+            zero_zoomed_node,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "session_record.zoomed_node_id must be non-zero"
+        ));
+        assert!(matches!(
+            zero_attachment_node,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.attachment_node_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_buffer_location_rejects_invalid_attachment_combinations() {
+        let mut builder = FlatBufferBuilder::new();
+        let location = fb::BufferLocation::create(
+            &mut builder,
+            &fb::BufferLocationArgs {
+                buffer_id: 5,
+                session_id: 0,
+                node_id: 3,
+                floating_id: 0,
+            },
+        );
+        let response = fb::BufferLocationResponse::create(
+            &mut builder,
+            &fb::BufferLocationResponseArgs {
+                location: Some(location),
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 1,
+                kind: fb::MessageKind::BufferLocationResponse,
+                buffer_location_response: Some(response),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_server_envelope(builder.finished_data())
+            .expect_err("invalid attachment combination should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_location_response.location has an invalid attachment combination"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_request_rejects_zero_required_buffer_id() {
+        let error = encode_client_message(&ClientMessage::Buffer(BufferRequest::Inspect {
+            request_id: RequestId(1),
+            buffer_id: BufferId(0),
+        }))
+        .expect_err("zero buffer id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_session_request_rejects_zero_required_session_id() {
+        let error = encode_client_message(&ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(1),
+            session_id: SessionId(0),
+        }))
+        .expect_err("zero session id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "session_request.session_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_session_request_rejects_zero_optional_ids() {
+        let zero_buffer_id =
+            encode_client_message(&ClientMessage::Session(SessionRequest::AddRootTab {
+                request_id: RequestId(1),
+                session_id: SessionId(1),
+                title: "tab".to_string(),
+                buffer_id: Some(BufferId(0)),
+                child_node_id: None,
+            }))
+            .expect_err("zero optional buffer id should be rejected");
+        let zero_child_node_id =
+            encode_client_message(&ClientMessage::Session(SessionRequest::AddRootTab {
+                request_id: RequestId(2),
+                session_id: SessionId(1),
+                title: "tab".to_string(),
+                buffer_id: None,
+                child_node_id: Some(NodeId(0)),
+            }))
+            .expect_err("zero optional child node id should be rejected");
+
+        assert!(matches!(
+            zero_buffer_id,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "session_request.buffer_id must be non-zero"
+        ));
+        assert!(matches!(
+            zero_child_node_id,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "session_request.child_node_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_node_request_rejects_zero_required_node_id() {
+        let error = encode_client_message(&ClientMessage::Node(NodeRequest::Zoom {
+            request_id: RequestId(1),
+            node_id: NodeId(0),
+        }))
+        .expect_err("zero node id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "node_request.node_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_node_request_rejects_zero_optional_ids() {
+        let zero_buffer_id = encode_client_message(&ClientMessage::Node(NodeRequest::AddTab {
+            request_id: RequestId(1),
+            tabs_node_id: NodeId(1),
+            index: 0,
+            title: "tab".to_string(),
+            buffer_id: Some(BufferId(0)),
+            child_node_id: None,
+        }))
+        .expect_err("zero optional buffer id should be rejected");
+        let zero_child_node_id = encode_client_message(&ClientMessage::Node(NodeRequest::AddTab {
+            request_id: RequestId(2),
+            tabs_node_id: NodeId(1),
+            index: 0,
+            title: "tab".to_string(),
+            buffer_id: None,
+            child_node_id: Some(NodeId(0)),
+        }))
+        .expect_err("zero optional child node id should be rejected");
+
+        assert!(matches!(
+            zero_buffer_id,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "node_request.buffer_id must be non-zero"
+        ));
+        assert!(matches!(
+            zero_child_node_id,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "node_request.child_node_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_client_request_rejects_zero_switch_session_id() {
+        let error = encode_client_message(&ClientMessage::Client(ClientRequest::Switch {
+            request_id: RequestId(1),
+            client_id: None,
+            session_id: SessionId(0),
+        }))
+        .expect_err("zero switch session id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "client_request.session_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_request_rejects_zero_optional_session_id() {
+        let error = encode_client_message(&ClientMessage::Buffer(BufferRequest::List {
+            request_id: RequestId(1),
+            session_id: Some(SessionId(0)),
+            attached_only: false,
+            detached_only: false,
+        }))
+        .expect_err("zero optional session id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.session_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_floating_request_rejects_zero_required_ids() {
+        let create_error =
+            encode_client_message(&ClientMessage::Floating(FloatingRequest::Create {
+                request_id: RequestId(1),
+                session_id: SessionId(0),
+                root_node_id: None,
+                buffer_id: None,
+                geometry: FloatGeometry::new(1, 1, 10, 10),
+                title: None,
+                focus: true,
+                close_on_empty: true,
+            }))
+            .expect_err("zero create session id should be rejected");
+        let close_error = encode_client_message(&ClientMessage::Floating(FloatingRequest::Close {
+            request_id: RequestId(2),
+            floating_id: FloatingId(0),
+        }))
+        .expect_err("zero close floating id should be rejected");
+
+        assert!(matches!(
+            create_error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "floating_request.session_id must be non-zero"
+        ));
+        assert!(matches!(
+            close_error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "floating_request.floating_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_input_request_rejects_zero_required_buffer_id() {
+        let send_error = encode_client_message(&ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(0),
+            bytes: b"x".to_vec(),
+        }))
+        .expect_err("zero send buffer id should be rejected");
+        let resize_error = encode_client_message(&ClientMessage::Input(InputRequest::Resize {
+            request_id: RequestId(2),
+            buffer_id: BufferId(0),
+            cols: 80,
+            rows: 24,
+        }))
+        .expect_err("zero resize buffer id should be rejected");
+
+        assert!(matches!(
+            send_error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "input_request.buffer_id must be non-zero"
+        ));
+        assert!(matches!(
+            resize_error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "input_request.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_buffer_request_rejects_zero_required_buffer_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let request = fb::BufferRequest::create(
+            &mut builder,
+            &fb::BufferRequestArgs {
+                op: fb::BufferOp::Inspect,
+                buffer_id: 0,
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 7,
+                kind: fb::MessageKind::BufferRequest,
+                buffer_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("zero buffer id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_session_request_rejects_zero_required_session_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let request = fb::SessionRequest::create(
+            &mut builder,
+            &fb::SessionRequestArgs {
+                op: fb::SessionOp::Get,
+                session_id: 0,
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 8,
+                kind: fb::MessageKind::SessionRequest,
+                session_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("zero session id should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "session_request.session_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_node_request_rejects_zero_required_node_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let request = fb::NodeRequest::create(
+            &mut builder,
+            &fb::NodeRequestArgs {
+                op: fb::NodeOp::Zoom,
+                node_id: 0,
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 9,
+                kind: fb::MessageKind::NodeRequest,
+                node_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error =
+            decode_client_message(builder.finished_data()).expect_err("zero node id should reject");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "node_request.node_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_floating_request_rejects_zero_required_floating_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let request = fb::FloatingRequest::create(
+            &mut builder,
+            &fb::FloatingRequestArgs {
+                op: fb::FloatingOp::Focus,
+                floating_id: 0,
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 10,
+                kind: fb::MessageKind::FloatingRequest,
+                floating_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("zero floating id should reject");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "floating_request.floating_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_input_request_rejects_zero_required_buffer_id() {
+        let mut builder = FlatBufferBuilder::new();
+        let bytes = builder.create_vector(b"x");
+        let request = fb::InputRequest::create(
+            &mut builder,
+            &fb::InputRequestArgs {
+                op: fb::InputOp::Send,
+                buffer_id: 0,
+                bytes: Some(bytes),
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 11,
+                kind: fb::MessageKind::InputRequest,
+                input_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("zero input buffer id should reject");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "input_request.buffer_id must be non-zero"
+        ));
     }
 }

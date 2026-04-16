@@ -45,6 +45,9 @@ Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling
 
 `segment(_: UiApi, text: String) -> BarSegment` produces plain text with default
 [`StyleSpec`] values and no click target.
+
+See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
+the full `options: Map` styling keys.
 </div>
 
 </div>

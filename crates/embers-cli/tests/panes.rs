@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use embers_core::RequestId;
-use embers_protocol::{BufferRequest, ClientMessage, ServerResponse};
+use embers_core::{ErrorCode, RequestId};
+use embers_protocol::{BufferRequest, ClientMessage, InputRequest, ServerResponse};
 use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
 
@@ -242,6 +242,307 @@ async fn detached_buffers_can_be_listed_and_attached_via_cli() {
         stdout(&detached_again)
             .lines()
             .any(|line| line.starts_with(&format!("{previous_buffer_id}\trunning\tdetached\t")))
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_show_and_history_open_helper_buffers() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let leaf = snapshot
+        .session
+        .focused_leaf_id
+        .expect("focused pane exists");
+    let session_id = snapshot.session.id;
+    let buffer_id = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == leaf)
+        .and_then(|node| node.buffer_view.as_ref())
+        .map(|view| view.buffer_id)
+        .expect("focused pane buffer exists");
+
+    run_cli(
+        &server,
+        [
+            "send-keys",
+            "-t",
+            &leaf.to_string(),
+            "--enter",
+            "printf",
+            "history-helper\\n",
+        ],
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let captured = run_cli(&server, ["capture-pane", "-t", &leaf.to_string()]);
+        if stdout(&captured).contains("history-helper") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for pane output"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let shown = run_cli(&server, ["buffer", "show", &buffer_id.to_string()]);
+    let shown_stdout = stdout(&shown);
+    assert!(shown_stdout.contains(&format!("id\t{buffer_id}")));
+    assert!(shown_stdout.contains("kind\tpty"));
+    assert!(shown_stdout.contains(&format!("location\tsession:{session_id} node:{leaf}")));
+
+    let opened = run_cli(
+        &server,
+        [
+            "buffer",
+            "history",
+            &buffer_id.to_string(),
+            "--scope",
+            "visible",
+        ],
+    );
+    let opened_stdout = stdout(&opened).trim().to_owned();
+    let helper_buffer_id = opened_stdout
+        .split('\t')
+        .next()
+        .expect("helper buffer id column")
+        .parse::<u64>()
+        .expect("helper buffer id parses");
+
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let helper = snapshot
+        .buffers
+        .iter()
+        .find(|buffer| buffer.id.0 == helper_buffer_id)
+        .expect("helper buffer exists in session");
+    assert_eq!(helper.kind, embers_protocol::BufferRecordKind::Helper);
+    assert!(helper.read_only);
+    assert_eq!(helper.helper_source_buffer_id, Some(buffer_id));
+    assert_eq!(
+        helper.helper_scope,
+        Some(embers_protocol::BufferHistoryScope::Visible)
+    );
+
+    let helper_capture = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Capture {
+            request_id: RequestId(3),
+            buffer_id: helper.id,
+        }))
+        .await
+        .expect("capture helper succeeds");
+    let helper_text = match helper_capture {
+        ServerResponse::Snapshot(response) => response.lines.join("\n"),
+        other => panic!("expected helper snapshot response, got {other:?}"),
+    };
+    assert!(helper_text.contains("history-helper"));
+
+    let send = connection
+        .request(&ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(4),
+            buffer_id: helper.id,
+            bytes: b"nope".to_vec(),
+        }))
+        .await
+        .expect("helper send request returns a response");
+    assert!(
+        matches!(
+            send,
+            ServerResponse::Error(ref response)
+                if response.error.code == ErrorCode::Conflict
+                    && response.error.message.contains("read-only")
+        ),
+        "helper buffers should reject input with a read-only conflict, got {send:?}"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn node_commands_cover_zoom_swap_break_join_and_reorder() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let split = run_cli(&server, ["split-window", "--", "/bin/sh"]);
+    let second_pane_id = stdout(&split)
+        .trim()
+        .parse::<u64>()
+        .expect("split-window returns pane id");
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let first_pane_id = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.buffer_view.as_ref().is_some() && node.id.0 != second_pane_id)
+        .map(|node| node.id.0)
+        .expect("first pane id exists");
+
+    run_cli(&server, ["node", "zoom", &first_pane_id.to_string()]);
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    assert_eq!(
+        snapshot.session.zoomed_node_id,
+        Some(embers_core::NodeId(first_pane_id))
+    );
+
+    run_cli(&server, ["node", "unzoom", "-t", "alpha"]);
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    assert_eq!(snapshot.session.zoomed_node_id, None);
+
+    let parent_split_id = snapshot
+        .nodes
+        .iter()
+        .find(|node| {
+            node.split.as_ref().is_some_and(|split| {
+                split
+                    .child_ids
+                    .contains(&embers_core::NodeId(first_pane_id))
+                    && split
+                        .child_ids
+                        .contains(&embers_core::NodeId(second_pane_id))
+            })
+        })
+        .map(|node| node.id)
+        .expect("parent split exists");
+
+    run_cli(
+        &server,
+        [
+            "node",
+            "swap",
+            &first_pane_id.to_string(),
+            &second_pane_id.to_string(),
+        ],
+    );
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let split = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == parent_split_id)
+        .and_then(|node| node.split.as_ref())
+        .expect("split still exists");
+    assert_eq!(split.child_ids[0], embers_core::NodeId(second_pane_id));
+
+    run_cli(
+        &server,
+        [
+            "node",
+            "move-before",
+            &first_pane_id.to_string(),
+            &second_pane_id.to_string(),
+        ],
+    );
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let split = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == parent_split_id)
+        .and_then(|node| node.split.as_ref())
+        .expect("split still exists after reorder");
+    assert_eq!(split.child_ids[0], embers_core::NodeId(first_pane_id));
+
+    run_cli(
+        &server,
+        [
+            "node",
+            "break",
+            &second_pane_id.to_string(),
+            "--to",
+            "floating",
+        ],
+    );
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    assert_eq!(snapshot.floating.len(), 1);
+    assert_eq!(
+        snapshot.floating[0].root_node_id,
+        embers_core::NodeId(second_pane_id)
+    );
+
+    let detached = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Create {
+            request_id: RequestId(10),
+            title: Some("notes".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+        }))
+        .await
+        .expect("buffer create succeeds");
+    let detached_buffer_id = match detached {
+        ServerResponse::Buffer(response) => response.buffer.id,
+        other => panic!("expected buffer response, got {other:?}"),
+    };
+
+    run_cli(
+        &server,
+        [
+            "node",
+            "join-buffer",
+            &first_pane_id.to_string(),
+            &detached_buffer_id.to_string(),
+            "--as",
+            "tab-after",
+        ],
+    );
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let (first_index, detached_index) = snapshot
+        .nodes
+        .iter()
+        .find_map(|node| {
+            node.tabs.as_ref().and_then(|tabs| {
+                let first_index = tabs.tabs.iter().position(|tab| tab.child_id.0 == first_pane_id)?;
+                let detached_index = tabs.tabs.iter().position(|tab| {
+                    snapshot
+                        .nodes
+                        .iter()
+                        .find(|candidate| candidate.id == tab.child_id)
+                        .and_then(|candidate| candidate.buffer_view.as_ref())
+                        .is_some_and(|view| view.buffer_id == detached_buffer_id)
+                })?;
+                Some((first_index, detached_index))
+            })
+        })
+        .expect("join-buffer attached the detached buffer into the same tabs container as the first pane");
+    assert_eq!(
+        detached_index,
+        first_index + 1,
+        "join-buffer placed the detached buffer immediately after the first pane"
     );
 
     server.shutdown().await.expect("shutdown server");

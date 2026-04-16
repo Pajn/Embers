@@ -9,8 +9,8 @@ use embers_core::{
     ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
 };
 use embers_protocol::{
-    BufferRecord, BufferRequest, BufferResponse, ClientMessage, FloatingRequest, InputRequest,
-    NodeRequest, ServerEvent, ServerResponse,
+    BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
+    ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent, ServerResponse,
 };
 
 use crate::RenderGrid;
@@ -325,14 +325,52 @@ where
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
-        let event = self.client.process_next_event().await?;
-        if let ServerEvent::RenderInvalidated(event) = &event {
+        let event = self.next_event().await?;
+        self.handle_event(&event).await?;
+        Ok(event)
+    }
+
+    pub async fn process_next_event_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerEvent>> {
+        let Some(event) = tokio::time::timeout(timeout, self.client.next_event())
+            .await
+            .ok()
+            .transpose()?
+        else {
+            return Ok(None);
+        };
+        self.handle_event(&event).await?;
+        Ok(Some(event))
+    }
+
+    pub async fn next_event(&mut self) -> Result<ServerEvent> {
+        self.client.next_event().await
+    }
+
+    pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        let previous_render_activity = match event {
+            ServerEvent::RenderInvalidated(render) => self
+                .client
+                .state()
+                .buffers
+                .get(&render.buffer_id)
+                .map(|buffer| buffer.activity),
+            _ => None,
+        };
+        let detached_session_id = matches!(event, ServerEvent::BufferDetached(_))
+            .then(|| self.event_session_id(event))
+            .flatten();
+        self.client.handle_event(event).await?;
+        if let ServerEvent::RenderInvalidated(event) = event {
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
         }
+        let session_id = detached_session_id.or_else(|| self.event_session_id(event));
 
-        let session_id = self.event_session_id(&event);
-        let mut event_names = vec![event_name(&event).to_owned()];
-        if let ServerEvent::RenderInvalidated(render) = &event
+        let mut event_names = vec![event_name(event).to_owned()];
+        if let ServerEvent::RenderInvalidated(render) = event
+            && previous_render_activity != Some(ActivityState::Bell)
             && self
                 .client
                 .state()
@@ -347,7 +385,7 @@ where
             let context = self.context_for(
                 session_id,
                 self.viewport,
-                Some(event_info(&event_name, &event)),
+                Some(event_info(&event_name, event, session_id)),
             );
             match self
                 .config
@@ -362,7 +400,7 @@ where
                 Err(error) => self.record_notification(error.to_string()),
             }
         }
-        Ok(event)
+        Ok(())
     }
 
     pub async fn render_session(
@@ -402,18 +440,39 @@ where
         self.config
             .reload()
             .map_err(|error| MuxError::invalid_input(error.to_string()))?;
+        self.finish_config_reload(&current_mode);
+        Ok(())
+    }
+
+    pub fn reload_config_if_changed(&mut self) -> Result<bool> {
+        match self.config.reload_if_changed() {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                let current_mode = self.input_state.current_mode().to_owned();
+                self.finish_config_reload(&current_mode);
+                Ok(true)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.record_notification(message.clone());
+                Err(MuxError::invalid_input(message))
+            }
+        }
+    }
+
+    fn finish_config_reload(&mut self, current_mode: &str) {
         if self
             .config
             .active_script()
             .loaded_config()
             .modes
-            .contains_key(&current_mode)
+            .contains_key(current_mode)
         {
             self.input_state.clear_pending();
         } else {
             self.input_state.set_mode(NORMAL_MODE);
+            self.search_prompt = None;
         }
-        Ok(())
     }
 
     async fn execute_actions(
@@ -424,6 +483,8 @@ where
     ) -> Result<()> {
         let mut pending = VecDeque::from(actions);
         let mut expansions = 0usize;
+        let mut current_session_id = session_id;
+        let current_viewport = viewport;
         while let Some(action) = pending.pop_front() {
             let result = match action {
                 Action::Noop => Ok(()),
@@ -431,11 +492,10 @@ where
                     prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::RunNamedAction { name } => {
-                    match self
-                        .config
-                        .active_script()
-                        .run_named_action(&name, self.context_for(session_id, viewport, None))
-                    {
+                    match self.config.active_script().run_named_action(
+                        &name,
+                        self.context_for(current_session_id, current_viewport, None),
+                    ) {
                         Ok(actions) => {
                             prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                         }
@@ -443,12 +503,18 @@ where
                     }
                 }
                 Action::EnterMode { mode } => {
-                    let actions = self.transition_mode(mode, session_id, viewport).await?;
+                    let actions = self
+                        .transition_mode(mode, current_session_id, current_viewport)
+                        .await?;
                     prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
                 Action::LeaveMode => {
                     let actions = self
-                        .transition_mode(NORMAL_MODE.to_owned(), session_id, viewport)
+                        .transition_mode(
+                            NORMAL_MODE.to_owned(),
+                            current_session_id,
+                            current_viewport,
+                        )
                         .await?;
                     prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
@@ -459,7 +525,7 @@ where
                         mode
                     };
                     let actions = self
-                        .transition_mode(next_mode, session_id, viewport)
+                        .transition_mode(next_mode, current_session_id, current_viewport)
                         .await?;
                     prepend_actions_with_limit(&mut pending, actions, &mut expansions)
                 }
@@ -471,13 +537,103 @@ where
                     self.record_notification(format_notification(level, &message));
                     Ok(())
                 }
+                Action::FocusBuffer { buffer_id } => {
+                    let location = Self::buffer_location_from_response(
+                        self.client
+                            .request_message(ClientMessage::Buffer(BufferRequest::GetLocation {
+                                request_id: self.client.next_request_id(),
+                                buffer_id,
+                            }))
+                            .await?,
+                        "buffer focus",
+                    )?;
+                    let (session_id, node_id) =
+                        Self::attached_buffer_location(Some(buffer_id), location, "buffer focus")?;
+                    self.focus_node_with_shortcut(
+                        session_id,
+                        node_id,
+                        self.active_session_id == Some(session_id),
+                    )
+                    .await?;
+                    current_session_id = Some(session_id);
+                    if let Some(viewport) = current_viewport {
+                        self.set_active_view(session_id, viewport);
+                    }
+                    self.client.resync_all_sessions().await
+                }
+                Action::RevealBuffer { buffer_id } => {
+                    let location = Self::buffer_location_from_response(
+                        self.client
+                            .request_message(ClientMessage::Buffer(BufferRequest::Reveal {
+                                request_id: self.client.next_request_id(),
+                                buffer_id,
+                                client_id: None,
+                            }))
+                            .await?,
+                        "buffer reveal",
+                    )?;
+                    let (session_id, _) =
+                        Self::attached_buffer_location(Some(buffer_id), location, "buffer reveal")?;
+                    current_session_id = Some(session_id);
+                    if let Some(viewport) = current_viewport {
+                        self.set_active_view(session_id, viewport);
+                    }
+                    self.client.resync_all_sessions().await
+                }
+                Action::OpenBufferHistory {
+                    buffer_id,
+                    scope,
+                    placement,
+                } => {
+                    let location = Self::buffer_location_from_response(
+                        self.client
+                            .request_message(ClientMessage::Buffer(BufferRequest::OpenHistory {
+                                request_id: self.client.next_request_id(),
+                                buffer_id,
+                                scope,
+                                placement,
+                                client_id: None,
+                            }))
+                            .await?,
+                        "buffer history",
+                    )?;
+                    let (session_id, _) =
+                        Self::attached_buffer_location(None, location, "buffer history")?;
+                    current_session_id = Some(session_id);
+                    if let Some(viewport) = current_viewport {
+                        self.set_active_view(session_id, viewport);
+                    }
+                    self.client.resync_all_sessions().await
+                }
                 action => {
-                    let Some((session_id, viewport)) = session_id.zip(viewport) else {
-                        continue;
-                    };
-                    let presentation = self.prepare_presentation(session_id, viewport).await?;
-                    self.execute_action(session_id, viewport, &presentation, action)
+                    match self
+                        .execute_without_presentation(current_session_id, action)
                         .await
+                    {
+                        Ok(None) => Ok(()),
+                        Ok(Some(action)) => {
+                            let mut missing = Vec::new();
+                            if current_session_id.is_none() {
+                                missing.push("current_session_id");
+                            }
+                            if current_viewport.is_none() {
+                                missing.push("current_viewport");
+                            }
+                            if !missing.is_empty() {
+                                return Err(MuxError::invalid_input(format!(
+                                    "cannot execute action {action:?} without {}",
+                                    missing.join(" and ")
+                                )));
+                            }
+                            let session_id = current_session_id.expect("checked current session");
+                            let viewport = current_viewport.expect("checked current viewport");
+                            let presentation =
+                                self.prepare_presentation(session_id, viewport).await?;
+                            self.execute_action(session_id, viewport, &presentation, action)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
             };
             if let Err(error) = result {
@@ -485,6 +641,192 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn execute_without_presentation(
+        &mut self,
+        current_session_id: Option<SessionId>,
+        action: Action,
+    ) -> Result<Option<Action>> {
+        match action {
+            Action::CloseFloating {
+                floating_id: Some(floating_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Floating(FloatingRequest::Close {
+                        request_id: self.client.next_request_id(),
+                        floating_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::CloseView {
+                node_id: Some(node_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Close {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::KillBuffer {
+                buffer_id: Some(buffer_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Buffer(BufferRequest::Kill {
+                        request_id: self.client.next_request_id(),
+                        buffer_id,
+                        force: false,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::DetachBuffer {
+                buffer_id: Some(buffer_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Buffer(BufferRequest::Detach {
+                        request_id: self.client.next_request_id(),
+                        buffer_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::MoveBufferToNode { buffer_id, node_id } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveBufferToNode {
+                        request_id: self.client.next_request_id(),
+                        buffer_id,
+                        target_leaf_node_id: node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::ZoomNode {
+                node_id: Some(node_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Zoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::UnzoomNode {
+                session_id: target_session_id,
+            } => {
+                let Some(session_id) = target_session_id.or(current_session_id) else {
+                    return Err(MuxError::invalid_input(format!(
+                        "cannot execute action {:?} without current_session_id",
+                        Action::UnzoomNode {
+                            session_id: target_session_id
+                        }
+                    )));
+                };
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Unzoom {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::ToggleZoomNode {
+                node_id: Some(node_id),
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::SwapSiblingNodes {
+                first_node_id: Some(first_node_id),
+                second_node_id,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::SwapSiblings {
+                        request_id: self.client.next_request_id(),
+                        first_node_id,
+                        second_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::BreakNode {
+                node_id: Some(node_id),
+                destination,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::BreakNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        destination,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::JoinBufferAtNode {
+                node_id: Some(node_id),
+                buffer_id,
+                placement,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        buffer_id,
+                        placement,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::MoveNodeBefore {
+                node_id: Some(node_id),
+                sibling_node_id,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            Action::MoveNodeAfter {
+                node_id: Some(node_id),
+                sibling_node_id,
+            } => {
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeAfter {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await?;
+                Ok(None)
+            }
+            other => Ok(Some(other)),
+        }
     }
 
     async fn transition_mode(
@@ -582,6 +924,7 @@ where
             }
             Action::SearchNext => self.navigate_search(presentation, true).await,
             Action::SearchPrev => self.navigate_search(presentation, false).await,
+            Action::CommitSearch => self.commit_search_prompt(session_id, viewport).await,
             Action::CancelSearch => self.cancel_search_prompt(session_id, viewport).await,
             Action::EnterSelect { kind } => {
                 self.enter_select_mode(session_id, viewport, presentation, kind)
@@ -888,9 +1231,122 @@ where
                     .await?;
                 self.client.resync_all_sessions().await
             }
-            Action::FocusBuffer { buffer_id } | Action::RevealBuffer { buffer_id } => {
-                self.focus_buffer(session_id, buffer_id).await
+            Action::ZoomNode { node_id: None } => {
+                let node_id = presentation
+                    .focused_leaf()
+                    .map(|leaf| leaf.node_id)
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to zoom"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::Zoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
             }
+            Action::ToggleZoomNode { node_id } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to toggle zoom"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::SwapSiblingNodes {
+                first_node_id,
+                second_node_id,
+            } => {
+                let first_node_id = first_node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to swap"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::SwapSiblings {
+                        request_id: self.client.next_request_id(),
+                        first_node_id,
+                        second_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::BreakNode {
+                node_id,
+                destination,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to break"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::BreakNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        destination,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::JoinBufferAtNode {
+                node_id,
+                buffer_id,
+                placement,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| {
+                        MuxError::invalid_input("no focused node to join buffer into")
+                    })?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::JoinBufferAtNode {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        buffer_id,
+                        placement,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::MoveNodeBefore {
+                node_id,
+                sibling_node_id,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to reorder"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::MoveNodeAfter {
+                node_id,
+                sibling_node_id,
+            } => {
+                let node_id = node_id
+                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+                    .ok_or_else(|| MuxError::invalid_input("no focused node to reorder"))?;
+                self.client
+                    .request_message(ClientMessage::Node(NodeRequest::MoveNodeAfter {
+                        request_id: self.client.next_request_id(),
+                        node_id,
+                        sibling_node_id,
+                    }))
+                    .await?;
+                self.client.resync_all_sessions().await
+            }
+            Action::FocusBuffer { .. }
+            | Action::RevealBuffer { .. }
+            | Action::OpenBufferHistory { .. }
+            | Action::UnzoomNode { .. }
+            | Action::ZoomNode { node_id: Some(_) } => Err(MuxError::invalid_input(
+                "action should be handled before presentation is required",
+            )),
             other => Err(MuxError::invalid_input(format!(
                 "action '{other:?}' is not supported by the live executor yet"
             ))),
@@ -1179,6 +1635,53 @@ where
             .map(|node| node.session_id)
     }
 
+    fn buffer_location_from_response(
+        response: ServerResponse,
+        context: &str,
+    ) -> Result<BufferLocation> {
+        match response {
+            ServerResponse::BufferLocation(response) => Ok(response.location),
+            ServerResponse::BufferWithLocation(response) => {
+                let (_, _, location, _) = response.into_parts();
+                Ok(location)
+            }
+            other => Err(MuxError::protocol(format!(
+                "expected {context} response, got {other:?}"
+            ))),
+        }
+    }
+
+    fn attached_buffer_location(
+        expected_buffer_id: Option<BufferId>,
+        location: BufferLocation,
+        context: &str,
+    ) -> Result<(SessionId, NodeId)> {
+        if let Some(expected_buffer_id) = expected_buffer_id
+            && location.buffer_id != expected_buffer_id
+        {
+            return Err(MuxError::protocol(format!(
+                "{context} returned location for buffer {} while acting on buffer {expected_buffer_id}",
+                location.buffer_id
+            )));
+        }
+
+        match location.attachment {
+            BufferLocationAttachment::Session {
+                session_id,
+                node_id,
+            }
+            | BufferLocationAttachment::Floating {
+                session_id,
+                node_id,
+                ..
+            } => Ok((session_id, node_id)),
+            BufferLocationAttachment::Detached => Err(MuxError::conflict(format!(
+                "{context} returned a detached location for buffer {}",
+                expected_buffer_id.unwrap_or(location.buffer_id)
+            ))),
+        }
+    }
+
     fn set_active_view(&mut self, session_id: SessionId, viewport: Size) {
         self.active_session_id = Some(session_id);
         self.viewport = Some(viewport);
@@ -1192,58 +1695,6 @@ where
             .get(self.input_state.current_mode())
             .map(|mode| mode.fallback_policy)
             .unwrap_or(FallbackPolicy::Ignore)
-    }
-
-    async fn focus_buffer(&mut self, session_id: SessionId, buffer_id: BufferId) -> Result<()> {
-        let node_id = self
-            .client
-            .state()
-            .buffers
-            .get(&buffer_id)
-            .and_then(|buffer| buffer.attachment_node_id)
-            .ok_or_else(|| MuxError::invalid_input(format!("buffer {buffer_id} is detached")))?;
-
-        let mut selections = Vec::new();
-        let mut child_id = node_id;
-        let mut parent_id = self
-            .client
-            .state()
-            .nodes
-            .get(&node_id)
-            .and_then(|node| node.parent_id);
-        while let Some(current_parent) = parent_id {
-            if let Some(tabs) = self
-                .client
-                .state()
-                .nodes
-                .get(&current_parent)
-                .and_then(|node| node.tabs.as_ref())
-                && let Some(index) = tabs.tabs.iter().position(|tab| tab.child_id == child_id)
-            {
-                selections.push((current_parent, index));
-            }
-            child_id = current_parent;
-            parent_id = self
-                .client
-                .state()
-                .nodes
-                .get(&current_parent)
-                .and_then(|node| node.parent_id);
-        }
-        selections.reverse();
-
-        for (tabs_node_id, index) in selections {
-            self.client
-                .request_message(ClientMessage::Node(NodeRequest::SelectTab {
-                    request_id: self.client.next_request_id(),
-                    tabs_node_id,
-                    index: u32::try_from(index).map_err(|_| {
-                        MuxError::invalid_input("tab index exceeds protocol limits")
-                    })?,
-                }))
-                .await?;
-        }
-        self.focus_node(session_id, node_id).await
     }
 
     fn focused_leaf<'a>(&self, presentation: &'a PresentationModel) -> Result<&'a LeafFrame> {
@@ -1277,6 +1728,9 @@ where
         presentation: &PresentationModel,
         actions: &[Action],
     ) -> bool {
+        // When the focused pane is acting like a live terminal surface, prefer
+        // forwarding local search/select/navigation bindings to the program
+        // instead of stealing keys that fullscreen apps expect to receive.
         let Some(leaf) = presentation.focused_leaf() else {
             return false;
         };
@@ -1454,8 +1908,14 @@ where
                 }
                 Ok(())
             }
-            KeyEvent::Enter => self.commit_search_prompt(session_id, viewport).await,
-            KeyEvent::Escape => self.cancel_search_prompt(session_id, viewport).await,
+            KeyEvent::Enter => {
+                self.execute_actions(Some(session_id), Some(viewport), vec![Action::CommitSearch])
+                    .await
+            }
+            KeyEvent::Escape => {
+                self.execute_actions(Some(session_id), Some(viewport), vec![Action::CancelSearch])
+                    .await
+            }
             KeyEvent::Bytes(bytes) => {
                 if let Some(prompt) = &mut self.search_prompt {
                     prompt.query.push_str(&String::from_utf8_lossy(&bytes));
@@ -1780,18 +2240,31 @@ where
     }
 
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
-        if self
-            .client
-            .state()
-            .sessions
-            .get(&session_id)
-            .and_then(|session| session.focused_leaf_id)
-            == Some(node_id)
+        self.focus_node_with_shortcut(session_id, node_id, true)
+            .await
+    }
+
+    async fn focus_node_with_shortcut(
+        &mut self,
+        session_id: SessionId,
+        node_id: NodeId,
+        allow_same_session_shortcut: bool,
+    ) -> Result<()> {
+        if allow_same_session_shortcut
+            && self
+                .client
+                .state()
+                .sessions
+                .get(&session_id)
+                .and_then(|session| session.focused_leaf_id)
+                == Some(node_id)
         {
             return Ok(());
         }
 
-        let previous_buffer = self.focused_buffer_for_session(session_id);
+        let previous_buffer = self
+            .active_session_id
+            .and_then(|active_session_id| self.focused_buffer_for_session(active_session_id));
         let sent_focus_out = if let Some(buffer_id) = previous_buffer {
             self.maybe_send_focus_sequence(buffer_id, false).await?
         } else {
@@ -1903,6 +2376,7 @@ fn action_is_local_terminal_action(action: &Action) -> bool {
         | Action::EnterSearchMode
         | Action::SearchNext
         | Action::SearchPrev
+        | Action::CommitSearch
         | Action::CancelSearch
         | Action::EnterSelect { .. }
         | Action::SelectMove { .. }
@@ -2292,7 +2766,11 @@ fn event_name(event: &ServerEvent) -> &'static str {
     }
 }
 
-fn event_info(name: &str, event: &ServerEvent) -> EventInfo {
+fn event_info(
+    name: &str,
+    event: &ServerEvent,
+    fallback_session_id: Option<SessionId>,
+) -> EventInfo {
     let mut info = base_event_info(name);
     match event {
         ServerEvent::SessionCreated(event) => info.session_id = Some(event.session.id),
@@ -2304,7 +2782,10 @@ fn event_info(name: &str, event: &ServerEvent) -> EventInfo {
         }
         ServerEvent::BufferDetached(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::NodeChanged(event) => info.session_id = Some(event.session_id),
-        ServerEvent::FloatingChanged(event) => info.session_id = Some(event.session_id),
+        ServerEvent::FloatingChanged(event) => {
+            info.session_id = Some(event.session_id);
+            info.floating_id = event.floating_id;
+        }
         ServerEvent::FocusChanged(event) => {
             info.session_id = Some(event.session_id);
             info.node_id = event.focused_leaf_id;
@@ -2316,6 +2797,9 @@ fn event_info(name: &str, event: &ServerEvent) -> EventInfo {
             info.previous_session_id = event.previous_session_id;
             info.client_id = Some(event.client.id);
         }
+    }
+    if info.session_id.is_none() {
+        info.session_id = fallback_session_id;
     }
     info
 }
@@ -2329,5 +2813,165 @@ fn base_event_info(name: &str) -> EventInfo {
         buffer_id: None,
         node_id: None,
         floating_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use embers_core::{ActivityState, BufferId, FloatingId, NodeId, PtySize, RequestId, SessionId};
+    use embers_protocol::{
+        BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordKind,
+        BufferRecordState, BufferWithLocationResponse, FloatingChangedEvent, ServerEvent,
+        ServerResponse,
+    };
+    use tempfile::tempdir;
+
+    use super::{ConfiguredClient, SearchPrompt, event_info};
+    use crate::client::MuxClient;
+    use crate::config::{ConfigDiscoveryOptions, ConfigManager};
+    use crate::input::NORMAL_MODE;
+    use crate::testing::FakeTransport;
+
+    #[test]
+    fn attached_buffer_location_accepts_session_and_floating_locations() {
+        assert_eq!(
+            ConfiguredClient::<crate::testing::FakeTransport>::attached_buffer_location(
+                Some(BufferId(7)),
+                BufferLocation::session(BufferId(7), SessionId(2), NodeId(5)),
+                "buffer focus",
+            )
+            .expect("session attachment should validate"),
+            (SessionId(2), NodeId(5))
+        );
+        assert_eq!(
+            ConfiguredClient::<crate::testing::FakeTransport>::attached_buffer_location(
+                Some(BufferId(7)),
+                BufferLocation::floating(BufferId(7), SessionId(2), NodeId(5), FloatingId(9)),
+                "buffer reveal",
+            )
+            .expect("floating attachment should validate"),
+            (SessionId(2), NodeId(5))
+        );
+    }
+
+    #[test]
+    fn attached_buffer_location_accepts_history_helper_locations_without_source_id_match() {
+        assert_eq!(
+            ConfiguredClient::<crate::testing::FakeTransport>::attached_buffer_location(
+                None,
+                BufferLocation::session(BufferId(8), SessionId(2), NodeId(5)),
+                "buffer history",
+            )
+            .expect("history helper attachment should validate"),
+            (SessionId(2), NodeId(5))
+        );
+    }
+
+    #[test]
+    fn attached_buffer_location_rejects_mismatched_or_detached_locations() {
+        let mismatch = ConfiguredClient::<crate::testing::FakeTransport>::attached_buffer_location(
+            Some(BufferId(7)),
+            BufferLocation::session(BufferId(8), SessionId(2), NodeId(5)),
+            "buffer focus",
+        )
+        .expect_err("mismatched buffer ids should fail");
+        let detached = ConfiguredClient::<crate::testing::FakeTransport>::attached_buffer_location(
+            Some(BufferId(7)),
+            BufferLocation {
+                buffer_id: BufferId(7),
+                attachment: BufferLocationAttachment::Detached,
+            },
+            "buffer reveal",
+        )
+        .expect_err("detached locations should fail");
+
+        assert!(
+            mismatch
+                .to_string()
+                .contains("returned location for buffer 8")
+        );
+        assert!(detached.to_string().contains("detached location"));
+    }
+
+    #[test]
+    fn buffer_location_from_response_accepts_buffer_with_location() {
+        let location = BufferLocation::session(BufferId(8), SessionId(2), NodeId(5));
+        let response = ServerResponse::BufferWithLocation(
+            BufferWithLocationResponse::new(
+                RequestId(1),
+                BufferRecord {
+                    id: BufferId(8),
+                    title: "helper".to_owned(),
+                    command: Vec::new(),
+                    cwd: None,
+                    kind: BufferRecordKind::Helper,
+                    state: BufferRecordState::Created,
+                    pid: None,
+                    attachment_node_id: Some(NodeId(5)),
+                    read_only: true,
+                    helper_source_buffer_id: Some(BufferId(7)),
+                    helper_scope: Some(embers_protocol::BufferHistoryScope::Visible),
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+                location,
+                false,
+            )
+            .expect("buffer and location ids should match"),
+        );
+
+        assert_eq!(
+            ConfiguredClient::<crate::testing::FakeTransport>::buffer_location_from_response(
+                response,
+                "buffer history",
+            )
+            .expect("buffer-with-location response should validate"),
+            location
+        );
+    }
+
+    #[test]
+    fn floating_changed_event_info_includes_floating_id() {
+        let info = event_info(
+            "floating_changed",
+            &ServerEvent::FloatingChanged(FloatingChangedEvent {
+                session_id: SessionId(2),
+                floating_id: Some(FloatingId(9)),
+            }),
+            None,
+        );
+
+        assert_eq!(info.session_id, Some(SessionId(2)));
+        assert_eq!(info.floating_id, Some(FloatingId(9)));
+    }
+
+    #[test]
+    fn finish_config_reload_clears_search_prompt_when_mode_falls_back_to_normal() {
+        let tempdir = tempdir().expect("create tempdir");
+        let config_path = tempdir.path().join("config.rhai");
+        fs::write(&config_path, "define_mode(\"custom\");").expect("write custom config");
+        let config = ConfigManager::load(
+            ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+        )
+        .expect("load config");
+        let client = MuxClient::new(FakeTransport::default());
+        let mut configured = ConfiguredClient::new(client, config);
+        configured.input_state.set_mode("custom".to_owned());
+        configured.search_prompt = Some(SearchPrompt {
+            node_id: NodeId(7),
+            query: "stale".to_owned(),
+        });
+
+        fs::write(&config_path, "").expect("rewrite config without custom mode");
+
+        configured.reload_config().expect("reload config");
+
+        assert_eq!(configured.input_state.current_mode(), NORMAL_MODE);
+        assert_eq!(configured.search_prompt, None);
     }
 }

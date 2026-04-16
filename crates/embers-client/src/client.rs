@@ -107,9 +107,8 @@ where
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
-        let event = self.transport.next_event().await?;
-        self.state.apply_event(&event);
-        self.resync_for_event(&event).await?;
+        let event = self.next_event().await?;
+        self.handle_event(&event).await?;
         Ok(event)
     }
 
@@ -119,6 +118,27 @@ where
         } else {
             Ok(self.current_client().await?.id)
         }
+    }
+
+    pub async fn process_next_event_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ServerEvent>> {
+        let event = match tokio::time::timeout(timeout, self.next_event()).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(None),
+        };
+        self.handle_event(&event).await?;
+        Ok(Some(event))
+    }
+
+    pub async fn next_event(&mut self) -> Result<ServerEvent> {
+        self.transport.next_event().await
+    }
+
+    pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        self.state.apply_event(event);
+        self.resync_for_event(event).await
     }
 
     pub async fn resync_session(&mut self, session_id: SessionId) -> Result<()> {
@@ -157,6 +177,26 @@ where
             }
             other => Err(MuxError::protocol(format!(
                 "expected visible snapshot response, got {other:?}"
+            ))),
+        }
+    }
+
+    pub async fn refresh_buffer_record(&mut self, buffer_id: BufferId) -> Result<()> {
+        let response = self
+            .transport
+            .request(ClientMessage::Buffer(BufferRequest::Get {
+                request_id: self.next_request_id(),
+                buffer_id,
+            }))
+            .await?;
+
+        match expect_response(response)? {
+            ServerResponse::Buffer(response) => {
+                self.state.apply_buffer_record(response.buffer);
+                Ok(())
+            }
+            other => Err(MuxError::protocol(format!(
+                "expected buffer response, got {other:?}"
             ))),
         }
     }
@@ -278,10 +318,12 @@ where
                 }
                 Ok(())
             }
+            ServerEvent::RenderInvalidated(event) => {
+                self.refresh_buffer_record(event.buffer_id).await
+            }
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
-            | ServerEvent::FocusChanged(_)
-            | ServerEvent::RenderInvalidated(_) => Ok(()),
+            | ServerEvent::FocusChanged(_) => Ok(()),
         }
     }
 
