@@ -398,11 +398,11 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     if to.underline {
         output.push_str("\x1b[4m");
     }
-    if to.reverse {
-        output.push_str("\x1b[7m");
-    }
     if to.blink {
         output.push_str("\x1b[5m");
+    }
+    if to.reverse {
+        output.push_str("\x1b[7m");
     }
     if let Some(fg) = to.fg {
         let _ = write!(output, "\x1b[38;2;{};{};{}m", fg.red, fg.green, fg.blue);

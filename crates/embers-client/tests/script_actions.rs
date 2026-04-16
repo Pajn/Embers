@@ -273,9 +273,10 @@ fn action_helpers_roundtrip_to_typed_actions() {
             message: "hello".to_owned(),
         }]
     );
+    let ctx = demo_context();
     assert_eq!(
         engine
-            .run_named_action("open-history", demo_context())
+            .run_named_action("open-history", ctx.clone())
             .unwrap(),
         vec![Action::OpenBufferHistory {
             buffer_id: BufferId(4),
@@ -284,43 +285,35 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine.run_named_action("zoom", demo_context()).unwrap(),
+        engine.run_named_action("zoom", ctx.clone()).unwrap(),
         vec![Action::ZoomNode { node_id: None }]
     );
     assert_eq!(
-        engine.run_named_action("unzoom", demo_context()).unwrap(),
+        engine.run_named_action("unzoom", ctx.clone()).unwrap(),
         vec![Action::UnzoomNode { session_id: None }]
     );
     assert_eq!(
-        engine
-            .run_named_action("toggle-zoom", demo_context())
-            .unwrap(),
+        engine.run_named_action("toggle-zoom", ctx.clone()).unwrap(),
         vec![Action::ToggleZoomNode {
             node_id: Some(NodeId(7)),
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("swap-nodes", demo_context())
-            .unwrap(),
+        engine.run_named_action("swap-nodes", ctx.clone()).unwrap(),
         vec![Action::SwapSiblingNodes {
             first_node_id: None,
             second_node_id: NodeId(8),
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("break-node", demo_context())
-            .unwrap(),
+        engine.run_named_action("break-node", ctx.clone()).unwrap(),
         vec![Action::BreakNode {
             node_id: None,
             destination: NodeBreakDestination::Tab,
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("join-buffer", demo_context())
-            .unwrap(),
+        engine.run_named_action("join-buffer", ctx.clone()).unwrap(),
         vec![Action::JoinBufferAtNode {
             node_id: None,
             buffer_id: BufferId(9),
@@ -328,18 +321,14 @@ fn action_helpers_roundtrip_to_typed_actions() {
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("move-before", demo_context())
-            .unwrap(),
+        engine.run_named_action("move-before", ctx.clone()).unwrap(),
         vec![Action::MoveNodeBefore {
             node_id: None,
             sibling_node_id: NodeId(10),
         }]
     );
     assert_eq!(
-        engine
-            .run_named_action("move-after", demo_context())
-            .unwrap(),
+        engine.run_named_action("move-after", ctx).unwrap(),
         vec![Action::MoveNodeAfter {
             node_id: Some(NodeId(11)),
             sibling_node_id: NodeId(12),
@@ -584,6 +573,26 @@ fn move_node_after_rejects_negative_target_id() {
         error
             .to_string()
             .contains("node id must be zero or greater")
+    );
+}
+
+#[test]
+fn open_buffer_history_rejects_negative_buffer_id() {
+    let engine = load_engine(
+        r#"
+            fn bad_history(ctx) { action.open_buffer_history(-1, "visible", "floating") }
+            define_action("bad-history", bad_history);
+        "#,
+    );
+
+    let error = engine
+        .run_named_action("bad-history", demo_context())
+        .expect_err("negative buffer id should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("buffer id must be zero or greater")
     );
 }
 

@@ -64,10 +64,7 @@ pub struct ConfigManager {
 impl ConfigManager {
     pub fn load(discovery: ConfigDiscoveryOptions) -> Result<Self, ConfigManagerError> {
         let active_source = load_config_source(&discovery)?;
-        let active_script = match active_source.origin {
-            ConfigOrigin::BuiltIn => ScriptEngine::load(&active_source)?,
-            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &active_source)?,
-        };
+        let active_script = load_script_engine(&active_source)?;
         Ok(Self {
             discovery,
             active_source,
@@ -93,10 +90,7 @@ impl ConfigManager {
 
     pub fn reload(&mut self) -> Result<(), ConfigManagerError> {
         let candidate_source = load_config_source(&self.discovery)?;
-        let candidate_script = match candidate_source.origin {
-            ConfigOrigin::BuiltIn => ScriptEngine::load(&candidate_source)?,
-            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &candidate_source)?,
-        };
+        let candidate_script = load_script_engine(&candidate_source)?;
         self.active_source = candidate_source;
         self.active_script = candidate_script;
         Ok(())
@@ -108,13 +102,20 @@ impl ConfigManager {
             return Ok(false);
         }
 
-        let candidate_script = match candidate_source.origin {
-            ConfigOrigin::BuiltIn => ScriptEngine::load(&candidate_source)?,
-            _ => ScriptEngine::load_with_overlay(BUILTIN_CONFIG_SOURCE, &candidate_source)?,
-        };
+        let candidate_script = load_script_engine(&candidate_source)?;
         self.active_source = candidate_source;
         self.active_script = candidate_script;
         Ok(true)
+    }
+}
+
+fn load_script_engine(source: &LoadedConfigSource) -> Result<ScriptEngine, ConfigManagerError> {
+    match source.origin {
+        ConfigOrigin::BuiltIn => Ok(ScriptEngine::load(source)?),
+        _ => Ok(ScriptEngine::load_with_overlay(
+            BUILTIN_CONFIG_SOURCE,
+            source,
+        )?),
     }
 }
 

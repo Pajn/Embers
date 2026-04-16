@@ -2,7 +2,8 @@
 
 /* global Mark, elasticlunr, path_to_root */
 
-window.search = window.search || {};
+const EMBERS_DOC_SEARCH =
+    window.__EMBERS_CONFIG_API_SEARCH__ || (window.__EMBERS_CONFIG_API_SEARCH__ = {});
 (function search() {
     // Search functionality
     //
@@ -302,7 +303,7 @@ window.search = window.search || {};
         config.hasFocus = hasFocus;
     }
 
-    initSearchInteractions(window.search);
+    initSearchInteractions(EMBERS_DOC_SEARCH);
 
     function unfocusSearchbar() {
         // hacky, but just focusing a div only works once
@@ -426,7 +427,7 @@ window.search = window.search || {};
         const script = document.createElement('script');
         script.src = url;
         script.id = id;
-        script.onload = () => init(window.search);
+        script.onload = () => init(EMBERS_DOC_SEARCH);
         script.onerror = error => {
             console.error(`Failed to load \`${url}\`: ${error}`);
         };
@@ -437,7 +438,7 @@ window.search = window.search || {};
         if (yes) {
             loadSearchScript(
                 window.path_to_searchindex_js ||
-                path_to_root + 'searchindex-0ec70bca.js',
+                path_to_root + 'searchindex-60b5c002.js',
                 'mdbook-search-index');
             search_wrap.classList.remove('hidden');
             searchicon.setAttribute('aria-expanded', 'true');
@@ -552,4 +553,4 @@ window.search = window.search || {};
 
     // Exported functions
     search.hasFocus = hasFocus;
-})(window.search);
+})(EMBERS_DOC_SEARCH);

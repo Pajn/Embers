@@ -1654,9 +1654,12 @@ impl Runtime {
                 };
                 match state.break_node(node_id, into_floating) {
                     Ok(()) => {
-                        let current_floating_id = state
-                            .floating_id_for_node(node_id)
-                            .expect("broken node should remain addressable");
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
                         let (response, mut events) =
                             layout_ok_response(&state, request_id, session_id);
                         if previous_floating_id != current_floating_id {
@@ -1682,9 +1685,12 @@ impl Runtime {
                 };
                 match state.join_buffer_at_node(node_id, buffer_id, placement) {
                     Ok(()) => {
-                        let current_floating_id = state
-                            .floating_id_for_node(node_id)
-                            .expect("joined node should remain addressable");
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
                         let (response, mut events) =
                             layout_ok_response(&state, request_id, session_id);
                         if current_floating_id.is_some() {
@@ -2250,7 +2256,9 @@ impl Runtime {
                             %rollback_error,
                             "failed to roll back helper buffer after focus failure"
                         );
-                        Err(rollback_error)
+                        Err(MuxError::internal(format!(
+                            "{error}; rollback also failed: {rollback_error}"
+                        )))
                     }
                 }
             }

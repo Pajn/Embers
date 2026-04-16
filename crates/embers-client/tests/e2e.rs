@@ -162,26 +162,28 @@ async fn poll_for_tab_activity(
     expected_activity: ActivityState,
     timeout: Duration,
     poll_interval: Duration,
-) -> bool {
+) -> embers_core::Result<bool> {
     let deadline = Instant::now() + timeout;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return false;
+            return Ok(false);
         }
-        let _ = match tokio::time::timeout(remaining, client.resync_all_sessions()).await {
-            Ok(result) => result,
-            Err(_) => return false,
-        };
+        match tokio::time::timeout(remaining, client.resync_all_sessions()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(false),
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return false;
+            return Ok(false);
         }
-        let _ = match tokio::time::timeout(remaining, refresh_all_snapshots(client)).await {
-            Ok(result) => result,
-            Err(_) => return false,
-        };
+        match tokio::time::timeout(remaining, refresh_all_snapshots(client)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(false),
+        }
         let maybe_session_id = client
             .state()
             .sessions
@@ -206,10 +208,10 @@ async fn poll_for_tab_activity(
                 .iter()
                 .any(|tab| tab.title == target_title && tab.activity == expected_activity)
         {
-            return true;
+            return Ok(true);
         }
         if Instant::now() >= deadline {
-            return false;
+            return Ok(false);
         }
         tokio::time::sleep(poll_interval).await;
     }
@@ -904,7 +906,8 @@ async fn hidden_activity_is_visible_and_reconnect_rehydrates_state() {
         Duration::from_secs(2),
         Duration::from_millis(50),
     )
-    .await;
+    .await
+    .expect("poll hidden activity succeeds");
     assert!(
         saw_hidden_activity,
         "hidden tab activity should propagate before reconnect"
@@ -989,7 +992,8 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         Duration::from_secs(2),
         Duration::from_millis(50),
     )
-    .await;
+    .await
+    .expect("poll hidden bell succeeds");
     assert!(
         saw_hidden_bell,
         "timed out waiting for bell activity after reconnect"
@@ -1019,7 +1023,8 @@ async fn hidden_bell_is_visible_to_clients_until_revealed() {
         Duration::from_secs(2),
         Duration::from_millis(50),
     )
-    .await;
+    .await
+    .expect("poll cleared hidden bell succeeds");
     assert!(
         cleared_hidden_bell,
         "hidden tab kept Bell activity after being revealed"

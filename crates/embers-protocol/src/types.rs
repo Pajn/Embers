@@ -852,8 +852,13 @@ impl BufferWithLocationResponse {
         self.at_root_tab
     }
 
-    pub fn into_parts(self) -> (RequestId, BufferRecord, BufferLocation) {
-        (self.request_id, self.buffer, self.location)
+    pub fn into_parts(self) -> (RequestId, BufferRecord, BufferLocation, bool) {
+        (
+            self.request_id,
+            self.buffer,
+            self.location,
+            self.at_root_tab,
+        )
     }
 }
 

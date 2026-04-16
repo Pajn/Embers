@@ -9,7 +9,7 @@ behavior.
 | --- | --- | --- |
 | Buffer runtime ownership and PTY lifecycle | `crates/embers-test-support/tests/buffer_runtime.rs` | Locks down runtime state transitions and detached-buffer policy. |
 | Backend boundary and capture semantics | `crates/embers-server/tests/backend.rs` and `crates/embers-server/tests/buffer_lifecycle.rs` | Verifies backend ownership, activity bookkeeping, and server-side lifecycle rules. |
-| Byte-stream features and alternate-screen parsing | `crates/terminal-backend/tests/*` | Covers escape-sequence handling, visible snapshots, and parser/backend invariants. |
+| Byte-stream features and alternate-screen parsing | `crates/embers-server/tests/backend.rs` and `crates/embers-client/tests/e2e.rs` | Current coverage lives in the server/backend regression tests plus the end-to-end alternate-screen client checks. |
 
 ## Client and render-source contracts
 

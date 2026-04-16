@@ -14,9 +14,9 @@ The client does not consume terminal diffs. It renders from full visible snapsho
 
 ### Freshness expectations
 
-`RenderInvalidated` means the visible snapshot for that buffer may be stale. The configured client refreshes invalidated visible leaves before rendering and re-projects the presentation after those refreshes so updated titles, alternate-screen flags, and visible lines are used together.
+`RenderInvalidated` means the visible snapshot for that buffer may be stale. The client refreshes invalidated visible leaves (leaf nodes in the layout tree corresponding to visible buffers) before rendering and then updates the display so updated titles, alternate-screen flags, and visible lines are used together.
 
-For event handling, the client also refreshes the affected `BufferRecord` before dispatching render-invalidated hooks. That keeps metadata-only consumers such as bell automation aligned with the latest server state.
+For event handling, the client also refreshes the affected `BufferRecord` before dispatching `RenderInvalidated` hooks. That keeps metadata-only consumers such as bell automation aligned with the latest server state.
 
 ### Metadata synchronization
 

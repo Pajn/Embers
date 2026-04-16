@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0ec70bca.js";
+            window.path_to_searchindex_js = "searchindex-60b5c002.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c8603eba.js"></script>
@@ -614,7 +614,8 @@ Description
 </div>
 
 <div group="commit_search" id="commit_search-Description" class="tabcontent" style="display: block;">
-Commit the active search.
+Finalize the active search, keep the current match and cursor position, and leave search
+mode with the committed result in place.
 </div>
 
 </div>
@@ -1021,7 +1022,7 @@ Description
 </div>
 
 <div group="join_buffer_here" id="join_buffer_here-Description" class="tabcontent" style="display: block;">
-Join a buffer at the current node.
+Attach a buffer at the current node.
 `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
 Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
@@ -1154,6 +1155,27 @@ Move a buffer into a specific node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> move_current_node_after </h2>
+
+<pre><code class="language-rust ignore">fn move_current_node_after(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="move_current_node_after" id="link-move_current_node_after-Description" class="tablinks active" onclick="openTab(event, &#39;move_current_node_after&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="move_current_node_after" id="move_current_node_after-Description" class="tabcontent" style="display: block;">
+Move the current node after a sibling.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> move_current_node_before </h2>
 
 <pre><code class="language-rust ignore">fn move_current_node_before(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
@@ -1166,6 +1188,8 @@ Description
 
 <div group="move_current_node_before" id="move_current_node_before-Description" class="tabcontent" style="display: block;">
 Move the current node before a sibling.
+Use this when the current node is the one being repositioned.
+Example: `action.move_current_node_before(42)`.
 </div>
 
 </div>
@@ -1187,6 +1211,29 @@ Description
 
 <div group="move_node_after" id="move_node_after-Description" class="tabcontent" style="display: block;">
 Move a node after a sibling.
+Use this when you need to move a specific node id instead of the current node.
+Example: `action.move_node_after(10, 42)`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> move_node_before </h2>
+
+<pre><code class="language-rust ignore">fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="move_node_before" id="link-move_node_before-Description" class="tablinks active" onclick="openTab(event, &#39;move_node_before&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="move_node_before" id="move_node_before-Description" class="tabcontent" style="display: block;">
+Move a node before a sibling.
 </div>
 
 </div>
@@ -1853,7 +1900,7 @@ Split the current node and attach the provided tree as the new sibling.
     
 <h2 class="func-name"> <code>fn</code> swap_current_node </h2>
 
-<pre><code class="language-rust ignore">fn swap_current_node(_: ActionApi, second_node_id: int) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn swap_current_node(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="swap_current_node" id="link-swap_current_node-Description" class="tablinks active" onclick="openTab(event, &#39;swap_current_node&#39;, &#39;Description&#39;)">
@@ -1904,7 +1951,9 @@ Description
 </div>
 
 <div group="toggle_zoom_node" id="toggle_zoom_node-Description" class="tabcontent" style="display: block;">
-Toggle zoom on a node.
+Toggle zoom for the specified node id.
+There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
+focused node and `toggle_zoom_node` when you already know the target id.
 </div>
 
 </div>
@@ -1925,7 +1974,8 @@ Description
 </div>
 
 <div group="unzoom_current_session" id="unzoom_current_session-Description" class="tabcontent" style="display: block;">
-Unzoom the current session.
+Clear the current session's active zoom state.
+This removes the current session zoom rather than unwinding a stack of prior zooms.
 </div>
 
 </div>
@@ -1967,7 +2017,8 @@ Description
 </div>
 
 <div group="zoom_current_node" id="zoom_current_node-Description" class="tabcontent" style="display: block;">
-Zoom the current node.
+Zoom the session's currently focused node.
+There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 </div>
 
 </div>
@@ -2351,11 +2402,8 @@ Description
 Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
 <p><code>segment(_: UiApi, text: String) -&gt; BarSegment</code> produces plain text with default
 [<code>StyleSpec</code>] values and no click target.</p>
-<p>The overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> supports
-<code>fg</code>, <code>bg</code>, <code>bold</code>, <code>italic</code>, <code>underline</code>, <code>dim</code>, <code>blink</code>, and <code>target</code> keys to override
-styling and attach an optional interaction target. <code>dim</code> is a boolean that renders the
-text with reduced intensity for a muted appearance, and <code>blink</code> is a boolean that enables
-blinking text for that segment.</p>
+<p>See the overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> doc for
+the full <code>options: Map</code> styling keys.</p>
 </div>
 
 </div>
@@ -2705,7 +2753,8 @@ Description
 </div>
 
 <div group="commit_search" id="commit_search-Description-1" class="tabcontent" style="display: block;">
-Commit the active search.
+Finalize the active search, keep the current match and cursor position, and leave search
+mode with the committed result in place.
 </div>
 
 </div>
@@ -3112,7 +3161,7 @@ Description
 </div>
 
 <div group="join_buffer_here" id="join_buffer_here-Description-1" class="tabcontent" style="display: block;">
-Join a buffer at the current node.
+Attach a buffer at the current node.
 `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
 Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
@@ -3245,6 +3294,27 @@ Move a buffer into a specific node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> move_current_node_after </h2>
+
+<pre><code class="language-rust ignore">fn move_current_node_after(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="move_current_node_after" id="link-move_current_node_after-Description-1" class="tablinks active" onclick="openTab(event, &#39;move_current_node_after&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="move_current_node_after" id="move_current_node_after-Description-1" class="tabcontent" style="display: block;">
+Move the current node after a sibling.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> move_current_node_before </h2>
 
 <pre><code class="language-rust ignore">fn move_current_node_before(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
@@ -3257,6 +3327,8 @@ Description
 
 <div group="move_current_node_before" id="move_current_node_before-Description-1" class="tabcontent" style="display: block;">
 Move the current node before a sibling.
+Use this when the current node is the one being repositioned.
+Example: `action.move_current_node_before(42)`.
 </div>
 
 </div>
@@ -3278,6 +3350,29 @@ Description
 
 <div group="move_node_after" id="move_node_after-Description-1" class="tabcontent" style="display: block;">
 Move a node after a sibling.
+Use this when you need to move a specific node id instead of the current node.
+Example: `action.move_node_after(10, 42)`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> move_node_before </h2>
+
+<pre><code class="language-rust ignore">fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="move_node_before" id="link-move_node_before-Description-1" class="tablinks active" onclick="openTab(event, &#39;move_node_before&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="move_node_before" id="move_node_before-Description-1" class="tabcontent" style="display: block;">
+Move a node before a sibling.
 </div>
 
 </div>
@@ -3944,7 +4039,7 @@ Split the current node and attach the provided tree as the new sibling.
     
 <h2 class="func-name"> <code>fn</code> swap_current_node </h2>
 
-<pre><code class="language-rust ignore">fn swap_current_node(_: ActionApi, second_node_id: int) -&gt; Action</code></pre>
+<pre><code class="language-rust ignore">fn swap_current_node(_: ActionApi, sibling_node_id: int) -&gt; Action</code></pre>
 <div>
 <div class="tab">
 <button group="swap_current_node" id="link-swap_current_node-Description-1" class="tablinks active" onclick="openTab(event, &#39;swap_current_node&#39;, &#39;Description&#39;)">
@@ -3995,7 +4090,9 @@ Description
 </div>
 
 <div group="toggle_zoom_node" id="toggle_zoom_node-Description-1" class="tabcontent" style="display: block;">
-Toggle zoom on a node.
+Toggle zoom for the specified node id.
+There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
+focused node and `toggle_zoom_node` when you already know the target id.
 </div>
 
 </div>
@@ -4016,7 +4113,8 @@ Description
 </div>
 
 <div group="unzoom_current_session" id="unzoom_current_session-Description-1" class="tabcontent" style="display: block;">
-Unzoom the current session.
+Clear the current session's active zoom state.
+This removes the current session zoom rather than unwinding a stack of prior zooms.
 </div>
 
 </div>
@@ -4058,7 +4156,8 @@ Description
 </div>
 
 <div group="zoom_current_node" id="zoom_current_node-Description-1" class="tabcontent" style="display: block;">
-Zoom the current node.
+Zoom the session's currently focused node.
+There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 </div>
 
 </div>
@@ -6312,11 +6411,8 @@ Description
 Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling.
 <p><code>segment(_: UiApi, text: String) -&gt; BarSegment</code> produces plain text with default
 [<code>StyleSpec</code>] values and no click target.</p>
-<p>The overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> supports
-<code>fg</code>, <code>bg</code>, <code>bold</code>, <code>italic</code>, <code>underline</code>, <code>dim</code>, <code>blink</code>, and <code>target</code> keys to override
-styling and attach an optional interaction target. <code>dim</code> is a boolean that renders the
-text with reduced intensity for a muted appearance, and <code>blink</code> is a boolean that enables
-blinking text for that segment.</p>
+<p>See the overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> doc for
+the full <code>options: Map</code> styling keys.</p>
 </div>
 
 </div>

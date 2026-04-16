@@ -569,12 +569,9 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let pair = match pair {
         Some(pair) => pair,
         None => {
-            let error = last_error.ok_or_else(|| {
-                MuxError::pty(format!(
-                    "failed to openpty after {} attempts with no error details",
-                    KEEPER_PTY_MAX_RETRIES + 1
-                ))
-            })?;
+            // Safe: each failed retry stores the PTY allocation error before continuing.
+            let error =
+                last_error.expect("openpty retry loop must capture an error before failing");
             return Err(MuxError::pty(format!(
                 "failed to openpty after {} attempts: {error}",
                 KEEPER_PTY_MAX_RETRIES + 1

@@ -2,6 +2,13 @@
 
 This note defines the terminal snapshot and capture semantics Embers exposes from PTY-backed buffers.
 
+## Terminology
+
+- durable buffer runtime - the long-lived PTY runtime owned by `BufferRuntimeHandle`, including its
+  runtime keeper process and the terminal state it preserves for a `Buffer`
+- backend - the `TerminalBackend` implementation used by that runtime keeper to store and expose
+  visible state, full capture, and scrollback
+
 ## Capture surfaces
 
 Embers exposes three related but distinct capture surfaces for PTY buffers:
@@ -64,7 +71,11 @@ While detached:
 - title and other backend metadata remain available
 - the most recent PTY size remains the size reported by capture APIs until another resize arrives
 
-Exited PTY buffers also remain capturable as long as the buffer record still exists. Writes, resizes, and kills must fail after exit, but capture reads continue to work.
+Exited PTY buffers also remain capturable as long as the buffer record still exists. Writes,
+resizes, and kills must fail after exit, but capture reads continue to work. In practice callers
+should expect an error result rather than a silent no-op: writes and kills surface a conflict such
+as `buffer 12 has already exited`, while resize requests can fail with `buffer runtime has already
+exited`.
 
 ## Alternate-screen policy
 
@@ -74,7 +85,10 @@ Alternate-screen ownership stays in the backend.
 - full capture and scrollback semantics follow the backend's own history model
 - leaving alternate screen returns visible capture to the primary screen state the backend preserved
 
-Embers locks down the observable behavior with tests rather than layering extra server-side alternate-screen state on top of the backend.
+## Testing notes
+
+Embers locks down the observable behavior with tests rather than layering extra server-side
+alternate-screen state on top of the backend.
 
 ## Resize behavior
 
@@ -85,6 +99,8 @@ Resize updates the PTY and the keeper-owned backend surface. Future full and vis
 - reattach into differently sized views once a new resize is applied
 
 ## Code anchors
+
+As of 2026-04-16:
 
 - Runtime capture implementation: `crates/embers-server/src/server.rs`
 - Runtime keeper capture surface: `crates/embers-server/src/buffer_runtime.rs`

@@ -4,7 +4,7 @@ use embers_core::RequestId;
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 
 use crate::codec::{ProtocolError, decode_server_envelope, encode_client_message};
 use crate::framing::{FrameType, RawFrame, read_frame, write_frame};
@@ -17,7 +17,7 @@ pub struct ProtocolClient {
     writer: OwnedWriteHalf,
     reader_rx: mpsc::Receiver<ReaderItem>,
     reader_reached_eof: bool,
-    reader_task: JoinHandle<()>,
+    reader_abort_handle: AbortHandle,
 }
 
 impl ProtocolClient {
@@ -34,12 +34,13 @@ impl ProtocolClient {
         let reader_task = tokio::spawn(async move {
             Self::run_reader(reader, reader_tx).await;
         });
+        let reader_abort_handle = reader_task.abort_handle();
 
         Self {
             writer,
             reader_rx,
             reader_reached_eof: false,
-            reader_task,
+            reader_abort_handle,
         }
     }
 
@@ -147,7 +148,22 @@ impl ProtocolClient {
 
 impl Drop for ProtocolClient {
     fn drop(&mut self) {
-        self.reader_task.abort();
+        self.reader_abort_handle.abort();
+    }
+}
+
+#[cfg(test)]
+impl ProtocolClient {
+    fn abort_reader_task(&self) {
+        self.reader_abort_handle.abort();
+    }
+
+    fn drain_recv_buffer(&mut self) {
+        while let Ok(item) = self.reader_rx.try_recv() {
+            if matches!(item, Ok(None)) {
+                self.reader_reached_eof = true;
+            }
+        }
     }
 }
 
@@ -157,7 +173,6 @@ mod tests {
     use embers_core::{ErrorCode, RequestId, SessionId, WireError};
     use tokio::io::AsyncWriteExt;
     use tokio::net::UnixStream;
-    use tokio::task::yield_now;
     use tokio::time::{Duration, timeout};
 
     use crate::codec::{ProtocolError, encode_server_envelope};
@@ -259,8 +274,8 @@ mod tests {
         let (_server, client_stream) = UnixStream::pair().expect("create unix stream pair");
         let mut client = ProtocolClient::from_stream(client_stream);
 
-        client.reader_task.abort();
-        yield_now().await;
+        client.abort_reader_task();
+        client.drain_recv_buffer();
 
         let error = timeout(Duration::from_secs(1), client.recv())
             .await

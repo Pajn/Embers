@@ -10,20 +10,17 @@ use portable_pty::{
 };
 
 const OUTPUT_TAIL_CHARS: usize = 2000;
-static PTY_AVAILABLE: OnceLock<()> = OnceLock::new();
+static PTY_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Checks if PTY devices are available on this system.
 /// Returns true if we can successfully open a PTY pair.
 pub fn is_pty_available() -> bool {
-    if PTY_AVAILABLE.get().is_some() {
-        return true;
+    if let Some(available) = PTY_AVAILABLE.get() {
+        return *available;
     }
-    if PtyHarness::openpty_with_retry(PtySize::new(80, 24)).is_ok() {
-        let _ = PTY_AVAILABLE.set(());
-        true
-    } else {
-        false
-    }
+    let available = PtyHarness::openpty_with_retry(PtySize::new(80, 24)).is_ok();
+    let _ = PTY_AVAILABLE.set(available);
+    available
 }
 
 pub struct PtyHarness {
@@ -72,9 +69,8 @@ impl PtyHarness {
         Err(MuxError::pty(format!(
             "failed to openpty after {} attempts: {}",
             Self::MAX_RETRIES + 1,
-            last_error
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "unknown error".to_owned())
+            // Safe: every failed attempt stores the last encountered PTY allocation error.
+            last_error.expect("openpty retry loop must capture an error before failing")
         )))
     }
 

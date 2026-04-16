@@ -448,14 +448,33 @@ fn spawn_config_thread(
         .name("embers-config".to_owned())
         .spawn(move || {
             let mut last_modified = config_modified(&config_path);
+            let mut pending_change = None;
+            let mut missing_polls = 0usize;
             loop {
                 thread::sleep(CONFIG_WATCH_POLL_INTERVAL);
-                let next_modified = config_modified(&config_path);
-                if next_modified != last_modified {
-                    last_modified = next_modified;
+                let observed_modified = config_modified(&config_path);
+                if observed_modified.is_none() && last_modified.is_some() {
+                    missing_polls = missing_polls.saturating_add(1);
+                    if missing_polls < 2 {
+                        continue;
+                    }
+                } else {
+                    missing_polls = 0;
+                }
+
+                if observed_modified == last_modified {
+                    pending_change = None;
+                    continue;
+                }
+
+                if pending_change == Some(observed_modified) {
+                    last_modified = observed_modified;
+                    pending_change = None;
                     if tx.send(TerminalEvent::ConfigChanged).is_err() {
                         break;
                     }
+                } else {
+                    pending_change = Some(observed_modified);
                 }
             }
         })
