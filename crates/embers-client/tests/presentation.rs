@@ -257,6 +257,7 @@ fn foreign_session_zoom_targets_are_ignored() {
         NodeRecord {
             id: FOREIGN_NODE_ID,
             session_id: FOREIGN_SESSION_ID,
+            // Intentional: point the foreign node at the local root tabs so session checks win.
             parent_id: Some(ROOT_TABS_ID),
             kind: NodeRecordKind::BufferView,
             buffer_view: Some(BufferViewRecord {

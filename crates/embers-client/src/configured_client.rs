@@ -453,8 +453,9 @@ where
                 Ok(true)
             }
             Err(error) => {
-                self.record_notification(error.to_string());
-                Ok(false)
+                let message = error.to_string();
+                self.record_notification(message.clone());
+                Err(MuxError::invalid_input(message))
             }
         }
     }
@@ -603,11 +604,6 @@ where
                         self.set_active_view(session_id, viewport);
                     }
                     self.client.resync_all_sessions().await
-                }
-                Action::UnzoomNode { session_id: None } if current_session_id.is_none() => {
-                    return Err(MuxError::invalid_input(
-                        "cannot execute action UnzoomNode { session_id: None } without current_session_id",
-                    ));
                 }
                 action => {
                     match self
@@ -1645,7 +1641,10 @@ where
     ) -> Result<BufferLocation> {
         match response {
             ServerResponse::BufferLocation(response) => Ok(response.location),
-            ServerResponse::BufferWithLocation(response) => Ok(response.into_parts().2),
+            ServerResponse::BufferWithLocation(response) => {
+                let (_, _, location, _) = response.into_parts();
+                Ok(location)
+            }
             other => Err(MuxError::protocol(format!(
                 "expected {context} response, got {other:?}"
             ))),

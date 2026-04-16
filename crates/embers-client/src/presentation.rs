@@ -767,6 +767,97 @@ mod zoom_tests {
     }
 
     #[test]
+    fn missing_zoomed_node_falls_back_to_normal_projection() {
+        let mut state = ClientState::default();
+        state.sessions.insert(
+            SessionId(1),
+            SessionRecord {
+                id: SessionId(1),
+                name: "main".to_owned(),
+                root_node_id: NodeId(1),
+                floating_ids: Vec::new(),
+                focused_leaf_id: Some(NodeId(3)),
+                focused_floating_id: None,
+                zoomed_node_id: Some(NodeId(99)),
+            },
+        );
+        state.nodes.insert(
+            NodeId(1),
+            NodeRecord {
+                id: NodeId(1),
+                session_id: SessionId(1),
+                parent_id: None,
+                kind: NodeRecordKind::Split,
+                buffer_view: None,
+                split: Some(SplitRecord {
+                    direction: embers_core::SplitDirection::Vertical,
+                    child_ids: vec![NodeId(2), NodeId(3)],
+                    sizes: vec![1, 1],
+                }),
+                tabs: None,
+            },
+        );
+        for (node_id, buffer_id, focused) in [
+            (NodeId(2), BufferId(10), false),
+            (NodeId(3), BufferId(11), true),
+        ] {
+            state.nodes.insert(
+                node_id,
+                NodeRecord {
+                    id: node_id,
+                    session_id: SessionId(1),
+                    parent_id: Some(NodeId(1)),
+                    kind: NodeRecordKind::BufferView,
+                    buffer_view: Some(BufferViewRecord {
+                        buffer_id,
+                        focused,
+                        zoomed: false,
+                        follow_output: true,
+                        last_render_size: PtySize::new(80, 24),
+                    }),
+                    split: None,
+                    tabs: None,
+                },
+            );
+            state.buffers.insert(
+                buffer_id,
+                BufferRecord {
+                    id: buffer_id,
+                    title: format!("buffer-{buffer_id}"),
+                    command: vec!["sh".to_owned()],
+                    cwd: None,
+                    kind: BufferRecordKind::Pty,
+                    state: BufferRecordState::Running,
+                    pid: Some(1),
+                    attachment_node_id: Some(node_id),
+                    read_only: false,
+                    helper_source_buffer_id: None,
+                    helper_scope: None,
+                    pty_size: PtySize::new(80, 24),
+                    activity: ActivityState::Idle,
+                    last_snapshot_seq: 0,
+                    exit_code: None,
+                    env: Default::default(),
+                },
+            );
+        }
+
+        let presentation = PresentationModel::project(
+            &state,
+            SessionId(1),
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("project with missing zoom node");
+
+        assert_eq!(presentation.leaves.len(), 2);
+        assert!(presentation.root_tabs.is_none());
+        assert!(presentation.floating.is_empty());
+    }
+
+    #[test]
     fn hidden_zoomed_floating_is_not_projected() {
         let mut state = ClientState::default();
         state.sessions.insert(

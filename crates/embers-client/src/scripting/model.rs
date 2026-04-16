@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use embers_core::{BufferId, FloatingId, NodeId, SplitDirection};
+use embers_core::{BufferId, FloatingId, NodeId, SessionId, SplitDirection};
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
 };
@@ -93,7 +93,7 @@ pub enum Action {
         node_id: Option<NodeId>,
     },
     UnzoomNode {
-        session_id: Option<embers_core::SessionId>,
+        session_id: Option<SessionId>,
     },
     ToggleZoomNode {
         node_id: Option<NodeId>,

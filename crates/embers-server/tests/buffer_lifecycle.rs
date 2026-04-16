@@ -125,6 +125,9 @@ fn focusing_a_leaf_clears_recorded_activity() {
     state
         .add_root_tab(session_id, "second", second_view)
         .expect("attach second view");
+    state
+        .focus_leaf(session_id, second_view)
+        .expect("focus second leaf");
 
     state
         .set_buffer_activity(first_buffer, ActivityState::Bell)

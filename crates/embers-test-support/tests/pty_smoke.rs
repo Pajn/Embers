@@ -1,3 +1,6 @@
+#[path = "support.rs"]
+mod support;
+
 use std::time::Duration;
 
 use crate::support::integration_test_lock;

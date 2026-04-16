@@ -486,7 +486,6 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                     .await?;
                 let (buffer, location, _) = expect_buffer_with_location(response, "buffer show")?;
                 ensure_matching_buffer_id("buffer show", requested_buffer_id, buffer.id)?;
-                ensure_matching_buffer_id("buffer show", requested_buffer_id, location.buffer_id)?;
                 Ok(format_buffer_details(&buffer, &location))
             }
             BufferCommand::Reveal { buffer_id, client } => {
@@ -1621,8 +1620,7 @@ fn expect_buffer_with_location(
 ) -> Result<(embers_protocol::BufferRecord, BufferLocation, bool)> {
     match response {
         ServerResponse::BufferWithLocation(response) => {
-            let at_root_tab = response.at_root_tab();
-            let (_, buffer, location) = response.into_parts();
+            let (_, buffer, location, at_root_tab) = response.into_parts();
             if buffer.id != location.buffer_id {
                 return Err(MuxError::protocol(format!(
                     "{operation} returned buffer {} but location was for buffer {}",
@@ -2121,7 +2119,7 @@ fn ensure_history_response(
         } => (*session_id, *node_id),
         BufferLocationAttachment::Detached => {
             ensure_history_attachment(source_buffer_id, requested_placement, location)?;
-            return Ok(());
+            unreachable!("detached buffer history attachments should fail validation")
         }
     };
     if buffer.attachment_node_id != Some(node_id) {

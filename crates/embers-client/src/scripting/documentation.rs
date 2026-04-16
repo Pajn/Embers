@@ -321,48 +321,55 @@ fn rewrite_generated_defs(path: &Path) -> Result<(), Box<dyn Error>> {
 // and `split_with` patterns into literal unions after the fact. Both the markdown forms without
 // trailing semicolons and the defs forms with trailing semicolons are matched here, so upstream
 // Rhai signature changes will break these replacements and should be updated together.
+const SIGNATURE_REWRITES: &[(&str, &str)] = &[
+    (
+        "fn break_current_node(_: ActionApi, destination: String) -> Action",
+        "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action",
+    ),
+    (
+        "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action",
+        "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action",
+    ),
+    (
+        "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action",
+        "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action",
+    ),
+    (
+        "fn notify(_: ActionApi, level: String, message: String) -> Action",
+        "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: String) -> Action",
+    ),
+    (
+        "fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action",
+        "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action",
+    ),
+    (
+        "fn break_current_node(_: ActionApi, destination: string) -> Action;",
+        "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action;",
+    ),
+    (
+        "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;",
+        "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action;",
+    ),
+    (
+        "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;",
+        "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action;",
+    ),
+    (
+        "fn notify(_: ActionApi, level: string, message: string) -> Action;",
+        "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: string) -> Action;",
+    ),
+    (
+        "fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;",
+        "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action;",
+    ),
+];
+
 fn rewrite_signature_literals(content: &str) -> String {
-    content
-        .replace(
-            "fn break_current_node(_: ActionApi, destination: String) -> Action",
-            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action",
-        )
-        .replace(
-            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: String) -> Action",
-            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action",
-        )
-        .replace(
-            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: String, placement: String) -> Action",
-            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action",
-        )
-        .replace(
-            "fn notify(_: ActionApi, level: String, message: String) -> Action",
-            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: String) -> Action",
-        )
-        .replace(
-            "fn split_with(_: ActionApi, direction: String, tree: TreeSpec) -> Action",
-            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action",
-        )
-        .replace(
-            "fn break_current_node(_: ActionApi, destination: string) -> Action;",
-            "fn break_current_node(_: ActionApi, destination: \"tab\" | \"floating\") -> Action;",
-        )
-        .replace(
-            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;",
-            "fn join_buffer_here(_: ActionApi, buffer_id: int, placement: \"tab-after\" | \"tab-before\" | \"left\" | \"right\" | \"up\" | \"down\") -> Action;",
-        )
-        .replace(
-            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: string, placement: string) -> Action;",
-            "fn open_buffer_history(_: ActionApi, buffer_id: int, scope: \"visible\" | \"full\", placement: \"floating\" | \"tab\") -> Action;",
-        )
-        .replace(
-            "fn notify(_: ActionApi, level: string, message: string) -> Action;",
-            "fn notify(_: ActionApi, level: \"info\" | \"warn\" | \"error\", message: string) -> Action;",
-        )
-        .replace(
-            "fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;",
-            "fn split_with(_: ActionApi, direction: \"h\" | \"horizontal\" | \"v\" | \"vertical\", tree: TreeSpec) -> Action;",
-        )
+    let mut rewritten = content.to_owned();
+    for (source, target) in SIGNATURE_REWRITES {
+        rewritten = rewritten.replace(source, target);
+    }
+    rewritten
 }
 
 fn filter_item_for_page(item: &Item, page: &PageSpec<'_>) -> Option<Item> {
@@ -638,7 +645,67 @@ pub fn build_mdbook(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         return Err(format!("mdbook build failed for {}", output_dir.display()).into());
     }
 
+    postprocess_mdbook_output(&build_dir)?;
+
     Ok(())
+}
+
+fn postprocess_mdbook_output(build_dir: &Path) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(build_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with("searcher-") && file_name.ends_with(".js") {
+            let content = fs::read_to_string(&path)?;
+            fs::write(&path, rewrite_mdbook_searcher_js(&content))?;
+        } else if file_name.starts_with("book-") && file_name.ends_with(".js") {
+            let content = fs::read_to_string(&path)?;
+            fs::write(&path, rewrite_mdbook_book_js(&content))?;
+        } else if file_name.starts_with("searchindex-") && file_name.ends_with(".js") {
+            let content = fs::read_to_string(&path)?;
+            fs::write(&path, rewrite_mdbook_searchindex_js(&content))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rewrite_mdbook_searcher_js(content: &str) -> String {
+    content
+        .replace(
+            "window.search = window.search || {};",
+            "const EMBERS_DOC_SEARCH =\n    window.__EMBERS_CONFIG_API_SEARCH__ || (window.__EMBERS_CONFIG_API_SEARCH__ = {});",
+        )
+        .replace("initSearchInteractions(window.search);", "initSearchInteractions(EMBERS_DOC_SEARCH);")
+        .replace("script.onload = () => init(window.search);", "script.onload = () => init(EMBERS_DOC_SEARCH);")
+        .replace("})(window.search);", "})(EMBERS_DOC_SEARCH);")
+}
+
+fn rewrite_mdbook_book_js(content: &str) -> String {
+    content.replace(
+        "if (window.search && window.search.hasFocus()) {",
+        "if (window.__EMBERS_CONFIG_API_SEARCH__\n            && window.__EMBERS_CONFIG_API_SEARCH__.hasFocus()) {",
+    )
+}
+
+fn rewrite_mdbook_searchindex_js(content: &str) -> String {
+    let prefix = "window.search = Object.assign(window.search, JSON.parse('";
+    let suffix = "'));";
+    let Some(rest) = content.strip_prefix(prefix) else {
+        return content.to_owned();
+    };
+    let Some(json) = rest.strip_suffix(suffix) else {
+        return content.to_owned();
+    };
+
+    format!(
+        "(function(){{const target=(window.__EMBERS_CONFIG_API_SEARCH__&&typeof window.__EMBERS_CONFIG_API_SEARCH__===\"object\")?window.__EMBERS_CONFIG_API_SEARCH__:(window.__EMBERS_CONFIG_API_SEARCH__={{}});let parsed={{}};try{{parsed=JSON.parse('{json}');}}catch(error){{console.error(\"Failed to parse Embers config API search index:\", error);}}Object.assign(target, parsed);}})();"
+    )
 }
 
 fn example_page() -> &'static str {

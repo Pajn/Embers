@@ -46,11 +46,8 @@ Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling
 `segment(_: UiApi, text: String) -> BarSegment` produces plain text with default
 [`StyleSpec`] values and no click target.
 
-The overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports
-`fg`, `bg`, `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override
-styling and attach an optional interaction target. `dim` is a boolean that renders the
-text with reduced intensity for a muted appearance, and `blink` is a boolean that enables
-blinking text for that segment.
+See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
+the full `options: Map` styling keys.
 </div>
 
 </div>

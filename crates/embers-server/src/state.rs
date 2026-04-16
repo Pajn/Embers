@@ -1645,11 +1645,13 @@ impl ServerState {
         }
         if let Some(source_view) = source_view {
             if let Err(error) = self.close_node(source_view) {
-                self.discard_buffer_view(new_view);
-                if let Some(tabs_id) = created_tabs_wrapper
-                    && self.nodes.contains_key(&tabs_id)
-                {
-                    let _ = self.normalize_upwards(tabs_id);
+                match self.close_node(new_view) {
+                    Ok(()) => {}
+                    Err(rollback_error) => {
+                        return Err(MuxError::internal(format!(
+                            "failed to close original view {source_view} after joining buffer {buffer_id}: {error}; rollback failed while closing new view {new_view}: {rollback_error}"
+                        )));
+                    }
                 }
                 return Err(error);
             }

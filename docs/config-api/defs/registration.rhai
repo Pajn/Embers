@@ -10,20 +10,38 @@ fn bar(_: UiApi, left: array, center: array, right: array) -> BarSpec;
 /// `segment(_: UiApi, text: String) -> BarSegment` produces plain text with default
 /// [`StyleSpec`] values and no click target.
 ///
-/// The overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports
-/// `fg`, `bg`, `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override
-/// styling and attach an optional interaction target. `dim` is a boolean that renders the
-/// text with reduced intensity for a muted appearance, and `blink` is a boolean that enables
-/// blinking text for that segment.
+/// See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
+/// the full `options: Map` styling keys.
 fn segment(_: UiApi, text: string) -> BarSegment;
 
 /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
 ///
+/// See the main `segment(_: UiApi, text: String) -> BarSegment` doc for the shared behavior.
+///
 /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
 /// `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override styling and
-/// attach an optional interaction target. `dim` is a boolean that renders the text with
-/// reduced intensity for a muted appearance, and `blink` is a boolean that enables blinking
-/// text for that segment.
+/// attach an optional interaction target.
+///
+/// `fg` is the foreground color and accepts a standard CSS color name, a hex code such as
+/// `#ff0000`, or an RGB/RGBA string such as `rgb(255,0,0)` or `rgba(255,0,0,0.5)`.
+/// `bg` is the background color and accepts the same color formats.
+/// `bold`, `italic`, `underline`, `dim`, and `blink` are boolean `true`/`false` flags.
+/// `dim` renders the text with reduced intensity for a muted appearance.
+/// `blink` enables blinking text for that segment, but many modern terminal emulators ignore
+/// or disable blink by default, so blinking text may not appear consistently.
+/// `target` is an optional interaction target, usually either a string identifier such as
+/// `"myTarget"` or a structured object such as `#{ type: "callback", id: "save" }`,
+/// depending on the consumer API.
+///
+/// Examples:
+/// - `#{ fg: "#ff0000", bg: "rgba(0,0,0,0.5)", bold: true }`
+/// - `#{ target: "myTarget" }`
+/// - `#{ target: #{ type: "callback", id: "save" } }`
+///
+/// Accessibility note: blinking text can be distracting and may trigger seizures for some
+/// users. Use `blink` sparingly, prefer non-animated emphasis such as `dim` or color/weight
+/// changes, follow WCAG guidance to avoid flashing content, and respect reduced-motion
+/// preferences before enabling `blink`.
 fn segment(_: UiApi, text: string, options: map) -> BarSegment;
 
 /// Read an environment variable, if it is set.
@@ -118,7 +136,8 @@ fn close_node(_: ActionApi, node_id: int) -> Action;
 /// Close the currently focused view.
 fn close_view(_: ActionApi) -> Action;
 
-/// Commit the active search.
+/// Finalize the active search, keep the current match and cursor position, and leave search
+/// mode with the committed result in place.
 fn commit_search(_: ActionApi) -> Action;
 
 /// Copy the current selection into the clipboard.
@@ -181,7 +200,7 @@ fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeS
 /// Insert a tab before the current tab.
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
-/// Join a buffer at the current node.
+/// Attach a buffer at the current node.
 /// `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
 /// Example: `action.join_buffer_here(12, "tab-after")`.
 fn join_buffer_here(_: ActionApi, buffer_id: int, placement: string) -> Action;
@@ -212,11 +231,21 @@ fn move_buffer_to_floating(_: ActionApi, buffer_id: int, options: map) -> Action
 /// Move a buffer into a specific node.
 fn move_buffer_to_node(_: ActionApi, buffer_id: int, node_id: int) -> Action;
 
+/// Move the current node after a sibling.
+fn move_current_node_after(_: ActionApi, sibling_node_id: int) -> Action;
+
 /// Move the current node before a sibling.
+/// Use this when the current node is the one being repositioned.
+/// Example: `action.move_current_node_before(42)`.
 fn move_current_node_before(_: ActionApi, sibling_node_id: int) -> Action;
 
 /// Move a node after a sibling.
+/// Use this when you need to move a specific node id instead of the current node.
+/// Example: `action.move_node_after(10, 42)`.
 fn move_node_after(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
+
+/// Move a node before a sibling.
+fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
@@ -329,21 +358,25 @@ fn send_keys_current(_: ActionApi, notation: string) -> Action;
 fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;
 
 /// Swap the current node with a sibling.
-fn swap_current_node(_: ActionApi, second_node_id: int) -> Action;
+fn swap_current_node(_: ActionApi, sibling_node_id: int) -> Action;
 
 /// Toggle a named input mode.
 fn toggle_mode(_: ActionApi, mode: string) -> Action;
 
-/// Toggle zoom on a node.
+/// Toggle zoom for the specified node id.
+/// There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
+/// focused node and `toggle_zoom_node` when you already know the target id.
 fn toggle_zoom_node(_: ActionApi, node_id: int) -> Action;
 
-/// Unzoom the current session.
+/// Clear the current session's active zoom state.
+/// This removes the current session zoom rather than unwinding a stack of prior zooms.
 fn unzoom_current_session(_: ActionApi) -> Action;
 
 /// Copy the current selection into the clipboard.
 fn yank_selection(_: ActionApi) -> Action;
 
-/// Zoom the current node.
+/// Zoom the session's currently focused node.
+/// There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 fn zoom_current_node(_: ActionApi) -> Action;
 
 /// Toggle focus-on-click behavior.

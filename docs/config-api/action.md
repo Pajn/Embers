@@ -218,7 +218,8 @@ Description
 </div>
 
 <div group="commit_search" id="commit_search-Description" class="tabcontent"  style="display: block;" >
-Commit the active search.
+Finalize the active search, keep the current match and cursor position, and leave search
+mode with the committed result in place.
 </div>
 
 </div>
@@ -646,7 +647,7 @@ Description
 </div>
 
 <div group="join_buffer_here" id="join_buffer_here-Description" class="tabcontent"  style="display: block;" >
-Join a buffer at the current node.
+Attach a buffer at the current node.
 `placement` accepts `tab-after`, `tab-before`, `left`, `right`, `up`, or `down`.
 Example: `action.join_buffer_here(12, "tab-after")`.
 </div>
@@ -780,6 +781,28 @@ Move a buffer into a specific node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> move_current_node_after </h2>
+
+```rust,ignore
+fn move_current_node_after(_: ActionApi, sibling_node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="move_current_node_after" id="link-move_current_node_after-Description"  class="tablinks active"
+    onclick="openTab(event, 'move_current_node_after', 'Description')">
+Description
+</button>
+</div>
+
+<div group="move_current_node_after" id="move_current_node_after-Description" class="tabcontent"  style="display: block;" >
+Move the current node after a sibling.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> move_current_node_before </h2>
 
 ```rust,ignore
@@ -796,6 +819,8 @@ Description
 
 <div group="move_current_node_before" id="move_current_node_before-Description" class="tabcontent"  style="display: block;" >
 Move the current node before a sibling.
+Use this when the current node is the one being repositioned.
+Example: `action.move_current_node_before(42)`.
 </div>
 
 </div>
@@ -818,6 +843,30 @@ Description
 
 <div group="move_node_after" id="move_node_after-Description" class="tabcontent"  style="display: block;" >
 Move a node after a sibling.
+Use this when you need to move a specific node id instead of the current node.
+Example: `action.move_node_after(10, 42)`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> move_node_before </h2>
+
+```rust,ignore
+fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="move_node_before" id="link-move_node_before-Description"  class="tablinks active"
+    onclick="openTab(event, 'move_node_before', 'Description')">
+Description
+</button>
+</div>
+
+<div group="move_node_before" id="move_node_before-Description" class="tabcontent"  style="display: block;" >
+Move a node before a sibling.
 </div>
 
 </div>
@@ -1513,7 +1562,7 @@ Split the current node and attach the provided tree as the new sibling.
     <h2 class="func-name"> <code>fn</code> swap_current_node </h2>
 
 ```rust,ignore
-fn swap_current_node(_: ActionApi, second_node_id: int) -> Action
+fn swap_current_node(_: ActionApi, sibling_node_id: int) -> Action
 ```
 
 <div>
@@ -1569,7 +1618,9 @@ Description
 </div>
 
 <div group="toggle_zoom_node" id="toggle_zoom_node-Description" class="tabcontent"  style="display: block;" >
-Toggle zoom on a node.
+Toggle zoom for the specified node id.
+There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
+focused node and `toggle_zoom_node` when you already know the target id.
 </div>
 
 </div>
@@ -1591,7 +1642,8 @@ Description
 </div>
 
 <div group="unzoom_current_session" id="unzoom_current_session-Description" class="tabcontent"  style="display: block;" >
-Unzoom the current session.
+Clear the current session's active zoom state.
+This removes the current session zoom rather than unwinding a stack of prior zooms.
 </div>
 
 </div>
@@ -1635,7 +1687,8 @@ Description
 </div>
 
 <div group="zoom_current_node" id="zoom_current_node-Description" class="tabcontent"  style="display: block;" >
-Zoom the current node.
+Zoom the session's currently focused node.
+There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 </div>
 
 </div>

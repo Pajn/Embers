@@ -38,6 +38,7 @@ Killing a buffer targets the runtime, not the view tree.
 
 - the PTY child is terminated
 - the buffer transitions to `Exited`
+- if the buffer was still attached, it remains `Attached(NodeId)` until that view is later closed or replaced
 - capture remains available from the terminal backend snapshot state
 - the buffer record may later be cleaned up once it is detached
 
@@ -47,9 +48,9 @@ Killing a buffer targets the runtime, not the view tree.
 
 `Detached -> Attached` happens when the buffer is attached to a new leaf.
 
-`Attached -> Moved` is modeled as:
+A "move" is a composite operation:
 
-1. detach/close the old view
+1. detach or close the old view
 2. keep the buffer runtime alive
 3. attach the same buffer to the target leaf
 
@@ -68,17 +69,22 @@ While detached:
 
 Reattaching a detached buffer does not recreate the process or reset terminal state. It only gives the durable runtime a new view attachment.
 
-## Runtime transitions
+## Runtime lifecycle transitions
 
 The intended transition graph is:
 
 - `Created -> Running` when the runtime keeper is spawned or restored
 - `Running -> Exited` when the child process terminates normally or is explicitly killed
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
-- `Attached -> Detached` when a view closes
-- `Detached -> Attached` when the buffer is attached to a leaf
-- `Attached -> Moved` when the old view is removed and the same buffer is attached elsewhere
 - `Exited -> cleaned up` when a detached exited buffer is removed from server state
+
+## Attachment transitions
+
+- `Attached(NodeId) -> Detached` when a view closes or the buffer is explicitly detached
+- `Detached -> Attached(NodeId)` when the buffer is attached to a leaf
+
+The composite "move" operation is `Attached(NodeId) -> Detached -> Attached(NodeId)` while the
+same runtime stays alive.
 
 ## Code anchors
 

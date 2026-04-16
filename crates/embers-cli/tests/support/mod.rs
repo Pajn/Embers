@@ -8,6 +8,7 @@ use embers_test_support::{TestConnection, TestServer, cargo_bin, is_pty_availabl
 
 /// Returns true if PTY tests can run on this system.
 /// Call this at the start of tests that require PTY support.
+#[must_use]
 pub fn require_pty() -> bool {
     if is_pty_available() {
         true

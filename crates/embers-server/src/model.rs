@@ -32,8 +32,9 @@ pub enum HelperBufferScope {
     Visible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum BufferKind {
+    #[default]
     Pty,
     Helper(HelperBuffer),
 }

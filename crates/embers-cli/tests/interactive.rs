@@ -60,6 +60,7 @@ impl Drop for SpawnedEmbers {
 fn kill_orphaned_server(socket_path: &Path) {
     let pid_path = socket_path.with_extension("pid");
 
+    // A clean SIGTERM path returns here; failed waits fall through to the SIGKILL retry below.
     let matched_pid = try_signal_server(&pid_path, socket_path, libc::SIGTERM);
     if let Some(matched_pid) = matched_pid
         && wait_for_server_exit(matched_pid, socket_path)
@@ -88,7 +89,9 @@ fn try_signal_server(pid_path: &Path, socket_path: &Path, signal: i32) -> Option
         return None;
     }
     // SAFETY: pid was read from our pid file and verified against the active __serve command line.
-    unsafe { libc::kill(pid, signal) };
+    if unsafe { libc::kill(pid, signal) } != 0 {
+        return None;
+    }
     Some(pid)
 }
 
@@ -190,8 +193,14 @@ fn split_nul_args(bytes: &[u8]) -> Option<Vec<OsString>> {
 
 #[cfg(target_os = "macos")]
 fn parse_macos_argv(bytes: &[u8]) -> Option<Vec<OsString>> {
-    let argc =
-        i32::from_ne_bytes(bytes.get(..std::mem::size_of::<i32>())?.try_into().ok()?) as usize;
+    let argc = i32::from_ne_bytes(bytes.get(..std::mem::size_of::<i32>())?.try_into().ok()?);
+    if argc < 0 {
+        return None;
+    }
+    let argc = usize::try_from(argc).ok()?;
+    if argc > bytes.len() {
+        return None;
+    }
     let mut index = std::mem::size_of::<i32>();
     while bytes.get(index).is_some_and(|byte| *byte != 0) {
         index += 1;

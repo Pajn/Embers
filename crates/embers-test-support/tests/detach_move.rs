@@ -389,6 +389,7 @@ async fn detach_and_reattach_preserve_runtime_identity_size_and_capture() {
 
     let reattached = get_buffer(&mut connection, primary.id).await;
     assert_eq!(reattached.attachment_node_id, Some(target_leaf));
+    assert_eq!(reattached.state, before_detach.state);
     assert_eq!(reattached.pid, before_detach.pid);
     assert_eq!(reattached.pty_size, embers_core::PtySize::new(120, 33));
 
