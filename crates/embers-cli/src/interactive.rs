@@ -641,10 +641,7 @@ fn mouse_button(code: u16) -> Option<MouseButton> {
 
 fn read_bracketed_paste(fd: libc::c_int) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    loop {
-        let Some(next) = read_byte(fd)? else {
-            break;
-        };
+    while let Some(next) = read_byte(fd)? {
         bytes.push(next);
         if bytes.ends_with(BRACKETED_PASTE_END) {
             let new_len = bytes.len() - BRACKETED_PASTE_END.len();
