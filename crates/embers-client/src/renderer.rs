@@ -185,9 +185,18 @@ impl Renderer {
         }
 
         let view_state = state.view_state(leaf.node_id);
-        let lines = view_state
-            .map(|view| view.visible_lines.as_slice())
-            .filter(|lines| !lines.is_empty())
+        let rendered_lines = view_state
+            .map(|view| {
+                if view.visible_lines.is_empty() {
+                    state
+                        .snapshots
+                        .get(&leaf.buffer_id)
+                        .map(|snapshot| snapshot.lines.as_slice())
+                        .unwrap_or(&[])
+                } else {
+                    view.visible_lines.as_slice()
+                }
+            })
             .or_else(|| {
                 state
                     .snapshots
@@ -199,7 +208,7 @@ impl Renderer {
         let display_offset = view_state
             .filter(|view| view.follow_output)
             .map(|_| {
-                lines.map_or(0, |lines| {
+                rendered_lines.map_or(0, |lines| {
                     let significant_len = lines
                         .iter()
                         .rposition(|line| !line.is_empty())
@@ -215,10 +224,10 @@ impl Renderer {
                     .saturating_add(u64::try_from(display_offset).unwrap_or(u64::MAX))
             })
             .unwrap_or(0);
-        let displayed_view_lines = view_state
-            .map(|view| &view.visible_lines[display_offset.min(view.visible_lines.len())..]);
+        let displayed_view_lines =
+            rendered_lines.map(|lines| &lines[display_offset.min(lines.len())..]);
 
-        if let Some(lines) = lines {
+        if let Some(lines) = rendered_lines {
             for (row, line) in lines
                 .iter()
                 .skip(display_offset)
@@ -242,7 +251,7 @@ impl Renderer {
                     y + 1,
                     width,
                     displayed_top_line,
-                    displayed_view_lines.unwrap_or(&view_state.visible_lines),
+                    displayed_view_lines.unwrap_or(rendered_lines.unwrap_or(&[])),
                     search_state,
                 );
             }
@@ -253,7 +262,7 @@ impl Renderer {
                     y + 1,
                     width,
                     displayed_top_line,
-                    displayed_view_lines.unwrap_or(&view_state.visible_lines),
+                    displayed_view_lines.unwrap_or(rendered_lines.unwrap_or(&[])),
                     selection_state,
                 );
             }

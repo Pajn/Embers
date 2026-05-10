@@ -556,6 +556,7 @@ where
                     )
                     .await?;
                     current_session_id = Some(session_id);
+                    self.active_session_id = Some(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -575,6 +576,7 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(Some(buffer_id), location, "buffer reveal")?;
                     current_session_id = Some(session_id);
+                    self.active_session_id = Some(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -600,6 +602,7 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(None, location, "buffer history")?;
                     current_session_id = Some(session_id);
+                    self.active_session_id = Some(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }

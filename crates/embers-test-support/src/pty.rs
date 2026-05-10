@@ -18,9 +18,13 @@ pub fn is_pty_available() -> bool {
     if let Some(available) = PTY_AVAILABLE.get() {
         return *available;
     }
-    let available = PtyHarness::openpty_with_retry(PtySize::new(80, 24)).is_ok();
-    let _ = PTY_AVAILABLE.set(available);
-    available
+    match PtyHarness::openpty_with_retry(PtySize::new(80, 24)) {
+        Ok(_) => {
+            let _ = PTY_AVAILABLE.set(true);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub struct PtyHarness {

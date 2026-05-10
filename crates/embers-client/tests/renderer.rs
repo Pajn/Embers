@@ -136,6 +136,42 @@ fn renderer_shows_scroll_indicator_and_search_highlights() {
 }
 
 #[test]
+fn renderer_uses_snapshot_lines_for_overlays_when_visible_lines_are_empty() {
+    let mut state = demo_state();
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.follow_output = false;
+    view.scroll_top_line = 0;
+    view.visible_lines.clear();
+    view.search_state = Some(SearchState {
+        query: "left".to_owned(),
+        matches: vec![SearchMatch {
+            line: 0,
+            start_column: 0,
+            end_column: 4,
+        }],
+        active_match_index: Some(0),
+    });
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .unwrap();
+    let renderer = Renderer;
+    let grid = renderer.render(&state, &presentation);
+    let ansi = grid.ansi_lines();
+
+    assert!(
+        ansi.iter().any(|line| line.contains("\x1b[4m\x1b[7m")),
+        "{ansi:?}"
+    );
+}
+
+#[test]
 fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
     let mut state = demo_state();
     state

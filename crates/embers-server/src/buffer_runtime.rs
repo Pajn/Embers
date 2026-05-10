@@ -561,7 +561,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
             Err(error) => {
                 last_error = Some(error);
                 if attempt < KEEPER_PTY_MAX_RETRIES {
-                    thread::sleep(KEEPER_PTY_RETRY_DELAY * (attempt + 1) as u32);
+                    thread::sleep(KEEPER_PTY_RETRY_DELAY * 2_u32.pow(attempt as u32));
                 }
             }
         }

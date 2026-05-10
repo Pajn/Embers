@@ -1633,7 +1633,23 @@ impl Runtime {
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
                 match state.swap_sibling_nodes(first_node_id, second_node_id) {
-                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Ok(()) => {
+                        let current_floating_id = match state.floating_id_for_node(first_node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        let (response, mut events) =
+                            layout_ok_response(&state, request_id, session_id);
+                        if current_floating_id.is_some() {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: current_floating_id,
+                            }));
+                        }
+                        (response, events)
+                    }
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
@@ -1662,7 +1678,9 @@ impl Runtime {
                         };
                         let (response, mut events) =
                             layout_ok_response(&state, request_id, session_id);
-                        if previous_floating_id != current_floating_id {
+                        if previous_floating_id != current_floating_id
+                            || current_floating_id.is_some()
+                        {
                             events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
                                 session_id,
                                 floating_id: current_floating_id,
@@ -1714,7 +1732,23 @@ impl Runtime {
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
                 match state.move_node_before(node_id, sibling_node_id) {
-                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Ok(()) => {
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        let (response, mut events) =
+                            layout_ok_response(&state, request_id, session_id);
+                        if current_floating_id.is_some() {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: current_floating_id,
+                            }));
+                        }
+                        (response, events)
+                    }
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
@@ -1728,7 +1762,23 @@ impl Runtime {
                     Err(error) => return (mux_error_response(Some(request_id), error), Vec::new()),
                 };
                 match state.move_node_after(node_id, sibling_node_id) {
-                    Ok(()) => layout_ok_response(&state, request_id, session_id),
+                    Ok(()) => {
+                        let current_floating_id = match state.floating_id_for_node(node_id) {
+                            Ok(floating_id) => floating_id,
+                            Err(error) => {
+                                return (mux_error_response(Some(request_id), error), Vec::new());
+                            }
+                        };
+                        let (response, mut events) =
+                            layout_ok_response(&state, request_id, session_id);
+                        if current_floating_id.is_some() {
+                            events.push(ServerEvent::FloatingChanged(FloatingChangedEvent {
+                                session_id,
+                                floating_id: current_floating_id,
+                            }));
+                        }
+                        (response, events)
+                    }
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
@@ -3130,10 +3180,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use embers_core::{ActivityState, FloatGeometry, MuxError, RequestId};
+    use embers_core::{ActivityState, FloatGeometry, MuxError, RequestId, SplitDirection};
     use embers_protocol::{
-        BufferHistoryPlacement, BufferHistoryScope, InputRequest, NodeJoinPlacement, NodeRequest,
-        ServerEnvelope, ServerEvent, ServerResponse,
+        BufferHistoryPlacement, BufferHistoryScope, InputRequest, NodeBreakDestination,
+        NodeJoinPlacement, NodeRequest, ServerEnvelope, ServerEvent, ServerResponse,
     };
     use tempfile::tempdir;
     use tokio::sync::mpsc;
@@ -3143,6 +3193,127 @@ mod tests {
     use crate::{BufferRuntimeUpdate, BufferState, ServerState};
 
     use tokio::time::{Duration, timeout};
+
+    fn create_leaf(
+        state: &mut ServerState,
+        session_id: embers_core::SessionId,
+        title: &str,
+    ) -> embers_core::NodeId {
+        let buffer_id = state.create_buffer(title, vec!["/bin/sh".to_owned()], None);
+        state
+            .create_buffer_view(session_id, buffer_id)
+            .expect("create leaf")
+    }
+
+    fn floating_split_runtime() -> (
+        Runtime,
+        embers_core::SessionId,
+        embers_core::FloatingId,
+        embers_core::NodeId,
+        embers_core::NodeId,
+    ) {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("alpha");
+        let root_leaf = create_leaf(&mut state, session_id, "root");
+        state
+            .add_root_tab(session_id, "main", root_leaf)
+            .expect("attach root leaf");
+        let split_left = create_leaf(&mut state, session_id, "left");
+        let split_right = create_leaf(&mut state, session_id, "right");
+        let split_root = state
+            .create_split_node(
+                session_id,
+                SplitDirection::Vertical,
+                vec![split_left, split_right],
+            )
+            .expect("create floating split");
+        let floating_id = state
+            .create_floating_window_with_options(
+                session_id,
+                split_root,
+                FloatGeometry::new(4, 4, 20, 10),
+                Some("popup".to_owned()),
+                false,
+                true,
+            )
+            .expect("create floating");
+        (
+            Runtime::new(
+                state,
+                tempdir.path().join("server.sock"),
+                tempdir.path().join("workspace.json"),
+                tempdir.path().join("runtime"),
+                BTreeMap::new(),
+            ),
+            session_id,
+            floating_id,
+            split_left,
+            split_right,
+        )
+    }
+
+    fn hidden_floating_tabs_runtime() -> (
+        Runtime,
+        embers_core::SessionId,
+        embers_core::FloatingId,
+        embers_core::NodeId,
+    ) {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("alpha");
+        let root_leaf = create_leaf(&mut state, session_id, "root");
+        state
+            .add_root_tab(session_id, "main", root_leaf)
+            .expect("attach root leaf");
+        let split_left = create_leaf(&mut state, session_id, "left");
+        let split_right = create_leaf(&mut state, session_id, "right");
+        let split_root = state
+            .create_split_node(
+                session_id,
+                SplitDirection::Vertical,
+                vec![split_left, split_right],
+            )
+            .expect("create hidden split");
+        let other_leaf = create_leaf(&mut state, session_id, "other");
+        let hidden_tabs = state
+            .create_tabs_node(
+                session_id,
+                vec![
+                    crate::TabEntry::new("split", split_root),
+                    crate::TabEntry::new("other", other_leaf),
+                ],
+                0,
+            )
+            .expect("create hidden tabs");
+        let floating_id = state
+            .create_floating_window_with_options(
+                session_id,
+                hidden_tabs,
+                FloatGeometry::new(4, 4, 20, 10),
+                Some("popup".to_owned()),
+                false,
+                true,
+            )
+            .expect("create floating");
+        state
+            .floating
+            .get_mut(&floating_id)
+            .expect("floating exists")
+            .visible = false;
+        (
+            Runtime::new(
+                state,
+                tempdir.path().join("server.sock"),
+                tempdir.path().join("workspace.json"),
+                tempdir.path().join("runtime"),
+                BTreeMap::new(),
+            ),
+            session_id,
+            floating_id,
+            split_right,
+        )
+    }
 
     #[tokio::test]
     async fn shutdown_signal_is_latched_for_new_receivers() {
@@ -3506,6 +3677,75 @@ mod tests {
                 node_id: popup_leaf,
                 buffer_id: detached_buffer_id,
                 placement: NodeJoinPlacement::Right,
+            })
+            .await;
+
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::FloatingChanged(changed)
+                if changed.session_id == session_id
+                        && changed.floating_id == Some(floating_id)
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn swap_siblings_emits_floating_changed_for_existing_floating() {
+        let (runtime, session_id, floating_id, split_left, split_right) = floating_split_runtime();
+
+        let (response, events) = runtime
+            .dispatch_node(NodeRequest::SwapSiblings {
+                request_id: RequestId(1),
+                first_node_id: split_left,
+                second_node_id: split_right,
+            })
+            .await;
+
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::FloatingChanged(changed)
+                    if changed.session_id == session_id
+                        && changed.floating_id == Some(floating_id)
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn move_node_after_emits_floating_changed_for_existing_floating() {
+        let (runtime, session_id, floating_id, split_left, split_right) = floating_split_runtime();
+
+        let (response, events) = runtime
+            .dispatch_node(NodeRequest::MoveNodeAfter {
+                request_id: RequestId(1),
+                node_id: split_left,
+                sibling_node_id: split_right,
+            })
+            .await;
+
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ServerEvent::FloatingChanged(changed)
+                    if changed.session_id == session_id
+                        && changed.floating_id == Some(floating_id)
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn break_node_emits_floating_changed_when_node_stays_in_same_floating() {
+        let (runtime, session_id, floating_id, split_right) = hidden_floating_tabs_runtime();
+
+        let (response, events) = runtime
+            .dispatch_node(NodeRequest::BreakNode {
+                request_id: RequestId(1),
+                node_id: split_right,
+                destination: NodeBreakDestination::Tab,
             })
             .await;
 

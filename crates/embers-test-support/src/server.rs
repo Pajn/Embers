@@ -40,19 +40,28 @@ impl TestServer {
     /// Shuts down the server and kills any orphaned embers helper processes that
     /// were spawned for this socket during the test.
     pub async fn shutdown(mut self) -> Result<()> {
+        let mut shutdown_error = None;
         if let Some(handle) = self.handle.take() {
             match tokio::time::timeout(SHUTDOWN_TIMEOUT, handle.shutdown()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "TestServer shutdown returned error");
+                    shutdown_error = Some(e);
                 }
                 Err(_) => {
                     tracing::warn!("TestServer shutdown timed out after {:?}", SHUTDOWN_TIMEOUT);
+                    shutdown_error = Some(embers_core::MuxError::timeout(format!(
+                        "TestServer shutdown timed out after {:?}",
+                        SHUTDOWN_TIMEOUT
+                    )));
                 }
             }
         }
         self.kill_orphaned_processes();
-        Ok(())
+        match shutdown_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Kill any orphaned embers helper processes that were spawned for this

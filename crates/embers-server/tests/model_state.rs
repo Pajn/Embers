@@ -1015,7 +1015,9 @@ fn break_node_into_hidden_tabs_branch_preserves_focus() {
         Node::Tabs(tabs) => tabs.tabs.iter().map(|tab| tab.child).collect::<Vec<_>>(),
         other => panic!("expected hidden tabs, got {other:?}"),
     };
+    assert!(hidden_children.contains(&split_left));
     assert!(hidden_children.contains(&split_right));
+    assert!(hidden_children.contains(&other_leaf));
     assert_eq!(
         state.session(session_id).expect("session").focused_leaf,
         Some(root_leaf)
