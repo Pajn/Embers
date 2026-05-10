@@ -29,7 +29,7 @@ use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{Instrument, debug, error, info};
 
 use crate::model::{BufferKind, HelperBufferScope, Node};
 use crate::persist::{load_workspace, save_workspace};
@@ -2890,10 +2890,10 @@ async fn handle_connection(
             }
         };
 
-        let span = request_span("handle_request", request.request_id());
-        let _entered = span.enter();
+        let request_id = request.request_id();
         let (response, events, deferred_shutdown) = runtime
             .dispatch_request(connection_id, &outbound, request)
+            .instrument(request_span("handle_request", request_id))
             .await;
 
         if outbound.send(ServerEnvelope::Response(response)).is_err() {

@@ -314,8 +314,8 @@ async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
         .write_all(&long_output)
         .expect("write scrolling command");
     harness
-        .read_until_contains("line-1", IO_TIMEOUT)
-        .unwrap_or_else(|error| panic!("long output started: {error}"));
+        .read_until_contains("DONE", IO_TIMEOUT)
+        .unwrap_or_else(|error| panic!("long output completed: {error}"));
     harness
         .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
         .unwrap_or_else(|error| panic!("long output settled: {error}"));

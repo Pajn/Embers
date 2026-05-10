@@ -1915,7 +1915,13 @@ impl ServerState {
             }
         }
 
-        if seen.len() != self.nodes.len() {
+        let unseen_invalid = self
+            .nodes
+            .keys()
+            .copied()
+            .filter(|node_id| !seen.contains(node_id))
+            .find(|node_id| !self.is_detached_empty_tabs_node(*node_id));
+        if unseen_invalid.is_some() {
             return Err(MuxError::conflict(format!(
                 "orphaned node(s) detected: visited {} of {} node(s)",
                 seen.len(),
@@ -2882,7 +2888,7 @@ impl ServerState {
         session_id: SessionId,
         node_id: NodeId,
         expected_parent: Option<NodeId>,
-        is_session_root: bool,
+        _is_session_root: bool,
         seen: &mut BTreeSet<NodeId>,
     ) -> Result<()> {
         let node = self.node(node_id)?;
@@ -2922,11 +2928,6 @@ impl ServerState {
                 }
             }
             Node::Tabs(tabs) => {
-                if !is_session_root && tabs.tabs.is_empty() {
-                    return Err(MuxError::conflict(format!(
-                        "tabs node {node_id} must not be empty"
-                    )));
-                }
                 if tabs.tabs.is_empty() {
                     if tabs.active != 0 {
                         return Err(MuxError::conflict(format!(
@@ -2945,6 +2946,17 @@ impl ServerState {
         }
 
         Ok(())
+    }
+
+    fn is_detached_empty_tabs_node(&self, node_id: NodeId) -> bool {
+        matches!(
+            self.nodes.get(&node_id),
+            Some(Node::Tabs(tabs))
+                if tabs.parent.is_none()
+                    && tabs.tabs.is_empty()
+                    && self.floating_id_by_root(node_id).is_none()
+                    && !self.sessions.values().any(|session| session.root_node == node_id)
+        )
     }
 
     fn session_mut(&mut self, session_id: SessionId) -> Result<&mut Session> {

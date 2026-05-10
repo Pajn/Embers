@@ -195,10 +195,34 @@ impl Renderer {
                     .map(|snapshot| snapshot.lines.as_slice())
             });
 
+        let content_rows = usize::from(height.saturating_sub(1));
+        let display_offset = view_state
+            .filter(|view| view.follow_output)
+            .map(|_| {
+                lines.map_or(0, |lines| {
+                    let significant_len = lines
+                        .iter()
+                        .rposition(|line| !line.is_empty())
+                        .map(|index| index + 1)
+                        .unwrap_or(0);
+                    significant_len.saturating_sub(content_rows)
+                })
+            })
+            .unwrap_or(0);
+        let displayed_top_line = view_state
+            .map(|view| {
+                view.scroll_top_line
+                    .saturating_add(u64::try_from(display_offset).unwrap_or(u64::MAX))
+            })
+            .unwrap_or(0);
+        let displayed_view_lines = view_state
+            .map(|view| &view.visible_lines[display_offset.min(view.visible_lines.len())..]);
+
         if let Some(lines) = lines {
             for (row, line) in lines
                 .iter()
-                .take(usize::from(height.saturating_sub(1)))
+                .skip(display_offset)
+                .take(content_rows)
                 .enumerate()
             {
                 let Some(row) = u16::try_from(row).ok() else {
@@ -217,8 +241,8 @@ impl Renderer {
                     x,
                     y + 1,
                     width,
-                    view_state.scroll_top_line,
-                    &view_state.visible_lines,
+                    displayed_top_line,
+                    displayed_view_lines.unwrap_or(&view_state.visible_lines),
                     search_state,
                 );
             }
@@ -228,8 +252,8 @@ impl Renderer {
                     x,
                     y + 1,
                     width,
-                    view_state.scroll_top_line,
-                    &view_state.visible_lines,
+                    displayed_top_line,
+                    displayed_view_lines.unwrap_or(&view_state.visible_lines),
                     selection_state,
                 );
             }

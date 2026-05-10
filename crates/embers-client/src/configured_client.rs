@@ -612,6 +612,13 @@ where
                     {
                         Ok(None) => Ok(()),
                         Ok(Some(action)) => {
+                            if matches!(action, Action::UnzoomNode { .. })
+                                && current_session_id.is_none()
+                            {
+                                return Err(MuxError::invalid_input(format!(
+                                    "cannot execute action {action:?} without current_session_id"
+                                )));
+                            }
                             let mut missing = Vec::new();
                             if current_session_id.is_none() {
                                 missing.push("current_session_id");
@@ -725,12 +732,9 @@ where
                 session_id: target_session_id,
             } => {
                 let Some(session_id) = target_session_id.or(current_session_id) else {
-                    return Err(MuxError::invalid_input(format!(
-                        "cannot execute action {:?} without current_session_id",
-                        Action::UnzoomNode {
-                            session_id: target_session_id
-                        }
-                    )));
+                    return Ok(Some(Action::UnzoomNode {
+                        session_id: target_session_id,
+                    }));
                 };
                 self.client
                     .request_message(ClientMessage::Node(NodeRequest::Unzoom {

@@ -415,14 +415,12 @@ fn validate_action_refs(
 ) -> Result<(), ScriptError> {
     for action in actions {
         match action {
-            Action::RunNamedAction { name } => {
-                if !named_actions.contains_key(name) {
-                    return Err(ScriptError::validation(
-                        source,
-                        position,
-                        format!("binding references unknown action '{name}'"),
-                    ));
-                }
+            Action::RunNamedAction { name } if !named_actions.contains_key(name) => {
+                return Err(ScriptError::validation(
+                    source,
+                    position,
+                    format!("binding references unknown action '{name}'"),
+                ));
             }
             Action::Chain(actions) => {
                 validate_action_refs(source, position, named_actions, actions)?;
