@@ -121,11 +121,16 @@ pub async fn run(
                         dirty = true;
                     }
                 }
-                Ok(TerminalEvent::ConfigChanged) => {
-                    let _ = configured.reload_config_if_changed()?;
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
-                }
+                Ok(TerminalEvent::ConfigChanged) => match configured.reload_config_if_changed() {
+                    Ok(true) => {
+                        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        dirty = true;
+                    }
+                },
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
                     return Err(MuxError::transport(message));

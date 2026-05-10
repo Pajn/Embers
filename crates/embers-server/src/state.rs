@@ -1486,9 +1486,10 @@ impl ServerState {
             )
             .map(|_| ())
         } else {
-            let tabs_id = self
-                .nearest_tabs_ancestor(old_parent)?
-                .unwrap_or(self.ensure_root_tabs_container(session_id)?);
+            let tabs_id = match self.nearest_tabs_ancestor(old_parent)? {
+                Some(tabs_id) => tabs_id,
+                None => self.ensure_root_tabs_container(session_id)?,
+            };
             let insert_index = match self.node(tabs_id)? {
                 Node::Tabs(tabs) => tabs.tabs.len(),
                 _ => return Err(MuxError::invalid_input("node is not a tabs container")),

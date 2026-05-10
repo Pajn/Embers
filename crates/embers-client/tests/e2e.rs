@@ -128,7 +128,7 @@ async fn refresh_all_snapshots(
 ) -> embers_core::Result<()> {
     let buffer_ids = client.state().buffers.keys().copied().collect::<Vec<_>>();
     for buffer_id in buffer_ids {
-        client.refresh_buffer_snapshot(buffer_id).await?;
+        let _ = client.refresh_buffer_snapshot(buffer_id).await;
     }
     Ok(())
 }

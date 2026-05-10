@@ -1020,7 +1020,14 @@ async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
         r#"bind("normal", "<C-g>", action.send_bytes_current("echo after-reload\r"))"#,
     )
     .expect("write reloaded config");
-    filetime::set_file_mtime(&config_path, FileTime::now()).expect("bump reloaded config mtime");
+    let previous_mtime = FileTime::from_last_modification_time(
+        &fs::metadata(&config_path).expect("read reloaded config metadata"),
+    );
+    let next_mtime = FileTime::from_unix_time(
+        previous_mtime.unix_seconds() + 1,
+        previous_mtime.nanoseconds(),
+    );
+    filetime::set_file_mtime(&config_path, next_mtime).expect("bump reloaded config mtime");
     let reload_deadline = tokio::time::Instant::now() + IO_TIMEOUT;
     loop {
         harness.write_all("\x07").expect("trigger reloaded binding");
