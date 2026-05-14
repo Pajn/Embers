@@ -204,6 +204,9 @@ impl ClientState {
             ServerEvent::BufferCreated(event) => {
                 self.buffers.insert(event.buffer.id, event.buffer.clone());
             }
+            ServerEvent::BufferPipeChanged(event) => {
+                self.buffers.insert(event.buffer.id, event.buffer.clone());
+            }
             ServerEvent::BufferDetached(event) => {
                 if let Some(buffer) = self.buffers.get_mut(&event.buffer_id) {
                     buffer.attachment_node_id = None;

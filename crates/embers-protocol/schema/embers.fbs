@@ -40,6 +40,7 @@ enum MessageKind : ubyte {
   RenderInvalidatedEvent = 47,
   SessionRenamedEvent = 48,
   ClientChangedEvent = 49,
+  BufferPipeChangedEvent = 50,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -79,6 +80,8 @@ enum BufferOp : ubyte {
   Reveal = 9,
   OpenHistory = 10,
   Inspect = 11,
+  StartPipe = 12,
+  StopPipe = 13,
 }
 
 enum NodeOp : ubyte {
@@ -156,6 +159,19 @@ enum BufferHistoryScopeWire : ubyte {
 enum BufferHistoryPlacementWire : ubyte {
   Tab = 0,
   Floating = 1,
+}
+
+enum BufferPipeStateWire : ubyte {
+  Running = 0,
+  Stopped = 1,
+}
+
+enum BufferPipeStopReasonWire : ubyte {
+  Requested = 0,
+  PipeExited = 1,
+  WriteFailed = 2,
+  BufferExited = 3,
+  RuntimeInterrupted = 4,
 }
 
 enum NodeBreakDestinationWire : ubyte {
@@ -323,6 +339,18 @@ table BufferRecord {
   helper_source_buffer_id:ulong = 0 (id: 18);
   helper_scope:BufferHistoryScopeWire = Full (id: 19);
   has_helper_scope:bool = false (id: 20);
+  pipe:BufferPipeRecord (id: 21);
+}
+
+table BufferPipeRecord {
+  command:[string] (id: 0);
+  state:BufferPipeStateWire = Running (id: 1);
+  pid:uint = 0 (id: 2);
+  has_pid:bool = false (id: 3);
+  exit_code:int = 0 (id: 4);
+  has_exit_code:bool = false (id: 5);
+  stop_reason:BufferPipeStopReasonWire = Requested (id: 6);
+  has_stop_reason:bool = false (id: 7);
 }
 
 table BufferViewRecord {
@@ -493,6 +521,11 @@ table BufferCreatedEvent {
   buffer:BufferRecord;
 }
 
+table BufferPipeChangedEvent {
+  session_id:ulong = 0;
+  buffer:BufferRecord;
+}
+
 table BufferDetachedEvent {
   buffer_id:ulong;
 }
@@ -567,6 +600,7 @@ table Envelope {
   client_changed_event:ClientChangedEvent (id: 35);
   buffer_location_response:BufferLocationResponse (id: 36);
   buffer_with_location_response:BufferWithLocationResponse (id: 37);
+  buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
 }
 
 root_type Envelope;

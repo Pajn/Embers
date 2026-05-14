@@ -1,11 +1,31 @@
+use std::fs;
 use std::time::Duration;
 
 use embers_core::{ErrorCode, RequestId};
 use embers_protocol::{BufferRequest, ClientMessage, InputRequest, ServerResponse};
 use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
+use predicates::prelude::*;
+use tempfile::tempdir;
 use tokio::time::sleep;
 
-use crate::support::{run_cli, session_snapshot_by_name, stdout};
+use crate::support::{cli_command, run_cli, session_snapshot_by_name, stdout};
+
+async fn wait_for_file_contains(path: &std::path::Path, needle: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Ok(contents) = fs::read_to_string(path)
+            && contents.contains(needle)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for file {:?} to contain {needle:?}",
+            path
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pane_commands_round_trip_through_cli() {
@@ -375,6 +395,118 @@ async fn buffer_show_and_history_open_helper_buffers() {
         ),
         "helper buffers should reject input with a read-only conflict, got {send:?}"
     );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_pipe_start_show_stop_round_trips_and_rejects_helper_buffers() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let tempdir = tempdir().expect("tempdir");
+    let pipe_path = tempdir.path().join("pipe-output.txt");
+
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "work",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+    let leaf = snapshot
+        .session
+        .focused_leaf_id
+        .expect("focused pane exists");
+    let buffer_id = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == leaf)
+        .and_then(|node| node.buffer_view.as_ref())
+        .map(|view| view.buffer_id)
+        .expect("focused pane buffer exists");
+
+    let shell_command = format!("cat >> '{}'", pipe_path.display());
+    let started = run_cli(
+        &server,
+        [
+            "buffer",
+            "pipe",
+            "start",
+            &buffer_id.to_string(),
+            "--",
+            "/bin/sh",
+            "-lc",
+            &shell_command,
+        ],
+    );
+    let started_stdout = stdout(&started);
+    assert!(started_stdout.contains(&format!("buffer_id\t{buffer_id}")));
+    assert!(started_stdout.contains("state\trunning"));
+
+    run_cli(
+        &server,
+        [
+            "send-keys",
+            "-t",
+            &leaf.to_string(),
+            "--enter",
+            "printf",
+            "pipe-cli-marker\\n",
+        ],
+    );
+    wait_for_file_contains(&pipe_path, "pipe-cli-marker").await;
+
+    let shown = run_cli(&server, ["buffer", "pipe", "show", &buffer_id.to_string()]);
+    let shown_stdout = stdout(&shown);
+    assert!(shown_stdout.contains("state\trunning"));
+    assert!(shown_stdout.contains("command\t["));
+
+    let stopped = run_cli(&server, ["buffer", "pipe", "stop", &buffer_id.to_string()]);
+    let stopped_stdout = stdout(&stopped);
+    assert!(stopped_stdout.contains("state\tstopped"));
+    assert!(stopped_stdout.contains("stop_reason\trequested"));
+
+    let opened = run_cli(
+        &server,
+        [
+            "buffer",
+            "history",
+            &buffer_id.to_string(),
+            "--scope",
+            "visible",
+        ],
+    );
+    let helper_buffer_id = stdout(&opened)
+        .trim()
+        .split('\t')
+        .next()
+        .expect("helper buffer id column")
+        .parse::<u64>()
+        .expect("helper buffer id parses");
+
+    cli_command(&server)
+        .args([
+            "buffer",
+            "pipe",
+            "start",
+            &helper_buffer_id.to_string(),
+            "--",
+            "/bin/cat",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("read-only"));
 
     server.shutdown().await.expect("shutdown server");
 }

@@ -32,6 +32,7 @@ fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord
         activity: ActivityState::Idle,
         last_snapshot_seq: 0,
         exit_code: None,
+        pipe: None,
     }
 }
 

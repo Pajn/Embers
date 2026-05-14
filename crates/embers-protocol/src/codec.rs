@@ -194,6 +194,23 @@ fn validate_required_node_ids(
     Ok(())
 }
 
+fn validate_non_empty_command(
+    command: &[String],
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if command.is_empty() {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if command[0].is_empty() {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} first segment must not be empty"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
     match req {
         SessionRequest::Create { .. } | SessionRequest::List { .. } => Ok(()),
@@ -224,6 +241,12 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
         BufferRequest::List { session_id, .. } => {
             validate_optional_session_id(*session_id, "buffer_request.session_id")
         }
+        BufferRequest::StartPipe {
+            buffer_id, command, ..
+        } => {
+            validate_required_buffer_id(*buffer_id, "buffer_request.buffer_id")?;
+            validate_non_empty_command(command, "buffer_request.command")
+        }
         BufferRequest::Get { buffer_id, .. }
         | BufferRequest::Inspect { buffer_id, .. }
         | BufferRequest::Detach { buffer_id, .. }
@@ -233,7 +256,8 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
         | BufferRequest::ScrollbackSlice { buffer_id, .. }
         | BufferRequest::GetLocation { buffer_id, .. }
         | BufferRequest::Reveal { buffer_id, .. }
-        | BufferRequest::OpenHistory { buffer_id, .. } => {
+        | BufferRequest::OpenHistory { buffer_id, .. }
+        | BufferRequest::StopPipe { buffer_id, .. } => {
             validate_required_buffer_id(*buffer_id, "buffer_request.buffer_id")
         }
     }
@@ -475,6 +499,35 @@ fn decode_buffer_history_placement(
         fb::BufferHistoryPlacementWire::Floating => Ok(BufferHistoryPlacement::Floating),
         _ => Err(ProtocolError::InvalidMessage(
             "unknown buffer history placement",
+        )),
+    }
+}
+
+fn encode_buffer_pipe_stop_reason(reason: BufferPipeStopReason) -> fb::BufferPipeStopReasonWire {
+    match reason {
+        BufferPipeStopReason::Requested => fb::BufferPipeStopReasonWire::Requested,
+        BufferPipeStopReason::PipeExited => fb::BufferPipeStopReasonWire::PipeExited,
+        BufferPipeStopReason::WriteFailed => fb::BufferPipeStopReasonWire::WriteFailed,
+        BufferPipeStopReason::BufferExited => fb::BufferPipeStopReasonWire::BufferExited,
+        BufferPipeStopReason::RuntimeInterrupted => {
+            fb::BufferPipeStopReasonWire::RuntimeInterrupted
+        }
+    }
+}
+
+fn decode_buffer_pipe_stop_reason(
+    reason: fb::BufferPipeStopReasonWire,
+) -> Result<BufferPipeStopReason, ProtocolError> {
+    match reason {
+        fb::BufferPipeStopReasonWire::Requested => Ok(BufferPipeStopReason::Requested),
+        fb::BufferPipeStopReasonWire::PipeExited => Ok(BufferPipeStopReason::PipeExited),
+        fb::BufferPipeStopReasonWire::WriteFailed => Ok(BufferPipeStopReason::WriteFailed),
+        fb::BufferPipeStopReasonWire::BufferExited => Ok(BufferPipeStopReason::BufferExited),
+        fb::BufferPipeStopReasonWire::RuntimeInterrupted => {
+            Ok(BufferPipeStopReason::RuntimeInterrupted)
+        }
+        _ => Err(ProtocolError::InvalidMessage(
+            "unknown buffer pipe stop reason",
         )),
     }
 }
@@ -1021,6 +1074,46 @@ fn encode_buffer_request<'a>(
             None,
             None,
         ),
+        BufferRequest::StartPipe {
+            buffer_id,
+            command,
+            cwd,
+            env,
+            ..
+        } => (
+            fb::BufferOp::StartPipe,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            Some(command),
+            cwd.as_deref(),
+            Some(env),
+        ),
+        BufferRequest::StopPipe { buffer_id, .. } => (
+            fb::BufferOp::StopPipe,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
     };
 
     let title = title_str.map(|s| builder.create_string(s));
@@ -1168,8 +1261,20 @@ fn validate_buffer_record(record: &BufferRecord) -> Result<(), ProtocolError> {
         record.helper_source_buffer_id,
         "buffer_record.helper_source_buffer_id",
     )?;
+    if let Some(pipe) = &record.pipe {
+        validate_buffer_pipe_record(pipe, "buffer_record.pipe")?;
+    }
     record
         .validate()
+        .map_err(ProtocolError::InvalidMessageOwned)
+}
+
+fn validate_buffer_pipe_record(
+    record: &BufferPipeRecord,
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    record
+        .validate(field)
         .map_err(ProtocolError::InvalidMessageOwned)
 }
 
@@ -1283,6 +1388,10 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
             validate_required_session_id(event.session_id, "session_renamed_event.session_id")
         }
         ServerEvent::BufferCreated(event) => validate_buffer_record(&event.buffer),
+        ServerEvent::BufferPipeChanged(event) => {
+            validate_optional_session_id(event.session_id, "buffer_pipe_changed_event.session_id")?;
+            validate_buffer_record(&event.buffer)
+        }
         ServerEvent::BufferDetached(event) => {
             validate_required_buffer_id(event.buffer_id, "buffer_detached_event.buffer_id")
         }
@@ -2754,6 +2863,25 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::BufferPipeChanged(e) => {
+            let buffer = encode_buffer_record(builder, &e.buffer);
+            let event = fb::BufferPipeChangedEvent::create(
+                builder,
+                &fb::BufferPipeChangedEventArgs {
+                    session_id: e.session_id.map(|id| id.into()).unwrap_or(0),
+                    buffer: Some(buffer),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::BufferPipeChangedEvent,
+                    buffer_pipe_changed_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::BufferDetached(e) => {
             let event = fb::BufferDetachedEvent::create(
                 builder,
@@ -2925,6 +3053,10 @@ fn encode_buffer_record<'a>(
         .helper_scope
         .map(encode_buffer_history_scope)
         .unwrap_or(fb::BufferHistoryScopeWire::Full);
+    let pipe = record
+        .pipe
+        .as_ref()
+        .map(|pipe| encode_buffer_pipe_record(builder, pipe));
 
     fb::BufferRecord::create(
         builder,
@@ -2933,6 +3065,7 @@ fn encode_buffer_record<'a>(
             title: Some(title),
             command: Some(command),
             cwd,
+            pipe,
             kind,
             state,
             pid: record.pid.unwrap_or(0),
@@ -2953,6 +3086,39 @@ fn encode_buffer_record<'a>(
             has_exit_code: record.exit_code.is_some(),
             env_keys: Some(env_keys),
             env_values: Some(env_values),
+        },
+    )
+}
+
+fn encode_buffer_pipe_record<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    record: &BufferPipeRecord,
+) -> flatbuffers::WIPOffset<fb::BufferPipeRecord<'a>> {
+    let command_vec: Vec<_> = record
+        .command
+        .iter()
+        .map(|segment| builder.create_string(segment))
+        .collect();
+    let command = builder.create_vector(&command_vec);
+    let state = match record.state {
+        BufferPipeState::Running => fb::BufferPipeStateWire::Running,
+        BufferPipeState::Stopped => fb::BufferPipeStateWire::Stopped,
+    };
+    let stop_reason = record
+        .stop_reason
+        .map(encode_buffer_pipe_stop_reason)
+        .unwrap_or(fb::BufferPipeStopReasonWire::Requested);
+    fb::BufferPipeRecord::create(
+        builder,
+        &fb::BufferPipeRecordArgs {
+            command: Some(command),
+            state,
+            pid: record.pid.unwrap_or(0),
+            has_pid: record.pid.is_some(),
+            exit_code: record.exit_code.unwrap_or(0),
+            has_exit_code: record.exit_code.is_some(),
+            stop_reason,
+            has_stop_reason: record.stop_reason.is_some(),
         },
     )
 }
@@ -3312,8 +3478,29 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     placement: decode_buffer_history_placement(req.history_placement())?,
                     client_id: NonZeroU64::new(req.client_id()),
                 },
+                fb::BufferOp::StartPipe => BufferRequest::StartPipe {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                    command: required(req.command(), "buffer_request.command")?
+                        .iter()
+                        .map(|segment| segment.to_owned())
+                        .collect(),
+                    cwd: req.cwd().map(|cwd| cwd.to_owned()),
+                    env: decode_string_map(req.env_keys(), req.env_values(), "buffer_request.env")?,
+                },
+                fb::BufferOp::StopPipe => BufferRequest::StopPipe {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown buffer op")),
             };
+            validate_buffer_request(&buffer_request)?;
             Ok(ClientMessage::Buffer(buffer_request))
         }
         fb::MessageKind::NodeRequest => {
@@ -3981,6 +4168,23 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::BufferPipeChangedEvent => {
+            let event = required(
+                envelope.buffer_pipe_changed_event(),
+                "buffer_pipe_changed_event",
+            )?;
+            let buffer = required(event.buffer(), "buffer_pipe_changed_event.buffer")?;
+            Ok(ServerEnvelope::Event(ServerEvent::BufferPipeChanged(
+                BufferPipeChangedEvent {
+                    session_id: if event.session_id() == 0 {
+                        None
+                    } else {
+                        Some(SessionId(event.session_id()))
+                    },
+                    buffer: decode_buffer_record(buffer)?,
+                },
+            )))
+        }
         fb::MessageKind::BufferDetachedEvent => {
             let event = required(envelope.buffer_detached_event(), "buffer_detached_event")?;
             Ok(ServerEnvelope::Event(ServerEvent::BufferDetached(
@@ -4120,12 +4324,17 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
     } else {
         None
     };
+    let pipe = record
+        .pipe()
+        .map(|pipe| decode_buffer_pipe_record(pipe))
+        .transpose()?;
 
     let record = BufferRecord {
         id: BufferId(record.id()),
         title: title.to_owned(),
         command,
         cwd: record.cwd().map(|c| c.to_owned()),
+        pipe,
         kind,
         state,
         pid: record.has_pid().then(|| record.pid()),
@@ -4160,6 +4369,34 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         .validate()
         .map_err(ProtocolError::InvalidMessageOwned)?;
     Ok(record)
+}
+
+fn decode_buffer_pipe_record(
+    record: fb::BufferPipeRecord,
+) -> Result<BufferPipeRecord, ProtocolError> {
+    let command_fb = required(record.command(), "buffer_pipe_record.command")?;
+    let command: Vec<String> = command_fb
+        .iter()
+        .map(|segment| segment.to_owned())
+        .collect();
+    let state = match record.state() {
+        fb::BufferPipeStateWire::Running => BufferPipeState::Running,
+        fb::BufferPipeStateWire::Stopped => BufferPipeState::Stopped,
+        _ => return Err(ProtocolError::InvalidMessage("unknown buffer pipe state")),
+    };
+    let decoded = BufferPipeRecord {
+        command,
+        state,
+        pid: record.has_pid().then(|| record.pid()),
+        exit_code: record.has_exit_code().then(|| record.exit_code()),
+        stop_reason: if record.has_stop_reason() {
+            Some(decode_buffer_pipe_stop_reason(record.stop_reason())?)
+        } else {
+            None
+        },
+    };
+    validate_buffer_pipe_record(&decoded, "buffer_pipe_record")?;
+    Ok(decoded)
 }
 
 fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolError> {
@@ -4348,6 +4585,7 @@ fn decode_error_code(code: fb::ErrorCodeWire) -> ErrorCode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::num::NonZeroU64;
 
     use flatbuffers::FlatBufferBuilder;
@@ -4376,6 +4614,102 @@ mod tests {
             error,
             ProtocolError::InvalidMessage("node_record.buffer_view")
         ));
+    }
+
+    #[test]
+    fn validate_buffer_pipe_record_rejects_stopped_without_stop_reason() {
+        let record = BufferPipeRecord {
+            command: vec!["tee".to_owned()],
+            state: BufferPipeState::Stopped,
+            pid: None,
+            exit_code: Some(0),
+            stop_reason: None,
+        };
+
+        let error = validate_buffer_pipe_record(&record, "buffer_record.pipe")
+            .expect_err("stopped pipe requires stop reason");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_record.pipe.stop_reason required for stopped pipe"
+        ));
+    }
+
+    #[test]
+    fn buffer_record_validate_rejects_running_pipe_with_exit_code() {
+        let record = BufferRecord {
+            id: BufferId(1),
+            title: "shell".to_owned(),
+            command: vec!["sh".to_owned()],
+            cwd: None,
+            pipe: Some(BufferPipeRecord {
+                command: vec!["tee".to_owned()],
+                state: BufferPipeState::Running,
+                pid: Some(123),
+                exit_code: Some(0),
+                stop_reason: None,
+            }),
+            kind: BufferRecordKind::Pty,
+            state: BufferRecordState::Running,
+            pid: Some(456),
+            attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 1,
+            exit_code: None,
+            env: BTreeMap::new(),
+        };
+
+        let error = record
+            .validate()
+            .expect_err("running pipe cannot set exit code");
+
+        assert_eq!(
+            error,
+            "buffer_record.pipe.exit_code requires a stopped pipe"
+        );
+    }
+
+    #[test]
+    fn buffer_record_validate_rejects_empty_pipe_program() {
+        let record = BufferRecord {
+            id: BufferId(1),
+            title: "shell".to_owned(),
+            command: vec!["sh".to_owned()],
+            cwd: None,
+            pipe: Some(BufferPipeRecord {
+                command: vec![String::new()],
+                state: BufferPipeState::Running,
+                pid: Some(123),
+                exit_code: None,
+                stop_reason: None,
+            }),
+            kind: BufferRecordKind::Pty,
+            state: BufferRecordState::Running,
+            pid: Some(456),
+            attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 1,
+            exit_code: None,
+            env: BTreeMap::new(),
+        };
+
+        let error = record
+            .validate()
+            .expect_err("pipe command program cannot be empty");
+
+        assert_eq!(
+            error,
+            "buffer_record.pipe.command first segment must not be empty"
+        );
     }
 
     #[test]
@@ -4730,6 +5064,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -4766,6 +5101,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -4803,6 +5139,7 @@ mod tests {
                         title: "helper".to_owned(),
                         command: vec!["echo".to_owned()],
                         cwd: None,
+                        pipe: None,
                         kind: BufferRecordKind::Pty,
                         state: BufferRecordState::Running,
                         pid: None,
@@ -4830,6 +5167,7 @@ mod tests {
                         title: "helper".to_owned(),
                         command: vec!["echo".to_owned()],
                         cwd: None,
+                        pipe: None,
                         kind: BufferRecordKind::Pty,
                         state: BufferRecordState::Running,
                         pid: None,
@@ -4856,6 +5194,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -4902,6 +5241,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -4943,6 +5283,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -4980,6 +5321,7 @@ mod tests {
                 title: "helper".to_owned(),
                 command: Vec::new(),
                 cwd: None,
+                pipe: None,
                 kind: BufferRecordKind::Helper,
                 state: BufferRecordState::Created,
                 pid: None,
@@ -5014,6 +5356,7 @@ mod tests {
                     title: "shell".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -5038,6 +5381,7 @@ mod tests {
                     title: "shell".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -5077,6 +5421,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Helper,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -5101,6 +5446,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Helper,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -5197,6 +5543,7 @@ mod tests {
                     title: "helper".to_owned(),
                     command: vec!["echo".to_owned()],
                     cwd: None,
+                    pipe: None,
                     kind: BufferRecordKind::Pty,
                     state: BufferRecordState::Running,
                     pid: None,
@@ -5277,6 +5624,42 @@ mod tests {
             error,
             ProtocolError::InvalidMessageOwned(message)
                 if message == "buffer_request.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_request_rejects_empty_start_pipe_command() {
+        let error = encode_client_message(&ClientMessage::Buffer(BufferRequest::StartPipe {
+            request_id: RequestId(1),
+            buffer_id: BufferId(7),
+            command: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+        }))
+        .expect_err("empty start pipe command should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.command must not be empty"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_request_rejects_empty_start_pipe_program() {
+        let error = encode_client_message(&ClientMessage::Buffer(BufferRequest::StartPipe {
+            request_id: RequestId(1),
+            buffer_id: BufferId(7),
+            command: vec![String::new()],
+            cwd: None,
+            env: BTreeMap::new(),
+        }))
+        .expect_err("empty start pipe program should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.command first segment must not be empty"
         ));
     }
 
@@ -5498,6 +5881,75 @@ mod tests {
             error,
             ProtocolError::InvalidMessageOwned(message)
                 if message == "buffer_request.buffer_id must be non-zero"
+        ));
+    }
+
+    #[test]
+    fn decode_buffer_request_rejects_empty_start_pipe_command() {
+        let mut builder = FlatBufferBuilder::new();
+        let empty_command = builder.create_vector::<flatbuffers::ForwardsUOffset<&str>>(&[]);
+        let request = fb::BufferRequest::create(
+            &mut builder,
+            &fb::BufferRequestArgs {
+                op: fb::BufferOp::StartPipe,
+                buffer_id: 7,
+                command: Some(empty_command),
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 8,
+                kind: fb::MessageKind::BufferRequest,
+                buffer_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("empty start pipe command should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.command must not be empty"
+        ));
+    }
+
+    #[test]
+    fn decode_buffer_request_rejects_empty_start_pipe_program() {
+        let mut builder = FlatBufferBuilder::new();
+        let empty_program = builder.create_string("");
+        let command = builder.create_vector(&[empty_program]);
+        let request = fb::BufferRequest::create(
+            &mut builder,
+            &fb::BufferRequestArgs {
+                op: fb::BufferOp::StartPipe,
+                buffer_id: 7,
+                command: Some(command),
+                ..Default::default()
+            },
+        );
+        let envelope = fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: 8,
+                kind: fb::MessageKind::BufferRequest,
+                buffer_request: Some(request),
+                ..Default::default()
+            },
+        );
+        builder.finish(envelope, Some("EMBR"));
+
+        let error = decode_client_message(builder.finished_data())
+            .expect_err("empty start pipe program should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessageOwned(message)
+                if message == "buffer_request.command first segment must not be empty"
         ));
     }
 

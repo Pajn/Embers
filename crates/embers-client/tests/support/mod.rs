@@ -322,6 +322,7 @@ fn buffer(
         activity,
         last_snapshot_seq: 0,
         exit_code: None,
+        pipe: None,
     }
 }
 
