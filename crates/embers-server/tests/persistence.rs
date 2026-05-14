@@ -73,6 +73,33 @@ async fn wait_for_snapshot_line(
     );
 }
 
+async fn wait_for_running_buffer(
+    client: &mut ProtocolClient,
+    request_id: RequestId,
+    buffer_id: BufferId,
+) -> embers_protocol::BufferRecord {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let response = request_buffer(
+            client,
+            BufferRequest::Get {
+                request_id,
+                buffer_id,
+            },
+        )
+        .await;
+        if response.buffer.state == BufferRecordState::Running {
+            return response.buffer;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!("buffer {buffer_id} did not reach Running before timeout");
+}
+
 #[tokio::test]
 async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
     init_test_tracing();
@@ -245,6 +272,88 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
         "restarted-detached",
     )
     .await;
+
+    handle.shutdown().await.expect("shutdown restarted server");
+}
+
+#[tokio::test]
+async fn clean_restart_stops_ephemeral_buffer_pipes() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(101),
+            title: Some("piped".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+        },
+    )
+    .await
+    .buffer;
+    let buffer_id = buffer.id;
+    let _ = wait_for_running_buffer(&mut client, RequestId(102), buffer_id).await;
+
+    let started = request_buffer(
+        &mut client,
+        BufferRequest::StartPipe {
+            request_id: RequestId(103),
+            buffer_id,
+            command: vec!["/bin/cat".to_owned()],
+            cwd: None,
+            env: Default::default(),
+        },
+    )
+    .await
+    .buffer;
+    assert!(
+        started
+            .pipe
+            .as_ref()
+            .is_some_and(|pipe| pipe.state == embers_protocol::BufferPipeState::Running)
+    );
+
+    handle.shutdown().await.expect("shutdown server");
+
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+
+    let restored = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(104),
+            buffer_id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(restored.state, BufferRecordState::Running);
+    let restored_pipe = restored
+        .pipe
+        .expect("restored buffer keeps stopped pipe metadata");
+    assert_eq!(
+        restored_pipe.state,
+        embers_protocol::BufferPipeState::Stopped
+    );
+    assert_eq!(
+        restored_pipe.stop_reason,
+        Some(embers_protocol::BufferPipeStopReason::Requested)
+    );
 
     handle.shutdown().await.expect("shutdown restarted server");
 }

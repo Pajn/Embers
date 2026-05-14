@@ -39,6 +39,32 @@ pub enum BufferKind {
     Helper(HelperBuffer),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferPipe {
+    pub command: Vec<String>,
+    pub state: BufferPipeState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BufferPipeState {
+    Running {
+        pid: Option<u32>,
+    },
+    Stopped {
+        exit_code: Option<i32>,
+        reason: BufferPipeStopReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferPipeStopReason {
+    Requested,
+    PipeExited,
+    WriteFailed,
+    BufferExited,
+    RuntimeInterrupted,
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     pub id: BufferId,
@@ -53,6 +79,7 @@ pub struct Buffer {
     pub activity: ActivityState,
     pub last_snapshot_seq: u64,
     pub kind: BufferKind,
+    pub pipe: Option<BufferPipe>,
     pub created_at: Timestamp,
 }
 
@@ -77,6 +104,7 @@ impl Buffer {
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,
             kind: BufferKind::Pty,
+            pipe: None,
             created_at: Timestamp::now(),
         }
     }
@@ -105,6 +133,7 @@ impl fmt::Debug for Buffer {
             .field("activity", &self.activity)
             .field("last_snapshot_seq", &self.last_snapshot_seq)
             .field("kind", &self.kind)
+            .field("pipe", &self.pipe)
             .field("created_at", &self.created_at)
             .finish()
     }
@@ -123,6 +152,7 @@ impl PartialEq for Buffer {
             && self.activity == other.activity
             && self.last_snapshot_seq == other.last_snapshot_seq
             && self.kind == other.kind
+            && self.pipe == other.pipe
             && self.created_at == other.created_at
     }
 }

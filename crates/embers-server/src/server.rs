@@ -14,9 +14,9 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
-    BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferRequest,
-    BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent, ClientMessage,
-    ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
+    BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
+    BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
+    ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
     FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent, FrameType,
     InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
     RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
@@ -31,14 +31,17 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info};
 
-use crate::model::{BufferKind, HelperBufferScope, Node};
+use crate::model::{
+    BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
+};
 use crate::persist::{load_workspace, save_workspace};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
 use crate::{
-    BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeStatus,
-    BufferRuntimeUpdate, BufferState, ServerConfig, ServerState, TabEntry,
+    BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
+    BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, BufferState,
+    ServerConfig, ServerState, TabEntry,
 };
 
 #[derive(Debug)]
@@ -470,7 +473,27 @@ impl Runtime {
                 .attach_buffer_runtime(buffer.id, socket_path.clone())
                 .await
             {
-                Ok((runtime, status)) => {
+                Ok((runtime, mut status)) => {
+                    if status.pipe.as_ref().is_some_and(|pipe| pipe.running) {
+                        match runtime.stop_pipe().await {
+                            Ok(pipe) => status.pipe = Some(pipe),
+                            Err(error) => {
+                                debug!(
+                                    %buffer.id,
+                                    socket_path = %socket_path.display(),
+                                    %error,
+                                    "failed to stop restored buffer pipe"
+                                );
+                                let mut state = self.state.lock().await;
+                                let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                                let _ = state.mark_buffer_interrupted(
+                                    buffer.id,
+                                    buffer_pid_hint(&buffer.state),
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     let mut state = self.state.lock().await;
                     let _ =
                         state.set_buffer_runtime_socket_path(buffer.id, Some(socket_path.clone()));
@@ -1195,6 +1218,29 @@ impl Runtime {
                         ),
                     }
                 }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::StartPipe {
+                request_id,
+                buffer_id,
+                command,
+                cwd,
+                env,
+            } => match self.start_buffer_pipe(buffer_id, command, cwd, env).await {
+                Ok((buffer, events)) => (
+                    ServerResponse::Buffer(BufferResponse { request_id, buffer }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::StopPipe {
+                request_id,
+                buffer_id,
+            } => match self.stop_buffer_pipe(buffer_id).await {
+                Ok((buffer, events)) => (
+                    ServerResponse::Buffer(BufferResponse { request_id, buffer }),
+                    events,
+                ),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
         }
@@ -2008,6 +2054,100 @@ impl Runtime {
         Ok(())
     }
 
+    async fn ensure_buffer_accepts_pipe(&self, buffer_id: BufferId) -> Result<()> {
+        let state = self.state.lock().await;
+        let buffer = state.buffer(buffer_id)?;
+        if matches!(&buffer.kind, BufferKind::Helper(_)) {
+            return Err(MuxError::conflict(format!(
+                "buffer {buffer_id} is read-only"
+            )));
+        }
+        if matches!(buffer.state, BufferState::Exited(_)) {
+            return Err(MuxError::conflict(format!(
+                "buffer {buffer_id} has already exited"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn start_buffer_pipe(
+        &self,
+        buffer_id: BufferId,
+        command: Vec<String>,
+        cwd: Option<String>,
+        env: BTreeMap<String, String>,
+    ) -> Result<(embers_protocol::BufferRecord, Vec<ServerEvent>)> {
+        if command.is_empty() {
+            return Err(MuxError::invalid_input(
+                "buffer pipe command must not be empty",
+            ));
+        }
+        self.ensure_buffer_accepts_pipe(buffer_id).await?;
+        let runtime = self.buffer_runtime(buffer_id).await?;
+        let pipe = runtime
+            .start_pipe(command, cwd.map(Into::into), env)
+            .await?;
+        let (buffer, session_id) = {
+            let mut state = self.state.lock().await;
+            let attachment = state.buffer(buffer_id)?.attachment.clone();
+            {
+                let Some(record) = state.buffers.get_mut(&buffer_id) else {
+                    return Err(MuxError::not_found(format!(
+                        "buffer {buffer_id} was not found"
+                    )));
+                };
+                record.pipe = Some(model_pipe_from_runtime(&pipe));
+            }
+            let session_id = match attachment {
+                BufferAttachment::Attached(node_id) => Some(state.node(node_id)?.session_id()),
+                BufferAttachment::Detached => None,
+            };
+            let buffer = buffer_record(state.buffer(buffer_id)?);
+            (buffer, session_id)
+        };
+        Ok((
+            buffer.clone(),
+            vec![ServerEvent::BufferPipeChanged(BufferPipeChangedEvent {
+                session_id,
+                buffer,
+            })],
+        ))
+    }
+
+    async fn stop_buffer_pipe(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<(embers_protocol::BufferRecord, Vec<ServerEvent>)> {
+        self.ensure_buffer_accepts_pipe(buffer_id).await?;
+        let runtime = self.buffer_runtime(buffer_id).await?;
+        let pipe = runtime.stop_pipe().await?;
+        let (buffer, session_id) = {
+            let mut state = self.state.lock().await;
+            let attachment = state.buffer(buffer_id)?.attachment.clone();
+            {
+                let Some(record) = state.buffers.get_mut(&buffer_id) else {
+                    return Err(MuxError::not_found(format!(
+                        "buffer {buffer_id} was not found"
+                    )));
+                };
+                record.pipe = Some(model_pipe_from_runtime(&pipe));
+            }
+            let session_id = match attachment {
+                BufferAttachment::Attached(node_id) => Some(state.node(node_id)?.session_id()),
+                BufferAttachment::Detached => None,
+            };
+            let buffer = buffer_record(state.buffer(buffer_id)?);
+            (buffer, session_id)
+        };
+        Ok((
+            buffer.clone(),
+            vec![ServerEvent::BufferPipeChanged(BufferPipeChangedEvent {
+                session_id,
+                buffer,
+            })],
+        ))
+    }
+
     async fn resolve_reveal_client_id(
         &self,
         connection_id: u64,
@@ -2531,34 +2671,57 @@ impl Runtime {
     }
 
     async fn record_buffer_update(&self, buffer_id: BufferId, update: BufferRuntimeUpdate) {
-        let updated = {
+        let (render_invalidated, pipe_event) = {
             let mut state = self.state.lock().await;
-            let Some(buffer) = state.buffers.get_mut(&buffer_id) else {
+            let Some(existing) = state.buffers.get(&buffer_id) else {
                 return;
             };
-            if update.sequence <= buffer.last_snapshot_seq {
-                false
-            } else {
-                buffer.last_snapshot_seq = update.sequence;
-                buffer.activity = max_activity(buffer.activity, update.activity);
-                if let Some(title) = update.title {
-                    match title {
-                        Some(title) => buffer.title = title,
-                        None => buffer.title.clear(),
+            let previous_pipe = existing.pipe.clone();
+            let mut render_invalidated = false;
+            {
+                let buffer = state
+                    .buffers
+                    .get_mut(&buffer_id)
+                    .expect("buffer still exists while update is applied");
+                let sequence_advanced = update.sequence > buffer.last_snapshot_seq;
+                if sequence_advanced {
+                    buffer.last_snapshot_seq = update.sequence;
+                    let next_activity = max_activity(buffer.activity, update.activity);
+                    if next_activity != buffer.activity {
+                        buffer.activity = next_activity;
                     }
+                    if let Some(title) = update.title {
+                        let next_title = title.unwrap_or_default();
+                        if next_title != buffer.title {
+                            buffer.title = next_title;
+                        }
+                    }
+                    render_invalidated = true;
                 }
-                true
+                if let Some(pipe) = update.pipe {
+                    buffer.pipe = pipe.as_ref().map(model_pipe_from_runtime);
+                }
             }
+            let pipe_event = match state.buffer(buffer_id) {
+                Ok(buffer) if buffer.pipe != previous_pipe => {
+                    buffer_pipe_changed_event(&state, buffer_id).ok()
+                }
+                _ => None,
+            };
+            (render_invalidated, pipe_event)
         };
 
-        if updated {
-            self.broadcast(
-                vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
-                    buffer_id,
-                })],
-                &[],
-            )
-            .await;
+        let mut events = Vec::new();
+        if render_invalidated {
+            events.push(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                buffer_id,
+            }));
+        }
+        if let Some(pipe_event) = pipe_event {
+            events.push(ServerEvent::BufferPipeChanged(pipe_event));
+        }
+        if !events.is_empty() {
+            self.broadcast(events, &[]).await;
         }
     }
 
@@ -2568,7 +2731,12 @@ impl Runtime {
             let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
             drop(runtime);
         }
-        let updated = {
+        let runtime = if should_interrupt {
+            None
+        } else {
+            self.buffer_runtimes.lock().await.get(&buffer_id).cloned()
+        };
+        let (updated, pipe_changed) = {
             let mut state = self.state.lock().await;
             let result = if should_interrupt {
                 let pid = state
@@ -2580,22 +2748,59 @@ impl Runtime {
                 state.mark_buffer_exited(buffer_id, exit_code)
             };
             match result {
-                Ok(()) => true,
+                Ok(()) => {
+                    let pipe_reason = if should_interrupt {
+                        BufferPipeStopReason::RuntimeInterrupted
+                    } else {
+                        BufferPipeStopReason::BufferExited
+                    };
+                    let pipe_changed = state
+                        .buffers
+                        .get_mut(&buffer_id)
+                        .is_some_and(|buffer| stop_buffer_pipe(buffer, pipe_reason, exit_code));
+                    (true, pipe_changed)
+                }
                 Err(error) => {
                     debug!(%buffer_id, %error, "buffer exited after state cleanup");
-                    false
+                    (false, false)
                 }
             }
         };
 
+        if updated && pipe_changed && !should_interrupt {
+            match runtime {
+                Some(runtime) => match runtime.stop_pipe_after_exit().await {
+                    Ok(pipe) => {
+                        let mut state = self.state.lock().await;
+                        if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+                            buffer.pipe = Some(model_pipe_from_runtime(&pipe));
+                        }
+                    }
+                    Err(error) => {
+                        debug!(%buffer_id, %error, "failed to stop buffer pipe after buffer exit");
+                    }
+                },
+                None => {
+                    debug!(%buffer_id, "buffer exited with a running pipe but no runtime handle");
+                }
+            }
+        }
+
+        let pipe_event = if updated && pipe_changed {
+            let state = self.state.lock().await;
+            buffer_pipe_changed_event(&state, buffer_id).ok()
+        } else {
+            None
+        };
+
         if updated {
-            self.broadcast(
-                vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
-                    buffer_id,
-                })],
-                &[],
-            )
-            .await;
+            let mut events = vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                buffer_id,
+            })];
+            if let Some(pipe_event) = pipe_event {
+                events.push(ServerEvent::BufferPipeChanged(pipe_event));
+            }
+            self.broadcast(events, &[]).await;
         }
     }
 
@@ -2611,6 +2816,7 @@ impl Runtime {
                 sequence: status.sequence,
                 activity: status.activity,
                 title: Some(status.title.clone()),
+                pipe: Some(status.pipe.clone()),
             },
         )
         .await;
@@ -3128,6 +3334,58 @@ fn protocol_error_to_mux(error: ProtocolError) -> MuxError {
     MuxError::protocol(error.to_string())
 }
 
+fn model_pipe_from_runtime(status: &BufferRuntimePipeStatus) -> BufferPipe {
+    BufferPipe {
+        command: status.command.clone(),
+        state: if status.running {
+            BufferPipeState::Running { pid: status.pid }
+        } else {
+            BufferPipeState::Stopped {
+                exit_code: status.exit_code,
+                reason: match status
+                    .stop_reason
+                    .unwrap_or(BufferRuntimePipeStopReason::PipeExited)
+                {
+                    BufferRuntimePipeStopReason::Requested => BufferPipeStopReason::Requested,
+                    BufferRuntimePipeStopReason::PipeExited => BufferPipeStopReason::PipeExited,
+                    BufferRuntimePipeStopReason::WriteFailed => BufferPipeStopReason::WriteFailed,
+                    BufferRuntimePipeStopReason::BufferExited => BufferPipeStopReason::BufferExited,
+                },
+            }
+        },
+    }
+}
+
+fn stop_buffer_pipe(
+    buffer: &mut crate::Buffer,
+    reason: BufferPipeStopReason,
+    exit_code: Option<i32>,
+) -> bool {
+    let Some(pipe) = buffer.pipe.as_mut() else {
+        return false;
+    };
+    if matches!(pipe.state, BufferPipeState::Stopped { .. }) {
+        return false;
+    }
+    pipe.state = BufferPipeState::Stopped { exit_code, reason };
+    true
+}
+
+fn buffer_pipe_changed_event(
+    state: &ServerState,
+    buffer_id: BufferId,
+) -> Result<BufferPipeChangedEvent> {
+    let buffer = state.buffer(buffer_id)?;
+    let session_id = match buffer.attachment {
+        BufferAttachment::Attached(node_id) => Some(state.node(node_id)?.session_id()),
+        BufferAttachment::Detached => None,
+    };
+    Ok(BufferPipeChangedEvent {
+        session_id,
+        buffer: buffer_record(buffer),
+    })
+}
+
 fn apply_runtime_status(
     state: &mut ServerState,
     buffer_id: BufferId,
@@ -3135,6 +3393,7 @@ fn apply_runtime_status(
 ) {
     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
         buffer.last_snapshot_seq = status.sequence;
+        buffer.pipe = status.pipe.as_ref().map(model_pipe_from_runtime);
     }
     if let Some(title) = &status.title {
         let _ = state.set_buffer_title(buffer_id, title.clone());
@@ -3383,6 +3642,7 @@ mod tests {
                     sequence: 5,
                     activity: ActivityState::Bell,
                     title: Some(Some("stale-title".to_owned())),
+                    pipe: None,
                 },
             )
             .await;
@@ -3406,6 +3666,7 @@ mod tests {
                     sequence: 6,
                     activity: ActivityState::Bell,
                     title: Some(Some("fresh-title".to_owned())),
+                    pipe: None,
                 },
             )
             .await;
@@ -3454,6 +3715,7 @@ mod tests {
                     sequence: 6,
                     activity: ActivityState::Idle,
                     title: Some(None),
+                    pipe: None,
                 },
             )
             .await;

@@ -124,6 +124,21 @@ fn client_message_families_round_trip() {
             placement: BufferHistoryPlacement::Tab,
             client_id: Some(NonZeroU64::new(8).expect("non-zero client id")),
         }),
+        ClientMessage::Buffer(BufferRequest::StartPipe {
+            request_id: RequestId(158),
+            buffer_id: BufferId(20),
+            command: vec![
+                "tee".to_owned(),
+                "-a".to_owned(),
+                "/tmp/embers.log".to_owned(),
+            ],
+            cwd: Some("/tmp".to_owned()),
+            env: std::collections::BTreeMap::from([("PIPE_MODE".to_owned(), "append".to_owned())]),
+        }),
+        ClientMessage::Buffer(BufferRequest::StopPipe {
+            request_id: RequestId(159),
+            buffer_id: BufferId(20),
+        }),
         ClientMessage::Node(NodeRequest::GetTree {
             request_id: RequestId(16),
             session_id: SessionId(10),
@@ -327,6 +342,20 @@ fn server_envelope_families_round_trip() {
     let snapshot_without_zoom = sample_snapshot_without_zoom();
     let session = snapshot.session.clone();
     let buffers = snapshot.buffers.clone();
+    let buffer_with_pipe = BufferRecord {
+        pipe: Some(BufferPipeRecord {
+            command: vec![
+                "tee".to_owned(),
+                "-a".to_owned(),
+                "/tmp/embers.log".to_owned(),
+            ],
+            state: BufferPipeState::Running,
+            pid: Some(5001),
+            exit_code: None,
+            stop_reason: None,
+        }),
+        ..buffers[0].clone()
+    };
     let detached_buffer = BufferRecord {
         attachment_node_id: None,
         ..buffers[2].clone()
@@ -367,7 +396,7 @@ fn server_envelope_families_round_trip() {
         })),
         ServerEnvelope::Response(ServerResponse::Buffer(BufferResponse {
             request_id: RequestId(36),
-            buffer: buffers[0].clone(),
+            buffer: buffer_with_pipe.clone(),
         })),
         ServerEnvelope::Response(ServerResponse::BufferWithLocation(
             BufferWithLocationResponse::new(
@@ -459,6 +488,10 @@ fn server_envelope_families_round_trip() {
         })),
         ServerEnvelope::Event(ServerEvent::BufferCreated(BufferCreatedEvent {
             buffer: buffers[0].clone(),
+        })),
+        ServerEnvelope::Event(ServerEvent::BufferPipeChanged(BufferPipeChangedEvent {
+            session_id: Some(SessionId(10)),
+            buffer: buffer_with_pipe,
         })),
         ServerEnvelope::Event(ServerEvent::BufferDetached(BufferDetachedEvent {
             buffer_id: BufferId(11),
@@ -652,6 +685,7 @@ fn sample_buffer_record(
         title: format!("buffer-{id}"),
         command: vec!["bash".to_owned(), "-lc".to_owned(), "echo mux".to_owned()],
         cwd: Some("/tmp".to_owned()),
+        pipe: None,
         kind,
         state,
         pid: Some(4242),

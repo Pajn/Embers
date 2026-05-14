@@ -1,3 +1,4 @@
+mod automation;
 mod interactive;
 
 use std::ffi::OsString;
@@ -21,10 +22,11 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
-    BufferLocationResponse, BufferRequest, BufferResponse, ClientMessage, ClientRecord,
-    ClientRequest, FloatingRecord, FloatingRequest, FloatingResponse, NodeBreakDestination,
-    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SnapshotResponse,
+    BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason, BufferRequest,
+    BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord, FloatingRequest,
+    FloatingResponse, NodeBreakDestination, NodeJoinPlacement, NodeRequest, PingRequest,
+    ProtocolClient, ServerResponse, SessionRecord, SessionRequest, SessionSnapshot,
+    SnapshotResponse,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -93,6 +95,12 @@ pub enum Command {
         env: Vec<(String, OsString)>,
         #[arg(last = true)]
         command: Vec<String>,
+    },
+    Automation {
+        #[arg(short = 't', long = "target", conflicts_with = "all_sessions")]
+        target: Option<String>,
+        #[arg(long, conflicts_with = "target")]
+        all_sessions: bool,
     },
     Ping {
         #[arg(default_value = "phase0")]
@@ -258,6 +266,10 @@ pub enum BufferCommand {
     Show {
         buffer_id: u64,
     },
+    Pipe {
+        #[command(subcommand)]
+        command: BufferPipeCommand,
+    },
     Reveal {
         buffer_id: u64,
         #[arg(long)]
@@ -271,6 +283,25 @@ pub enum BufferCommand {
         placement: HistoryPlacementArg,
         #[arg(long)]
         client: Option<NonZeroU64>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BufferPipeCommand {
+    Start {
+        buffer_id: u64,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long = "env", value_parser = parse_string_env_arg)]
+        env: Vec<(String, String)>,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    Stop {
+        buffer_id: u64,
+    },
+    Show {
+        buffer_id: u64,
     },
 }
 
@@ -343,11 +374,17 @@ pub enum JoinPlacementArg {
 
 async fn execute(socket: &Path, command: Command) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
+    execute_command(&mut connection, command).await
+}
 
+async fn execute_command(connection: &mut CliConnection, command: Command) -> Result<String> {
     match command {
-        Command::Attach { .. } | Command::Serve | Command::RuntimeKeeper { .. } => Err(
-            MuxError::internal("interactive commands must be dispatched through run()"),
-        ),
+        Command::Attach { .. }
+        | Command::Serve
+        | Command::RuntimeKeeper { .. }
+        | Command::Automation { .. } => Err(MuxError::internal(
+            "interactive commands must be dispatched through run()",
+        )),
         Command::Ping { payload } => {
             let response = connection
                 .request(ClientMessage::Ping(PingRequest {
@@ -488,6 +525,67 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 ensure_matching_buffer_id("buffer show", requested_buffer_id, buffer.id)?;
                 Ok(format_buffer_details(&buffer, &location))
             }
+            BufferCommand::Pipe { command } => match command {
+                BufferPipeCommand::Start {
+                    buffer_id,
+                    cwd,
+                    env,
+                    command,
+                } => {
+                    let response = connection
+                        .request(ClientMessage::Buffer(BufferRequest::StartPipe {
+                            request_id: new_request_id(),
+                            buffer_id: BufferId(buffer_id),
+                            command,
+                            cwd,
+                            env: env.into_iter().collect(),
+                        }))
+                        .await?;
+                    match response {
+                        ServerResponse::Buffer(response) => format_buffer_pipe_details(
+                            response.buffer.id,
+                            response.buffer.pipe.as_ref(),
+                        ),
+                        other => Err(MuxError::protocol(format!(
+                            "unexpected response to buffer pipe start: {other:?}"
+                        ))),
+                    }
+                }
+                BufferPipeCommand::Stop { buffer_id } => {
+                    let response = connection
+                        .request(ClientMessage::Buffer(BufferRequest::StopPipe {
+                            request_id: new_request_id(),
+                            buffer_id: BufferId(buffer_id),
+                        }))
+                        .await?;
+                    match response {
+                        ServerResponse::Buffer(response) => format_buffer_pipe_details(
+                            response.buffer.id,
+                            response.buffer.pipe.as_ref(),
+                        ),
+                        other => Err(MuxError::protocol(format!(
+                            "unexpected response to buffer pipe stop: {other:?}"
+                        ))),
+                    }
+                }
+                BufferPipeCommand::Show { buffer_id } => {
+                    let response = connection
+                        .request(ClientMessage::Buffer(BufferRequest::Get {
+                            request_id: new_request_id(),
+                            buffer_id: BufferId(buffer_id),
+                        }))
+                        .await?;
+                    match response {
+                        ServerResponse::Buffer(response) => format_buffer_pipe_details(
+                            response.buffer.id,
+                            response.buffer.pipe.as_ref(),
+                        ),
+                        other => Err(MuxError::protocol(format!(
+                            "unexpected response to buffer pipe show: {other:?}"
+                        ))),
+                    }
+                }
+            },
             BufferCommand::Reveal { buffer_id, client } => {
                 let requested_buffer_id = BufferId(buffer_id);
                 let response = connection
@@ -667,14 +765,14 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 }))
                 .await;
             let response = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "new-window",
                 response,
             )
             .await?;
             let snapshot = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "new-window",
                 expect_session_snapshot(response, "new-window"),
@@ -748,14 +846,14 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 }))
                 .await;
             let response = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "split-window",
                 response,
             )
             .await?;
             let snapshot = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "split-window",
                 expect_session_snapshot(response, "split-window"),
@@ -882,14 +980,14 @@ async fn execute(socket: &Path, command: Command) -> Result<String> {
                 }))
                 .await;
             let response = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "display-popup",
                 response,
             )
             .await?;
             let popup = rollback_created_buffer_on_error(
-                &mut connection,
+                connection,
                 buffer.buffer.id,
                 "display-popup",
                 expect_floating(response, "display-popup"),
@@ -951,6 +1049,13 @@ pub async fn run(cli: Cli) -> Result<()> {
                     }
                     interactive::run(socket, target, config).await
                 }
+                Some(Command::Automation {
+                    target,
+                    all_sessions,
+                }) => {
+                    ensure_server_process(&socket).await?;
+                    automation::run(socket, target, all_sessions).await
+                }
                 Some(Command::Serve) => run_server(socket).await,
                 Some(command) => {
                     ensure_server_process(&socket).await?;
@@ -999,6 +1104,16 @@ fn parse_env_arg(value: &str) -> std::result::Result<(String, OsString), String>
         return Err("environment key must not be empty".to_owned());
     }
     Ok((key.to_owned(), decode_runtime_keeper_env_value(env_value)?))
+}
+
+fn parse_string_env_arg(value: &str) -> std::result::Result<(String, String), String> {
+    let Some((key, env_value)) = value.split_once('=') else {
+        return Err("expected KEY=VALUE".to_owned());
+    };
+    if key.is_empty() {
+        return Err("environment key must not be empty".to_owned());
+    }
+    Ok((key.to_owned(), env_value.to_owned()))
 }
 
 fn decode_runtime_keeper_env_value(value: &str) -> std::result::Result<OsString, String> {
@@ -1734,7 +1849,60 @@ fn format_buffer_details(
             serde_json::to_string(cwd).expect("buffer working directories serialize to JSON");
         lines.push(format!("cwd\t{serialized_cwd}"));
     }
+    if let Some(pipe) = &buffer.pipe {
+        lines.push(format!(
+            "pipe_state\t{}",
+            buffer_pipe_state_label(pipe.state)
+        ));
+        let serialized_command =
+            serde_json::to_string(&pipe.command).expect("buffer pipe commands serialize to JSON");
+        lines.push(format!("pipe_command\t{serialized_command}"));
+        if let Some(pid) = pipe.pid {
+            lines.push(format!("pipe_pid\t{pid}"));
+        }
+        if let Some(exit_code) = pipe.exit_code {
+            lines.push(format!("pipe_exit_code\t{exit_code}"));
+        }
+        if let Some(reason) = pipe.stop_reason {
+            lines.push(format!(
+                "pipe_stop_reason\t{}",
+                buffer_pipe_stop_reason_label(reason)
+            ));
+        }
+    }
     lines.join("\n")
+}
+
+fn format_buffer_pipe_details(
+    buffer_id: BufferId,
+    pipe: Option<&BufferPipeRecord>,
+) -> Result<String> {
+    let Some(pipe) = pipe else {
+        return Err(MuxError::not_found(format!(
+            "buffer {buffer_id} has no pipe state"
+        )));
+    };
+    let mut lines = vec![
+        format!("buffer_id\t{buffer_id}"),
+        format!("state\t{}", buffer_pipe_state_label(pipe.state)),
+        format!(
+            "command\t{}",
+            serde_json::to_string(&pipe.command).expect("buffer pipe commands serialize to JSON")
+        ),
+    ];
+    if let Some(pid) = pipe.pid {
+        lines.push(format!("pid\t{pid}"));
+    }
+    if let Some(exit_code) = pipe.exit_code {
+        lines.push(format!("exit_code\t{exit_code}"));
+    }
+    if let Some(reason) = pipe.stop_reason {
+        lines.push(format!(
+            "stop_reason\t{}",
+            buffer_pipe_stop_reason_label(reason)
+        ));
+    }
+    Ok(lines.join("\n"))
 }
 
 fn format_buffer_location_line(location: &BufferLocation) -> String {
@@ -2032,6 +2200,23 @@ fn buffer_kind_label(kind: embers_protocol::BufferRecordKind) -> &'static str {
     match kind {
         embers_protocol::BufferRecordKind::Pty => "pty",
         embers_protocol::BufferRecordKind::Helper => "helper",
+    }
+}
+
+fn buffer_pipe_state_label(state: BufferPipeState) -> &'static str {
+    match state {
+        BufferPipeState::Running => "running",
+        BufferPipeState::Stopped => "stopped",
+    }
+}
+
+fn buffer_pipe_stop_reason_label(reason: BufferPipeStopReason) -> &'static str {
+    match reason {
+        BufferPipeStopReason::Requested => "requested",
+        BufferPipeStopReason::PipeExited => "pipe_exited",
+        BufferPipeStopReason::WriteFailed => "write_failed",
+        BufferPipeStopReason::BufferExited => "buffer_exited",
+        BufferPipeStopReason::RuntimeInterrupted => "runtime_interrupted",
     }
 }
 
@@ -2359,6 +2544,7 @@ mod tests {
                 activity: ActivityState::Idle,
                 last_snapshot_seq: 0,
                 exit_code: None,
+                pipe: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -2394,6 +2580,7 @@ mod tests {
                 activity: ActivityState::Idle,
                 last_snapshot_seq: 0,
                 exit_code: None,
+                pipe: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -2437,6 +2624,7 @@ mod tests {
                 activity: ActivityState::Idle,
                 last_snapshot_seq: 0,
                 exit_code: None,
+                pipe: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );
