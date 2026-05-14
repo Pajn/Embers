@@ -11,8 +11,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -32,12 +33,14 @@ const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 const CONNECT_RETRY_ATTEMPTS: usize = 1200;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+const KEEPER_PIPE_WRITE_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct BufferRuntimeUpdate {
     pub sequence: u64,
     pub activity: ActivityState,
     pub title: Option<Option<String>>,
+    pub pipe: Option<Option<BufferRuntimePipeStatus>>,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +51,24 @@ pub struct BufferRuntimeStatus {
     pub title: Option<String>,
     pub running: bool,
     pub exit_code: Option<i32>,
+    pub pipe: Option<BufferRuntimePipeStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BufferRuntimePipeStopReason {
+    Requested,
+    PipeExited,
+    WriteFailed,
+    BufferExited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferRuntimePipeStatus {
+    pub command: Vec<String>,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub stop_reason: Option<BufferRuntimePipeStopReason>,
 }
 
 #[derive(Clone)]
@@ -91,11 +112,29 @@ struct KeeperConnection {
 #[derive(Serialize, Deserialize)]
 enum KeeperRequest {
     Status,
-    Write { bytes: Vec<u8> },
-    Resize { size: PtySize },
-    Snapshot { cwd: Option<PathBuf> },
-    VisibleSnapshot { cwd: Option<PathBuf> },
-    ScrollbackSlice { start_line: u64, line_count: u32 },
+    Write {
+        bytes: Vec<u8>,
+    },
+    Resize {
+        size: PtySize,
+    },
+    Snapshot {
+        cwd: Option<PathBuf>,
+    },
+    VisibleSnapshot {
+        cwd: Option<PathBuf>,
+    },
+    ScrollbackSlice {
+        start_line: u64,
+        line_count: u32,
+    },
+    StartPipe {
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    },
+    StopPipe,
+    StopPipeAfterExit,
     Kill,
 }
 
@@ -105,6 +144,7 @@ enum KeeperResponse {
     Snapshot(KeeperSnapshot),
     VisibleSnapshot(TerminalSnapshot),
     ScrollbackSlice(KeeperScrollbackSlice),
+    PipeStatus(BufferRuntimePipeStatus),
     Ok,
     Error { message: String },
 }
@@ -117,6 +157,7 @@ struct KeeperStatus {
     title: Option<String>,
     running: bool,
     exit_code: Option<i32>,
+    pipe: Option<BufferRuntimePipeStatus>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -140,6 +181,7 @@ struct KeeperRuntime {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
     activity: Mutex<ActivityState>,
     exit_code: Mutex<Option<Option<i32>>>,
@@ -150,6 +192,23 @@ struct KeeperSurface {
     router: RawByteRouter,
     backend: Box<dyn TerminalBackend>,
     size: PtySize,
+}
+
+struct KeeperPipe {
+    command: Vec<String>,
+    child: ProcessCommandChild,
+    writer_tx: Option<SyncSender<Vec<u8>>>,
+    writer_state: Arc<Mutex<KeeperPipeWriterState>>,
+    writer_thread: Option<thread::JoinHandle<()>>,
+    stop_reason: Option<BufferRuntimePipeStopReason>,
+    exit_code: Option<i32>,
+}
+
+type ProcessCommandChild = std::process::Child;
+
+#[derive(Default)]
+struct KeeperPipeWriterState {
+    failed: bool,
 }
 
 impl std::fmt::Debug for BufferRuntimeHandle {
@@ -356,6 +415,51 @@ impl BufferRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
+    pub async fn start_pipe(
+        &self,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> Result<BufferRuntimePipeStatus> {
+        validate_pipe_command(&command)?;
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.start_pipe(command, cwd, env)
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
+    pub async fn stop_pipe(&self) -> Result<BufferRuntimePipeStatus> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.stop_pipe()
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
+    pub(crate) async fn stop_pipe_after_exit(&self) -> Result<BufferRuntimePipeStatus> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.stop_pipe_after_exit()
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
     pub async fn join_threads(&self) -> Result<()> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || inner.join_threads_blocking())
@@ -410,6 +514,7 @@ impl KeeperConnection {
                 title: status.title,
                 running: status.running,
                 exit_code: status.exit_code,
+                pipe: status.pipe,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
@@ -484,6 +589,42 @@ impl KeeperConnection {
             ))),
         }
     }
+
+    fn start_pipe(
+        &mut self,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> Result<BufferRuntimePipeStatus> {
+        validate_pipe_command(&command)?;
+        match self.request(KeeperRequest::StartPipe { command, cwd, env })? {
+            KeeperResponse::PipeStatus(status) => Ok(status),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper start pipe response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    fn stop_pipe(&mut self) -> Result<BufferRuntimePipeStatus> {
+        match self.request(KeeperRequest::StopPipe)? {
+            KeeperResponse::PipeStatus(status) => Ok(status),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper stop pipe response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    fn stop_pipe_after_exit(&mut self) -> Result<BufferRuntimePipeStatus> {
+        match self.request(KeeperRequest::StopPipeAfterExit)? {
+            KeeperResponse::PipeStatus(status) => Ok(status),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper stop pipe after exit response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
 }
 
 impl KeeperSurface {
@@ -522,6 +663,161 @@ impl KeeperSurface {
             total_lines: slice.total_lines,
             lines: slice.lines,
         }
+    }
+}
+
+impl KeeperPipe {
+    fn spawn(
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> Result<Self> {
+        let Some(program) = command.first() else {
+            return Err(MuxError::invalid_input(
+                "buffer pipe command must not be empty",
+            ));
+        };
+        let mut child = ProcessCommand::new(program);
+        child.args(&command[1..]);
+        if let Some(cwd) = cwd {
+            child.current_dir(cwd);
+        }
+        child.envs(env);
+        child.stdin(Stdio::piped());
+        child.stdout(Stdio::null());
+        child.stderr(Stdio::null());
+        let mut child = child.spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| MuxError::internal("buffer pipe stdin was not piped"))?;
+        let (writer_tx, writer_rx) = sync_channel(KEEPER_PIPE_WRITE_QUEUE_CAPACITY);
+        let writer_state = Arc::new(Mutex::new(KeeperPipeWriterState::default()));
+        let writer_thread_state = writer_state.clone();
+        let writer_pid = child.id();
+        let writer_thread = thread::Builder::new()
+            .name(format!("keeper-pipe-writer-{writer_pid}"))
+            .spawn(move || keeper_pipe_write_loop(stdin, writer_rx, writer_thread_state))
+            .map_err(|error| MuxError::internal(error.to_string()))?;
+        Ok(Self {
+            command,
+            child,
+            writer_tx: Some(writer_tx),
+            writer_state,
+            writer_thread: Some(writer_thread),
+            stop_reason: None,
+            exit_code: None,
+        })
+    }
+
+    fn status(&mut self) -> BufferRuntimePipeStatus {
+        self.refresh();
+        BufferRuntimePipeStatus {
+            command: self.command.clone(),
+            running: self.exit_code.is_none() && self.stop_reason.is_none(),
+            pid: (self.exit_code.is_none() && self.stop_reason.is_none()).then(|| self.child.id()),
+            exit_code: self.exit_code,
+            stop_reason: self.stop_reason,
+        }
+    }
+
+    fn refresh(&mut self) {
+        if self.exit_code.is_some() || self.stop_reason.is_some() {
+            return;
+        }
+        if self.writer_failed() {
+            let _ = self.terminate(BufferRuntimePipeStopReason::WriteFailed);
+            return;
+        }
+        if let Ok(Some(status)) = self.child.try_wait() {
+            self.exit_code = exit_status_code(status.into());
+            self.stop_reason
+                .get_or_insert(BufferRuntimePipeStopReason::PipeExited);
+            self.close_writer();
+            self.join_writer();
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if self.exit_code.is_some() || self.stop_reason.is_some() {
+            return;
+        }
+        if let Ok(Some(status)) = self.child.try_wait() {
+            self.exit_code = exit_status_code(status.into());
+            self.stop_reason
+                .get_or_insert(BufferRuntimePipeStopReason::PipeExited);
+            self.close_writer();
+            self.join_writer();
+            return;
+        }
+        let Some(writer_tx) = self.writer_tx.as_ref() else {
+            return;
+        };
+        match writer_tx.try_send(bytes.to_vec()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.record_write_failure();
+            }
+        }
+    }
+
+    fn stop(&mut self, reason: BufferRuntimePipeStopReason) -> Result<BufferRuntimePipeStatus> {
+        self.refresh();
+        if self.exit_code.is_some() || self.stop_reason.is_some() {
+            return Err(MuxError::conflict("buffer pipe is not running"));
+        }
+        self.terminate(reason)?;
+        Ok(self.status())
+    }
+
+    fn writer_failed(&self) -> bool {
+        self.writer_state
+            .lock()
+            .map(|state| state.failed)
+            .unwrap_or(true)
+    }
+
+    fn record_write_failure(&mut self) {
+        if let Ok(mut state) = self.writer_state.lock() {
+            state.failed = true;
+        }
+        self.close_writer();
+    }
+
+    fn close_writer(&mut self) {
+        let _ = self.writer_tx.take();
+    }
+
+    fn join_writer(&mut self) {
+        if let Some(writer_thread) = self.writer_thread.take() {
+            let _ = writer_thread.join();
+        }
+    }
+
+    fn terminate(&mut self, reason: BufferRuntimePipeStopReason) -> Result<()> {
+        self.stop_reason = Some(reason);
+        self.close_writer();
+        if let Err(error) = self.child.kill()
+            && error.kind() != std::io::ErrorKind::InvalidInput
+        {
+            return Err(error.into());
+        }
+        if let Ok(status) = self.child.wait() {
+            self.exit_code = exit_status_code(status.into());
+        }
+        self.join_writer();
+        Ok(())
+    }
+}
+
+impl Drop for KeeperPipe {
+    fn drop(&mut self) {
+        if self.exit_code.is_none() && self.stop_reason.is_none() {
+            self.close_writer();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+        self.join_writer();
     }
 }
 
@@ -608,6 +904,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         killer: Mutex::new(killer),
+        pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
         activity: Mutex::new(ActivityState::Idle),
         exit_code: Mutex::new(None),
@@ -699,6 +996,15 @@ fn handle_keeper_request(
             KeeperResponse::ScrollbackSlice(runtime.scrollback_slice(start_line, line_count)?),
             false,
         )),
+        KeeperRequest::StartPipe { command, cwd, env } => Ok((
+            KeeperResponse::PipeStatus(runtime.start_pipe(command, cwd, env)?),
+            false,
+        )),
+        KeeperRequest::StopPipe => Ok((KeeperResponse::PipeStatus(runtime.stop_pipe()?), false)),
+        KeeperRequest::StopPipeAfterExit => Ok((
+            KeeperResponse::PipeStatus(runtime.stop_pipe_after_exit()?),
+            false,
+        )),
         KeeperRequest::Kill => {
             runtime.kill()?;
             Ok((KeeperResponse::Ok, false))
@@ -734,6 +1040,12 @@ impl KeeperRuntime {
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
         let title = surface.backend.metadata().title.clone();
+        let pipe = self
+            .pipe
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper pipe lock poisoned"))?
+            .as_mut()
+            .map(KeeperPipe::status);
         Ok(KeeperStatus {
             pid: self.pid,
             sequence,
@@ -741,6 +1053,7 @@ impl KeeperRuntime {
             title,
             running: exit_code.is_none(),
             exit_code: exit_code.flatten(),
+            pipe,
         })
     }
 
@@ -811,6 +1124,75 @@ impl KeeperRuntime {
             .kill()
             .map_err(|error| MuxError::pty(error.to_string()))
     }
+
+    fn start_pipe(
+        &self,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+    ) -> Result<BufferRuntimePipeStatus> {
+        validate_pipe_command(&command)?;
+        self.ensure_running()?;
+        let mut pipe = self
+            .pipe
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper pipe lock poisoned"))?;
+        if let Some(existing) = pipe.as_mut()
+            && existing.status().running
+        {
+            return Err(MuxError::conflict("buffer pipe is already running"));
+        }
+        *pipe = Some(KeeperPipe::spawn(command, cwd, env)?);
+        Ok(pipe
+            .as_mut()
+            .expect("pipe slot populated after spawn")
+            .status())
+    }
+
+    fn stop_pipe(&self) -> Result<BufferRuntimePipeStatus> {
+        self.stop_pipe_with_reason(BufferRuntimePipeStopReason::Requested, true)
+    }
+
+    fn stop_pipe_after_exit(&self) -> Result<BufferRuntimePipeStatus> {
+        self.stop_pipe_with_reason(BufferRuntimePipeStopReason::BufferExited, false)
+    }
+
+    fn stop_pipe_with_reason(
+        &self,
+        reason: BufferRuntimePipeStopReason,
+        require_runtime_running: bool,
+    ) -> Result<BufferRuntimePipeStatus> {
+        if require_runtime_running {
+            self.ensure_running()?;
+        }
+        let mut pipe = self
+            .pipe
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper pipe lock poisoned"))?;
+        let Some(pipe) = pipe.as_mut() else {
+            return Err(MuxError::conflict("buffer pipe is not running"));
+        };
+        if !pipe.status().running {
+            return Err(MuxError::conflict("buffer pipe is not running"));
+        }
+        pipe.stop(reason)
+    }
+}
+
+fn keeper_pipe_write_loop(
+    mut stdin: ChildStdin,
+    writer_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    writer_state: Arc<Mutex<KeeperPipeWriterState>>,
+) {
+    for bytes in writer_rx {
+        if stdin.write_all(&bytes).and_then(|()| stdin.flush()).is_ok() {
+            continue;
+        }
+        if let Ok(mut state) = writer_state.lock() {
+            state.failed = true;
+        }
+        break;
+    }
 }
 
 fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send>) {
@@ -823,7 +1205,13 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     Ok(surface) => surface,
                     Err(_) => break,
                 };
-                let activity = surface.route_output(&buffer[..read]);
+                let bytes = &buffer[..read];
+                let activity = surface.route_output(bytes);
+                if let Ok(mut pipe) = runtime.pipe.lock()
+                    && let Some(pipe) = pipe.as_mut()
+                {
+                    pipe.write(bytes);
+                }
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
@@ -840,6 +1228,45 @@ fn keeper_wait_loop(runtime: Arc<KeeperRuntime>, mut child: Box<dyn Child + Send
     if let Ok(mut state) = runtime.exit_code.lock() {
         *state = Some(exit_code);
     }
+    let _ = runtime.stop_pipe_after_exit();
+}
+
+fn validate_pipe_command(command: &[String]) -> Result<()> {
+    if command.is_empty() {
+        return Err(MuxError::invalid_input(
+            "buffer pipe command must not be empty",
+        ));
+    }
+    if command[0].is_empty() {
+        return Err(MuxError::invalid_input(
+            "buffer pipe command first segment must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn notify_pipe_removed(
+    callbacks: &BufferRuntimeCallbacks,
+    buffer_id: BufferId,
+    last_sequence: &mut u64,
+    activity: ActivityState,
+    last_pipe: &mut Option<BufferRuntimePipeStatus>,
+    saw_exit: bool,
+) {
+    if last_pipe.is_none() && saw_exit {
+        return;
+    }
+    *last_sequence = last_sequence.saturating_add(1);
+    (callbacks.on_output)(
+        buffer_id,
+        BufferRuntimeUpdate {
+            sequence: *last_sequence,
+            activity,
+            title: None,
+            pipe: Some(None),
+        },
+    );
+    *last_pipe = None;
 }
 
 fn spawn_status_poller(
@@ -853,6 +1280,7 @@ fn spawn_status_poller(
             let mut last_sequence = initial.sequence;
             let mut last_title = initial.title.clone();
             let mut last_activity = initial.activity;
+            let mut last_pipe = initial.pipe.clone();
             let mut saw_exit = !initial.running;
 
             while !inner.stop.load(Ordering::Relaxed) {
@@ -865,6 +1293,14 @@ fn spawn_status_poller(
                         Ok(status) => status,
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
+                            notify_pipe_removed(
+                                &callbacks,
+                                inner.buffer_id,
+                                &mut last_sequence,
+                                last_activity,
+                                &mut last_pipe,
+                                saw_exit,
+                            );
                             (callbacks.on_exit)(inner.buffer_id, None);
                             break;
                         }
@@ -874,19 +1310,23 @@ fn spawn_status_poller(
                 if status.sequence != last_sequence
                     || status.title != last_title
                     || status.activity != last_activity
+                    || status.pipe != last_pipe
                 {
                     let title = (status.title != last_title).then(|| status.title.clone());
+                    let pipe = (status.pipe != last_pipe).then(|| status.pipe.clone());
                     (callbacks.on_output)(
                         inner.buffer_id,
                         BufferRuntimeUpdate {
                             sequence: status.sequence,
                             activity: status.activity,
                             title,
+                            pipe,
                         },
                     );
                     last_sequence = status.sequence;
                     last_title = status.title.clone();
                     last_activity = status.activity;
+                    last_pipe = status.pipe.clone();
                 }
 
                 if !saw_exit && !status.running {
@@ -1099,6 +1539,7 @@ fn keeper_response_kind(response: &KeeperResponse) -> &'static str {
         KeeperResponse::Snapshot(_) => "snapshot",
         KeeperResponse::VisibleSnapshot(_) => "visible_snapshot",
         KeeperResponse::ScrollbackSlice(_) => "scrollback_slice",
+        KeeperResponse::PipeStatus(_) => "pipe_status",
         KeeperResponse::Ok => "ok",
         KeeperResponse::Error { .. } => "error",
     }
@@ -1139,6 +1580,7 @@ impl Drop for SocketCleanup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
@@ -1149,8 +1591,10 @@ mod tests {
     use embers_core::{ActivityState, BufferId, MuxError};
 
     use super::{
-        BufferRuntimeCallbacks, BufferRuntimeInner, BufferRuntimeStatus, KeeperConnection,
-        MAX_FRAME_SIZE, RuntimeThreads, read_message, spawn_status_poller,
+        BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
+        BufferRuntimePipeStopReason, BufferRuntimeStatus, KEEPER_PIPE_WRITE_QUEUE_CAPACITY,
+        KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
+        spawn_status_poller,
     };
 
     #[test]
@@ -1220,6 +1664,33 @@ mod tests {
         assert!(error.to_string().contains("out of range"));
     }
 
+    #[tokio::test]
+    async fn start_pipe_rejects_empty_program_before_runtime_request() {
+        let (stream, peer) = UnixStream::pair().expect("create socket pair");
+        drop(peer);
+        let handle = BufferRuntimeHandle {
+            inner: Arc::new(BufferRuntimeInner {
+                buffer_id: BufferId(1),
+                pid: None,
+                socket_path: "/tmp/test-buffer.sock".into(),
+                connection: std::sync::Mutex::new(KeeperConnection { stream }),
+                stop: std::sync::atomic::AtomicBool::new(false),
+                threads: std::sync::Mutex::new(RuntimeThreads::default()),
+            }),
+        };
+
+        let error = handle
+            .start_pipe(vec![String::new()], None, BTreeMap::new())
+            .await
+            .expect_err("empty pipe program should reject before keeper request");
+
+        assert!(matches!(error, MuxError::InvalidInput(_)));
+        assert_eq!(
+            error.to_string(),
+            "invalid input: buffer pipe command first segment must not be empty"
+        );
+    }
+
     #[test]
     fn status_poller_exits_on_status_error() {
         let (stream, peer) = UnixStream::pair().expect("create socket pair");
@@ -1237,10 +1708,10 @@ mod tests {
         let poller = spawn_status_poller(
             inner,
             BufferRuntimeCallbacks {
-                on_output: Arc::new(move |buffer_id, _| {
+                on_output: Arc::new(move |buffer_id, update| {
                     output_tx
-                        .send(buffer_id)
-                        .expect("send unexpected output notification");
+                        .send((buffer_id, update))
+                        .expect("send output notification");
                 }),
                 on_exit: Arc::new(move |buffer_id, exit_code| {
                     exit_tx
@@ -1255,6 +1726,7 @@ mod tests {
                 title: None,
                 running: true,
                 exit_code: None,
+                pipe: None,
             },
         )
         .expect("spawn poller");
@@ -1267,6 +1739,104 @@ mod tests {
                 .expect("poller should report exit"),
             (BufferId(1), None)
         );
-        assert!(output_rx.try_recv().is_err());
+        let (buffer_id, update) = output_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("poller should report final pipe removal");
+        assert_eq!(buffer_id, BufferId(1));
+        assert_eq!(update.pipe, Some(None));
+    }
+
+    #[test]
+    fn status_poller_reports_pipe_removal_before_status_error_exit() {
+        let (stream, peer) = UnixStream::pair().expect("create socket pair");
+        drop(peer);
+        let inner = Arc::new(BufferRuntimeInner {
+            buffer_id: BufferId(2),
+            pid: None,
+            socket_path: "/tmp/test-buffer.sock".into(),
+            connection: std::sync::Mutex::new(KeeperConnection { stream }),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            threads: std::sync::Mutex::new(RuntimeThreads::default()),
+        });
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let (output_tx, output_rx) = mpsc::channel();
+        let poller = spawn_status_poller(
+            inner,
+            BufferRuntimeCallbacks {
+                on_output: Arc::new(move |buffer_id, update| {
+                    output_tx
+                        .send((buffer_id, update))
+                        .expect("send output notification");
+                }),
+                on_exit: Arc::new(move |buffer_id, exit_code| {
+                    exit_tx
+                        .send((buffer_id, exit_code))
+                        .expect("send exit notification");
+                }),
+            },
+            BufferRuntimeStatus {
+                pid: None,
+                sequence: 7,
+                activity: ActivityState::Idle,
+                title: None,
+                running: true,
+                exit_code: None,
+                pipe: Some(BufferRuntimePipeStatus {
+                    command: vec!["tee".to_owned()],
+                    running: true,
+                    pid: Some(123),
+                    exit_code: None,
+                    stop_reason: None,
+                }),
+            },
+        )
+        .expect("spawn poller");
+
+        poller.join().expect("poller exits cleanly");
+
+        let (buffer_id, update) = output_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("poller should report pipe removal");
+        assert_eq!(buffer_id, BufferId(2));
+        assert_eq!(update.sequence, 8);
+        assert_eq!(update.pipe, Some(None));
+        assert_eq!(
+            exit_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("poller should report exit"),
+            (BufferId(2), None)
+        );
+    }
+
+    #[test]
+    fn keeper_pipe_write_uses_bounded_queue() {
+        let mut pipe = KeeperPipe::spawn(
+            vec![
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                "sleep 30".to_owned(),
+            ],
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .expect("spawn pipe");
+        let payload = vec![b'x'; 128 * 1024];
+
+        let started = Instant::now();
+        for _ in 0..(KEEPER_PIPE_WRITE_QUEUE_CAPACITY + 2) {
+            pipe.write(&payload);
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "pipe writes should not block when the consumer is slow"
+        );
+
+        let status = pipe.status();
+        assert!(!status.running);
+        assert_eq!(
+            status.stop_reason,
+            Some(BufferRuntimePipeStopReason::WriteFailed)
+        );
     }
 }

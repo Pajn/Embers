@@ -1,13 +1,15 @@
 use embers_core::{MuxError, Result};
 use embers_protocol::{
-    BufferHistoryScope, BufferLocation, BufferRecord, BufferRecordKind, BufferRecordState,
-    BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind, SessionRecord, SessionSnapshot,
-    SplitRecord, TabRecord, TabsRecord,
+    BufferHistoryScope, BufferLocation, BufferPipeRecord, BufferPipeState,
+    BufferPipeStopReason as ProtocolBufferPipeStopReason, BufferRecord, BufferRecordKind,
+    BufferRecordState, BufferViewRecord, FloatingRecord, NodeRecord, NodeRecordKind, SessionRecord,
+    SessionSnapshot, SplitRecord, TabRecord, TabsRecord,
 };
 
 use crate::model::{
-    Buffer, BufferAttachment, BufferKind, BufferState, FloatingWindow, HelperBufferScope, Node,
-    Session,
+    Buffer, BufferAttachment, BufferKind, BufferPipeState as ModelBufferPipeState,
+    BufferPipeStopReason as ModelBufferPipeStopReason, BufferState, FloatingWindow,
+    HelperBufferScope, Node, Session,
 };
 use crate::state::ServerState;
 
@@ -55,6 +57,39 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
             .cwd
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned()),
+        pipe: buffer.pipe.as_ref().map(|pipe| BufferPipeRecord {
+            command: pipe.command.clone(),
+            state: match pipe.state {
+                ModelBufferPipeState::Running { .. } => BufferPipeState::Running,
+                ModelBufferPipeState::Stopped { .. } => BufferPipeState::Stopped,
+            },
+            pid: match pipe.state {
+                ModelBufferPipeState::Running { pid } => pid,
+                ModelBufferPipeState::Stopped { .. } => None,
+            },
+            exit_code: match pipe.state {
+                ModelBufferPipeState::Running { .. } => None,
+                ModelBufferPipeState::Stopped { exit_code, .. } => exit_code,
+            },
+            stop_reason: match pipe.state {
+                ModelBufferPipeState::Running { .. } => None,
+                ModelBufferPipeState::Stopped { reason, .. } => Some(match reason {
+                    ModelBufferPipeStopReason::Requested => ProtocolBufferPipeStopReason::Requested,
+                    ModelBufferPipeStopReason::PipeExited => {
+                        ProtocolBufferPipeStopReason::PipeExited
+                    }
+                    ModelBufferPipeStopReason::WriteFailed => {
+                        ProtocolBufferPipeStopReason::WriteFailed
+                    }
+                    ModelBufferPipeStopReason::BufferExited => {
+                        ProtocolBufferPipeStopReason::BufferExited
+                    }
+                    ModelBufferPipeStopReason::RuntimeInterrupted => {
+                        ProtocolBufferPipeStopReason::RuntimeInterrupted
+                    }
+                }),
+            },
+        }),
         kind,
         state,
         pid,

@@ -216,6 +216,7 @@ fn second_session_state() -> embers_client::ClientState {
             activity: ActivityState::Idle,
             last_snapshot_seq: 1,
             exit_code: None,
+            pipe: None,
             env: BTreeMap::new(),
         },
     );
@@ -1441,6 +1442,7 @@ async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
             activity: ActivityState::Idle,
             last_snapshot_seq: 0,
             exit_code: None,
+            pipe: None,
             env: BTreeMap::new(),
         },
     }));
