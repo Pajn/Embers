@@ -748,6 +748,7 @@ mod zoom_tests {
                     activity: ActivityState::Idle,
                     last_snapshot_seq: 0,
                     exit_code: None,
+                    pipe: None,
                     env: Default::default(),
                 },
             );
@@ -837,6 +838,7 @@ mod zoom_tests {
                     activity: ActivityState::Idle,
                     last_snapshot_seq: 0,
                     exit_code: None,
+                    pipe: None,
                     env: Default::default(),
                 },
             );
@@ -912,6 +914,7 @@ mod zoom_tests {
                     activity: ActivityState::Idle,
                     last_snapshot_seq: 0,
                     exit_code: None,
+                    pipe: None,
                     env: Default::default(),
                 },
             );
@@ -1034,6 +1037,7 @@ mod zoom_tests {
                     activity: ActivityState::Idle,
                     last_snapshot_seq: 0,
                     exit_code: None,
+                    pipe: None,
                     env: Default::default(),
                 },
             );
@@ -1056,6 +1060,7 @@ mod zoom_tests {
                 activity: ActivityState::Idle,
                 last_snapshot_seq: 0,
                 exit_code: None,
+                pipe: None,
                 env: Default::default(),
             },
         );
@@ -1160,6 +1165,7 @@ mod zoom_tests {
                 activity: ActivityState::Idle,
                 last_snapshot_seq: 0,
                 exit_code: None,
+                pipe: None,
                 env: Default::default(),
             },
         );

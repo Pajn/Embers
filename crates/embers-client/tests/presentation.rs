@@ -290,6 +290,7 @@ fn foreign_session_zoom_targets_are_ignored() {
             activity: ActivityState::Idle,
             last_snapshot_seq: 1,
             exit_code: None,
+            pipe: None,
         },
     );
 

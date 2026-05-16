@@ -144,6 +144,17 @@ pub enum BufferRequest {
         placement: BufferHistoryPlacement,
         client_id: Option<NonZeroU64>,
     },
+    StartPipe {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        command: Vec<String>,
+        cwd: Option<String>,
+        env: BTreeMap<String, String>,
+    },
+    StopPipe {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
 }
 
 impl BufferRequest {
@@ -160,7 +171,9 @@ impl BufferRequest {
             | Self::ScrollbackSlice { request_id, .. }
             | Self::GetLocation { request_id, .. }
             | Self::Reveal { request_id, .. }
-            | Self::OpenHistory { request_id, .. } => *request_id,
+            | Self::OpenHistory { request_id, .. }
+            | Self::StartPipe { request_id, .. }
+            | Self::StopPipe { request_id, .. } => *request_id,
         }
     }
 }
@@ -175,6 +188,30 @@ pub enum BufferHistoryScope {
 pub enum BufferHistoryPlacement {
     Tab,
     Floating,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferPipeState {
+    Running,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BufferPipeStopReason {
+    Requested,
+    PipeExited,
+    WriteFailed,
+    BufferExited,
+    RuntimeInterrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferPipeRecord {
+    pub command: Vec<String>,
+    pub state: BufferPipeState,
+    pub pid: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub stop_reason: Option<BufferPipeStopReason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -592,6 +629,7 @@ pub struct BufferRecord {
     pub title: String,
     pub command: Vec<String>,
     pub cwd: Option<String>,
+    pub pipe: Option<BufferPipeRecord>,
     pub kind: BufferRecordKind,
     pub state: BufferRecordState,
     pub pid: Option<u32>,
@@ -620,6 +658,9 @@ impl BufferRecord {
                 }
             }
             BufferRecordKind::Helper => {
+                if self.pipe.is_some() {
+                    return Err("buffer_record.kind=helper cannot set pipe".to_owned());
+                }
                 if self.helper_source_buffer_id.is_some() ^ self.helper_scope.is_some() {
                     return Err(
                         "buffer_record.kind=helper must set helper_source_buffer_id and helper_scope together"
@@ -961,6 +1002,12 @@ pub struct BufferCreatedEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferPipeChangedEvent {
+    pub session_id: Option<SessionId>,
+    pub buffer: BufferRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferDetachedEvent {
     pub buffer_id: BufferId,
 }
@@ -1006,6 +1053,7 @@ pub enum ServerEvent {
     SessionClosed(SessionClosedEvent),
     SessionRenamed(SessionRenamedEvent),
     BufferCreated(BufferCreatedEvent),
+    BufferPipeChanged(BufferPipeChangedEvent),
     BufferDetached(BufferDetachedEvent),
     NodeChanged(NodeChangedEvent),
     FloatingChanged(FloatingChangedEvent),
@@ -1021,6 +1069,7 @@ impl ServerEvent {
             Self::SessionClosed(event) => Some(event.session_id),
             Self::SessionRenamed(event) => Some(event.session_id),
             Self::BufferCreated(_) => None,
+            Self::BufferPipeChanged(event) => event.session_id,
             Self::BufferDetached(_) => None,
             Self::NodeChanged(event) => Some(event.session_id),
             Self::FloatingChanged(event) => Some(event.session_id),

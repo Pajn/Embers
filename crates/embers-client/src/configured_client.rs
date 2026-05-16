@@ -1597,6 +1597,9 @@ where
     fn event_session_id(&self, event: &ServerEvent) -> Option<SessionId> {
         event.session_id().or_else(|| match event {
             ServerEvent::BufferCreated(event) => self.session_id_for_buffer_record(&event.buffer),
+            ServerEvent::BufferPipeChanged(event) => {
+                self.session_id_for_buffer_record(&event.buffer)
+            }
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::SessionCreated(_)
@@ -2764,6 +2767,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::SessionClosed(_) => "session_closed",
         ServerEvent::SessionRenamed(_) => "session_renamed",
         ServerEvent::BufferCreated(_) => "buffer_created",
+        ServerEvent::BufferPipeChanged(_) => "buffer_pipe_changed",
         ServerEvent::BufferDetached(_) => "buffer_detached",
         ServerEvent::NodeChanged(_) => "node_changed",
         ServerEvent::FloatingChanged(_) => "floating_changed",
@@ -2784,6 +2788,11 @@ fn event_info(
         ServerEvent::SessionClosed(event) => info.session_id = Some(event.session_id),
         ServerEvent::SessionRenamed(event) => info.session_id = Some(event.session_id),
         ServerEvent::BufferCreated(event) => {
+            info.buffer_id = Some(event.buffer.id);
+            info.node_id = event.buffer.attachment_node_id;
+        }
+        ServerEvent::BufferPipeChanged(event) => {
+            info.session_id = event.session_id;
             info.buffer_id = Some(event.buffer.id);
             info.node_id = event.buffer.attachment_node_id;
         }
@@ -2924,6 +2933,7 @@ mod tests {
                     activity: ActivityState::Idle,
                     last_snapshot_seq: 0,
                     exit_code: None,
+                    pipe: None,
                     env: Default::default(),
                 },
                 location,

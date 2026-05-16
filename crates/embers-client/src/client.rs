@@ -321,6 +321,9 @@ where
             ServerEvent::RenderInvalidated(event) => {
                 self.refresh_buffer_record(event.buffer_id).await
             }
+            ServerEvent::BufferPipeChanged(event) => {
+                self.refresh_buffer_record(event.buffer.id).await
+            }
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_) => Ok(()),

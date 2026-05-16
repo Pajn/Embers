@@ -564,6 +564,7 @@ dependencies = [
  "libc",
  "predicates",
  "serde_json",
+ "shell-words",
  "tempfile",
  "tokio",
  "tracing",
