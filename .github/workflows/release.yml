@@ -1,0 +1,184 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+
+env:
+  FLATBUFFERS_VERSION: 25.12.19
+  FLATBUFFERS_SHA256: 9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches workspace version
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          cargo metadata --no-deps --format-version 1 > metadata.json
+          mismatches="$(
+            jq -r --arg version "$version" '
+              .packages[]
+              | select(.version != $version)
+              | "\(.name) has version \(.version), expected \($version)"
+            ' metadata.json
+          )"
+
+          if [ -n "$mismatches" ]; then
+            printf '%s\n' "$mismatches"
+            exit 1
+          fi
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace
+
+  publish-crates:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: crates.io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          crates=(
+            embers-core
+            embers-protocol
+            embers-server
+            embers-test-support
+            embers-client
+            embers-cli
+          )
+
+          crate_exists() {
+            local crate="$1"
+            curl --retry 5 --retry-delay 2 --retry-connrefused \
+              -fsSL "https://crates.io/api/v1/crates/${crate}/${version}" \
+              >/dev/null
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            for attempt in {1..30}; do
+              if crate_exists "$crate"; then
+                return 0
+              fi
+              echo "Waiting for ${crate} ${version} to appear in crates.io index (${attempt}/30)"
+              sleep 20
+            done
+
+            echo "::error::${crate} ${version} did not become visible on crates.io in time"
+            return 1
+          }
+
+          for crate in "${crates[@]}"; do
+            if crate_exists "$crate"; then
+              echo "${crate} ${version} is already published; skipping"
+            else
+              cargo publish --locked -p "$crate" --token "$CARGO_REGISTRY_TOKEN"
+            fi
+            wait_for_crate "$crate"
+          done
+
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: publish-crates
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          make_latest: true
+
+  build-release-assets:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatc on Linux
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-flatc
+        with:
+          version: ${{ env.FLATBUFFERS_VERSION }}
+          sha256: ${{ env.FLATBUFFERS_SHA256 }}
+      - name: Install flatc on macOS
+        if: runner.os == 'macOS'
+        run: brew install flatbuffers
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build binaries
+        run: |
+          cargo build --locked --release \
+            --target "${{ matrix.target }}" \
+            -p embers-cli \
+            --bin embers \
+            --bin embers-cli
+      - name: Package cargo-binstall archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          package="embers-cli-${{ matrix.target }}-v${version}"
+          mkdir -p "dist/${package}"
+
+          binary_dir="target/${{ matrix.target }}/release"
+          cp "${binary_dir}/embers" "dist/${package}/"
+          cp "${binary_dir}/embers-cli" "dist/${package}/"
+
+          tar -C dist -czf "dist/${package}.tgz" "${package}"
+          shasum -a 256 "dist/${package}.tgz" > "dist/${package}.tgz.sha256"
+      - name: Upload GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tgz
+            dist/*.sha256
+          fail_on_unmatched_files: true
