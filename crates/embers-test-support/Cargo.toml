@@ -1,8 +1,10 @@
 [package]
 name = "embers-test-support"
 autotests = false
+description = "Shared integration-test harnesses and helpers for Embers crates."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
@@ -11,9 +13,9 @@ doctest = false
 
 [dependencies]
 assert_cmd.workspace = true
-embers-core = { path = "../embers-core" }
-embers-protocol = { path = "../embers-protocol" }
-embers-server = { path = "../embers-server" }
+embers-core = { version = "0.1.0", path = "../embers-core" }
+embers-protocol = { version = "0.1.0", path = "../embers-protocol" }
+embers-server = { version = "0.1.0", path = "../embers-server" }
 fastrand.workspace = true
 libc.workspace = true
 portable-pty.workspace = true

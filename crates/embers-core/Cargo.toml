@@ -1,7 +1,9 @@
 [package]
 name = "embers-core"
+description = "Core shared types for the Embers terminal multiplexer."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 

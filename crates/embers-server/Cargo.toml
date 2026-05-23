@@ -1,8 +1,10 @@
 [package]
 name = "embers-server"
 autotests = false
+description = "Headless session, layout, persistence, and PTY runtime server for Embers."
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
@@ -12,8 +14,8 @@ doctest = false
 [dependencies]
 alacritty_terminal = "0.25.1"
 base64.workspace = true
-embers-core = { path = "../embers-core" }
-embers-protocol = { path = "../embers-protocol" }
+embers-core = { version = "0.1.0", path = "../embers-core" }
+embers-protocol = { version = "0.1.0", path = "../embers-protocol" }
 portable-pty.workspace = true
 serde.workspace = true
 serde_json.workspace = true
