@@ -550,7 +550,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embers-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "embers-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "embers-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "embers-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embers-core",
  "flatbuffers",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "embers-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "embers-test-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "embers-core",

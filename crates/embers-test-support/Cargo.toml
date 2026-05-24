@@ -13,9 +13,9 @@ doctest = false
 
 [dependencies]
 assert_cmd.workspace = true
-embers-core = { version = "0.1.0", path = "../embers-core" }
-embers-protocol = { version = "0.1.0", path = "../embers-protocol" }
-embers-server = { version = "0.1.0", path = "../embers-server" }
+embers-core.workspace = true
+embers-protocol.workspace = true
+embers-server.workspace = true
 fastrand.workspace = true
 libc.workspace = true
 portable-pty.workspace = true

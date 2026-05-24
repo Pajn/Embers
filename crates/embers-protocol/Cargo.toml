@@ -14,7 +14,7 @@ doctest = false
 
 [dependencies]
 flatbuffers.workspace = true
-embers-core = { version = "0.1.0", path = "../embers-core" }
+embers-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

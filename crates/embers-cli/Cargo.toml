@@ -28,10 +28,10 @@ disabled-strategies = ["quick-install"]
 [dependencies]
 base64.workspace = true
 clap.workspace = true
-embers-client = { version = "0.1.0", path = "../embers-client" }
-embers-core = { version = "0.1.0", path = "../embers-core" }
-embers-protocol = { version = "0.1.0", path = "../embers-protocol" }
-embers-server = { version = "0.1.0", path = "../embers-server" }
+embers-client.workspace = true
+embers-core.workspace = true
+embers-protocol.workspace = true
+embers-server.workspace = true
 libc.workspace = true
 shell-words.workspace = true
 serde_json.workspace = true
@@ -41,7 +41,7 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
-embers-test-support = { version = "0.1.0", path = "../embers-test-support" }
+embers-test-support.workspace = true
 filetime = "0.2"
 predicates.workspace = true
 tempfile.workspace = true
