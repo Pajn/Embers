@@ -639,7 +639,12 @@ pub fn build_mdbook(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         .arg(output_dir)
         .arg("--dest-dir")
         .arg(&build_dir)
-        .status()?;
+        .status()
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to run mdbook while building config API docs; install mdbook and make sure it is on PATH: {error}"
+            ))
+        })?;
 
     if !status.success() {
         return Err(format!("mdbook build failed for {}", output_dir.display()).into());

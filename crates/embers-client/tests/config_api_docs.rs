@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use embers_client::scripting::{build_mdbook, generate_config_api_docs};
 use tempfile::tempdir;
@@ -71,7 +72,6 @@ fn generated_docs_cover_representative_exports() -> Result<(), Box<dyn std::erro
 fn checked_in_docs_are_current() -> Result<(), Box<dyn std::error::Error>> {
     let tempdir = tempdir().unwrap();
     generate_config_api_docs(tempdir.path())?;
-    build_mdbook(tempdir.path())?;
 
     let generated = read_tree_bytes(tempdir.path())?;
     let checked_in = read_tree_bytes(&repo_docs_dir())?;
@@ -83,6 +83,15 @@ fn checked_in_docs_are_current() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if !mdbook_is_available() {
+        eprintln!(
+            "skipping rendered config API book freshness check because mdbook is not on PATH"
+        );
+        return Ok(());
+    }
+
+    build_mdbook(tempdir.path())?;
+
     let generated_book = read_tree_bytes(&generated_book_dir(tempdir.path()))?;
     let checked_in_book = read_tree_bytes(&repo_docs_book_dir())?;
 
@@ -93,6 +102,14 @@ fn checked_in_docs_are_current() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+fn mdbook_is_available() -> bool {
+    Command::new("mdbook")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn repo_docs_dir() -> PathBuf {

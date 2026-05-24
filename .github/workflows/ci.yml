@@ -46,7 +46,7 @@ jobs:
         run: cargo gen-docs
       - name: Verify checked-in config API docs
         run: |
-          status="$(git status --porcelain -- docs/config-api)"
+          status="$(git status --porcelain -- docs/config-api docs/config-api-book)"
           if [ -n "$status" ]; then
             echo "Config API docs are out of date after regeneration:"
             printf '%s\n' "$status"
