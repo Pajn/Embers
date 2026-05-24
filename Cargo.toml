@@ -14,7 +14,7 @@ edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/Pajn/Embers"
 rust-version = "1.92"
-version = "0.1.1"
+version = "0.1.2"
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -23,11 +23,11 @@ base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 criterion = "0.7"
 directories = "6"
-embers-client = { version = "0.1.1", path = "crates/embers-client" }
-embers-core = { version = "0.1.1", path = "crates/embers-core" }
-embers-protocol = { version = "0.1.1", path = "crates/embers-protocol" }
-embers-server = { version = "0.1.1", path = "crates/embers-server" }
-embers-test-support = { version = "0.1.1", path = "crates/embers-test-support" }
+embers-client = { version = "0.1.2", path = "crates/embers-client" }
+embers-core = { version = "0.1.2", path = "crates/embers-core" }
+embers-protocol = { version = "0.1.2", path = "crates/embers-protocol" }
+embers-server = { version = "0.1.2", path = "crates/embers-server" }
+embers-test-support = { version = "0.1.2", path = "crates/embers-test-support" }
 fastrand = "2"
 flatbuffers = "=25.12.19"
 libc = "0.2"
