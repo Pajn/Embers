@@ -10,7 +10,6 @@ use embers_core::{
     ActivityState, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine, TerminalModes,
     TerminalSnapshot,
 };
-use tracing::error;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackendMetadata {
@@ -114,10 +113,13 @@ impl BackendEventProxy {
 
 impl EventListener for BackendEventProxy {
     fn send_event(&self, event: Event) {
-        let Ok(mut state) = self.state.lock() else {
-            error!(?event, "backend event lock poisoned");
-            return;
-        };
+        // Recover from a poisoned lock rather than dropping the update: the event
+        // state is plain data, and silently skipping title/bell writes would
+        // desync from the metadata/take_activity readers, which both recover.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         match event {
             Event::Title(title) => state.title = Some(title),
@@ -149,14 +151,17 @@ impl Dimensions for BackendSize {
 }
 
 impl AlacrittyTerminalBackend {
-    pub fn new(size: PtySize) -> Self {
+    /// `max_scrollback_lines` is the per-buffer scrollback ceiling, resolved by
+    /// the caller (the runtime keeper) so this emulation layer stays independent
+    /// of server configuration and env.
+    pub fn new(size: PtySize, max_scrollback_lines: usize) -> Self {
         let events = Arc::new(Mutex::new(BackendEventState::default()));
         let dimensions = BackendSize {
             columns: size.cols as usize,
             screen_lines: size.rows as usize,
         };
         let config = Config {
-            scrolling_history: 10_000,
+            scrolling_history: max_scrollback_lines,
             ..Config::default()
         };
 
@@ -317,7 +322,12 @@ impl TerminalBackend for AlacrittyTerminalBackend {
     }
 
     fn metadata(&self) -> BackendMetadata {
-        let state = self.events.lock().expect("backend event lock");
+        // Recover from a poisoned lock rather than crashing the backend: the
+        // event state is plain data and a panic here would take down the buffer.
+        let state = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let modes = self.terminal_modes();
         BackendMetadata {
             title: state.title.clone(),
@@ -332,7 +342,10 @@ impl TerminalBackend for AlacrittyTerminalBackend {
     }
 
     fn take_activity(&mut self) -> ActivityState {
-        let mut state = self.events.lock().expect("backend event lock");
+        let mut state = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if std::mem::take(&mut state.bell_pending) {
             ActivityState::Bell
         } else {
@@ -365,7 +378,12 @@ mod tests {
         AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
         RawByteRouter, TerminalBackend,
     };
+    use crate::config::DEFAULT_MAX_SCROLLBACK_LINES;
     use embers_core::{ActivityState, CursorShape, PtySize, TerminalSnapshot};
+
+    fn backend(size: PtySize) -> AlacrittyTerminalBackend {
+        AlacrittyTerminalBackend::new(size, DEFAULT_MAX_SCROLLBACK_LINES)
+    }
 
     #[derive(Default)]
     struct StubBackend {
@@ -429,7 +447,7 @@ mod tests {
 
     #[test]
     fn visible_snapshot_extracts_plain_text_lines() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(8, 3));
+        let mut backend = backend(PtySize::new(8, 3));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"hello\r\nworld");
@@ -447,7 +465,7 @@ mod tests {
 
     #[test]
     fn carriage_return_overwrites_cells_without_advancing_the_row() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(8, 2));
+        let mut backend = backend(PtySize::new(8, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"hello\rHEY");
@@ -458,7 +476,7 @@ mod tests {
 
     #[test]
     fn automatic_wrap_moves_following_bytes_to_the_next_row() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(4, 2));
+        let mut backend = backend(PtySize::new(4, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"abcdX");
@@ -469,7 +487,7 @@ mod tests {
 
     #[test]
     fn erase_in_line_clears_trailing_cells_from_the_cursor() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 1));
+        let mut backend = backend(PtySize::new(6, 1));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"abcdef\rabc\x1b[K");
@@ -480,7 +498,7 @@ mod tests {
 
     #[test]
     fn clear_screen_resets_visible_cells_before_new_output() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let mut backend = backend(PtySize::new(6, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"one\r\ntwo\x1b[2J\x1b[Hdone");
@@ -491,7 +509,7 @@ mod tests {
 
     #[test]
     fn scrollback_capture_preserves_history_beyond_viewport() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let mut backend = backend(PtySize::new(6, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"one\r\ntwo\r\nthree\r\nfour");
@@ -509,7 +527,7 @@ mod tests {
 
     #[test]
     fn scrollback_slice_returns_requested_window() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let mut backend = backend(PtySize::new(6, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"one\r\ntwo\r\nthree\r\nfour");
@@ -522,7 +540,7 @@ mod tests {
 
     #[test]
     fn damage_can_be_read_and_reset() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(6, 2));
+        let mut backend = backend(PtySize::new(6, 2));
 
         assert!(matches!(backend.take_damage(), BackendDamage::Full));
         assert!(!matches!(backend.take_damage(), BackendDamage::Full));
@@ -534,7 +552,7 @@ mod tests {
 
     #[test]
     fn metadata_surfaces_terminal_modes_and_title() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
+        let mut backend = backend(PtySize::new(10, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"\x1b]0;embers\x07\x1b[?1049h\x1b[?1000h\x1b[?1004h\x1b[?2004h");
@@ -549,7 +567,7 @@ mod tests {
 
     #[test]
     fn metadata_mode_flags_clear_when_disable_sequences_arrive() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
+        let mut backend = backend(PtySize::new(10, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"\x1b[?1049h\x1b[?1000h\x1b[?1004h\x1b[?2004h");
@@ -569,7 +587,7 @@ mod tests {
 
     #[test]
     fn bell_activity_is_consumed_separately_from_metadata() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(10, 2));
+        let mut backend = backend(PtySize::new(10, 2));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"\x1b]0;embers\x07\x07");
@@ -599,7 +617,7 @@ mod tests {
 
     #[test]
     fn alternate_screen_visible_snapshot_tracks_active_screen_and_restores_primary_screen() {
-        let mut backend = AlacrittyTerminalBackend::new(PtySize::new(20, 4));
+        let mut backend = backend(PtySize::new(20, 4));
         let _ = backend.take_damage();
 
         backend.ingest_bytes(b"main-one\r\nmain-two");

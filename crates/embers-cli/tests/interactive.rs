@@ -300,6 +300,27 @@ async fn wait_for_socket(socket_path: &Path) {
     panic!("timed out waiting for socket {}", socket_path.display());
 }
 
+fn interactive_startup_tempdir() -> tempfile::TempDir {
+    #[cfg(unix)]
+    {
+        tempfile::Builder::new()
+            .prefix("emb.")
+            .tempdir_in("/tmp")
+            .expect("tempdir")
+    }
+
+    #[cfg(not(unix))]
+    {
+        tempfile::tempdir().expect("tempdir")
+    }
+}
+
+fn interactive_socket_path(tempdir: &tempfile::TempDir) -> PathBuf {
+    // Keep the runtime keeper socket under macOS's Unix socket path limit even
+    // when the ambient TMPDIR is deeply nested.
+    tempdir.path().join("mux.sock")
+}
+
 async fn populate_scrollback_or_wait(harness: &mut PtyHarness, lines: usize) {
     harness
         .write_all("echo READY\r")
@@ -604,8 +625,8 @@ async fn embers_without_subcommand_starts_server_and_client() {
     if !require_pty() {
         return;
     }
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let socket_path = tempdir.path().join("embers.sock");
+    let tempdir = interactive_startup_tempdir();
+    let socket_path = interactive_socket_path(&tempdir);
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 
@@ -830,8 +851,8 @@ async fn page_up_enters_local_scrollback() {
     if !require_pty() {
         return;
     }
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let socket_path = tempdir.path().join("embers.sock");
+    let tempdir = interactive_startup_tempdir();
+    let socket_path = interactive_socket_path(&tempdir);
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 
@@ -854,8 +875,8 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     if !require_pty() {
         return;
     }
-    let tempdir = tempfile::tempdir().expect("tempdir");
-    let socket_path = tempdir.path().join("embers.sock");
+    let tempdir = interactive_startup_tempdir();
+    let socket_path = interactive_socket_path(&tempdir);
     let socket_arg = socket_path.to_string_lossy().into_owned();
     let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
 

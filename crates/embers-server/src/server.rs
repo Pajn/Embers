@@ -29,8 +29,9 @@ use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, error, info, warn};
 
+use crate::config::ResourceLimits;
 use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
 };
@@ -43,6 +44,18 @@ use crate::{
     BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, BufferState,
     ServerConfig, ServerState, TabEntry,
 };
+
+/// Capacity of each client's outbound envelope queue. A client that cannot keep
+/// up (suspended terminal, stalled socket) fills this queue; rather than letting
+/// it grow unbounded and exhaust the shared daemon, [`Runtime::broadcast`] drops
+/// such a client. Sized to absorb normal render bursts while bounding per-client
+/// memory.
+///
+/// Note the response path in [`handle_connection`] does not drop on a full queue:
+/// a response is awaited by the client, so it backpressures (awaits capacity) and
+/// only fails on a genuinely closed channel. Only best-effort events, which a
+/// reattached client recovers via resync, are dropped when the queue is full.
+const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug)]
 pub struct Server {
@@ -67,6 +80,7 @@ impl Server {
             self.config.workspace_path.clone(),
             self.config.runtime_dir.clone(),
             self.config.buffer_env.clone(),
+            self.config.limits.clone(),
         ));
         runtime.restore_buffer_runtimes().await?;
         let listener = UnixListener::bind(&self.config.socket_path)?;
@@ -88,7 +102,7 @@ impl Server {
                         let (stream, _) = result?;
                         let connection_id = runtime.next_connection_id.fetch_add(1, Ordering::Relaxed);
                         let (reader, writer) = stream.into_split();
-                        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+                        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
                         let (shutdown_tx, shutdown_rx) = oneshot::channel();
                         let (stopped_tx, stopped_rx) = oneshot::channel();
                         runtime
@@ -260,7 +274,7 @@ impl ShutdownSignal {
 struct Subscription {
     connection_id: u64,
     session_id: Option<embers_core::SessionId>,
-    sender: mpsc::UnboundedSender<ServerEnvelope>,
+    sender: mpsc::Sender<ServerEnvelope>,
 }
 
 struct ClientConnection {
@@ -292,6 +306,7 @@ struct Runtime {
     workspace_path: PathBuf,
     runtime_dir: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
+    limits: ResourceLimits,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
@@ -368,6 +383,7 @@ impl Runtime {
         workspace_path: PathBuf,
         runtime_dir: PathBuf,
         buffer_env: BTreeMap<String, OsString>,
+        limits: ResourceLimits,
     ) -> Self {
         Self {
             state: Mutex::new(state),
@@ -377,6 +393,7 @@ impl Runtime {
             workspace_path,
             runtime_dir,
             buffer_env,
+            limits,
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
@@ -400,9 +417,11 @@ impl Runtime {
     }
 
     fn take_buffer_shutdown_intent(&self, buffer_id: BufferId) -> bool {
+        // Recover from poisoning: this set is plain bookkeeping and must not
+        // bring down the server if some other task panicked while holding it.
         self.buffer_shutdown_intents
             .lock()
-            .expect("buffer shutdown intent lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&buffer_id)
     }
 
@@ -540,7 +559,7 @@ impl Runtime {
     async fn dispatch_request(
         self: &Arc<Self>,
         connection_id: u64,
-        outbound: &mpsc::UnboundedSender<ServerEnvelope>,
+        outbound: &mpsc::Sender<ServerEnvelope>,
         request: ClientMessage,
     ) -> (
         ServerResponse,
@@ -745,6 +764,20 @@ impl Runtime {
 
         match request {
             SessionRequest::Create { request_id, name } => {
+                if state.sessions.len() >= self.limits.max_sessions {
+                    return (
+                        error_response(
+                            Some(request_id),
+                            ErrorCode::Conflict,
+                            limit_reached_message(
+                                "session",
+                                self.limits.max_sessions,
+                                crate::config::MAX_SESSIONS_ENV_VAR,
+                            ),
+                        ),
+                        Vec::new(),
+                    );
+                }
                 let session_id = state.create_session(name);
                 match session_snapshot(&state, session_id) {
                     Ok(snapshot) => (
@@ -909,6 +942,20 @@ impl Runtime {
 
                 let buffer_id = {
                     let mut state = self.state.lock().await;
+                    if state.buffers.len() >= self.limits.max_buffers {
+                        return (
+                            error_response(
+                                Some(request_id),
+                                ErrorCode::Conflict,
+                                limit_reached_message(
+                                    "buffer",
+                                    self.limits.max_buffers,
+                                    crate::config::MAX_BUFFERS_ENV_VAR,
+                                ),
+                            ),
+                            Vec::new(),
+                        );
+                    }
                     state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
@@ -2243,7 +2290,9 @@ impl Runtime {
                 }
                 clients
                     .get_mut(&client_id)
-                    .expect("client existence was checked above")
+                    .ok_or_else(|| {
+                        MuxError::not_found(format!("client {client_id} was not found"))
+                    })?
                     .current_session_id = Some(session_id);
                 let subscriptions = self.subscriptions.lock().await;
                 let mut subscribed_all_sessions = false;
@@ -2384,6 +2433,13 @@ impl Runtime {
         let helper_title = format!("{} history", source_title);
         let helper_buffer_id = {
             let mut state = self.state.lock().await;
+            if state.buffers.len() >= self.limits.max_buffers {
+                return Err(MuxError::conflict(limit_reached_message(
+                    "buffer",
+                    self.limits.max_buffers,
+                    crate::config::MAX_BUFFERS_ENV_VAR,
+                )));
+            }
             let helper_buffer_id = state.create_helper_buffer(
                 helper_title.clone(),
                 source_buffer_id,
@@ -2675,16 +2731,12 @@ impl Runtime {
     async fn record_buffer_update(&self, buffer_id: BufferId, update: BufferRuntimeUpdate) {
         let (render_invalidated, pipe_event) = {
             let mut state = self.state.lock().await;
-            let Some(existing) = state.buffers.get(&buffer_id) else {
+            let Some(buffer) = state.buffers.get_mut(&buffer_id) else {
                 return;
             };
-            let previous_pipe = existing.pipe.clone();
+            let previous_pipe = buffer.pipe.clone();
             let mut render_invalidated = false;
             {
-                let buffer = state
-                    .buffers
-                    .get_mut(&buffer_id)
-                    .expect("buffer still exists while update is applied");
                 let sequence_advanced = update.sequence > buffer.last_snapshot_seq;
                 let sequence_current = update.sequence >= buffer.last_snapshot_seq;
                 if sequence_advanced {
@@ -2839,7 +2891,7 @@ impl Runtime {
             let mut shutdown_intents = self
                 .buffer_shutdown_intents
                 .lock()
-                .expect("buffer shutdown intent lock");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             runtimes
                 .iter()
                 .map(|(&buffer_id, runtime)| {
@@ -2876,13 +2928,26 @@ impl Runtime {
                             .session_id
                             .is_some_and(|session_id| event_session_ids.contains(&session_id));
 
-                    if event_matches
-                        && subscription
+                    if event_matches {
+                        match subscription
                             .sender
-                            .send(ServerEnvelope::Event(event.clone()))
-                            .is_err()
-                    {
-                        return false;
+                            .try_send(ServerEnvelope::Event(event.clone()))
+                        {
+                            Ok(()) => {}
+                            // Client is gone: drop the subscription.
+                            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                            // Client cannot keep up: detach it rather than let
+                            // its queue grow without bound and exhaust the
+                            // daemon. It can reattach and resync from a fresh
+                            // snapshot.
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                warn!(
+                                    connection_id = subscription.connection_id,
+                                    "client outbound queue full; detaching slow client"
+                                );
+                                return false;
+                            }
+                        }
                     }
                 }
                 true
@@ -3087,7 +3152,7 @@ async fn handle_connection(
     runtime: Arc<Runtime>,
     connection_id: u64,
     mut reader: OwnedReadHalf,
-    outbound: mpsc::UnboundedSender<ServerEnvelope>,
+    outbound: mpsc::Sender<ServerEnvelope>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<ConnectionExit> {
     let mut server_shutdown = runtime.shutdown.subscribe();
@@ -3113,6 +3178,7 @@ async fn handle_connection(
                     Some(frame.request_id),
                     ProtocolError::UnexpectedFrameType(frame.frame_type),
                 )))
+                .await
                 .is_err()
             {
                 return Err(MuxError::transport("connection writer closed"));
@@ -3131,6 +3197,7 @@ async fn handle_connection(
                                 actual: request.request_id(),
                             },
                         )))
+                        .await
                         .is_err()
                     {
                         return Err(MuxError::transport("connection writer closed"));
@@ -3145,6 +3212,7 @@ async fn handle_connection(
                         Some(frame.request_id),
                         error,
                     )))
+                    .await
                     .is_err()
                 {
                     return Err(MuxError::transport("connection writer closed"));
@@ -3159,7 +3227,11 @@ async fn handle_connection(
             .instrument(request_span("handle_request", request_id))
             .await;
 
-        if outbound.send(ServerEnvelope::Response(response)).is_err() {
+        if outbound
+            .send(ServerEnvelope::Response(response))
+            .await
+            .is_err()
+        {
             return Err(MuxError::transport("connection writer closed"));
         }
         let retired_session_ids = closed_session_ids(&events);
@@ -3175,7 +3247,7 @@ async fn handle_connection(
 
 async fn write_loop(
     mut writer: OwnedWriteHalf,
-    mut outbound: mpsc::UnboundedReceiver<ServerEnvelope>,
+    mut outbound: mpsc::Receiver<ServerEnvelope>,
 ) -> Result<()> {
     while let Some(envelope) = outbound.recv().await {
         let payload = encode_server_envelope(&envelope).map_err(protocol_error_to_mux)?;
@@ -3319,6 +3391,13 @@ fn protocol_error_response(request_id: Option<RequestId>, error: ProtocolError) 
     error_response(request_id, ErrorCode::ProtocolViolation, error.to_string())
 }
 
+/// Rejection message shared by the session/buffer creation paths when a resource
+/// ceiling is hit. `resource` is the singular noun ("session"/"buffer"); `limit`
+/// and `env_var` name the active ceiling and the override knob.
+fn limit_reached_message(resource: &str, limit: usize, env_var: &str) -> String {
+    format!("{resource} limit reached ({limit}); close existing {resource}s or raise {env_var}")
+}
+
 fn mux_error_response(request_id: Option<RequestId>, error: MuxError) -> ServerResponse {
     let (code, message) = match error {
         MuxError::Wire(wire) => (wire.code, wire.message),
@@ -3446,15 +3525,21 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use embers_core::{ActivityState, FloatGeometry, MuxError, RequestId, SplitDirection};
+    use embers_core::{
+        ActivityState, ErrorCode, FloatGeometry, MuxError, RequestId, SplitDirection,
+    };
     use embers_protocol::{
-        BufferHistoryPlacement, BufferHistoryScope, InputRequest, NodeBreakDestination,
-        NodeJoinPlacement, NodeRequest, ServerEnvelope, ServerEvent, ServerResponse,
+        BufferHistoryPlacement, BufferHistoryScope, BufferRequest, InputRequest,
+        NodeBreakDestination, NodeJoinPlacement, NodeRequest, ServerEnvelope, ServerEvent,
+        ServerResponse, SessionRequest,
     };
     use tempfile::tempdir;
     use tokio::sync::mpsc;
 
-    use super::{Runtime, ShutdownSignal, Subscription, wait_for_shutdown};
+    use super::{
+        OUTBOUND_CHANNEL_CAPACITY, Runtime, ShutdownSignal, Subscription, wait_for_shutdown,
+    };
+    use crate::ResourceLimits;
     use crate::model::HelperBufferScope;
     use crate::{
         BufferRuntimePipeStatus, BufferRuntimePipeStopReason, BufferRuntimeUpdate, BufferState,
@@ -3514,6 +3599,7 @@ mod tests {
                 tempdir.path().join("workspace.json"),
                 tempdir.path().join("runtime"),
                 BTreeMap::new(),
+                ResourceLimits::default(),
             ),
             session_id,
             floating_id,
@@ -3577,6 +3663,7 @@ mod tests {
                 tempdir.path().join("workspace.json"),
                 tempdir.path().join("runtime"),
                 BTreeMap::new(),
+                ResourceLimits::default(),
             ),
             session_id,
             floating_id,
@@ -3603,6 +3690,7 @@ mod tests {
             PathBuf::from("workspace"),
             PathBuf::from("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
         runtime
             .buffer_shutdown_intents
@@ -3616,6 +3704,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_is_rejected_when_session_limit_reached() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits {
+                max_sessions: 1,
+                ..ResourceLimits::default()
+            },
+        );
+
+        let (first, _events) = runtime
+            .dispatch_session(SessionRequest::Create {
+                request_id: RequestId(1),
+                name: "alpha".to_owned(),
+            })
+            .await;
+        assert!(matches!(first, ServerResponse::SessionSnapshot(_)));
+
+        let (second, events) = runtime
+            .dispatch_session(SessionRequest::Create {
+                request_id: RequestId(2),
+                name: "beta".to_owned(),
+            })
+            .await;
+        assert!(events.is_empty());
+        match second {
+            ServerResponse::Error(response) => {
+                assert_eq!(response.error.code, ErrorCode::Conflict);
+            }
+            other => panic!("expected conflict error, got {other:?}"),
+        }
+        assert_eq!(runtime.state.lock().await.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_buffer_is_rejected_when_buffer_limit_reached() {
+        let runtime = Arc::new(Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits {
+                max_buffers: 1,
+                ..ResourceLimits::default()
+            },
+        ));
+
+        // Pre-seed the single allowed buffer directly so the dispatch guard
+        // rejects the next create before any PTY process is spawned.
+        runtime
+            .state
+            .lock()
+            .await
+            .create_buffer("existing", vec!["/bin/sh".to_owned()], None);
+
+        let (response, events) = runtime
+            .dispatch_buffer(
+                1,
+                BufferRequest::Create {
+                    request_id: RequestId(1),
+                    title: None,
+                    command: vec!["/bin/sh".to_owned()],
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+            )
+            .await;
+        assert!(events.is_empty());
+        match response {
+            ServerResponse::Error(response) => {
+                assert_eq!(response.error.code, ErrorCode::Conflict);
+            }
+            other => panic!("expected conflict error, got {other:?}"),
+        }
+        assert_eq!(runtime.state.lock().await.buffers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_history_buffer_is_rejected_when_buffer_limit_reached() {
+        let tempdir = tempdir().expect("tempdir");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("alpha");
+        // A helper source carries its lines inline, so opening its history does
+        // not need a live PTY capture and exercises the limit guard directly.
+        let base_buffer_id = state.create_buffer("base", vec!["/bin/sh".to_owned()], None);
+        let source_buffer_id = state
+            .create_helper_buffer(
+                "history",
+                base_buffer_id,
+                HelperBufferScope::Full,
+                None,
+                vec!["line-1".to_owned()],
+            )
+            .expect("create source helper buffer");
+        let leaf = state
+            .create_buffer_view(session_id, source_buffer_id)
+            .expect("create leaf");
+        state
+            .add_root_tab(session_id, "main", leaf)
+            .expect("attach leaf");
+
+        let buffer_count = state.buffers.len();
+        let runtime = Arc::new(Runtime::new(
+            state,
+            tempdir.path().join("server.sock"),
+            tempdir.path().join("workspace.json"),
+            tempdir.path().join("runtime"),
+            BTreeMap::new(),
+            ResourceLimits {
+                max_buffers: buffer_count,
+                ..ResourceLimits::default()
+            },
+        ));
+
+        let error = runtime
+            .open_history_buffer(
+                1,
+                None,
+                source_buffer_id,
+                BufferHistoryScope::Full,
+                BufferHistoryPlacement::Tab,
+            )
+            .await
+            .expect_err("helper buffer creation must respect the buffer limit");
+
+        assert!(matches!(error, MuxError::Conflict(_)), "got {error:?}");
+        assert_eq!(runtime.state.lock().await.buffers.len(), buffer_count);
+    }
+
+    #[tokio::test]
     async fn record_buffer_update_ignores_stale_sequences() {
         let runtime = Runtime::new(
             ServerState::new(),
@@ -3623,6 +3845,7 @@ mod tests {
             PathBuf::from("workspace"),
             PathBuf::from("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
         let buffer_id = {
             let mut state = runtime.state.lock().await;
@@ -3635,7 +3858,7 @@ mod tests {
             buffer.activity = ActivityState::Activity;
             buffer_id
         };
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         runtime.subscriptions.lock().await.insert(
             1,
             Subscription {
@@ -3706,6 +3929,7 @@ mod tests {
             PathBuf::from("workspace"),
             PathBuf::from("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
         let buffer_id = {
             let mut state = runtime.state.lock().await;
@@ -3717,7 +3941,7 @@ mod tests {
             buffer.last_snapshot_seq = 5;
             buffer_id
         };
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         runtime.subscriptions.lock().await.insert(
             1,
             Subscription {
@@ -3764,6 +3988,7 @@ mod tests {
             PathBuf::from("workspace"),
             PathBuf::from("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
         let buffer_id = {
             let mut state = runtime.state.lock().await;
@@ -3775,7 +4000,7 @@ mod tests {
             buffer.last_snapshot_seq = 5;
             buffer_id
         };
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         runtime.subscriptions.lock().await.insert(
             1,
             Subscription {
@@ -3831,6 +4056,7 @@ mod tests {
             PathBuf::from("workspace"),
             PathBuf::from("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
         let buffer_id = {
             let mut state = runtime.state.lock().await;
@@ -3887,6 +4113,7 @@ mod tests {
             tempdir.path().join("workspace.json"),
             tempdir.path().join("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         ));
 
         runtime
@@ -3923,6 +4150,7 @@ mod tests {
             tempdir.path().join("workspace.json"),
             tempdir.path().join("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         ));
 
         runtime
@@ -3947,6 +4175,7 @@ mod tests {
             tempdir.path().join("workspace.json"),
             tempdir.path().join("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
 
         let error = runtime
@@ -3993,6 +4222,7 @@ mod tests {
             tempdir.path().join("workspace.json"),
             tempdir.path().join("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         ));
 
         let (response, events) = runtime
@@ -4066,6 +4296,7 @@ mod tests {
             tempdir.path().join("workspace.json"),
             tempdir.path().join("runtime"),
             BTreeMap::new(),
+            ResourceLimits::default(),
         );
 
         let (response, events) = runtime
