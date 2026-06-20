@@ -629,9 +629,13 @@ impl KeeperConnection {
 
 impl KeeperSurface {
     fn new(size: PtySize) -> Self {
+        // The keeper inherits the server's environment, so resolving the
+        // scrollback ceiling here applies a single operator-configured value to
+        // this buffer (see `MAX_SCROLLBACK_LINES_ENV_VAR`).
+        let max_scrollback_lines = crate::config::ResourceLimits::from_env().max_scrollback_lines;
         Self {
             router: RawByteRouter,
-            backend: Box::new(AlacrittyTerminalBackend::new(size)),
+            backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
             size,
         }
     }
@@ -865,13 +869,15 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     let pair = match pair {
         Some(pair) => pair,
         None => {
-            // Safe: each failed retry stores the PTY allocation error before continuing.
-            let error =
-                last_error.expect("openpty retry loop must capture an error before failing");
-            return Err(MuxError::pty(format!(
-                "failed to openpty after {} attempts: {error}",
-                KEEPER_PTY_MAX_RETRIES + 1
-            )));
+            // Each failed retry stores the PTY allocation error before continuing, so
+            // last_error is normally populated; fall back to a generic message if not
+            // rather than panicking on this hot spawn path.
+            let attempts = KEEPER_PTY_MAX_RETRIES + 1;
+            let detail = match last_error {
+                Some(error) => format!("failed to openpty after {attempts} attempts: {error}"),
+                None => format!("failed to openpty after {attempts} attempts"),
+            };
+            return Err(MuxError::pty(detail));
         }
     };
 
@@ -1142,11 +1148,10 @@ impl KeeperRuntime {
         {
             return Err(MuxError::conflict("buffer pipe is already running"));
         }
-        *pipe = Some(KeeperPipe::spawn(command, cwd, env)?);
-        Ok(pipe
-            .as_mut()
-            .expect("pipe slot populated after spawn")
-            .status())
+        let mut spawned = KeeperPipe::spawn(command, cwd, env)?;
+        let status = spawned.status();
+        *pipe = Some(spawned);
+        Ok(status)
     }
 
     fn stop_pipe(&self) -> Result<BufferRuntimePipeStatus> {

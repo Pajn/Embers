@@ -13,7 +13,7 @@ pub use buffer_runtime::{
     BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeKeeperCli,
     run_runtime_keeper,
 };
-pub use config::{SOCKET_ENV_VAR, ServerConfig};
+pub use config::{ResourceLimits, SOCKET_ENV_VAR, ServerConfig};
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
     BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, InterruptedBuffer, Node,

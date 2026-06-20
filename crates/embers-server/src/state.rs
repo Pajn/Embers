@@ -154,10 +154,11 @@ impl ServerState {
             }
         }
 
-        let safe_next_session_id = next_id_after_max(sessions.keys().map(|id| id.0));
-        let safe_next_buffer_id = next_id_after_max(buffers.keys().map(|id| id.0));
-        let safe_next_node_id = next_id_after_max(nodes.keys().map(|id| id.0));
-        let safe_next_floating_id = next_id_after_max(floating.keys().map(|id| id.0));
+        let safe_next_session_id = checked_next_id(sessions.keys().map(|id| id.0), "session")?;
+        let safe_next_buffer_id = checked_next_id(buffers.keys().map(|id| id.0), "buffer")?;
+        let safe_next_node_id = checked_next_id(nodes.keys().map(|id| id.0), "node")?;
+        let safe_next_floating_id =
+            checked_next_id(floating.keys().map(|id| id.0), "floating window")?;
 
         let state = Self {
             sessions,
@@ -180,10 +181,16 @@ impl ServerState {
             buffers: self.buffers.values().map(persisted_buffer).collect(),
             nodes: self.nodes.values().map(persisted_node).collect(),
             floating: self.floating.values().map(persisted_floating).collect(),
-            next_session_id: next_id_after_max(self.sessions.keys().map(|id| id.0)),
-            next_buffer_id: next_id_after_max(self.buffers.keys().map(|id| id.0)),
-            next_node_id: next_id_after_max(self.nodes.keys().map(|id| id.0)),
-            next_floating_id: next_id_after_max(self.floating.keys().map(|id| id.0)),
+            // In-memory state cannot reach an exhausted id space (allocation would
+            // have failed long before), so serialize a saturating hint; if it ever
+            // did occur, the next load rejects it via `checked_next_id`.
+            next_session_id: next_id_after_max(self.sessions.keys().map(|id| id.0))
+                .unwrap_or(u64::MAX),
+            next_buffer_id: next_id_after_max(self.buffers.keys().map(|id| id.0))
+                .unwrap_or(u64::MAX),
+            next_node_id: next_id_after_max(self.nodes.keys().map(|id| id.0)).unwrap_or(u64::MAX),
+            next_floating_id: next_id_after_max(self.floating.keys().map(|id| id.0))
+                .unwrap_or(u64::MAX),
         }
     }
 
@@ -1587,18 +1594,21 @@ impl ServerState {
                 let title = self.buffer(buffer_id)?.title.clone();
                 let tabs_id = if matches!(self.node(node_id)?, Node::Tabs(_)) {
                     node_id
-                } else if matches!(
-                    self.node_parent(node_id)?
-                        .map(|id| self.node(id))
-                        .transpose()?,
-                    Some(Node::Tabs(_))
-                ) {
-                    self.node_parent(node_id)?.expect("checked parent exists")
                 } else {
-                    let tabs_id =
-                        self.wrap_node_in_tabs(node_id, self.default_tab_title(node_id)?)?;
-                    created_tabs_wrapper = Some(tabs_id);
-                    tabs_id
+                    let parent_id = self.node_parent(node_id)?;
+                    let parent_is_tabs = matches!(
+                        parent_id.map(|id| self.node(id)).transpose()?,
+                        Some(Node::Tabs(_))
+                    );
+                    match parent_id.filter(|_| parent_is_tabs) {
+                        Some(parent_id) => parent_id,
+                        None => {
+                            let tabs_id =
+                                self.wrap_node_in_tabs(node_id, self.default_tab_title(node_id)?)?;
+                            created_tabs_wrapper = Some(tabs_id);
+                            tabs_id
+                        }
+                    }
                 };
                 let insert_index = {
                     let tabs = match self.node(tabs_id)? {
@@ -2985,15 +2995,26 @@ impl ServerState {
     }
 }
 
-fn next_id_after_max(ids: impl Iterator<Item = u64>) -> u64 {
+/// Smallest id strictly greater than every id in `ids`, or `1` when `ids` is empty.
+///
+/// Returns `None` when the id space is exhausted: the maximum id is `u64::MAX`,
+/// leaving no room to allocate a new id. Callers on the persistence-load boundary
+/// surface this as an error instead of allowing it to wrap or panic.
+fn next_id_after_max(ids: impl Iterator<Item = u64>) -> Option<u64> {
     match ids.max() {
-        Some(max) => max.checked_add(1).unwrap_or_else(|| {
-            panic!(
-                "next_id_after_max allocator exhaustion: restored max id == u64::MAX, cannot allocate a new id"
-            )
-        }),
-        None => 1,
+        Some(max) => max.checked_add(1),
+        None => Some(1),
     }
+}
+
+/// Like [`next_id_after_max`], but turns id-space exhaustion into a descriptive
+/// error naming the entity kind, for use when restoring a persisted workspace.
+fn checked_next_id(ids: impl Iterator<Item = u64>, kind: &str) -> Result<u64> {
+    next_id_after_max(ids).ok_or_else(|| {
+        MuxError::internal(format!(
+            "persisted workspace exhausts the {kind} id space (highest id is u64::MAX); cannot allocate new ids"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -3056,5 +3077,33 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("floating window"));
         assert!(message.contains("not referenced by session"));
+    }
+
+    #[test]
+    fn next_id_after_max_reports_exhaustion_instead_of_panicking() {
+        assert_eq!(next_id_after_max(std::iter::empty()), Some(1));
+        assert_eq!(next_id_after_max([3u64, 7, 5].into_iter()), Some(8));
+        assert_eq!(next_id_after_max([u64::MAX].into_iter()), None);
+    }
+
+    #[test]
+    fn from_persisted_rejects_exhausted_buffer_id_space() {
+        let mut state = ServerState::new();
+        state.create_session("main");
+        let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+
+        let mut workspace = state.to_persisted();
+        workspace
+            .buffers
+            .iter_mut()
+            .find(|buffer| buffer.id == buffer_id.0)
+            .expect("buffer persists")
+            .id = u64::MAX;
+
+        let error = ServerState::from_persisted(workspace)
+            .expect_err("exhausted buffer id space should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("buffer"));
+        assert!(message.contains("id space"));
     }
 }

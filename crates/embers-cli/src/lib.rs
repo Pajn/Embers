@@ -32,6 +32,9 @@ use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 use tracing::warn;
 
+/// Environment variable selecting the tracing filter (e.g. `info`, `embers=debug`).
+pub const EMBERS_LOG_ENV_VAR: &str = "EMBERS_LOG";
+
 #[derive(Debug, Parser)]
 #[command(name = "embers", about = "headless terminal multiplexer for embers")]
 pub struct Cli {
@@ -39,7 +42,12 @@ pub struct Cli {
     pub socket: Option<PathBuf>,
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
-    #[arg(long, global = true, value_name = "FILTER")]
+    #[arg(
+        long,
+        visible_alias = "log-level",
+        global = true,
+        value_name = "FILTER"
+    )]
     pub log: Option<String>,
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -57,7 +65,7 @@ impl Cli {
             1 => return "debug".to_owned(),
             _ => return "trace".to_owned(),
         }
-        if let Some(filter) = std::env::var("EMBERS_LOG")
+        if let Some(filter) = std::env::var(EMBERS_LOG_ENV_VAR)
             .ok()
             .filter(|value| !value.trim().is_empty())
         {
@@ -1038,6 +1046,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    let log_filter = cli.log_filter();
     let Cli {
         socket,
         config,
@@ -1066,7 +1075,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             match command {
                 None => {
-                    ensure_server_process(&socket).await?;
+                    ensure_server_process(&socket, &log_filter).await?;
                     interactive::run(socket, None, config).await
                 }
                 Some(Command::Attach { target }) => {
@@ -1082,12 +1091,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                     target,
                     all_sessions,
                 }) => {
-                    ensure_server_process(&socket).await?;
+                    ensure_server_process(&socket, &log_filter).await?;
                     automation::run(socket, target, all_sessions).await
                 }
-                Some(Command::Serve) => run_server(socket).await,
+                Some(Command::Serve) => run_server(socket, &log_filter).await,
                 Some(command) => {
-                    ensure_server_process(&socket).await?;
+                    ensure_server_process(&socket, &log_filter).await?;
                     let output = execute(&socket, command).await?;
                     if !output.is_empty() {
                         println!("{output}");
@@ -1196,7 +1205,7 @@ async fn server_is_available(socket_path: &Path) -> bool {
     CliConnection::connect(socket_path).await.is_ok()
 }
 
-async fn ensure_server_process(socket_path: &Path) -> Result<()> {
+async fn ensure_server_process(socket_path: &Path, log_filter: &str) -> Result<()> {
     if server_is_available(socket_path).await {
         return Ok(());
     }
@@ -1208,6 +1217,10 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
         .arg("__serve")
         .arg("--socket")
         .arg(socket_path)
+        // Propagate the resolved filter so a `--log`/`-v` flag reaches the
+        // detached server, not just the inherited EMBERS_LOG/RUST_LOG env. The
+        // server writes its own rotating log file, so its stdio is discarded.
+        .env(EMBERS_LOG_ENV_VAR, log_filter)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1242,8 +1255,15 @@ async fn ensure_server_process(socket_path: &Path) -> Result<()> {
     }
 }
 
-async fn run_server(socket_path: PathBuf) -> Result<()> {
+async fn run_server(socket_path: PathBuf, log_filter: &str) -> Result<()> {
     ensure_socket_parent(&socket_path)?;
+    // The detached server logs to a daily-rotating file next to the socket. Set
+    // this up before anything else so startup is captured, then route panics
+    // through tracing so a crash lands in the same log instead of a dead stderr.
+    if let Some(dir) = socket_path.parent() {
+        embers_core::init_server_tracing(log_filter, dir)?;
+        install_server_panic_hook();
+    }
     let secure_parent = socket_path
         .parent()
         .is_some_and(|parent| parent == default_runtime_dir().as_path());
@@ -1251,6 +1271,17 @@ async fn run_server(socket_path: PathBuf) -> Result<()> {
     let handle = Server::new(ServerConfig::new(socket_path)).start().await?;
     wait_for_shutdown_signal().await?;
     handle.shutdown().await
+}
+
+/// Routes panics in the detached server through `tracing` (chained after the
+/// default hook) so a crash is recorded in the rotating log file, which is the
+/// server's only output sink once its stdio is discarded.
+fn install_server_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(target: "panic", "server panicked: {info}");
+        previous(info);
+    }));
 }
 
 fn ensure_socket_parent(socket_path: &Path) -> Result<()> {

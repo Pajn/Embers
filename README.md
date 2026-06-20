@@ -87,6 +87,44 @@ Useful subcommand groups include:
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
 
+## Logging
+
+The tracing filter is resolved from the first of these that is set, highest
+precedence first: `--log <FILTER>` (alias `--log-level`), `-v`/`-vv`,
+`EMBERS_LOG`, `RUST_LOG`, then the default of `info`. `<FILTER>` accepts the full
+`tracing` env-filter syntax (a bare level like `debug`, or per-target directives
+like `embers_server=trace,info`).
+
+```sh
+embers --log-level debug list-sessions
+EMBERS_LOG=embers_server=trace,info embers
+```
+
+Foreground commands log to stderr. The background server writes to a
+daily-rotating file in the socket's directory, named
+`embers-server.<date>.log`, retaining the most recent 7 days. The launching
+command's filter is propagated to the server, and server panics are recorded in
+the same log.
+
+## Resource Limits
+
+The server enforces operator-tunable ceilings so a runaway client cannot exhaust
+host resources. Each is overridable via an environment variable:
+
+- `EMBERS_MAX_SESSIONS` (default `256`)
+- `EMBERS_MAX_BUFFERS` (default `2048`) — each buffer owns a PTY-backed process plus scrollback, so this is the dominant resource bound
+- `EMBERS_MAX_SCROLLBACK_LINES` (default `10000`)
+
+Requests that would exceed a limit are rejected with an error naming the limit;
+existing sessions are unaffected.
+
+```sh
+EMBERS_MAX_BUFFERS=256 EMBERS_MAX_SCROLLBACK_LINES=2000 embers
+```
+
+See [`docs/configuration.md`](docs/configuration.md) for the full reference of
+operational environment variables and flags.
+
 ## Configuration
 
 Embers loads configuration in this order:
@@ -107,6 +145,10 @@ embers --config ./config.rhai
 ```
 
 The generated config API reference lives in [`docs/config-api`](docs/config-api/index.md), with a rendered mdBook copy in [`docs/config-api-book`](docs/config-api-book/index.html).
+
+Operational configuration (socket path, logging, and resource limits via
+environment variables and flags) is documented in
+[`docs/configuration.md`](docs/configuration.md).
 
 ## Development
 

@@ -6,8 +6,8 @@ pub mod metadata;
 pub mod snapshot;
 
 pub use diagnostics::{
-    RequestContext, format_focus_path, format_tree_dump, init_test_tracing, init_tracing,
-    new_request_id, request_span,
+    RequestContext, format_focus_path, format_tree_dump, init_server_tracing, init_test_tracing,
+    init_tracing, new_request_id, request_span,
 };
 pub use error::{ErrorCode, MuxError, Result, WireError};
 pub use geometry::{FloatGeometry, Point, PtySize, Rect, Size, SplitDirection};
