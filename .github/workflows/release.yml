@@ -79,7 +79,10 @@ jobs:
 
           crate_exists() {
             local crate="$1"
+            # crates.io rejects requests without a descriptive User-Agent (HTTP 403),
+            # so identify ourselves per their data-access policy.
             curl --retry 5 --retry-delay 2 --retry-connrefused \
+              -A "embers-release-ci (https://github.com/Pajn/Embers)" \
               -fsSL "https://crates.io/api/v1/crates/${crate}/${version}" \
               >/dev/null
           }
