@@ -7,10 +7,14 @@ Phase 8 locks down which server surfaces the client uses for terminal rendering.
 The server remains authoritative for both layout and terminal state.
 
 - `SessionSnapshot` provides layout topology plus durable buffer metadata such as title, activity, attachment, and PTY size.
-- `VisibleSnapshotResponse` provides the current visible terminal surface for one buffer, including visible lines, cursor state, viewport position, alternate-screen mode, and other terminal-mode flags.
+- `VisibleSnapshotResponse` provides the current visible terminal surface for one buffer, including styled visible lines, cursor state, viewport position, alternate-screen mode, and other terminal-mode flags.
 - Full capture and scrollback slices stay on-demand APIs and are not part of the normal render loop.
 
 The client does not consume terminal diffs. It renders from full visible snapshots, with `RenderInvalidated` acting as a hint that a buffer should be refreshed before the next user-visible render.
+
+### Styled visible lines
+
+Each visible line is a `SnapshotLine { text, runs }`: the plain text plus run-length style annotations (`StyledRun`) carrying per-cell foreground/background color and attributes. Colors are semantic — named/indexed ANSI colors travel as `Indexed(n)` so the outer terminal's palette resolves them, and only true-color sequences carry explicit RGB. An empty `runs` vector means the whole line is default-styled, so plain buffers ship (and render) exactly as before. Scrollback slices used for scrolled-back views carry the same styling; full capture and helper/persistence surfaces stay plain text. The no-diff / full-snapshot model is otherwise unchanged.
 
 ### Freshness expectations
 

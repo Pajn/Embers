@@ -475,6 +475,26 @@ table CursorState {
   shape:CursorShapeWire = Block;
 }
 
+// One run-length style annotation over a styled line's text.
+// A fixed-size struct (16 bytes inline) rather than a table to halve the size
+// vs a table per run. Structs cannot evolve; if `attrs` outgrows u16, append a
+// new field to StyledLine instead.
+// Color kind: 0 = default, 1 = indexed (index in *_r), 2 = rgb (*_r/g/b).
+struct StyledRunWire {
+  len:uint;
+  fg_kind:ubyte; fg_r:ubyte; fg_g:ubyte; fg_b:ubyte;
+  bg_kind:ubyte; bg_r:ubyte; bg_g:ubyte; bg_b:ubyte;
+  attrs:ushort;
+}
+
+// One styled line in a sparse `styles` array: `line_index` is the position in
+// the parallel `lines` array this styling applies to. Only lines that actually
+// carry styling are emitted, so mostly-plain buffers stay compact.
+table StyledLine {
+  line_index:uint;
+  runs:[StyledRunWire];
+}
+
 table SnapshotResponse {
   buffer_id:ulong;
   sequence:ulong = 0;
@@ -500,6 +520,9 @@ table VisibleSnapshotResponse {
   focus_reporting:bool = false;
   bracketed_paste:bool = false;
   cursor:CursorState;
+  // Appended (append-only evolution): parallel per-line styling. Absent for
+  // plain buffers, so plain frames stay byte-identical to pre-styling frames.
+  styles:[StyledLine];
 }
 
 table ScrollbackSliceResponse {
@@ -507,6 +530,8 @@ table ScrollbackSliceResponse {
   start_line:ulong = 0;
   total_lines:ulong = 0;
   lines:[string];
+  // Appended: parallel per-line styling. Absent ⇒ plain lines.
+  styles:[StyledLine];
 }
 
 table SessionCreatedEvent {

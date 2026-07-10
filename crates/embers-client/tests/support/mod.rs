@@ -341,7 +341,10 @@ fn snapshot<const N: usize>(buffer_id: u64, lines: [&str; N]) -> VisibleSnapshot
         buffer_id: BufferId(buffer_id),
         sequence: 1,
         size: PtySize::new(80, 24),
-        lines: lines.into_iter().map(str::to_owned).collect(),
+        lines: lines
+            .into_iter()
+            .map(embers_core::SnapshotLine::plain)
+            .collect(),
         title: None,
         cwd: None,
         viewport_top_line: 0,

@@ -1,12 +1,21 @@
 use std::time::{Duration, Instant};
 
-use embers_core::{PtySize, new_request_id};
+use embers_core::{PtySize, SnapshotLine, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRecordState, BufferRequest, ClientMessage, InputRequest, OkResponse,
     ServerResponse, SnapshotResponse,
 };
 use embers_test_support::{TestConnection, TestServer, acquire_test_lock};
 use tokio::time::sleep;
+
+/// Join styled snapshot lines into newline-delimited plain text for assertions.
+fn lines_text(lines: &[SnapshotLine]) -> String {
+    lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 async fn create_buffer(connection: &mut TestConnection, command: &[&str]) -> BufferRecord {
     let response = connection
@@ -294,7 +303,7 @@ async fn visible_snapshot_surfaces_terminal_modes_and_cursor_metadata() {
         .capture_visible_buffer(buffer.id)
         .await
         .expect("visible capture succeeds");
-    let text = snapshot.lines.join("\n");
+    let text = lines_text(&snapshot.lines);
     assert!(text.contains("hello"));
     assert_eq!(snapshot.title.as_deref(), Some("embers"));
     assert!(snapshot.alternate_screen);
@@ -341,7 +350,8 @@ async fn scrollback_slice_returns_history_while_full_capture_stays_available() {
     assert!(captured.lines.join("\n").contains("line-40"));
     assert!(visible.total_lines >= 40);
     assert!(visible.viewport_top_line > 0);
-    assert_eq!(slice.lines, expected_prefix);
+    let slice_text: Vec<String> = slice.lines.iter().map(|line| line.text.clone()).collect();
+    assert_eq!(slice_text, expected_prefix);
     assert_eq!(slice.start_line, 0);
     assert_eq!(slice.total_lines, visible.total_lines);
 
@@ -454,7 +464,7 @@ async fn detached_visible_capture_tracks_latest_size_and_output() {
         .expect("initial visible capture succeeds");
     assert_eq!(initial_visible.size, PtySize::new(80, 24));
     assert_eq!(initial_visible.title.as_deref(), Some("detached-preview"));
-    assert!(initial_visible.lines.join("\n").contains("ready"));
+    assert!(lines_text(&initial_visible.lines).contains("ready"));
 
     resize_buffer(&mut connection, buffer.id, 96, 18).await;
     let resized_visible = connection
@@ -473,7 +483,7 @@ async fn detached_visible_capture_tracks_latest_size_and_output() {
         .expect("final visible capture succeeds");
     assert_eq!(visible.size, PtySize::new(96, 18));
     assert_eq!(visible.title.as_deref(), Some("detached-preview"));
-    assert!(visible.lines.join("\n").contains("seen:after-resize"));
+    assert!(lines_text(&visible.lines).contains("seen:after-resize"));
 
     let captured = capture_buffer(&mut connection, buffer.id).await;
     assert_eq!(captured.size, PtySize::new(96, 18));
@@ -485,7 +495,7 @@ async fn detached_visible_capture_tracks_latest_size_and_output() {
         .await
         .expect("detached scrollback slice succeeds");
     assert!(slice.total_lines >= 2);
-    assert!(slice.lines.join("\n").contains("ready"));
+    assert!(lines_text(&slice.lines).contains("ready"));
 
     server.shutdown().await.expect("shutdown server");
 }

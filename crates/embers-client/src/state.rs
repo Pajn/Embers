@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use embers_core::{BufferId, NodeId, SessionId};
+use embers_core::{BufferId, NodeId, SessionId, SnapshotLine};
 use embers_protocol::NodeRecordKind;
 use embers_protocol::{
     BufferRecord, ServerEvent, SessionRecord, SessionSnapshot, VisibleSnapshotResponse,
@@ -48,7 +48,7 @@ pub struct BufferViewState {
     pub visible_line_count: u16,
     pub total_line_count: u64,
     pub alternate_screen: bool,
-    pub visible_lines: Vec<String>,
+    pub visible_lines: Vec<SnapshotLine>,
     pub search_state: Option<SearchState>,
     pub selection_state: Option<SelectionState>,
 }
@@ -292,7 +292,7 @@ impl ClientState {
         &mut self,
         node_id: NodeId,
         scroll_top_line: u64,
-        lines: Vec<String>,
+        lines: Vec<SnapshotLine>,
     ) -> Option<()> {
         let state = self.view_state.get_mut(&node_id)?;
         let scroll_top_line = clamp_top_line(

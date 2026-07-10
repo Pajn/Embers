@@ -19,7 +19,9 @@ use std::thread;
 use std::time::Duration;
 
 use base64::Engine as _;
-use embers_core::{ActivityState, BufferId, MuxError, PtySize, Result, TerminalSnapshot};
+use embers_core::{
+    ActivityState, BufferId, MuxError, PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
+};
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
     PtySystem,
@@ -169,11 +171,41 @@ pub struct KeeperSnapshot {
     pub cwd: Option<PathBuf>,
 }
 
+/// Budget for scrollback-slice styling. Above this the keeper drops styles and
+/// ships plain text, keeping the JSON (16 MiB) and client frame (8 MiB) caps
+/// safe. Well below the caps so text and framing overhead still fit.
+const MAX_STYLE_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+/// Rough per-run cost when a [`StyledRun`] is serialized to keeper JSON. Used
+/// only to estimate whether a slice's styling fits the budget.
+const ESTIMATED_STYLED_RUN_JSON_BYTES: usize = 64;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct KeeperScrollbackSlice {
     pub start_line: u64,
     pub total_lines: u64,
     pub lines: Vec<String>,
+    /// Parallel per-line style runs. A field distinct from `lines` (rather than
+    /// retyping `lines`) keeps the keeper JSON compatible with older keeper
+    /// processes: `#[serde(default)]` makes a missing `styles` decode as no
+    /// styling, and a short/empty inner vec means that line is plain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<Vec<StyledRun>>,
+}
+
+impl KeeperScrollbackSlice {
+    /// Zip `lines` and `styles` back into styled snapshot lines. A missing or
+    /// short `styles` entry yields a plain line, so old keepers degrade to text.
+    pub fn into_snapshot_lines(self) -> Vec<SnapshotLine> {
+        let mut styles = self.styles.into_iter();
+        self.lines
+            .into_iter()
+            .map(|text| SnapshotLine {
+                text,
+                runs: styles.next().unwrap_or_default(),
+            })
+            .collect()
+    }
 }
 
 struct KeeperRuntime {
@@ -662,10 +694,29 @@ impl KeeperSurface {
         let slice = self
             .backend
             .capture_scrollback_slice(start_line, line_count);
+        let mut lines = Vec::with_capacity(slice.lines.len());
+        let mut styles = Vec::with_capacity(slice.lines.len());
+        for line in slice.lines {
+            lines.push(line.text);
+            styles.push(line.runs);
+        }
+
+        // Styles are best-effort: a large `line_count` could produce a styled
+        // payload big enough to blow the keeper JSON (16 MiB) or client frame
+        // (8 MiB) caps. If the estimated styling exceeds the budget, ship plain
+        // text — the text always survives.
+        let run_count: usize = styles.iter().map(Vec::len).sum();
+        if run_count.saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES) > MAX_STYLE_PAYLOAD_BYTES
+            || styles.iter().all(Vec::is_empty)
+        {
+            styles.clear();
+        }
+
         KeeperScrollbackSlice {
             start_line: slice.start_line,
             total_lines: slice.total_lines,
-            lines: slice.lines,
+            lines,
+            styles,
         }
     }
 }

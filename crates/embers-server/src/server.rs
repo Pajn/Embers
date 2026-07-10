@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, WireError, request_span,
+    BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine, WireError,
+    request_span,
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
@@ -2419,9 +2420,14 @@ impl Runtime {
                         .lines
                 }
                 BufferHistoryScope::Visible => {
+                    // Helper buffers store plain text; project the styled visible
+                    // snapshot down to text at this boundary.
                     self.capture_visible_snapshot(RequestId(0), source_buffer_id)
                         .await?
                         .lines
+                        .into_iter()
+                        .map(|line| line.text)
+                        .collect()
                 }
             },
         };
@@ -2641,7 +2647,7 @@ impl Runtime {
                     buffer_id,
                     sequence,
                     size,
-                    lines,
+                    lines: lines.into_iter().map(SnapshotLine::plain).collect(),
                     title: Some(title),
                     cwd,
                     viewport_top_line,
@@ -2664,7 +2670,7 @@ impl Runtime {
             buffer_id,
             sequence: snapshot.sequence,
             size: snapshot.size,
-            lines: snapshot.lines.into_iter().map(|line| line.text).collect(),
+            lines: snapshot.lines,
             title: snapshot.title,
             cwd: snapshot.cwd.map(|path| path.display().to_string()),
             viewport_top_line: snapshot.viewport_top_line,
@@ -2710,7 +2716,7 @@ impl Runtime {
                 buffer_id,
                 start_line,
                 total_lines,
-                lines,
+                lines: lines.into_iter().map(SnapshotLine::plain).collect(),
             });
         }
         let runtime = self.buffer_runtime(buffer_id).await?;
@@ -2724,7 +2730,7 @@ impl Runtime {
             buffer_id,
             start_line: slice.start_line,
             total_lines: slice.total_lines,
-            lines: slice.lines,
+            lines: slice.into_snapshot_lines(),
         })
     }
 
@@ -4251,8 +4257,13 @@ mod tests {
         assert_eq!(snapshot.size.rows, 3);
         assert_eq!(snapshot.total_lines, 5);
         assert_eq!(snapshot.viewport_top_line, 2);
+        let snapshot_text: Vec<_> = snapshot
+            .lines
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
         assert_eq!(
-            snapshot.lines,
+            snapshot_text,
             vec![
                 "line-3".to_owned(),
                 "line-4".to_owned(),
