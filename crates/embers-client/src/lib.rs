@@ -22,7 +22,7 @@ pub use configured_client::ConfiguredClient;
 pub use controller::{
     Controller, KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
 };
-pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid};
+pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, InputResolution, InputState,
     KeyParseError, KeySequence, KeyToken, ModeSpec, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,

@@ -3,7 +3,8 @@ use embers_client::{
     SelectionState,
 };
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, NodeId, PtySize, RequestId, SessionId, SplitDirection,
+    ActivityState, BufferId, FloatGeometry, NodeId, PtySize, RequestId, SessionId, SnapshotLine,
+    SplitDirection,
 };
 use embers_protocol::{
     BufferDetachedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord,
@@ -164,7 +165,7 @@ fn visible_snapshot(
         buffer_id: BufferId(buffer_id),
         sequence: 1,
         size: PtySize::new(80, 24),
-        lines: vec!["line-a".to_owned(), "line-b".to_owned()],
+        lines: vec![SnapshotLine::plain("line-a"), SnapshotLine::plain("line-b")],
         title: None,
         cwd: None,
         viewport_top_line,

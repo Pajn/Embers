@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
-    SessionId, SplitDirection, WireError,
+    SessionId, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -950,7 +950,7 @@ pub struct VisibleSnapshotResponse {
     pub buffer_id: BufferId,
     pub sequence: u64,
     pub size: PtySize,
-    pub lines: Vec<String>,
+    pub lines: Vec<SnapshotLine>,
     pub title: Option<String>,
     pub cwd: Option<String>,
     pub viewport_top_line: u64,
@@ -968,7 +968,7 @@ pub struct ScrollbackSliceResponse {
     pub buffer_id: BufferId,
     pub start_line: u64,
     pub total_lines: u64,
-    pub lines: Vec<String>,
+    pub lines: Vec<SnapshotLine>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

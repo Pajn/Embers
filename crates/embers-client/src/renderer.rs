@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use embers_core::{ActivityState, Point, Rect, Size};
+use embers_core::{ActivityState, Point, Rect, Size, SnapshotLine};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -211,7 +211,7 @@ impl Renderer {
                 rendered_lines.map_or(0, |lines| {
                     let significant_len = lines
                         .iter()
-                        .rposition(|line| !line.is_empty())
+                        .rposition(|line| !line.text.is_empty())
                         .map(|index| index + 1)
                         .unwrap_or(0);
                     significant_len.saturating_sub(content_rows)
@@ -237,7 +237,7 @@ impl Renderer {
                 let Some(row) = u16::try_from(row).ok() else {
                     break;
                 };
-                grid.put_str(x, y + 1 + row, &truncate(line, width));
+                grid.put_snapshot_line(x, y + 1 + row, width, line);
             }
         }
 
@@ -387,7 +387,7 @@ fn render_search_overlay(
     y: u16,
     width: u16,
     top_line: u64,
-    lines: &[String],
+    lines: &[SnapshotLine],
     search_state: &crate::state::SearchState,
 ) {
     let Some(active_index) = search_state.active_match_index else {
@@ -404,22 +404,21 @@ fn render_search_overlay(
         if relative_row >= u16::try_from(lines.len()).unwrap_or(u16::MAX) {
             continue;
         }
-        let line = &lines[usize::from(relative_row)];
-        overlay_display_range(
-            grid,
-            OverlayLine {
-                x,
-                y: y.saturating_add(relative_row),
-                width,
-                text: line,
-            },
-            search_match.start_column,
-            search_match.end_column,
-            if index == active_index {
-                active_search_style()
-            } else {
-                search_style()
-            },
+        let start_column = search_match.start_column.min(width);
+        let end_column = search_match.end_column.min(width);
+        let overlay = if index == active_index {
+            active_search_style()
+        } else {
+            search_style()
+        };
+        // Search highlights compose: OR the overlay's attributes onto the content
+        // style and only override fg/bg where the overlay defines them.
+        grid.restyle_range(
+            x,
+            y.saturating_add(relative_row),
+            start_column,
+            end_column,
+            |base| compose_overlay(base, overlay),
         );
     }
 }
@@ -430,7 +429,7 @@ fn render_selection_overlay(
     y: u16,
     width: u16,
     top_line: u64,
-    lines: &[String],
+    lines: &[SnapshotLine],
     selection_state: &SelectionState,
 ) {
     for (row, line) in lines.iter().enumerate() {
@@ -439,22 +438,38 @@ fn render_selection_overlay(
         };
         let line_number = top_line.saturating_add(u64::try_from(row).unwrap_or(u64::MAX));
         let Some((start_column, end_column)) =
-            selection_range_for_line(selection_state, line_number, width, line)
+            selection_range_for_line(selection_state, line_number, width, &line.text)
         else {
             continue;
         };
-        overlay_display_range(
-            grid,
-            OverlayLine {
-                x,
-                y: y.saturating_add(row_u16),
-                width,
-                text: line,
+        // Selection toggles reverse on the underlying content style so colored
+        // text stays colored while the selection reads as inverted.
+        grid.restyle_range(
+            x,
+            y.saturating_add(row_u16),
+            start_column.min(width),
+            end_column.min(width),
+            |base| CellStyle {
+                reverse: !base.reverse,
+                ..base
             },
-            start_column,
-            end_column,
-            selection_style(),
         );
+    }
+}
+
+/// Compose an overlay style onto a base content style: attributes are OR-ed and
+/// the overlay's colors win only where it defines them.
+fn compose_overlay(base: CellStyle, overlay: CellStyle) -> CellStyle {
+    CellStyle {
+        fg: overlay.fg.or(base.fg),
+        bg: overlay.bg.or(base.bg),
+        bold: base.bold || overlay.bold,
+        italic: base.italic || overlay.italic,
+        underline: base.underline || overlay.underline,
+        dim: base.dim || overlay.dim,
+        reverse: base.reverse || overlay.reverse,
+        blink: base.blink || overlay.blink,
+        strikeout: base.strikeout || overlay.strikeout,
     }
 }
 
@@ -514,43 +529,6 @@ fn ordered_points(left: SelectionPoint, right: SelectionPoint) -> (SelectionPoin
         (left, right)
     } else {
         (right, left)
-    }
-}
-
-struct OverlayLine<'a> {
-    x: u16,
-    y: u16,
-    width: u16,
-    text: &'a str,
-}
-
-fn overlay_display_range(
-    grid: &mut RenderGrid,
-    line: OverlayLine<'_>,
-    start_column: u16,
-    end_column: u16,
-    style: CellStyle,
-) {
-    if start_column >= end_column || line.width == 0 {
-        return;
-    }
-
-    let visible_end = end_column.min(line.width);
-    let mut column = 0_u16;
-    for grapheme in UnicodeSegmentation::graphemes(line.text, true) {
-        let grapheme_width = display_width(grapheme).max(1);
-        let next_column = column.saturating_add(grapheme_width);
-        if next_column > start_column && column < visible_end {
-            grid.put_str_styled(line.x.saturating_add(column), line.y, grapheme, style);
-        }
-        column = next_column;
-        if column >= visible_end {
-            return;
-        }
-    }
-
-    for column in column.max(start_column)..visible_end {
-        grid.put_char_styled(line.x.saturating_add(column), line.y, ' ', style);
     }
 }
 
@@ -707,13 +685,6 @@ fn active_search_style() -> CellStyle {
         underline: true,
         reverse: true,
         italic: true,
-        ..CellStyle::default()
-    }
-}
-
-fn selection_style() -> CellStyle {
-    CellStyle {
-        reverse: true,
         ..CellStyle::default()
     }
 }

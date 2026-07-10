@@ -1,8 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CursorPosition, CursorShape, CursorState, ErrorCode, FloatGeometry,
-    FloatingId, NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
+    ActivityState, BufferId, CellAttrs, CursorPosition, CursorShape, CursorState, ErrorCode,
+    FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection,
+    StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -459,7 +460,19 @@ fn server_envelope_families_round_trip() {
             buffer_id: BufferId(11),
             sequence: 10,
             size: PtySize::new(120, 40),
-            lines: vec!["alpha".to_owned(), "beta".to_owned(), "".to_owned()],
+            lines: vec![
+                SnapshotLine {
+                    text: "alpha".to_owned(),
+                    runs: vec![StyledRun {
+                        len: 5,
+                        fg: TermColor::Indexed(1),
+                        bg: TermColor::Default,
+                        attrs: CellAttrs(CellAttrs::BOLD),
+                    }],
+                },
+                SnapshotLine::plain("beta"),
+                SnapshotLine::plain(""),
+            ],
             title: Some("shell".to_owned()),
             cwd: Some("/tmp".to_owned()),
             viewport_top_line: 17,
@@ -478,7 +491,22 @@ fn server_envelope_families_round_trip() {
             buffer_id: BufferId(11),
             start_line: 12,
             total_lines: 43,
-            lines: vec!["gamma".to_owned(), "delta".to_owned()],
+            lines: vec![
+                SnapshotLine {
+                    text: "gamma".to_owned(),
+                    runs: vec![StyledRun {
+                        len: 5,
+                        fg: TermColor::Rgb {
+                            r: 200,
+                            g: 100,
+                            b: 50,
+                        },
+                        bg: TermColor::Indexed(4),
+                        attrs: CellAttrs(CellAttrs::UNDERLINE),
+                    }],
+                },
+                SnapshotLine::plain("delta"),
+            ],
         })),
         ServerEnvelope::Event(ServerEvent::SessionCreated(SessionCreatedEvent {
             session: session.clone(),

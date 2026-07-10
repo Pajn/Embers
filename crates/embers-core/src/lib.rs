@@ -14,5 +14,6 @@ pub use geometry::{FloatGeometry, Point, PtySize, Rect, Size, SplitDirection};
 pub use ids::{BufferId, ClientId, FloatingId, IdAllocator, NodeId, RequestId, SessionId};
 pub use metadata::{ActivityState, EntityMetadata, Timestamp};
 pub use snapshot::{
-    CursorPosition, CursorShape, CursorState, SnapshotLine, TerminalModes, TerminalSnapshot,
+    CellAttrs, CursorPosition, CursorShape, CursorState, SnapshotLine, StyledRun, TermColor,
+    TerminalModes, TerminalSnapshot,
 };

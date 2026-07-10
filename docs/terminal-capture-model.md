@@ -19,6 +19,14 @@ Embers exposes three related but distinct capture surfaces for PTY buffers:
 
 All three are sourced from the durable buffer runtime (`BufferRuntimeHandle` -> runtime keeper -> `TerminalBackend`), not from layout state.
 
+## Styling
+
+Visible snapshots and scrollback slices carry per-cell styling; full capture, helper buffers, and persistence stay plain text (like `tmux capture-pane` without `-e`).
+
+Styled lines are `SnapshotLine { text, runs }`: the text plus run-length `StyledRun` annotations with semantic foreground/background color (`TermColor` = `Default | Indexed(u8) | Rgb`) and attribute bits (bold, dim, italic, underline, double-underline, inverse, hidden, strikeout). Named/indexed ANSI colors ship as `Indexed(n)` so the outer terminal's palette resolves them; only true-color sequences become `Rgb`. Empty `runs` means the whole line is default-styled, so plain content is byte-identical to the pre-styling wire format.
+
+The text projection is column-faithful to the active screen: tab cells become spaces, wide-character spacer cells contribute nothing, and trailing cells with a non-default background or the inverse flag survive as styled spaces (default trailing blanks still trim). The same projection is used for full capture text, so search columns computed over a capture agree with the displayed styled lines.
+
 ## Full snapshot semantics
 
 `capture_snapshot` is the "capture pane/buffer" source of truth for PTY buffers.
@@ -27,7 +35,7 @@ It returns:
 
 - the current snapshot sequence
 - the buffer's current PTY size
-- the backend's full captured lines
+- the backend's full captured lines, as plain text (no styling)
 - the terminal title if the backend has one
 - the buffer cwd tracked by the server
 
@@ -39,7 +47,7 @@ For PTY buffers, this is a runtime capture, not a view capture. Moving, detachin
 
 It returns:
 
-- the current visible lines from the active screen
+- the current visible lines from the active screen, with per-cell styling
 - viewport position and total line count
 - terminal mode bits such as alternate screen, mouse reporting, focus reporting, and bracketed paste
 - cursor metadata
@@ -55,7 +63,9 @@ It returns:
 
 - `start_line`: the effective start of the returned slice
 - `total_lines`: the full scrollback length at capture time
-- `lines`: the requested window into that history
+- `lines`: the requested window into that history, with per-cell styling
+
+Slice styling is best-effort: the requested window is walked directly (only the requested rows, not the full history), and if the styled payload would threaten the keeper JSON or client frame size caps the keeper drops styles and returns plain text for that slice. The text always survives.
 
 Repeated reads without new output should be stable: the same buffer state should yield the same full snapshot, visible snapshot, and scrollback slice.
 

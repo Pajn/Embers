@@ -634,9 +634,11 @@ async fn embers_without_subcommand_starts_server_and_client() {
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("client starts and renders");
 
-    let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
+    // The pane renders tab cells as spaces (styled-snapshot projection), so the
+    // tab-separated `1\tmain` shows with the tab expanded to the next tab stop.
+    let output = run_pane_command(&mut harness, "embers list-sessions", "1       main");
     assert!(
-        output.contains("1\tmain"),
+        output.contains("1       main"),
         "expected list-sessions output in pane:\n{output}"
     );
 
@@ -700,9 +702,10 @@ async fn attach_subcommand_connects_to_running_server() {
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
 
-    let output = run_pane_command(&mut harness, "embers list-sessions", "1\tmain");
+    // The pane renders tab cells as spaces (styled-snapshot projection).
+    let output = run_pane_command(&mut harness, "embers list-sessions", "1       main");
     assert!(
-        output.contains("1\tmain"),
+        output.contains("1       main"),
         "expected list-sessions output in attached pane:\n{output}"
     );
 
@@ -1372,7 +1375,7 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
             && snapshot
                 .lines
                 .iter()
-                .any(|line| line.contains("PTY-FULLSCREEN"))
+                .any(|line| line.text.contains("PTY-FULLSCREEN"))
     })
     .await;
     assert!(live.alternate_screen);
@@ -1385,7 +1388,7 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
             && snapshot
                 .lines
                 .iter()
-                .any(|line| line.contains("PTY-RESTORED"))
+                .any(|line| line.text.contains("PTY-RESTORED"))
     })
     .await;
     assert!(!restored.alternate_screen);

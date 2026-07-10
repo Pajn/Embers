@@ -6,7 +6,9 @@ use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseButton,
     MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
 };
-use embers_core::{ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size};
+use embers_core::{
+    ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size, SnapshotLine,
+};
 use embers_protocol::{
     BufferCreatedEvent, BufferRecord, BufferRecordKind, BufferRecordState, BufferResponse,
     BufferViewRecord, BuffersResponse, ClientChangedEvent, ClientMessage, ClientRecord,
@@ -111,7 +113,10 @@ fn scrollback_slice_response(
         buffer_id,
         start_line,
         total_lines,
-        lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+        lines: lines
+            .iter()
+            .map(|line| SnapshotLine::plain(*line))
+            .collect(),
     }
 }
 
@@ -227,7 +232,7 @@ fn second_session_state() -> embers_client::ClientState {
             buffer_id: SECOND_BUFFER_ID,
             sequence: 1,
             size: PtySize::new(80, 20),
-            lines: vec!["other pane".to_owned()],
+            lines: vec![SnapshotLine::plain("other pane")],
             title: Some("other pane".to_owned()),
             cwd: None,
             viewport_top_line: 0,
@@ -676,7 +681,10 @@ async fn page_up_scrolls_locally_with_scrollback_slices() {
     let snapshot = state.snapshots.get_mut(&BufferId(4)).unwrap();
     snapshot.total_lines = 60;
     snapshot.viewport_top_line = 36;
-    snapshot.lines = vec!["tail one".to_owned(), "tail two".to_owned()];
+    snapshot.lines = vec![
+        SnapshotLine::plain("tail one"),
+        SnapshotLine::plain("tail two"),
+    ];
     let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
     view.total_line_count = 60;
     view.scroll_top_line = 36;
@@ -706,7 +714,7 @@ async fn page_up_scrolls_locally_with_scrollback_slices() {
         .expect("focused view state");
     assert_eq!(view.scroll_top_line, 12);
     assert!(!view.follow_output);
-    assert_eq!(view.visible_lines[0], "history line");
+    assert_eq!(view.visible_lines[0].text, "history line");
     assert!(matches!(
         transport.requests()[0],
         ClientMessage::Buffer(embers_protocol::BufferRequest::ScrollbackSlice {
@@ -1303,7 +1311,7 @@ async fn render_session_refreshes_invalidated_snapshot_before_rendering_title_an
         .snapshots
         .get_mut(&FOCUSED_BUFFER_ID)
         .unwrap();
-    snapshot.lines = vec!["fresh render line".to_owned()];
+    snapshot.lines = vec![SnapshotLine::plain("fresh render line")];
     snapshot.title = Some("fresh-title".to_owned());
 
     transport.push_response(ServerResponse::VisibleSnapshot(
@@ -1374,7 +1382,7 @@ async fn render_session_replaces_stale_scrolled_cache_when_snapshot_switches_to_
     view.follow_output = false;
     view.scroll_top_line = 12;
     view.total_line_count = 60;
-    view.visible_lines = vec!["stale scrolled line".to_owned()];
+    view.visible_lines = vec![SnapshotLine::plain("stale scrolled line")];
     stale_state.apply_event(&ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
         buffer_id: FOCUSED_BUFFER_ID,
     }));
@@ -1384,7 +1392,7 @@ async fn render_session_replaces_stale_scrolled_cache_when_snapshot_switches_to_
         .snapshots
         .get_mut(&FOCUSED_BUFFER_ID)
         .unwrap();
-    snapshot.lines = vec!["alternate screen live".to_owned()];
+    snapshot.lines = vec![SnapshotLine::plain("alternate screen live")];
     snapshot.alternate_screen = true;
     snapshot.viewport_top_line = 0;
     snapshot.total_lines = 24;
@@ -1419,7 +1427,10 @@ async fn render_session_replaces_stale_scrolled_cache_when_snapshot_switches_to_
         .view_state(FOCUSED_LEAF_ID)
         .expect("focused view state");
     assert!(view.alternate_screen);
-    assert_eq!(view.visible_lines, vec!["alternate screen live".to_owned()]);
+    assert_eq!(
+        view.visible_lines,
+        vec![SnapshotLine::plain("alternate screen live")]
+    );
 }
 
 #[tokio::test]

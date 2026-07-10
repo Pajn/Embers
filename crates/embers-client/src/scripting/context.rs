@@ -160,7 +160,13 @@ impl Context {
                 let snapshot_lines = state
                     .snapshots
                     .get(&buffer.id)
-                    .map(|snapshot| snapshot.lines.clone())
+                    .map(|snapshot| {
+                        snapshot
+                            .lines
+                            .iter()
+                            .map(|line| line.text.clone())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 (
                     buffer.id,

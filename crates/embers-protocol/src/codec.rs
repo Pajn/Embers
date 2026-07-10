@@ -1,8 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CursorShape, CursorState, ErrorCode, FloatGeometry, FloatingId,
-    NodeId, PtySize, RequestId, SessionId, SplitDirection, WireError,
+    ActivityState, BufferId, CellAttrs, CursorShape, CursorState, ErrorCode, FloatGeometry,
+    FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection, StyledRun,
+    TermColor, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -461,6 +462,126 @@ fn encode_cursor_state<'a>(
             shape,
         },
     )
+}
+
+type StyledLinesOffset<'a> = flatbuffers::WIPOffset<
+    flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::StyledLine<'a>>>,
+>;
+
+/// Encode sparse per-line styling.
+///
+/// Only lines that actually carry styling are emitted, each tagged with its
+/// index into the parallel `lines` array, so a mostly-plain buffer costs one
+/// entry per styled line rather than one per line. Returns `None` when every
+/// line is plain, so plain buffers produce a frame with no `styles` field —
+/// byte-identical to pre-styling frames.
+fn encode_styled_lines<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    lines: &[SnapshotLine],
+) -> Option<StyledLinesOffset<'a>> {
+    if lines.iter().all(|line| line.runs.is_empty()) {
+        return None;
+    }
+
+    let line_offsets: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.runs.is_empty())
+        .map(|(index, line)| {
+            let runs: Vec<fb::StyledRunWire> = line.runs.iter().map(encode_styled_run).collect();
+            let runs = builder.create_vector(&runs);
+            fb::StyledLine::create(
+                builder,
+                &fb::StyledLineArgs {
+                    line_index: u32::try_from(index).unwrap_or(u32::MAX),
+                    runs: Some(runs),
+                },
+            )
+        })
+        .collect();
+
+    Some(builder.create_vector(&line_offsets))
+}
+
+fn encode_styled_run(run: &StyledRun) -> fb::StyledRunWire {
+    let (fg_kind, fg_r, fg_g, fg_b) = encode_term_color(run.fg);
+    let (bg_kind, bg_r, bg_g, bg_b) = encode_term_color(run.bg);
+    fb::StyledRunWire::new(
+        run.len,
+        fg_kind,
+        fg_r,
+        fg_g,
+        fg_b,
+        bg_kind,
+        bg_r,
+        bg_g,
+        bg_b,
+        run.attrs.bits(),
+    )
+}
+
+/// `(kind, r, g, b)` where kind is 0=default, 1=indexed (index in `r`), 2=rgb.
+fn encode_term_color(color: TermColor) -> (u8, u8, u8, u8) {
+    match color {
+        TermColor::Default => (0, 0, 0, 0),
+        TermColor::Indexed(index) => (1, index, 0, 0),
+        TermColor::Rgb { r, g, b } => (2, r, g, b),
+    }
+}
+
+/// Scatter an optional sparse styles vector onto decoded text lines.
+///
+/// Each styles entry carries its `line_index`; entries are placed onto the
+/// matching text line. Degrades leniently: absent `styles` or an out-of-range
+/// index yields plain lines, an unknown color kind decodes as
+/// [`TermColor::Default`], and a line whose runs do not cover exactly its text
+/// bytes drops that line's runs. Text never fails.
+fn decode_styled_lines(
+    texts: Vec<String>,
+    styles: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::StyledLine<'_>>>>,
+) -> Vec<SnapshotLine> {
+    let mut per_line: Vec<Vec<StyledRun>> = vec![Vec::new(); texts.len()];
+    if let Some(styles) = styles {
+        for entry in styles.iter() {
+            let index = entry.line_index() as usize;
+            if index < per_line.len()
+                && let Some(runs) = entry.runs()
+            {
+                per_line[index] = runs.iter().map(decode_styled_run).collect();
+            }
+        }
+    }
+
+    texts
+        .into_iter()
+        .zip(per_line)
+        .map(|(text, runs)| {
+            let covered: u64 = runs.iter().map(|run| u64::from(run.len)).sum();
+            if runs.is_empty() || covered == text.len() as u64 {
+                SnapshotLine { text, runs }
+            } else {
+                SnapshotLine::plain(text)
+            }
+        })
+        .collect()
+}
+
+fn decode_styled_run(run: &fb::StyledRunWire) -> StyledRun {
+    StyledRun {
+        len: run.len(),
+        fg: decode_term_color(run.fg_kind(), run.fg_r(), run.fg_g(), run.fg_b()),
+        bg: decode_term_color(run.bg_kind(), run.bg_r(), run.bg_g(), run.bg_b()),
+        attrs: CellAttrs(run.attrs()),
+    }
+}
+
+fn decode_term_color(kind: u8, r: u8, g: u8, b: u8) -> TermColor {
+    match kind {
+        1 => TermColor::Indexed(r),
+        2 => TermColor::Rgb { r, g, b },
+        // 0 = default, and any unknown kind degrades to default.
+        _ => TermColor::Default,
+    }
 }
 
 fn encode_buffer_history_scope(scope: BufferHistoryScope) -> fb::BufferHistoryScopeWire {
@@ -2726,8 +2847,13 @@ fn encode_server_response<'a>(
         ServerResponse::VisibleSnapshot(r) => {
             let title = r.title.as_ref().map(|t| builder.create_string(t));
             let cwd = r.cwd.as_ref().map(|c| builder.create_string(c));
-            let lines_vec: Vec<_> = r.lines.iter().map(|l| builder.create_string(l)).collect();
+            let lines_vec: Vec<_> = r
+                .lines
+                .iter()
+                .map(|l| builder.create_string(&l.text))
+                .collect();
             let lines = builder.create_vector(&lines_vec);
+            let styles = encode_styled_lines(builder, &r.lines);
             let cursor = r
                 .cursor
                 .as_ref()
@@ -2749,6 +2875,7 @@ fn encode_server_response<'a>(
                     focus_reporting: r.focus_reporting,
                     bracketed_paste: r.bracketed_paste,
                     cursor,
+                    styles,
                 },
             );
             fb::Envelope::create(
@@ -2762,8 +2889,13 @@ fn encode_server_response<'a>(
             )
         }
         ServerResponse::ScrollbackSlice(r) => {
-            let lines_vec: Vec<_> = r.lines.iter().map(|l| builder.create_string(l)).collect();
+            let lines_vec: Vec<_> = r
+                .lines
+                .iter()
+                .map(|l| builder.create_string(&l.text))
+                .collect();
             let lines = builder.create_vector(&lines_vec);
+            let styles = encode_styled_lines(builder, &r.lines);
             let snapshot = fb::ScrollbackSliceResponse::create(
                 builder,
                 &fb::ScrollbackSliceResponseArgs {
@@ -2771,6 +2903,7 @@ fn encode_server_response<'a>(
                     start_line: r.start_line,
                     total_lines: r.total_lines,
                     lines: Some(lines),
+                    styles,
                 },
             );
             fb::Envelope::create(
@@ -4090,6 +4223,7 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
             )?;
             let lines = required(resp.lines(), "visible_snapshot_response.lines")?;
             let lines_vec: Vec<String> = lines.iter().map(|l| l.to_owned()).collect();
+            let lines_vec = decode_styled_lines(lines_vec, resp.styles());
             let cursor = resp.cursor().map(decode_cursor_state).transpose()?;
             Ok(ServerEnvelope::Response(ServerResponse::VisibleSnapshot(
                 VisibleSnapshotResponse {
@@ -4122,6 +4256,7 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
             )?;
             let lines = required(resp.lines(), "scrollback_slice_response.lines")?;
             let lines_vec: Vec<String> = lines.iter().map(|l| l.to_owned()).collect();
+            let lines_vec = decode_styled_lines(lines_vec, resp.styles());
             Ok(ServerEnvelope::Response(ServerResponse::ScrollbackSlice(
                 ScrollbackSliceResponse {
                     request_id: RequestId(envelope.request_id()),
@@ -6081,5 +6216,142 @@ mod tests {
             ProtocolError::InvalidMessageOwned(message)
                 if message == "input_request.buffer_id must be non-zero"
         ));
+    }
+
+    fn round_trip(envelope: &ServerEnvelope) -> ServerEnvelope {
+        let bytes = encode_server_envelope(envelope).expect("encode succeeds");
+        decode_server_envelope(&bytes).expect("decode succeeds")
+    }
+
+    fn styled_visible(lines: Vec<SnapshotLine>) -> ServerEnvelope {
+        ServerEnvelope::Response(ServerResponse::VisibleSnapshot(VisibleSnapshotResponse {
+            request_id: RequestId(1),
+            buffer_id: BufferId(7),
+            sequence: 3,
+            size: PtySize::new(80, 24),
+            lines,
+            title: None,
+            cwd: None,
+            viewport_top_line: 0,
+            total_lines: 24,
+            alternate_screen: false,
+            mouse_reporting: false,
+            focus_reporting: false,
+            bracketed_paste: false,
+            cursor: None,
+        }))
+    }
+
+    #[test]
+    fn plain_visible_snapshot_round_trips_without_styles() {
+        let envelope = styled_visible(vec![SnapshotLine::plain("alpha"), SnapshotLine::plain("")]);
+        let decoded = round_trip(&envelope);
+        assert_eq!(decoded, envelope);
+        if let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = decoded {
+            assert!(resp.lines.iter().all(|line| line.runs.is_empty()));
+        } else {
+            panic!("expected visible snapshot");
+        }
+    }
+
+    #[test]
+    fn plain_frames_omit_the_styles_field() {
+        // A plain buffer must produce a frame with no styles vector so it stays
+        // byte-compatible with pre-styling peers.
+        let bytes = encode_server_envelope(&styled_visible(vec![SnapshotLine::plain("x")]))
+            .expect("encode succeeds");
+        let envelope = flatbuffers::root::<fb::Envelope>(&bytes).expect("valid envelope");
+        let resp = envelope
+            .visible_snapshot_response()
+            .expect("response present");
+        assert!(resp.styles().is_none());
+    }
+
+    #[test]
+    fn styled_visible_snapshot_round_trips() {
+        let envelope = styled_visible(vec![
+            SnapshotLine {
+                text: "hi".to_owned(),
+                runs: vec![
+                    StyledRun {
+                        len: 1,
+                        fg: TermColor::Indexed(1),
+                        bg: TermColor::Default,
+                        attrs: CellAttrs(CellAttrs::BOLD),
+                    },
+                    StyledRun {
+                        len: 1,
+                        fg: TermColor::Rgb { r: 9, g: 8, b: 7 },
+                        bg: TermColor::Indexed(4),
+                        attrs: CellAttrs::empty(),
+                    },
+                ],
+            },
+            SnapshotLine::plain("plain"),
+        ]);
+        assert_eq!(round_trip(&envelope), envelope);
+    }
+
+    #[test]
+    fn styling_on_a_non_first_line_round_trips_sparsely() {
+        // Only the middle line is styled. It must round-trip onto the correct
+        // index, and the sparse encoding must emit exactly one styles entry.
+        let styled = SnapshotLine {
+            text: "middle".to_owned(),
+            runs: vec![StyledRun {
+                len: 6,
+                fg: TermColor::Indexed(3),
+                bg: TermColor::Default,
+                attrs: CellAttrs::empty(),
+            }],
+        };
+        let envelope = styled_visible(vec![
+            SnapshotLine::plain("first"),
+            styled.clone(),
+            SnapshotLine::plain("last"),
+        ]);
+        assert_eq!(round_trip(&envelope), envelope);
+
+        let bytes = encode_server_envelope(&envelope).expect("encode succeeds");
+        let decoded = flatbuffers::root::<fb::Envelope>(&bytes).expect("valid envelope");
+        let styles = decoded
+            .visible_snapshot_response()
+            .and_then(|resp| resp.styles())
+            .expect("styles present");
+        assert_eq!(styles.len(), 1, "only the styled line should be encoded");
+        assert_eq!(styles.get(0).line_index(), 1);
+    }
+
+    #[test]
+    fn decode_drops_runs_when_lengths_do_not_cover_text() {
+        // A run claiming more bytes than the text holds is dropped on decode; the
+        // text always survives.
+        let envelope = styled_visible(vec![SnapshotLine {
+            text: "ab".to_owned(),
+            runs: vec![StyledRun {
+                len: 99,
+                fg: TermColor::Indexed(2),
+                bg: TermColor::Default,
+                attrs: CellAttrs::empty(),
+            }],
+        }]);
+        let decoded = round_trip(&envelope);
+        if let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = decoded {
+            assert_eq!(resp.lines[0].text, "ab");
+            assert!(resp.lines[0].runs.is_empty());
+        } else {
+            panic!("expected visible snapshot");
+        }
+    }
+
+    #[test]
+    fn decode_term_color_treats_unknown_kind_as_default() {
+        assert_eq!(decode_term_color(0, 5, 5, 5), TermColor::Default);
+        assert_eq!(decode_term_color(1, 5, 0, 0), TermColor::Indexed(5));
+        assert_eq!(
+            decode_term_color(2, 1, 2, 3),
+            TermColor::Rgb { r: 1, g: 2, b: 3 }
+        );
+        assert_eq!(decode_term_color(200, 9, 9, 9), TermColor::Default);
     }
 }

@@ -11,6 +11,15 @@ use embers_protocol::{
 use embers_test_support::{TestConnection, TestServer, cargo_bin};
 use tokio::time::{Duration, Instant};
 
+/// Join styled snapshot lines into newline-delimited plain text for assertions.
+fn lines_text(lines: &[embers_core::SnapshotLine]) -> String {
+    lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_cli(server: &TestServer, args: &[&str]) -> Output {
     let output = cargo_bin("embers")
         .arg("--socket")
@@ -1063,7 +1072,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         buffer.id,
         Duration::from_secs(3),
         |snapshot| {
-            let text = snapshot.lines.join("\n");
+            let text = lines_text(&snapshot.lines);
             snapshot.alternate_screen
                 && snapshot.title.as_deref() == Some("fullscreen-live-title")
                 && text.contains("fullscreen-live")
@@ -1071,7 +1080,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         },
     )
     .await;
-    let live_text = live.lines.join("\n");
+    let live_text = lines_text(&live.lines);
     assert!(!live_text.contains("main-before"));
 
     let mut client = MuxClient::connect(server.socket_path())
@@ -1087,7 +1096,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         buffer.id,
         Duration::from_secs(4),
         |snapshot| {
-            let text = snapshot.lines.join("\n");
+            let text = lines_text(&snapshot.lines);
             !snapshot.alternate_screen
                 && snapshot.title.as_deref() == Some("primary-restored-title")
                 && text.contains("main-before")
@@ -1095,7 +1104,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         },
     )
     .await;
-    let restored_text = restored.lines.join("\n");
+    let restored_text = lines_text(&restored.lines);
     assert!(!restored_text.contains("fullscreen-live"));
 
     server.shutdown().await.expect("server shuts down");
@@ -1127,7 +1136,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         |snapshot| {
             snapshot.alternate_screen
                 && snapshot.title.as_deref() == Some("fullscreen-hidden-live")
-                && snapshot.lines.join("\n").contains("fullscreen-live")
+                && lines_text(&snapshot.lines).contains("fullscreen-live")
         },
     )
     .await;
@@ -1154,7 +1163,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         fixture.hidden_buffer.id,
         Duration::from_secs(6),
         |snapshot| {
-            let text = snapshot.lines.join("\n");
+            let text = lines_text(&snapshot.lines);
             !snapshot.alternate_screen
                 && snapshot.title.as_deref() == Some("fullscreen-hidden-restored")
                 && text.contains("main-before")
@@ -1162,7 +1171,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         },
     )
     .await;
-    assert!(!restored.lines.join("\n").contains("fullscreen-live"));
+    assert!(!lines_text(&restored.lines).contains("fullscreen-live"));
 
     let restored_render = render_session(&mut client, "alpha").await;
     assert!(restored_render.contains("main-before"));
@@ -1210,7 +1219,7 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         &mut connection,
         buffer.id,
         Duration::from_secs(3),
-        |snapshot| snapshot.total_lines >= 80 && snapshot.lines.join("\n").contains("burst-80"),
+        |snapshot| snapshot.total_lines >= 80 && lines_text(&snapshot.lines).contains("burst-80"),
     )
     .await;
 
@@ -1222,10 +1231,83 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         .lines
         .iter()
         .rev()
-        .find(|line| line.starts_with("burst-"))
+        .find(|line| line.text.starts_with("burst-"))
         .expect("latest rendered burst line");
-    assert!(render.contains(latest_rendered_line));
+    assert!(render.contains(&latest_rendered_line.text));
     assert!(!render.contains("burst-01"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn styled_pane_output_reaches_client_ansi_lines() {
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "colored",
+        vec![
+            "/bin/sh".to_owned(),
+            "-lc".to_owned(),
+            // Emit red text via SGR, then idle so the pane persists while we render.
+            "printf '\\033[31mRED-TEXT\\033[0m\\n'; sleep 2".to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "colored".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add colored tab succeeds");
+
+    connection
+        .wait_for_capture_contains(buffer.id, "RED-TEXT", Duration::from_secs(3))
+        .await
+        .expect("colored output renders");
+    let _ = wait_for_visible_snapshot(
+        &mut connection,
+        buffer.id,
+        Duration::from_secs(3),
+        |snapshot| lines_text(&snapshot.lines).contains("RED-TEXT"),
+    )
+    .await;
+
+    let mut client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    client.resync_all_sessions().await.expect("resync succeeds");
+    refresh_all_snapshots(&mut client)
+        .await
+        .expect("refresh snapshots succeeds");
+    let session_id = session_id_by_name(&client, "alpha");
+    let model = PresentationModel::project(
+        client.state(),
+        session_id,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .expect("projection succeeds");
+    let grid = Renderer.render(client.state(), &model);
+    let ansi = grid.ansi_lines().join("\n");
+
+    // ANSI red maps to indexed color 1; the client re-emits `38;5;1m` so the
+    // outer terminal's palette resolves it (semantic colors are not baked to RGB).
+    assert!(
+        ansi.contains("\x1b[38;5;1m"),
+        "expected indexed red SGR in client output:\n{ansi:?}"
+    );
+    assert!(grid.render().contains("RED-TEXT"));
 
     server.shutdown().await.expect("server shuts down");
 }

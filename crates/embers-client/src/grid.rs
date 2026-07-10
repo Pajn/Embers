@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use embers_core::{CursorShape, Rect};
+use embers_core::{CellAttrs, CursorShape, Rect, SnapshotLine, StyledRun, TermColor};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -21,16 +21,33 @@ impl From<crate::scripting::RgbColor> for Color {
     }
 }
 
+/// A cell color as it travels toward SGR output.
+///
+/// Indexed colors emit `38;5;n` / `48;5;n` so the outer terminal's palette
+/// resolves them; only true-color values carry explicit RGB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalColor {
+    Rgb(Color),
+    Indexed(u8),
+}
+
+impl From<Color> for TerminalColor {
+    fn from(value: Color) -> Self {
+        Self::Rgb(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CellStyle {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
+    pub fg: Option<TerminalColor>,
+    pub bg: Option<TerminalColor>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
     pub dim: bool,
     pub reverse: bool,
     pub blink: bool,
+    pub strikeout: bool,
 }
 
 impl CellStyle {
@@ -62,14 +79,15 @@ impl CellStyle {
 impl From<&crate::scripting::StyleSpec> for CellStyle {
     fn from(value: &crate::scripting::StyleSpec) -> Self {
         Self {
-            fg: value.fg.map(Into::into),
-            bg: value.bg.map(Into::into),
+            fg: value.fg.map(|color| TerminalColor::Rgb(color.into())),
+            bg: value.bg.map(|color| TerminalColor::Rgb(color.into())),
             bold: value.bold,
             italic: value.italic,
             underline: value.underline,
             dim: value.dim,
             reverse: false,
             blink: value.blink,
+            strikeout: false,
         }
     }
 }
@@ -181,6 +199,92 @@ impl RenderGrid {
             self.clear_overlapping_cells(x_pos, y, width);
             self.set_cell(x_pos, y, grapheme, style, width);
             x_pos = x_pos.saturating_add(width);
+        }
+    }
+
+    /// Draw a styled snapshot line, mapping each grapheme to the style of the
+    /// run that contains its first byte.
+    ///
+    /// Mirrors [`truncate`]'s column budget: when the text is wider than `width`,
+    /// it draws up to `width - 1` columns then a default-styled `~` marker.
+    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked.
+    pub fn put_snapshot_line(&mut self, x: u16, y: u16, width: u16, line: &SnapshotLine) {
+        if width == 0 || y >= self.height || x >= self.width {
+            return;
+        }
+
+        let truncated = UnicodeWidthStr::width(line.text.as_str()) > usize::from(width);
+        let budget = if truncated {
+            width.saturating_sub(1)
+        } else {
+            width
+        };
+
+        let mut column = 0_u16;
+        let mut byte_offset = 0_usize;
+        let mut runs = RunCursor::new(&line.runs);
+        for grapheme in UnicodeSegmentation::graphemes(line.text.as_str(), true) {
+            let grapheme_width = grapheme_width(grapheme);
+            if column.saturating_add(grapheme_width) > budget {
+                break;
+            }
+
+            let run = runs.run_at(byte_offset);
+            let style = run.map(style_for_run).unwrap_or_default();
+            let hidden = run.is_some_and(|run| run.attrs.contains(CellAttrs::HIDDEN));
+
+            let draw_x = x.saturating_add(column);
+            if hidden {
+                self.put_str_styled(draw_x, y, &" ".repeat(usize::from(grapheme_width)), style);
+            } else {
+                self.put_str_styled(draw_x, y, grapheme, style);
+            }
+
+            column = column.saturating_add(grapheme_width);
+            byte_offset += grapheme.len();
+        }
+
+        if truncated {
+            self.put_char_styled(x.saturating_add(column), y, '~', CellStyle::default());
+        }
+    }
+
+    /// Recolor an existing span of cells in place by applying `restyle` to each
+    /// cell's current style.
+    ///
+    /// Columns are pane-relative to `x`. The span snaps outward across wide-char
+    /// continuation cells so a lead and its continuation are always restyled
+    /// together. Used by overlays (selection, search) so they compose on top of
+    /// content styling instead of replacing it.
+    pub fn restyle_range(
+        &mut self,
+        x: u16,
+        y: u16,
+        start_col: u16,
+        end_col: u16,
+        restyle: impl Fn(CellStyle) -> CellStyle,
+    ) {
+        if y >= self.height || start_col >= end_col {
+            return;
+        }
+        let abs_start = x.saturating_add(start_col).min(self.width);
+        let abs_end = x.saturating_add(end_col).min(self.width);
+        if abs_start >= abs_end {
+            return;
+        }
+
+        let mut start = abs_start;
+        while start > 0 && self.cells[self.index(start, y)].continuation {
+            start -= 1;
+        }
+        let mut end = abs_end;
+        while end < self.width && self.cells[self.index(end, y)].continuation {
+            end += 1;
+        }
+
+        for column in start..end {
+            let idx = self.index(column, y);
+            self.cells[idx].style = restyle(self.cells[idx].style);
         }
     }
 
@@ -381,6 +485,66 @@ fn grapheme_width(grapheme: &str) -> u16 {
     u16::try_from(width.max(1)).unwrap_or(u16::MAX)
 }
 
+/// Walks run-length style annotations in step with a byte cursor that only
+/// advances, resolving the run covering a given byte offset in amortized O(1).
+struct RunCursor<'a> {
+    runs: &'a [StyledRun],
+    index: usize,
+    run_end: usize,
+}
+
+impl<'a> RunCursor<'a> {
+    fn new(runs: &'a [StyledRun]) -> Self {
+        let run_end = runs.first().map_or(0, |run| run.len as usize);
+        Self {
+            runs,
+            index: 0,
+            run_end,
+        }
+    }
+
+    /// The run containing `byte_offset`, or `None` past the last run (plain).
+    fn run_at(&mut self, byte_offset: usize) -> Option<&'a StyledRun> {
+        while self.index < self.runs.len() && byte_offset >= self.run_end {
+            self.index += 1;
+            if let Some(run) = self.runs.get(self.index) {
+                self.run_end += run.len as usize;
+            }
+        }
+        self.runs.get(self.index)
+    }
+}
+
+/// Map a content style run to a renderable [`CellStyle`]. Double underline folds
+/// to a single underline (the client has no distinct double-underline SGR).
+pub(crate) fn style_for_run(run: &StyledRun) -> CellStyle {
+    let attrs = run.attrs;
+    CellStyle {
+        fg: term_color_to_cell(run.fg),
+        bg: term_color_to_cell(run.bg),
+        bold: attrs.contains(CellAttrs::BOLD),
+        italic: attrs.contains(CellAttrs::ITALIC),
+        underline: attrs.contains(CellAttrs::UNDERLINE)
+            || attrs.contains(CellAttrs::DOUBLE_UNDERLINE),
+        dim: attrs.contains(CellAttrs::DIM),
+        reverse: attrs.contains(CellAttrs::INVERSE),
+        blink: false,
+        strikeout: attrs.contains(CellAttrs::STRIKEOUT),
+    }
+}
+
+fn term_color_to_cell(color: TermColor) -> Option<TerminalColor> {
+    match color {
+        TermColor::Default => None,
+        TermColor::Indexed(index) => Some(TerminalColor::Indexed(index)),
+        TermColor::Rgb { r, g, b } => Some(TerminalColor::Rgb(Color {
+            red: r,
+            green: g,
+            blue: b,
+        })),
+    }
+}
+
 fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     if from == to {
         return;
@@ -404,11 +568,36 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     if to.reverse {
         output.push_str("\x1b[7m");
     }
+    if to.strikeout {
+        output.push_str("\x1b[9m");
+    }
     if let Some(fg) = to.fg {
-        let _ = write!(output, "\x1b[38;2;{};{};{}m", fg.red, fg.green, fg.blue);
+        match fg {
+            TerminalColor::Rgb(color) => {
+                let _ = write!(
+                    output,
+                    "\x1b[38;2;{};{};{}m",
+                    color.red, color.green, color.blue
+                );
+            }
+            TerminalColor::Indexed(index) => {
+                let _ = write!(output, "\x1b[38;5;{index}m");
+            }
+        }
     }
     if let Some(bg) = to.bg {
-        let _ = write!(output, "\x1b[48;2;{};{};{}m", bg.red, bg.green, bg.blue);
+        match bg {
+            TerminalColor::Rgb(color) => {
+                let _ = write!(
+                    output,
+                    "\x1b[48;2;{};{};{}m",
+                    color.red, color.green, color.blue
+                );
+            }
+            TerminalColor::Indexed(index) => {
+                let _ = write!(output, "\x1b[48;5;{index}m");
+            }
+        }
     }
 }
 
@@ -448,8 +637,123 @@ impl BorderStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::{CellStyle, Color, GridCursor, RenderGrid};
-    use embers_core::{CursorShape, Point, Rect, Size};
+    use super::{Cell, CellStyle, Color, GridCursor, RenderGrid, TerminalColor};
+    use embers_core::{
+        CellAttrs, CursorShape, Point, Rect, Size, SnapshotLine, StyledRun, TermColor,
+    };
+
+    /// Read a cell directly (the test module descends from the grid module, so
+    /// the private cell storage is visible here).
+    fn cell(grid: &RenderGrid, x: u16, y: u16) -> &Cell {
+        &grid.cells[grid.index(x, y)]
+    }
+
+    fn one_run_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
+        SnapshotLine {
+            text: text.to_owned(),
+            runs: vec![StyledRun {
+                len: text.len() as u32,
+                fg,
+                bg: TermColor::Default,
+                attrs: CellAttrs(attrs),
+            }],
+        }
+    }
+
+    #[test]
+    fn put_snapshot_line_truncates_with_default_styled_marker() {
+        let mut grid = RenderGrid::new(4, 1);
+        // Whole line is styled red and overflows width 4, so it draws three
+        // styled columns then a default-styled `~` in the reserved last column.
+        grid.put_snapshot_line(0, 0, 4, &one_run_line("abcdef", TermColor::Indexed(5), 0));
+
+        assert_eq!(grid.lines()[0], "abc~");
+        assert_eq!(cell(&grid, 0, 0).text, "a");
+        assert_eq!(
+            cell(&grid, 0, 0).style.fg,
+            Some(TerminalColor::Indexed(5)),
+            "styled content keeps its color"
+        );
+        assert_eq!(cell(&grid, 3, 0).text, "~");
+        assert_eq!(
+            cell(&grid, 3, 0).style,
+            CellStyle::default(),
+            "the truncation marker is default-styled"
+        );
+    }
+
+    #[test]
+    fn put_snapshot_line_blanks_hidden_run_preserving_width() {
+        let mut grid = RenderGrid::new(4, 1);
+        // A hidden wide grapheme followed by a visible plain one. The wide char
+        // is blanked to spaces but still occupies two columns, so `x` lands at
+        // column 2; the blanked cells keep the run's foreground.
+        let line = SnapshotLine {
+            text: "界x".to_owned(),
+            runs: vec![
+                StyledRun {
+                    len: "界".len() as u32,
+                    fg: TermColor::Indexed(1),
+                    bg: TermColor::Default,
+                    attrs: CellAttrs(CellAttrs::HIDDEN),
+                },
+                StyledRun {
+                    len: 1,
+                    fg: TermColor::Default,
+                    bg: TermColor::Default,
+                    attrs: CellAttrs::empty(),
+                },
+            ],
+        };
+        grid.put_snapshot_line(0, 0, 4, &line);
+
+        assert_eq!(grid.lines()[0], "  x ");
+        assert_eq!(cell(&grid, 0, 0).text, " ");
+        assert_eq!(cell(&grid, 1, 0).text, " ");
+        assert!(
+            !cell(&grid, 0, 0).continuation && !cell(&grid, 1, 0).continuation,
+            "blanked cells are independent spaces, not a wide-char pair"
+        );
+        assert_eq!(cell(&grid, 0, 0).style.fg, Some(TerminalColor::Indexed(1)));
+        assert_eq!(cell(&grid, 1, 0).style.fg, Some(TerminalColor::Indexed(1)));
+        assert_eq!(cell(&grid, 2, 0).text, "x");
+        assert_eq!(cell(&grid, 2, 0).style, CellStyle::default());
+    }
+
+    #[test]
+    fn restyle_range_snaps_both_sides_of_a_wide_grapheme() {
+        let mark = |style: CellStyle| CellStyle {
+            reverse: true,
+            ..style
+        };
+
+        // Snap the start backward: the range names only the continuation column
+        // (2), so the lead (1) is pulled in and both halves are restyled.
+        let mut grid = RenderGrid::new(6, 1);
+        grid.put_str(0, 0, "a界b");
+        grid.restyle_range(0, 0, 2, 3, mark);
+        assert!(!cell(&grid, 0, 0).style.reverse, "'a' untouched");
+        assert!(cell(&grid, 1, 0).style.reverse, "wide lead restyled");
+        assert!(
+            cell(&grid, 2, 0).style.reverse,
+            "wide continuation restyled"
+        );
+        assert!(!cell(&grid, 1, 0).continuation && cell(&grid, 2, 0).continuation);
+        assert!(!cell(&grid, 3, 0).style.reverse, "'b' untouched");
+
+        // Snap the end forward: the range names only the lead column (1), so the
+        // continuation (2) is pulled in and both halves are restyled.
+        let mut grid = RenderGrid::new(6, 1);
+        grid.put_str(0, 0, "a界b");
+        grid.restyle_range(0, 0, 1, 2, mark);
+        assert!(!cell(&grid, 0, 0).style.reverse, "'a' untouched");
+        assert!(cell(&grid, 1, 0).style.reverse, "wide lead restyled");
+        assert!(
+            cell(&grid, 2, 0).style.reverse,
+            "wide continuation restyled"
+        );
+        assert!(!cell(&grid, 3, 0).style.reverse, "'b' untouched");
+    }
 
     #[test]
     fn render_preserves_plain_text_rows() {
@@ -468,11 +772,11 @@ mod tests {
             0,
             "ab",
             CellStyle {
-                fg: Some(Color {
+                fg: Some(TerminalColor::Rgb(Color {
                     red: 1,
                     green: 2,
                     blue: 3,
-                }),
+                })),
                 bold: true,
                 ..CellStyle::default()
             },
@@ -482,6 +786,27 @@ mod tests {
         assert!(line.contains("\x1b[1m"));
         assert!(line.contains("\x1b[38;2;1;2;3m"));
         assert!(line.contains("ab"));
+    }
+
+    #[test]
+    fn ansi_lines_emit_indexed_and_strikeout() {
+        let mut grid = RenderGrid::new(4, 1);
+        grid.put_str_styled(
+            0,
+            0,
+            "x",
+            CellStyle {
+                fg: Some(TerminalColor::Indexed(5)),
+                bg: Some(TerminalColor::Indexed(12)),
+                strikeout: true,
+                ..CellStyle::default()
+            },
+        );
+
+        let line = &grid.ansi_lines()[0];
+        assert!(line.contains("\x1b[38;5;5m"), "line: {line:?}");
+        assert!(line.contains("\x1b[48;5;12m"), "line: {line:?}");
+        assert!(line.contains("\x1b[9m"), "line: {line:?}");
     }
 
     #[test]
