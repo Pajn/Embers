@@ -198,6 +198,26 @@ fn detach_buffer(_: ActionApi) -> Action;
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Enter thumbs-style hint mode: label the matches in the visible pane and
+/// copy the selected one to the clipboard (OSC 52).
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints()
+/// ```
+fn enter_hints(_: ActionApi) -> Action;
+
+/// Enter hint mode, invoking the named action with the selected text exposed
+/// as `ctx.hint_selection()` instead of copying it.
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints_with("open-url")
+/// ```
+fn enter_hints_with(_: ActionApi, action: string) -> Action;
+
 /// Enter a specific input mode by name.
 fn enter_mode(_: ActionApi, mode: string) -> Action;
 
@@ -766,6 +786,11 @@ fn find_floating(context: Context, floating_id: int) -> ?;
 ///
 /// ReturnType: `NodeRef | ()`
 fn find_node(context: Context, node_id: int) -> ?;
+
+/// Return the text selected in hint mode, when a hint callback is running.
+///
+/// ReturnType: `string | ()`
+fn hint_selection(context: Context) -> ?;
 
 /// Return every visible session.
 fn sessions(context: Context) -> array;

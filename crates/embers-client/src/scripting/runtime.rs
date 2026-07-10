@@ -165,8 +165,8 @@ pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
 #[export_module]
 mod documented_context_api {
     use super::{
-        Array, Context, Dynamic, NativeCallContext, dynamic_option_custom, parse_buffer_id,
-        parse_floating_id, parse_node_id, with_call_position,
+        Array, Context, Dynamic, NativeCallContext, dynamic_option_custom, dynamic_option_string,
+        parse_buffer_id, parse_floating_id, parse_node_id, with_call_position,
     };
 
     /// Return the active input mode name.
@@ -181,6 +181,14 @@ mod documented_context_api {
     #[rhai_fn(name = "event")]
     pub fn event(context: &mut Context) -> Dynamic {
         dynamic_option_custom(context.event())
+    }
+
+    /// Return the text selected in hint mode, when a hint callback is running.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "hint_selection")]
+    pub fn hint_selection(context: &mut Context) -> Dynamic {
+        dynamic_option_string(context.hint_selection())
     }
 
     /// Return the current session reference, if any.
@@ -1024,6 +1032,34 @@ mod documented_action_api {
     pub fn run_shell(_: &mut ActionApi, command: &str) -> Action {
         Action::RunShell {
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()],
+        }
+    }
+
+    /// Enter thumbs-style hint mode: label the matches in the visible pane and
+    /// copy the selected one to the clipboard (OSC 52).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.enter_hints()
+    /// ```
+    #[rhai_fn(name = "enter_hints")]
+    pub fn enter_hints(_: &mut ActionApi) -> Action {
+        Action::EnterHints { action: None }
+    }
+
+    /// Enter hint mode, invoking the named action with the selected text exposed
+    /// as `ctx.hint_selection()` instead of copying it.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.enter_hints_with("open-url")
+    /// ```
+    #[rhai_fn(name = "enter_hints_with")]
+    pub fn enter_hints_with(_: &mut ActionApi, action: &str) -> Action {
+        Action::EnterHints {
+            action: Some(action.to_owned()),
         }
     }
 

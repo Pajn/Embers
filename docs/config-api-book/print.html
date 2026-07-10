@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-94998a29.js";
+            window.path_to_searchindex_js = "searchindex-3b02c077.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c8603eba.js"></script>
+        <script src="toc-22d094e2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -190,6 +190,7 @@
 <li><a href="#context">context</a></li>
 <li><a href="#eventinfo">event-info</a></li>
 <li><a href="#floatingref">floating-ref</a></li>
+<li><a href="#hints">hints</a></li>
 <li><a href="#mouse">mouse</a></li>
 <li><a href="#mux">mux</a></li>
 <li><a href="#noderef">node-ref</a></li>
@@ -679,6 +680,66 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description" class="tabcontent" style="display: block;">
 Detach a buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints" id="link-enter_hints-Description" class="tablinks active" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints" id="link-enter_hints-Example" class="tablinks" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints" id="enter_hints-Description" class="tabcontent" style="display: block;">
+Enter thumbs-style hint mode: label the matches in the visible pane and
+copy the selected one to the clipboard (OSC 52).
+</div>
+
+<div group="enter_hints" id="enter_hints-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints()
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints_with </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints_with(_: ActionApi, action: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints_with" id="link-enter_hints_with-Description" class="tablinks active" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints_with" id="link-enter_hints_with-Example" class="tablinks" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Description" class="tabcontent" style="display: block;">
+Enter hint mode, invoking the named action with the selected text exposed
+as `ctx.hint_selection()` instead of copying it.
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints_with("open-url")
+</code></pre>
 </div>
 
 </div>
@@ -2651,6 +2712,41 @@ Toggle client-side wheel scrolling.
 
 
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="hints"><a class="header" href="#hints">Hints</a></h1>
+<p><code>Namespace: global</code></p>
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_patterns </h2>
+
+<pre><code class="language-rust ignore">fn set_patterns(hints: HintsApi, patterns: Array)</code></pre>
+<div>
+<div class="tab">
+<button group="set_patterns" id="link-set_patterns-Description" class="tablinks active" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_patterns" id="link-set_patterns-Example" class="tablinks" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_patterns" id="set_patterns-Description" class="tabcontent" style="display: block;">
+Replace the hint patterns used by `action.enter_hints()` with the given
+regex strings. A non-string element or an invalid regex is an error. An
+empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+IPs, numbers).
+</div>
+
+<div group="set_patterns" id="set_patterns-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="theme"><a class="header" href="#theme">Theme</a></h1>
 <p><code>Namespace: global</code></p>
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
@@ -2970,6 +3066,66 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description-1" class="tabcontent" style="display: block;">
 Detach a buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints" id="link-enter_hints-Description-1" class="tablinks active" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints" id="link-enter_hints-Example-1" class="tablinks" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints" id="enter_hints-Description-1" class="tabcontent" style="display: block;">
+Enter thumbs-style hint mode: label the matches in the visible pane and
+copy the selected one to the clipboard (OSC 52).
+</div>
+
+<div group="enter_hints" id="enter_hints-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints()
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints_with </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints_with(_: ActionApi, action: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints_with" id="link-enter_hints_with-Description-1" class="tablinks active" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints_with" id="link-enter_hints_with-Example-1" class="tablinks" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Description-1" class="tabcontent" style="display: block;">
+Enter hint mode, invoking the named action with the selected text exposed
+as `ctx.hint_selection()` instead of copying it.
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints_with("open-url")
+</code></pre>
 </div>
 
 </div>
@@ -4961,6 +5117,28 @@ Description
 <div group="find_node" id="find_node-Description" class="tabcontent" style="display: block;">
 Find a node by numeric id. Returns `()` when it does not exist.
 <p>ReturnType: <code>NodeRef | ()</code></p>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> hint_selection </h2>
+
+<pre><code class="language-rust ignore">fn hint_selection(context: Context) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="hint_selection" id="link-hint_selection-Description" class="tablinks active" onclick="openTab(event, &#39;hint_selection&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="hint_selection" id="hint_selection-Description" class="tabcontent" style="display: block;">
+Return the text selected in hint mode, when a hint callback is running.
+<p>ReturnType: <code>string | ()</code></p>
 </div>
 
 </div>

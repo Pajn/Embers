@@ -18,6 +18,7 @@ pub struct Context {
     buffers: BTreeMap<BufferId, BufferRef>,
     nodes: BTreeMap<NodeId, NodeRef>,
     floating: BTreeMap<FloatingId, FloatingRef>,
+    hint_selection: Option<String>,
 }
 
 impl Context {
@@ -226,12 +227,22 @@ impl Context {
             buffers,
             nodes,
             floating,
+            hint_selection: None,
         }
     }
 
     pub fn with_event(mut self, event: EventInfo) -> Self {
         self.event = Some(event);
         self
+    }
+
+    pub fn with_hint_selection(mut self, selection: impl Into<String>) -> Self {
+        self.hint_selection = Some(selection.into());
+        self
+    }
+
+    pub fn hint_selection(&self) -> Option<String> {
+        self.hint_selection.clone()
     }
 
     pub fn current_mode(&self) -> &str {

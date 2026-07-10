@@ -1458,6 +1458,138 @@ async fn run_shell_spawns_with_socket_env_and_reports_failures() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hints_copy_and_callback_over_a_url() {
+    use base64::Engine as _;
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(
+        &server,
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--",
+            "/bin/sh",
+            "-lc",
+            "printf 'X https://example.com/x Y\\n'; cat",
+        ],
+    );
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        r#"
+            fn go_hints(ctx) { action.enter_hints() }
+            fn go_hints_cb(ctx) { action.enter_hints_with("capture") }
+            fn capture(ctx) { action.notify("info", ctx.hint_selection()) }
+            define_action("go-hints", go_hints);
+            define_action("go-hints-cb", go_hints_cb);
+            define_action("capture", capture);
+            bind("normal", "h", "go-hints");
+            bind("normal", "j", "go-hints-cb");
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Fetch the pane's visible snapshot (it rendered before we attached, so no
+    // render event is pending) and retry until entering hints finds the URL.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let buffer_ids: Vec<_> = configured
+            .client()
+            .state()
+            .buffers
+            .keys()
+            .copied()
+            .collect();
+        for buffer_id in buffer_ids {
+            let _ = configured
+                .client_mut()
+                .refresh_buffer_snapshot(buffer_id)
+                .await;
+        }
+        configured
+            .handle_key(alpha, size, KeyEvent::Char('h'))
+            .await
+            .expect("enter hints");
+        if configured.current_mode() == "hints" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "hints never found the URL; notes {:?}",
+            configured.notifications()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = configured.drain_terminal_output();
+
+    // The single match is labelled "a"; typing it copies the URL via OSC 52.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("select hint");
+    assert_eq!(configured.current_mode(), "normal");
+    let out = configured.drain_terminal_output().concat();
+    let encoded = base64::engine::general_purpose::STANDARD.encode("https://example.com/x");
+    let expected = format!("\x1b]52;c;{encoded}\x07");
+    assert!(
+        contains_subslice(&out, expected.as_bytes()),
+        "expected OSC 52 clipboard for the URL in {:?}",
+        String::from_utf8_lossy(&out)
+    );
+
+    // The callback variant invokes the named action with ctx.hint_selection().
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('j'))
+        .await
+        .expect("enter hints with callback");
+    assert_eq!(configured.current_mode(), "hints");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("select hint for callback");
+    assert!(
+        configured
+            .notifications()
+            .iter()
+            .skip(before)
+            .any(|note| note.contains("https://example.com/x")),
+        "callback should notify with the selected URL; got {:?}",
+        configured.notifications()
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_title_follows_session_on_attach_switch_and_rename() {
     use embers_client::{ConfiguredClient, KeyEvent};
 

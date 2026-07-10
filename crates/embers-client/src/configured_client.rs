@@ -19,8 +19,8 @@ use crate::client::MuxClient;
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::input::{
-    FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,
-    resolve_key,
+    FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE,
+    SELECT_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::renderer::Renderer;
@@ -28,7 +28,9 @@ use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
     NotifyLevel, TabBarContext, TreeSpec,
 };
-use crate::state::{SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState};
+use crate::state::{
+    HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
+};
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
@@ -71,6 +73,7 @@ pub struct ConfiguredClient<T> {
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
     search_prompt: Option<SearchPrompt>,
+    hints_node: Option<NodeId>,
     terminal_output: VecDeque<Vec<u8>>,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
@@ -93,6 +96,7 @@ where
             previous_session_id: None,
             viewport: None,
             search_prompt: None,
+            hints_node: None,
             terminal_output: VecDeque::new(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
@@ -119,6 +123,11 @@ where
 
     pub fn notifications(&self) -> &[String] {
         &self.notifications
+    }
+
+    /// The name of the active input mode (e.g. "normal", "hints").
+    pub fn current_mode(&self) -> &str {
+        self.input_state.current_mode()
     }
 
     /// The session the client is currently focused on, if any.
@@ -188,6 +197,12 @@ where
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
                 .handle_search_key(session_id, viewport, &presentation, key)
+                .await;
+        }
+
+        if self.input_state.current_mode() == HINTS_MODE {
+            return self
+                .handle_hints_key(session_id, viewport, &presentation, key)
                 .await;
         }
 
@@ -319,6 +334,14 @@ where
                         .await;
                 }
                 if settings.wheel_scroll && !self.view_is_alternate_screen(target_leaf.node_id) {
+                    // Scrolling replaces this pane's visible_lines directly (not via
+                    // a snapshot apply, which would invalidate hints), so hint labels
+                    // captured against the old viewport would map to the wrong
+                    // content. Clear them when the hinted pane itself is scrolled;
+                    // scrolling a different pane leaves the hinted pane untouched.
+                    if self.hints_node == Some(target_leaf.node_id) {
+                        self.cancel_active_hints();
+                    }
                     let delta = match event.kind {
                         MouseEventKind::WheelUp => -(WHEEL_SCROLL_LINES as i64),
                         MouseEventKind::WheelDown => WHEEL_SCROLL_LINES as i64,
@@ -330,6 +353,9 @@ where
             }
             MouseEventKind::Press(_) | MouseEventKind::Release(_) | MouseEventKind::Drag(_) => {
                 if settings.click_focus && !target_leaf.focused {
+                    // Focus is moving to a different pane; a hints overlay on the
+                    // previously focused node is now stale, so tear it down.
+                    self.cancel_active_hints();
                     self.focus_node(session_id, target_leaf.node_id).await?;
                 }
                 if settings.click_forward && mouse_reporting && point_in_content {
@@ -437,6 +463,15 @@ where
         {
             self.emit_terminal_title(renamed.session_id);
         }
+        // A server-driven focus change (e.g. another client) that moves focus off
+        // our hints node orphans the overlay, so drop it and leave hints mode.
+        if let ServerEvent::FocusChanged(focus) = event
+            && self.active_session_id == Some(focus.session_id)
+            && self.hints_node.is_some()
+            && focus.focused_leaf_id != self.hints_node
+        {
+            self.cancel_active_hints();
+        }
         let session_id = detached_session_id.or_else(|| self.event_session_id(event));
 
         let mut event_names = vec![event_name(event).to_owned()];
@@ -543,6 +578,12 @@ where
         } else {
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
+            // Also drop any active hints overlay so it can't outlive its mode.
+            if let Some(node_id) = self.hints_node.take()
+                && let Some(state) = self.client.state_mut().view_state_mut(node_id)
+            {
+                state.hints_state = None;
+            }
         }
     }
 
@@ -732,6 +773,13 @@ where
                     self.spawn_run_shell(command, current_session_id);
                     Ok(())
                 }
+                Action::EnterHints { action } => match (current_session_id, current_viewport) {
+                    (Some(session_id), Some(viewport)) => {
+                        let presentation = self.prepare_presentation(session_id, viewport).await?;
+                        self.enter_hints_mode(action, &presentation)
+                    }
+                    _ => Ok(()),
+                },
                 action => {
                     match self
                         .execute_without_presentation(current_session_id, action)
@@ -1825,7 +1873,16 @@ where
     /// (tmux `switch-client -l`) can toggle back to it.
     fn set_active_session(&mut self, session_id: SessionId) {
         if self.active_session_id != Some(session_id) {
-            self.previous_session_id = self.active_session_id;
+            // The overlay is anchored to a node in the old session; it can't
+            // survive the switch, so tear it down before we move on.
+            self.cancel_active_hints();
+            // Only record the current session as `previous` when switching
+            // directly between sessions. When reattaching after a detach (active
+            // is None), keep the session `clear_active_session` already stored so
+            // `last_session` can still toggle back to it.
+            if let Some(active) = self.active_session_id {
+                self.previous_session_id = Some(active);
+            }
             self.active_session_id = Some(session_id);
         }
     }
@@ -1834,8 +1891,23 @@ where
     /// the prior one so `last_session` can still toggle back to it.
     fn clear_active_session(&mut self) {
         if let Some(session_id) = self.active_session_id.take() {
+            self.cancel_active_hints();
             self.previous_session_id = Some(session_id);
         }
+    }
+
+    /// Drop any active hints overlay. Used when the active session changes or is
+    /// detached, so a stale overlay can't linger on a node we're leaving.
+    fn cancel_active_hints(&mut self) {
+        let Some(node_id) = self.hints_node.take() else {
+            return;
+        };
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.hints_state = None;
+        }
+        // Fully leave hints mode so the next key is processed normally instead of
+        // being routed to `handle_hints_key` for an overlay that no longer exists.
+        self.input_state.set_mode(NORMAL_MODE);
     }
 
     fn resolve_session_by_name(&self, name: &str) -> Option<SessionId> {
@@ -2232,6 +2304,232 @@ where
             prompt.query.push_str(&String::from_utf8_lossy(&bytes));
         }
         Ok(())
+    }
+
+    fn enter_hints_mode(
+        &mut self,
+        on_select: Option<String>,
+        presentation: &PresentationModel,
+    ) -> Result<()> {
+        let leaf = self.focused_leaf(presentation)?;
+        let node_id = leaf.node_id;
+        let buffer_id = leaf.buffer_id;
+        if self.view_is_alternate_screen(node_id) {
+            return Ok(());
+        }
+
+        // Scan the same lines the renderer draws: the local visible lines when
+        // present, otherwise the buffer's visible snapshot, positioned by the
+        // same follow-output offset the overlay uses.
+        let (lines, top_line) = {
+            let state = self.client.state();
+            let view_state = state.view_state(node_id);
+            let rendered: Vec<embers_core::SnapshotLine> = match view_state
+                .map(|view| view.visible_lines.as_slice())
+                .filter(|lines| !lines.is_empty())
+            {
+                Some(lines) => lines.to_vec(),
+                None => state
+                    .snapshots
+                    .get(&buffer_id)
+                    .map(|snapshot| snapshot.lines.clone())
+                    .unwrap_or_default(),
+            };
+            let scroll_top = view_state.map(|view| view.scroll_top_line).unwrap_or(0);
+            let follow = view_state.map(|view| view.follow_output).unwrap_or(true);
+            let content_rows = usize::from(leaf.rect.size.height.saturating_sub(1));
+            let position = crate::renderer::follow_output_position(
+                &rendered,
+                content_rows,
+                scroll_top,
+                follow,
+            );
+            let displayed = rendered[position.display_offset.min(rendered.len())..].to_vec();
+            (displayed, position.displayed_top_line)
+        };
+        if lines.is_empty() {
+            self.record_notification(format_notification(NotifyLevel::Info, "no hints found"));
+            return Ok(());
+        }
+
+        let pattern_sources = &self.config.active_script().loaded_config().hints.patterns;
+        let patterns = if pattern_sources.is_empty() {
+            crate::hints::default_patterns()
+        } else {
+            crate::hints::compile_patterns(pattern_sources)
+        };
+        let matches = crate::hints::scan(&lines, &patterns, top_line);
+        if matches.is_empty() {
+            self.record_notification(format_notification(NotifyLevel::Info, "no hints found"));
+            return Ok(());
+        }
+
+        let Some(state) = self.client.state_mut().view_state_mut(node_id) else {
+            // No view state to attach the overlay to; don't enter a hints mode
+            // that would have no matches.
+            return Ok(());
+        };
+        state.hints_state = Some(HintsState {
+            matches,
+            typed: String::new(),
+            on_select,
+        });
+        self.hints_node = Some(node_id);
+        self.input_state.set_mode(HINTS_MODE);
+        Ok(())
+    }
+
+    async fn handle_hints_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        _presentation: &PresentationModel,
+        key: KeyEvent,
+    ) -> Result<()> {
+        let Some(node_id) = self.hints_node else {
+            self.input_state.set_mode(NORMAL_MODE);
+            return Ok(());
+        };
+        // The overlay can be invalidated out from under us — e.g. a fresh
+        // snapshot clears hints_state because the visible content changed. If
+        // that happened, tear the overlay down and drop back to NORMAL_MODE so
+        // we don't stay stuck in HINTS_MODE swallowing every non-Escape key.
+        let overlay_active = self
+            .client
+            .state()
+            .view_state(node_id)
+            .is_some_and(|state| state.hints_state.is_some());
+        if !overlay_active {
+            self.cancel_hints(node_id);
+            return Ok(());
+        }
+        match key {
+            KeyEvent::Escape => {
+                self.cancel_hints(node_id);
+                Ok(())
+            }
+            KeyEvent::Backspace => {
+                if let Some(state) = self
+                    .client
+                    .state_mut()
+                    .view_state_mut(node_id)
+                    .and_then(|state| state.hints_state.as_mut())
+                {
+                    state.typed.pop();
+                }
+                Ok(())
+            }
+            KeyEvent::Char(ch) => {
+                self.hints_type_char(session_id, viewport, node_id, ch)
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Append a character to the typed hint prefix, selecting on a unique full
+    /// match and ignoring characters that match no label.
+    async fn hints_type_char(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        node_id: NodeId,
+        ch: char,
+    ) -> Result<()> {
+        let (selected, extend) = {
+            let Some(state) = self
+                .client
+                .state()
+                .view_state(node_id)
+                .and_then(|state| state.hints_state.as_ref())
+            else {
+                return Ok(());
+            };
+            let mut typed = state.typed.clone();
+            typed.push(ch);
+            let any_prefix = state
+                .matches
+                .iter()
+                .any(|hint| hint.label.starts_with(&typed));
+            if !any_prefix {
+                // Not a valid continuation; ignore the keystroke.
+                (None, None)
+            } else if let Some(hint) = state.matches.iter().find(|hint| hint.label == typed) {
+                (Some(hint.clone()), None)
+            } else {
+                (None, Some(typed))
+            }
+        };
+
+        if let Some(typed) = extend {
+            if let Some(state) = self
+                .client
+                .state_mut()
+                .view_state_mut(node_id)
+                .and_then(|state| state.hints_state.as_mut())
+            {
+                state.typed = typed;
+            }
+            return Ok(());
+        }
+        if let Some(hint) = selected {
+            return self.select_hint(session_id, viewport, node_id, hint).await;
+        }
+        Ok(())
+    }
+
+    fn cancel_hints(&mut self, node_id: NodeId) {
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.hints_state = None;
+        }
+        self.hints_node = None;
+        self.input_state.set_mode(NORMAL_MODE);
+    }
+
+    async fn select_hint(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        node_id: NodeId,
+        hint: crate::state::HintMatch,
+    ) -> Result<()> {
+        let on_select = self
+            .client
+            .state()
+            .view_state(node_id)
+            .and_then(|state| state.hints_state.as_ref())
+            .and_then(|state| state.on_select.clone());
+        self.cancel_hints(node_id);
+
+        match on_select {
+            Some(name) => {
+                let context = self
+                    .context_for(Some(session_id), Some(viewport), None)
+                    .with_hint_selection(hint.text.clone());
+                match self.config.active_script().run_named_action(&name, context) {
+                    Ok(actions) => {
+                        self.execute_actions(Some(session_id), Some(viewport), actions)
+                            .await
+                    }
+                    Err(error) => {
+                        self.record_notification(error.to_string());
+                        Ok(())
+                    }
+                }
+            }
+            None => {
+                // Report only the length, not the copied text: record_notification
+                // logs at WARN and the status line renders it, so raw hint text
+                // (possibly a secret or control chars) must not leak in.
+                let copied = hint.text.chars().count();
+                self.enqueue_clipboard(hint.text);
+                self.record_notification(format_notification(
+                    NotifyLevel::Info,
+                    &format!("copied {copied} characters"),
+                ));
+                Ok(())
+            }
+        }
     }
 
     async fn commit_search_prompt(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {

@@ -597,6 +597,7 @@ dependencies = [
  "embers-core",
  "embers-protocol",
  "embers-test-support",
+ "regex",
  "rhai",
  "rhai-autodocs",
  "tempfile",

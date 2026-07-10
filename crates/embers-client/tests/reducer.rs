@@ -1,6 +1,6 @@
 use embers_client::{
-    ClientState, MuxClient, ScriptedTransport, SearchState, SelectionKind, SelectionPoint,
-    SelectionState,
+    ClientState, HintMatch, HintsState, MuxClient, ScriptedTransport, SearchState, SelectionKind,
+    SelectionPoint, SelectionState,
 };
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, PtySize, RequestId, SessionId, SnapshotLine,
@@ -385,6 +385,59 @@ fn rebinding_view_to_a_new_buffer_resets_search_and_selection_state() {
     assert_eq!(view.buffer_id, BufferId(99));
     assert!(view.search_state.is_none());
     assert!(view.selection_state.is_none());
+}
+
+fn sample_hints_state() -> HintsState {
+    HintsState {
+        matches: vec![HintMatch {
+            label: "a".to_owned(),
+            text: "https://example.com".to_owned(),
+            line: 16,
+            start_col: 0,
+            end_col: 19,
+        }],
+        typed: String::new(),
+        on_select: None,
+    }
+}
+
+#[test]
+fn fresh_buffer_snapshot_invalidates_stale_hints() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+    state.apply_buffer_snapshot(visible_snapshot(1, 40, 16, false));
+
+    state
+        .view_state
+        .get_mut(&NodeId(11))
+        .expect("root leaf view state")
+        .hints_state = Some(sample_hints_state());
+
+    // A new snapshot for the same buffer means the content changed, so the
+    // stale hint overlay must be dropped (its coordinates/text no longer match).
+    state.apply_buffer_snapshot(visible_snapshot(1, 42, 18, false));
+    let view = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert!(view.hints_state.is_none());
+}
+
+#[test]
+fn session_resync_retains_active_hints_overlay() {
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(session_snapshot(0, 0));
+    state.apply_buffer_snapshot(visible_snapshot(1, 40, 16, false));
+
+    state
+        .view_state
+        .get_mut(&NodeId(11))
+        .expect("root leaf view state")
+        .hints_state = Some(sample_hints_state());
+
+    // A structural resync (e.g. triggered by NodeChanged/FloatingChanged) does
+    // not change the pane's visible content, so an active hints overlay must
+    // survive it — only a fresh buffer snapshot may invalidate it.
+    state.apply_session_snapshot(session_snapshot(0, 0));
+    let view = state.view_state(NodeId(11)).expect("root leaf view state");
+    assert!(view.hints_state.is_some());
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ Definition files live in [`defs/`](defs/).
 - [context](context.md)
 - [event-info](event-info.md)
 - [floating-ref](floating-ref.md)
+- [hints](hints.md)
 - [mouse](mouse.md)
 - [mux](mux.md)
 - [node-ref](node-ref.md)

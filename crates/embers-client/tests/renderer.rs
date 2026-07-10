@@ -41,6 +41,45 @@ fn render_focused_with_lines(lines: Vec<SnapshotLine>) -> embers_client::RenderG
 }
 
 #[test]
+fn renders_hint_labels_over_matches() {
+    use embers_client::{HintMatch, HintsState};
+
+    let mut state = demo_state();
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.follow_output = false;
+    view.scroll_top_line = 0;
+    view.visible_lines = vec![SnapshotLine::plain("see https://example.com/x now")];
+    view.hints_state = Some(HintsState {
+        matches: vec![HintMatch {
+            label: "a".to_owned(),
+            text: "https://example.com/x".to_owned(),
+            line: 0,
+            start_col: 4,
+            end_col: 25,
+        }],
+        typed: String::new(),
+        on_select: None,
+    });
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let grid = Renderer.render(&state, &presentation);
+    let rendered = grid.render();
+    // The label 'a' is drawn over the first cell of the match (the URL's 'h'),
+    // leaving the rest of the matched text in place.
+    assert!(
+        rendered.contains("see attps://example.com/x"),
+        "expected hint label at match start:\n{rendered}"
+    );
+}
+
+#[test]
 fn renders_nested_tabs_splits_and_floating_overlay() {
     let state = demo_state();
     let presentation = PresentationModel::project(

@@ -3,6 +3,7 @@ pub mod config;
 pub mod configured_client;
 pub mod controller;
 pub mod grid;
+pub mod hints;
 pub mod input;
 pub mod presentation;
 pub mod renderer;
@@ -42,8 +43,8 @@ pub use scripting::{
 };
 pub use socket_transport::SocketTransport;
 pub use state::{
-    BufferViewState, ClientState, SearchMatch, SearchState, SelectionKind, SelectionPoint,
-    SelectionState,
+    BufferViewState, ClientState, HintMatch, HintsState, SearchMatch, SearchState, SelectionKind,
+    SelectionPoint, SelectionState,
 };
 pub use testing::{FakeTransport, ScriptedTransport, TestGrid};
 pub use transport::Transport;

@@ -149,6 +149,26 @@ fn detach_buffer(_: ActionApi) -> Action;
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Enter thumbs-style hint mode: label the matches in the visible pane and
+/// copy the selected one to the clipboard (OSC 52).
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints()
+/// ```
+fn enter_hints(_: ActionApi) -> Action;
+
+/// Enter hint mode, invoking the named action with the selected text exposed
+/// as `ctx.hint_selection()` instead of copying it.
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints_with("open-url")
+/// ```
+fn enter_hints_with(_: ActionApi, action: string) -> Action;
+
 /// Enter a specific input mode by name.
 fn enter_mode(_: ActionApi, mode: string) -> Action;
 
@@ -418,6 +438,20 @@ fn yank_selection(_: ActionApi) -> Action;
 /// There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 fn zoom_current_node(_: ActionApi) -> Action;
 
+/// Replace the hint patterns used by `action.enter_hints()` with the given
+/// regex strings. A non-string element or an invalid regex is an error. An
+/// empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+/// IPs, numbers).
+///
+/// # Example
+///
+/// ```rhai
+/// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+/// ```
+///
+/// # rhai-autodocs:index:26
+fn set_patterns(hints: HintsApi, patterns: array) -> ();
+
 /// Toggle focus-on-click behavior.
 ///
 /// # rhai-autodocs:index:22
@@ -515,3 +549,5 @@ let tabbar: TabbarApi;
 let theme: ThemeApi;
 
 let mouse: MouseApi;
+
+let hints: HintsApi;

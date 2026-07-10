@@ -6,6 +6,7 @@ pub const NORMAL_MODE: &str = "normal";
 pub const COPY_MODE: &str = "copy";
 pub const SEARCH_MODE: &str = "search";
 pub const SELECT_MODE: &str = "select";
+pub const HINTS_MODE: &str = "hints";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FallbackPolicy {
@@ -88,6 +89,10 @@ pub fn builtin_modes() -> BTreeMap<String, ModeSpec> {
             SELECT_MODE.to_owned(),
             ModeSpec::new(SELECT_MODE, FallbackPolicy::Ignore),
         ),
+        (
+            HINTS_MODE.to_owned(),
+            ModeSpec::new(HINTS_MODE, FallbackPolicy::Ignore),
+        ),
     ])
 }
 
@@ -113,5 +118,6 @@ mod tests {
         assert!(modes.contains_key("copy"));
         assert!(modes.contains_key("search"));
         assert!(modes.contains_key("select"));
+        assert!(modes.contains_key("hints"));
     }
 }

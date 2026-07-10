@@ -20,6 +20,26 @@ pub struct SearchState {
     pub active_match_index: Option<usize>,
 }
 
+/// A single hint target discovered in the visible view, labelled for jump-to
+/// selection (tmux-thumbs style).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HintMatch {
+    pub label: String,
+    pub text: String,
+    pub line: u64,
+    pub start_col: u16,
+    pub end_col: u16,
+}
+
+/// Active hints overlay state: the labelled matches, the label prefix typed so
+/// far, and an optional named action to invoke with the selected text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HintsState {
+    pub matches: Vec<HintMatch>,
+    pub typed: String,
+    pub on_select: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
     Character,
@@ -51,6 +71,7 @@ pub struct BufferViewState {
     pub visible_lines: Vec<SnapshotLine>,
     pub search_state: Option<SearchState>,
     pub selection_state: Option<SelectionState>,
+    pub hints_state: Option<HintsState>,
 }
 
 impl Default for BufferViewState {
@@ -65,6 +86,7 @@ impl Default for BufferViewState {
             visible_lines: Vec::new(),
             search_state: None,
             selection_state: None,
+            hints_state: None,
         }
     }
 }
@@ -135,7 +157,7 @@ impl ClientState {
             }
         }
 
-        self.sync_view_states_for_nodes(&current_node_ids);
+        self.sync_view_states_for_nodes(&current_node_ids, false);
         self.dirty_sessions.remove(&session_id);
     }
 
@@ -320,10 +342,15 @@ impl ClientState {
             })
             .map(|node| node.id)
             .collect::<BTreeSet<_>>();
-        self.sync_view_states_for_nodes(&node_ids);
+        // Driven by a fresh buffer snapshot: content advanced, so invalidate
+        // any hint overlay on the affected panes.
+        self.sync_view_states_for_nodes(&node_ids, true);
     }
 
-    fn sync_view_states_for_nodes(&mut self, node_ids: &BTreeSet<NodeId>) {
+    /// `reset_hints` is `true` only when the sync is driven by a fresh buffer
+    /// snapshot (advancing visible content); structural session resyncs pass
+    /// `false` so an active hints overlay survives a NodeChanged/FloatingChanged.
+    fn sync_view_states_for_nodes(&mut self, node_ids: &BTreeSet<NodeId>, reset_hints: bool) {
         for node_id in node_ids {
             let Some(node) = self.nodes.get(node_id) else {
                 continue;
@@ -349,6 +376,14 @@ impl ClientState {
 
             match self.view_state.get_mut(node_id) {
                 Some(state) if state.buffer_id == buffer_view.buffer_id => {
+                    // A fresh snapshot means the visible content changed, so any
+                    // active hint overlay's coordinates and matched text are now
+                    // stale — drop it rather than let a label map to new content.
+                    // Structural resyncs (reset_hints == false) leave content
+                    // untouched and must preserve the overlay.
+                    if reset_hints {
+                        state.hints_state = None;
+                    }
                     state.visible_line_count = visible_line_count;
                     state.total_line_count = total_line_count;
                     state.alternate_screen = alternate_screen;
@@ -388,6 +423,7 @@ impl ClientState {
                         visible_lines: snapshot_lines,
                         search_state: None,
                         selection_state: None,
+                        hints_state: None,
                     };
                 }
                 None => {
@@ -403,6 +439,7 @@ impl ClientState {
                             visible_lines: snapshot_lines,
                             search_state: None,
                             selection_state: None,
+                            hints_state: None,
                         },
                     );
                 }

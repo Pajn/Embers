@@ -322,11 +322,17 @@ fn wisp_popup(ctx) {
     action.run_shell("wisp popup")
 }
 
+fn enter_hints_action(ctx) {
+    action.enter_hints()
+}
+
 define_action("last-session", last_session);
 define_action("wisp-popup", wisp_popup);
+define_action("hints", enter_hints_action);
 
 bind("normal", "<leader>'", "last-session");
 bind("normal", "<leader>w", "wisp-popup");
+bind("normal", "<leader><Space>", "hints");
 bind("normal", "<C-h>", "smart-nav-left");
 bind("normal", "<C-j>", "smart-nav-down");
 bind("normal", "<C-k>", "smart-nav-up");

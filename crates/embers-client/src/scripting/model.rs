@@ -163,6 +163,9 @@ pub enum Action {
     RunShell {
         command: Vec<String>,
     },
+    EnterHints {
+        action: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

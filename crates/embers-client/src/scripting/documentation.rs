@@ -73,6 +73,13 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
         names: &[],
     },
     PageSpec {
+        file: "hints.md",
+        title: "Hints",
+        intro: "Hint-mode registration methods available through the `hints` config object.",
+        receiver: Some("HintsApi"),
+        names: &[],
+    },
+    PageSpec {
         file: "theme.md",
         title: "Theme",
         intro: "Theme registration methods available through the `theme` config object.",

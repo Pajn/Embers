@@ -292,6 +292,72 @@ Detach a buffer by id.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> enter_hints </h2>
+
+```rust,ignore
+fn enter_hints(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="enter_hints" id="link-enter_hints-Description"  class="tablinks active"
+    onclick="openTab(event, 'enter_hints', 'Description')">
+Description
+</button>
+<button group="enter_hints" id="link-enter_hints-Example"  class="tablinks"
+    onclick="openTab(event, 'enter_hints', 'Example')">
+Example
+</button>
+</div>
+
+<div group="enter_hints" id="enter_hints-Description" class="tabcontent"  style="display: block;" >
+Enter thumbs-style hint mode: label the matches in the visible pane and
+copy the selected one to the clipboard (OSC 52).
+</div>
+<div group="enter_hints" id="enter_hints-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.enter_hints()
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> enter_hints_with </h2>
+
+```rust,ignore
+fn enter_hints_with(_: ActionApi, action: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="enter_hints_with" id="link-enter_hints_with-Description"  class="tablinks active"
+    onclick="openTab(event, 'enter_hints_with', 'Description')">
+Description
+</button>
+<button group="enter_hints_with" id="link-enter_hints_with-Example"  class="tablinks"
+    onclick="openTab(event, 'enter_hints_with', 'Example')">
+Example
+</button>
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Description" class="tabcontent"  style="display: block;" >
+Enter hint mode, invoking the named action with the selected text exposed
+as `ctx.hint_selection()` instead of copying it.
+</div>
+<div group="enter_hints_with" id="enter_hints_with-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.enter_hints_with("open-url")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> enter_mode </h2>
 
 ```rust,ignore

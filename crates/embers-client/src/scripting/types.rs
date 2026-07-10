@@ -118,6 +118,13 @@ impl MouseSettings {
     }
 }
 
+/// Hint-mode configuration. When `patterns` is empty the built-in default set
+/// (URLs, paths, SHAs, UUIDs, IPs, numbers) is used.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HintsSettings {
+    pub patterns: Vec<String>,
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,
@@ -131,6 +138,7 @@ pub struct LoadedConfig {
     pub event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     pub tab_bar_formatter: Option<ScriptFunctionRef>,
     pub mouse: MouseSettings,
+    pub hints: HintsSettings,
     pub theme: ThemeSpec,
 }
 
@@ -165,6 +173,7 @@ impl fmt::Debug for LoadedConfig {
             .field("event_handlers", &self.event_handlers)
             .field("tab_bar_formatter", &self.tab_bar_formatter)
             .field("mouse", &self.mouse)
+            .field("hints", &self.hints)
             .field("theme", &self.theme)
             .finish()
     }

@@ -709,6 +709,31 @@ fn run_shell_builders_map_to_actions() {
 }
 
 #[test]
+fn enter_hints_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn hints(ctx) { action.enter_hints() }
+            fn hints_with(ctx) { action.enter_hints_with("open-url") }
+            define_action("hints", hints);
+            define_action("hints-with", hints_with);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("hints", demo_context()).unwrap(),
+        vec![Action::EnterHints { action: None }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("hints-with", demo_context())
+            .unwrap(),
+        vec![Action::EnterHints {
+            action: Some("open-url".to_owned())
+        }]
+    );
+}
+
+#[test]
 fn query_api_supports_smart_nav_style_scripts() {
     let engine = load_engine(
         r#"
