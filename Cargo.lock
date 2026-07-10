@@ -637,6 +637,7 @@ dependencies = [
  "base64",
  "embers-core",
  "embers-protocol",
+ "libc",
  "portable-pty",
  "proptest",
  "serde",

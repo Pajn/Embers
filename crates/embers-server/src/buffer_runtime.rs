@@ -53,6 +53,9 @@ pub struct BufferRuntimeUpdate {
     pub activity: ActivityState,
     pub title: Option<Option<String>>,
     pub pipe: Option<Option<BufferRuntimePipeStatus>>,
+    /// `Some(value)` when the working directory changed in this update (`value`
+    /// is `None` when it became unknown); `None` when cwd is unchanged.
+    pub cwd: Option<Option<PathBuf>>,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +67,7 @@ pub struct BufferRuntimeStatus {
     pub running: bool,
     pub exit_code: Option<i32>,
     pub pipe: Option<BufferRuntimePipeStatus>,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +174,10 @@ struct KeeperStatus {
     running: bool,
     exit_code: Option<i32>,
     pipe: Option<BufferRuntimePipeStatus>,
+    // Defaulted so a newer server stays compatible with an older keeper that
+    // predates live-cwd reporting.
+    #[serde(default)]
+    cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -561,6 +569,7 @@ impl KeeperConnection {
                 running: status.running,
                 exit_code: status.exit_code,
                 pipe: status.pipe,
+                cwd: status.cwd,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
@@ -680,7 +689,7 @@ impl KeeperSurface {
         // this buffer (see `MAX_SCROLLBACK_LINES_ENV_VAR`).
         let max_scrollback_lines = crate::config::ResourceLimits::from_env().max_scrollback_lines;
         Self {
-            router: RawByteRouter,
+            router: RawByteRouter::default(),
             backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
             size,
         }
@@ -1128,6 +1137,23 @@ impl KeeperRuntime {
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
         let title = surface.backend.metadata().title.clone();
+        let reported_cwd = surface.router.reported_cwd();
+        drop(surface);
+        let running = exit_code.is_none();
+        // Prefer an OSC 7 report from the shell (handles ssh'd shells reporting
+        // remote paths like tmux); fall back to resolving the direct child's cwd
+        // from its pid. Only the keeper is guaranteed same-host as the child. The
+        // pid fallback may hit the filesystem, so run it without the surface lock.
+        // Only resolve while the child is still running: after exit the OS may
+        // have recycled the pid to an unrelated process, so a stale OSC 7 report
+        // or nothing is safer than resolving another process's directory.
+        let cwd = reported_cwd.or_else(|| {
+            if running {
+                self.pid.and_then(resolve_pid_cwd)
+            } else {
+                None
+            }
+        });
         let pipe = self
             .pipe
             .lock()
@@ -1139,9 +1165,10 @@ impl KeeperRuntime {
             sequence,
             activity,
             title,
-            running: exit_code.is_none(),
+            running,
             exit_code: exit_code.flatten(),
             pipe,
+            cwd,
         })
     }
 
@@ -1383,9 +1410,39 @@ fn notify_pipe_removed(
             activity,
             title: None,
             pipe: Some(None),
+            cwd: None,
         },
     );
     *last_pipe = None;
+}
+
+/// Compute the update to emit when a freshly polled status differs from the
+/// last one reported to the callbacks, or `None` when nothing changed. Only the
+/// fields that actually changed are populated, so a cwd-only change — which does
+/// not advance `sequence` — is still emitted and distinguishable from no change.
+fn status_update_delta(
+    status: &BufferRuntimeStatus,
+    last_sequence: u64,
+    last_title: &Option<String>,
+    last_activity: ActivityState,
+    last_pipe: &Option<BufferRuntimePipeStatus>,
+    last_cwd: &Option<PathBuf>,
+) -> Option<BufferRuntimeUpdate> {
+    let changed = status.sequence != last_sequence
+        || status.title != *last_title
+        || status.activity != last_activity
+        || status.pipe != *last_pipe
+        || status.cwd != *last_cwd;
+    if !changed {
+        return None;
+    }
+    Some(BufferRuntimeUpdate {
+        sequence: status.sequence,
+        activity: status.activity,
+        title: (status.title != *last_title).then(|| status.title.clone()),
+        pipe: (status.pipe != *last_pipe).then(|| status.pipe.clone()),
+        cwd: (status.cwd != *last_cwd).then(|| status.cwd.clone()),
+    })
 }
 
 fn spawn_status_poller(
@@ -1400,6 +1457,10 @@ fn spawn_status_poller(
             let mut last_title = initial.title.clone();
             let mut last_activity = initial.activity;
             let mut last_pipe = initial.pipe.clone();
+            // Seed as unknown (not `initial.cwd`) so the first poll always reports
+            // the current directory: an OSC 7 report or pid resolution may already
+            // be present at attach, and the buffer record must still learn it.
+            let mut last_cwd: Option<PathBuf> = None;
             let mut saw_exit = !initial.running;
 
             while !inner.stop.load(Ordering::Relaxed) {
@@ -1426,26 +1487,20 @@ fn spawn_status_poller(
                     }
                 };
 
-                if status.sequence != last_sequence
-                    || status.title != last_title
-                    || status.activity != last_activity
-                    || status.pipe != last_pipe
-                {
-                    let title = (status.title != last_title).then(|| status.title.clone());
-                    let pipe = (status.pipe != last_pipe).then(|| status.pipe.clone());
-                    (callbacks.on_output)(
-                        inner.buffer_id,
-                        BufferRuntimeUpdate {
-                            sequence: status.sequence,
-                            activity: status.activity,
-                            title,
-                            pipe,
-                        },
-                    );
+                if let Some(update) = status_update_delta(
+                    &status,
+                    last_sequence,
+                    &last_title,
+                    last_activity,
+                    &last_pipe,
+                    &last_cwd,
+                ) {
+                    (callbacks.on_output)(inner.buffer_id, update);
                     last_sequence = status.sequence;
                     last_title = status.title.clone();
                     last_activity = status.activity;
                     last_pipe = status.pipe.clone();
+                    last_cwd = status.cwd.clone();
                 }
 
                 if !saw_exit && !status.running {
@@ -1457,6 +1512,53 @@ fn spawn_status_poller(
             }
         })
         .map_err(|error| MuxError::internal(error.to_string()))
+}
+
+/// Resolve the current working directory of a running process by pid.
+///
+/// This is the primary, zero-shell-config cwd source (OSC 7 overrides it when the
+/// shell emits it). Only meaningful when called on the same host as the process,
+/// which the keeper always is.
+#[cfg(target_os = "linux")]
+fn resolve_pid_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_pid_cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>();
+    // Safety: `proc_pidinfo` writes up to `size` bytes into `info` and reports how
+    // many it wrote; we only read the buffer when it filled the whole struct.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast::<libc::c_void>(),
+            size as libc::c_int,
+        )
+    };
+    if written <= 0 || (written as usize) < size {
+        return None;
+    }
+    let path = &info.pvi_cdir.vip_path;
+    // Safety: `vip_path` is a fixed-size NUL-terminated C string buffer.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), std::mem::size_of_val(path))
+    };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if end == 0 {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resolve_pid_cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 fn connect_to_keeper(socket_path: &Path) -> Result<UnixStream> {
@@ -1713,8 +1815,71 @@ mod tests {
         BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
         BufferRuntimePipeStopReason, BufferRuntimeStatus, KEEPER_PIPE_WRITE_QUEUE_CAPACITY,
         KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
-        spawn_status_poller,
+        spawn_status_poller, status_update_delta,
     };
+
+    fn status_with_cwd(sequence: u64, cwd: Option<&str>) -> BufferRuntimeStatus {
+        BufferRuntimeStatus {
+            pid: None,
+            sequence,
+            activity: ActivityState::Idle,
+            title: Some("shell".to_owned()),
+            running: true,
+            exit_code: None,
+            pipe: None,
+            cwd: cwd.map(std::path::PathBuf::from),
+        }
+    }
+
+    #[test]
+    fn status_update_delta_emits_cwd_change_without_sequence_advance() {
+        // known -> known: cwd changes while the snapshot sequence is unchanged.
+        let status = status_with_cwd(7, Some("/new"));
+        let update = status_update_delta(
+            &status,
+            7,
+            &Some("shell".to_owned()),
+            ActivityState::Idle,
+            &None,
+            &Some(std::path::PathBuf::from("/old")),
+        )
+        .expect("cwd change should emit an update even at the same sequence");
+        assert_eq!(update.sequence, 7);
+        assert_eq!(update.cwd, Some(Some(std::path::PathBuf::from("/new"))));
+        assert!(update.title.is_none());
+        assert!(update.pipe.is_none());
+    }
+
+    #[test]
+    fn status_update_delta_emits_cwd_cleared_to_unknown() {
+        // known -> unknown: cwd becomes None while the sequence is unchanged;
+        // the Some/None distinction must survive as `Some(None)`.
+        let status = status_with_cwd(7, None);
+        let update = status_update_delta(
+            &status,
+            7,
+            &Some("shell".to_owned()),
+            ActivityState::Idle,
+            &None,
+            &Some(std::path::PathBuf::from("/old")),
+        )
+        .expect("cwd clear should emit an update even at the same sequence");
+        assert_eq!(update.cwd, Some(None));
+    }
+
+    #[test]
+    fn status_update_delta_returns_none_when_unchanged() {
+        let status = status_with_cwd(7, Some("/same"));
+        let update = status_update_delta(
+            &status,
+            7,
+            &Some("shell".to_owned()),
+            ActivityState::Idle,
+            &None,
+            &Some(std::path::PathBuf::from("/same")),
+        );
+        assert!(update.is_none());
+    }
 
     #[test]
     fn join_threads_waits_for_poller_shutdown() {
@@ -1846,6 +2011,7 @@ mod tests {
                 running: true,
                 exit_code: None,
                 pipe: None,
+                cwd: None,
             },
         )
         .expect("spawn poller");
@@ -1907,6 +2073,7 @@ mod tests {
                     exit_code: None,
                     stop_reason: None,
                 }),
+                cwd: None,
             },
         )
         .expect("spawn poller");

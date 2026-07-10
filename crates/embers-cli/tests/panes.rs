@@ -33,10 +33,7 @@ async fn buffer_user_options_round_trip_through_cli() {
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "alpha"]);
-    run_cli(
-        &server,
-        ["new-window", "-t", "alpha", "--", "/bin/sh"],
-    );
+    run_cli(&server, ["new-window", "-t", "alpha", "--", "/bin/sh"]);
     let split = run_cli(&server, ["split-window", "--", "/bin/sh"]);
     let pane_id = stdout(&split)
         .trim()
@@ -44,7 +41,10 @@ async fn buffer_user_options_round_trip_through_cli() {
         .expect("split-window returns pane id");
     let pane = pane_id.to_string();
 
-    run_cli(&server, ["buffer", "set-option", "-t", &pane, "is-vim", "1"]);
+    run_cli(
+        &server,
+        ["buffer", "set-option", "-t", &pane, "is-vim", "1"],
+    );
     let shown = run_cli(&server, ["buffer", "show-options", "-t", &pane]);
     // JSON-encoded, tab-separated (matches format_buffer_details).
     assert_eq!(stdout(&shown).trim(), "\"is-vim\"\t\"1\"");

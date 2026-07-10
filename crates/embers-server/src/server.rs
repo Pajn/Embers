@@ -2720,6 +2720,19 @@ impl Runtime {
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
+        // Re-read cwd after the sync: the runtime may have reported a new working
+        // directory (e.g. via OSC 7) that `sync_buffer_runtime_status` just wrote
+        // into the buffer record. `buffer_cwd` captured before the sync is stale.
+        let response_cwd = {
+            let state = self.state.lock().await;
+            match state.buffers.get(&buffer_id) {
+                // Preserve a deliberately-cleared cwd (`None`) on an existing
+                // buffer; only fall back to the captured value when the buffer is
+                // gone entirely.
+                Some(buffer) => buffer.cwd.clone(),
+                None => buffer_cwd,
+            }
+        };
 
         Ok(SnapshotResponse {
             request_id,
@@ -2728,7 +2741,7 @@ impl Runtime {
             size: snapshot.size,
             lines: snapshot.lines,
             title: snapshot.title.or(Some(buffer_title)),
-            cwd: buffer_cwd.map(|path| path.display().to_string()),
+            cwd: response_cwd.map(|path| path.display().to_string()),
         })
     }
 
@@ -2806,6 +2819,19 @@ impl Runtime {
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_visible_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
+        // Re-read cwd after the sync: the runtime may have reported a new working
+        // directory (e.g. via OSC 7) that `sync_buffer_runtime_status` just wrote
+        // into the buffer record; the pre-sync `snapshot.cwd`/`buffer_cwd` is stale.
+        let response_cwd = {
+            let state = self.state.lock().await;
+            match state.buffers.get(&buffer_id) {
+                // Preserve a deliberately-cleared cwd (`None`) on an existing
+                // buffer; only fall back to the captured value when the buffer is
+                // gone entirely.
+                Some(buffer) => buffer.cwd.clone(),
+                None => buffer_cwd,
+            }
+        };
 
         Ok(VisibleSnapshotResponse {
             request_id,
@@ -2814,7 +2840,7 @@ impl Runtime {
             size: snapshot.size,
             lines: snapshot.lines,
             title: snapshot.title,
-            cwd: snapshot.cwd.map(|path| path.display().to_string()),
+            cwd: response_cwd.map(|path| path.display().to_string()),
             viewport_top_line: snapshot.viewport_top_line,
             total_lines: snapshot.total_lines,
             alternate_screen: snapshot.modes.alternate_screen,
@@ -2899,6 +2925,20 @@ impl Runtime {
                             buffer.title = next_title;
                         }
                     }
+                    render_invalidated = true;
+                }
+                // The shell can change directory without advancing the snapshot
+                // sequence, so accept same-sequence cwd updates; reject only
+                // stale, lower-sequence ones (consistent with the pipe branch).
+                // A `None` from the runtime means "cwd currently unresolved" (no
+                // OSC 7 yet, pid lookup failed, unsupported platform) — not
+                // "cleared" — so never let it wipe a directory we already know.
+                if sequence_current
+                    && let Some(cwd) = update.cwd
+                    && cwd.is_some()
+                    && cwd != buffer.cwd
+                {
+                    buffer.cwd = cwd;
                     render_invalidated = true;
                 }
                 if sequence_current && let Some(pipe) = update.pipe {
@@ -3024,6 +3064,7 @@ impl Runtime {
                 activity: status.activity,
                 title: Some(status.title.clone()),
                 pipe: Some(status.pipe.clone()),
+                cwd: Some(status.cwd.clone()),
             },
         )
         .await;
@@ -4195,6 +4236,7 @@ mod tests {
                     activity: ActivityState::Bell,
                     title: Some(Some("stale-title".to_owned())),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -4219,6 +4261,7 @@ mod tests {
                     activity: ActivityState::Bell,
                     title: Some(Some("fresh-title".to_owned())),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -4284,6 +4327,7 @@ mod tests {
                         exit_code: Some(0),
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
+                    cwd: None,
                 },
             )
             .await;
@@ -4343,6 +4387,7 @@ mod tests {
                         exit_code: Some(0),
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
+                    cwd: None,
                 },
             )
             .await;
@@ -4396,6 +4441,7 @@ mod tests {
                     activity: ActivityState::Idle,
                     title: Some(None),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -4409,6 +4455,79 @@ mod tests {
             .clone();
         assert_eq!(buffer.last_snapshot_seq, 6);
         assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_keeps_known_cwd_when_runtime_reports_none() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer(
+                "shell",
+                vec!["/bin/sh".to_owned()],
+                Some(PathBuf::from("/home/user")),
+            );
+            state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created")
+                .last_snapshot_seq = 5;
+            buffer_id
+        };
+
+        // The runtime couldn't resolve a live cwd (no OSC 7 yet, pid lookup
+        // failed, etc.). That is "unknown", not "cleared", so the spawn cwd must
+        // survive rather than being wiped to None.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: Some(None),
+                },
+            )
+            .await;
+
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.cwd, Some(PathBuf::from("/home/user")));
+
+        // A resolved directory still updates it.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: Some(Some(PathBuf::from("/tmp/work"))),
+                },
+            )
+            .await;
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.cwd, Some(PathBuf::from("/tmp/work")));
     }
 
     #[tokio::test]
