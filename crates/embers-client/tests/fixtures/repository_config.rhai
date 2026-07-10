@@ -314,6 +314,13 @@ define_action("visible-history-tab", visible_history_tab);
 define_action("full-history-tab", full_history_tab);
 define_action("scratchpad", scratchpad);
 
+fn last_session(ctx) {
+    action.last_session()
+}
+
+define_action("last-session", last_session);
+
+bind("normal", "<leader>'", "last-session");
 bind("normal", "<C-h>", "smart-nav-left");
 bind("normal", "<C-j>", "smart-nav-down");
 bind("normal", "<C-k>", "smart-nav-up");

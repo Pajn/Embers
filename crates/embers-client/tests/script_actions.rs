@@ -643,6 +643,41 @@ fn scripts_can_read_buffer_user_options() {
 }
 
 #[test]
+fn session_switch_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn go_switch(ctx) { action.switch_session("work") }
+            fn go_last(ctx) { action.last_session() }
+            fn go_next(ctx) { action.next_session() }
+            fn go_prev(ctx) { action.prev_session() }
+            define_action("switch", go_switch);
+            define_action("last", go_last);
+            define_action("next", go_next);
+            define_action("prev", go_prev);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("switch", demo_context()).unwrap(),
+        vec![Action::SwitchSession {
+            name: "work".to_owned()
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("last", demo_context()).unwrap(),
+        vec![Action::LastSession]
+    );
+    assert_eq!(
+        engine.run_named_action("next", demo_context()).unwrap(),
+        vec![Action::NextSession]
+    );
+    assert_eq!(
+        engine.run_named_action("prev", demo_context()).unwrap(),
+        vec![Action::PrevSession]
+    );
+}
+
+#[test]
 fn query_api_supports_smart_nav_style_scripts() {
     let engine = load_engine(
         r#"

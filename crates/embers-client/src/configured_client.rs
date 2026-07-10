@@ -67,6 +67,7 @@ pub struct ConfiguredClient<T> {
     renderer: Renderer,
     notifications: Vec<String>,
     active_session_id: Option<SessionId>,
+    previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
     search_prompt: Option<SearchPrompt>,
     terminal_output: VecDeque<Vec<u8>>,
@@ -84,6 +85,7 @@ where
             renderer: Renderer,
             notifications: Vec::new(),
             active_session_id: None,
+            previous_session_id: None,
             viewport: None,
             search_prompt: None,
             terminal_output: VecDeque::new(),
@@ -104,6 +106,17 @@ where
 
     pub fn notifications(&self) -> &[String] {
         &self.notifications
+    }
+
+    /// The session the client is currently focused on, if any.
+    pub fn active_session_id(&self) -> Option<SessionId> {
+        self.active_session_id
+    }
+
+    /// The session the client was focused on before the current one, used by
+    /// `last_session` (tmux `switch-client -l`).
+    pub fn previous_session_id(&self) -> Option<SessionId> {
+        self.previous_session_id
     }
 
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
@@ -366,6 +379,14 @@ where
         if let ServerEvent::RenderInvalidated(event) = event {
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
         }
+        // Keep last-session tracking in sync when our own session changes through
+        // the server (e.g. another client or a server-driven switch).
+        if let ServerEvent::ClientChanged(changed) = event
+            && self.client.cached_client_id() == Some(changed.client.id)
+            && let Some(session_id) = changed.client.current_session_id
+        {
+            self.set_active_session(session_id);
+        }
         let session_id = detached_session_id.or_else(|| self.event_session_id(event));
 
         let mut event_names = vec![event_name(event).to_owned()];
@@ -556,7 +577,7 @@ where
                     )
                     .await?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -576,7 +597,7 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(Some(buffer_id), location, "buffer reveal")?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -602,12 +623,61 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(None, location, "buffer history")?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
                     self.client.resync_all_sessions().await
                 }
+                Action::SwitchSession { name } => match self.resolve_session_by_name(&name) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => {
+                        self.record_notification(format_notification(
+                            NotifyLevel::Warn,
+                            &format!("no session named '{name}'"),
+                        ));
+                        Ok(())
+                    }
+                },
+                Action::LastSession => match self
+                    .previous_session_id
+                    .filter(|id| self.client.state().sessions.contains_key(id))
+                {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => {
+                        // Unset, or the previous session has since closed.
+                        self.previous_session_id = None;
+                        self.record_notification(format_notification(
+                            NotifyLevel::Info,
+                            "no previous session",
+                        ));
+                        Ok(())
+                    }
+                },
+                Action::NextSession => match self.cycled_session(true) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                },
+                Action::PrevSession => match self.cycled_session(false) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                },
                 action => {
                     match self
                         .execute_without_presentation(current_session_id, action)
@@ -1693,8 +1763,50 @@ where
     }
 
     fn set_active_view(&mut self, session_id: SessionId, viewport: Size) {
-        self.active_session_id = Some(session_id);
+        self.set_active_session(session_id);
         self.viewport = Some(viewport);
+    }
+
+    /// Update the active session, remembering the prior one so `last_session`
+    /// (tmux `switch-client -l`) can toggle back to it.
+    fn set_active_session(&mut self, session_id: SessionId) {
+        if self.active_session_id != Some(session_id) {
+            self.previous_session_id = self.active_session_id;
+            self.active_session_id = Some(session_id);
+        }
+    }
+
+    fn resolve_session_by_name(&self, name: &str) -> Option<SessionId> {
+        self.client
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == name)
+            .map(|session| session.id)
+    }
+
+    /// The next (or previous) session id in list-sessions order, wrapping around.
+    /// Returns `None` when there are no sessions or only the current one.
+    fn cycled_session(&self, forward: bool) -> Option<SessionId> {
+        let ids: Vec<SessionId> = self.client.state().sessions.keys().copied().collect();
+        if ids.len() < 2 {
+            return None;
+        }
+        let current = self.active_session_id?;
+        let index = ids.iter().position(|id| *id == current)?;
+        let len = ids.len();
+        let next = if forward {
+            (index + 1) % len
+        } else {
+            (index + len - 1) % len
+        };
+        Some(ids[next])
+    }
+
+    async fn perform_session_switch(&mut self, session_id: SessionId) -> Result<()> {
+        self.client.switch_current_session(session_id).await?;
+        self.set_active_session(session_id);
+        self.client.resync_all_sessions().await
     }
 
     fn current_fallback_policy(&self) -> FallbackPolicy {

@@ -700,6 +700,28 @@ Kill a buffer by id.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> last_session </h2>
+
+```rust,ignore
+fn last_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="last_session" id="link-last_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'last_session', 'Description')">
+Description
+</button>
+</div>
+
+<div group="last_session" id="last_session-Description" class="tabcontent"  style="display: block;" >
+Switch back to the previously active session (tmux `switch-client -l`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> leave_mode </h2>
 
 ```rust,ignore
@@ -895,6 +917,28 @@ Select the next tab in the currently focused tabs node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> next_session </h2>
+
+```rust,ignore
+fn next_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="next_session" id="link-next_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'next_session', 'Description')">
+Description
+</button>
+</div>
+
+<div group="next_session" id="next_session-Description" class="tabcontent"  style="display: block;" >
+Switch to the next session in list order, wrapping around.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> next_tab </h2>
 
 ```rust,ignore
@@ -1023,6 +1067,28 @@ Description
 
 <div group="prev_current_tabs" id="prev_current_tabs-Description" class="tabcontent"  style="display: block;" >
 Select the previous tab in the currently focused tabs node.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> prev_session </h2>
+
+```rust,ignore
+fn prev_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="prev_session" id="link-prev_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'prev_session', 'Description')">
+Description
+</button>
+</div>
+
+<div group="prev_session" id="prev_session-Description" class="tabcontent"  style="display: block;" >
+Switch to the previous session in list order, wrapping around.
 </div>
 
 </div>
@@ -1575,6 +1641,38 @@ Description
 
 <div group="swap_current_node" id="swap_current_node-Description" class="tabcontent"  style="display: block;" >
 Swap the current node with a sibling.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> switch_session </h2>
+
+```rust,ignore
+fn switch_session(_: ActionApi, name: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="switch_session" id="link-switch_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'switch_session', 'Description')">
+Description
+</button>
+<button group="switch_session" id="link-switch_session-Example"  class="tablinks"
+    onclick="openTab(event, 'switch_session', 'Example')">
+Example
+</button>
+</div>
+
+<div group="switch_session" id="switch_session-Description" class="tabcontent"  style="display: block;" >
+Switch the client to the session with the given name (tmux `switch-client -t`).
+</div>
+<div group="switch_session" id="switch_session-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.switch_session("work")
+```
 </div>
 
 </div>

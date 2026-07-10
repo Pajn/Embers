@@ -138,6 +138,20 @@ pub async fn run(
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Ok(()),
             }
+
+            // A dispatched action (switch/reveal a buffer or session) may have
+            // changed the active session inside the client. Reconcile before the
+            // next queued input is read, so a following key targets the new
+            // session rather than the old one — not just after the queue drains.
+            // Detach (active becomes None) is left to the ClientChanged path, and
+            // a not-yet-initialised None is ignored.
+            if let Some(active_session_id) = configured.active_session_id()
+                && Some(active_session_id) != session_id
+            {
+                ensure_root_window(configured.client_mut(), active_session_id).await?;
+                session_id = Some(active_session_id);
+                dirty = true;
+            }
         }
 
         let next_size = terminal.size()?;

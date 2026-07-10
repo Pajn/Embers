@@ -211,6 +211,9 @@ fn kill_buffer(_: ActionApi) -> Action;
 /// Kill a buffer by id.
 fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Switch back to the previously active session (tmux `switch-client -l`).
+fn last_session(_: ActionApi) -> Action;
+
 /// Leave the active input mode.
 fn leave_mode(_: ActionApi) -> Action;
 
@@ -250,6 +253,9 @@ fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
 
+/// Switch to the next session in list order, wrapping around.
+fn next_session(_: ActionApi) -> Action;
+
 /// Select the next tab in a specific tabs node.
 fn next_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
@@ -269,6 +275,9 @@ fn open_floating(_: ActionApi, tree: TreeSpec, options: map) -> Action;
 
 /// Select the previous tab in the currently focused tabs node.
 fn prev_current_tabs(_: ActionApi) -> Action;
+
+/// Switch to the previous session in list order, wrapping around.
+fn prev_session(_: ActionApi) -> Action;
 
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
@@ -359,6 +368,15 @@ fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;
 
 /// Swap the current node with a sibling.
 fn swap_current_node(_: ActionApi, sibling_node_id: int) -> Action;
+
+/// Switch the client to the session with the given name (tmux `switch-client -t`).
+///
+/// # Example
+///
+/// ```rhai
+/// action.switch_session("work")
+/// ```
+fn switch_session(_: ActionApi, name: string) -> Action;
 
 /// Toggle a named input mode.
 fn toggle_mode(_: ActionApi, mode: string) -> Action;

@@ -154,6 +154,12 @@ pub enum Action {
     RunNamedAction {
         name: String,
     },
+    SwitchSession {
+        name: String,
+    },
+    LastSession,
+    NextSession,
+    PrevSession,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

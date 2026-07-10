@@ -978,6 +978,38 @@ mod documented_action_api {
         Action::ClearPendingKeys
     }
 
+    /// Switch the client to the session with the given name (tmux `switch-client -t`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.switch_session("work")
+    /// ```
+    #[rhai_fn(name = "switch_session")]
+    pub fn switch_session(_: &mut ActionApi, name: &str) -> Action {
+        Action::SwitchSession {
+            name: name.to_owned(),
+        }
+    }
+
+    /// Switch back to the previously active session (tmux `switch-client -l`).
+    #[rhai_fn(name = "last_session")]
+    pub fn last_session(_: &mut ActionApi) -> Action {
+        Action::LastSession
+    }
+
+    /// Switch to the next session in list order, wrapping around.
+    #[rhai_fn(name = "next_session")]
+    pub fn next_session(_: &mut ActionApi) -> Action {
+        Action::NextSession
+    }
+
+    /// Switch to the previous session in list order, wrapping around.
+    #[rhai_fn(name = "prev_session")]
+    pub fn prev_session(_: &mut ActionApi) -> Action {
+        Action::PrevSession
+    }
+
     /// Focus the view to the left of the current node.
     ///
     /// # Example

@@ -40,6 +40,14 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is utf-8")
 }
 
+/// Create two sessions ("alpha", "beta"), each with a single shell window.
+fn two_sessions_with_shells(server: &TestServer) {
+    run_cli(server, &["new-session", "alpha"]);
+    run_cli(server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    run_cli(server, &["new-session", "beta"]);
+    run_cli(server, &["new-window", "-t", "beta", "--", "/bin/sh"]);
+}
+
 async fn create_session(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::Create {
@@ -1308,6 +1316,146 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
         "expected indexed red SGR in client output:\n{ansi:?}"
     );
     assert!(grid.render().contains("RED-TEXT"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        r#"
+            fn go_alpha(ctx) { action.switch_session("alpha") }
+            fn go_beta(ctx) { action.switch_session("beta") }
+            fn go_last(ctx) { action.last_session() }
+            fn go_next(ctx) { action.next_session() }
+            fn go_ghost(ctx) { action.switch_session("ghost") }
+            define_action("go-alpha", go_alpha);
+            define_action("go-beta", go_beta);
+            define_action("go-last", go_last);
+            define_action("go-next", go_next);
+            define_action("go-ghost", go_ghost);
+            bind("normal", "p", "go-alpha");
+            bind("normal", "o", "go-beta");
+            bind("normal", "l", "go-last");
+            bind("normal", "c", "go-next");
+            bind("normal", "x", "go-ghost");
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    (config, tempdir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_switch_actions_move_between_sessions() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    // Two sessions, each with a live shell pane.
+    two_sessions_with_shells(&server);
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync sessions");
+
+    let session_id = |configured: &ConfiguredClient<_>, name: &str| {
+        configured
+            .client()
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == name)
+            .map(|session| session.id)
+            .unwrap_or_else(|| panic!("session {name} exists"))
+    };
+    let alpha = session_id(&configured, "alpha");
+    let beta = session_id(&configured, "beta");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Switch by name: alpha -> beta.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+
+    // Last-session toggles back to alpha, then forward to beta again.
+    configured
+        .handle_key(beta, size, KeyEvent::Char('l'))
+        .await
+        .expect("last session");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('l'))
+        .await
+        .expect("last session again");
+    assert_eq!(configured.active_session_id(), Some(beta));
+
+    // Cycle wraps across the two sessions.
+    configured
+        .handle_key(beta, size, KeyEvent::Char('c'))
+        .await
+        .expect("cycle next");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+
+    // Unknown session name notifies without changing the active session.
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('x'))
+        .await
+        .expect("unknown session name is handled");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    let unknown_notice = &configured.notifications()[before..];
+    assert_eq!(
+        unknown_notice.len(),
+        1,
+        "expected exactly one notification for the unknown session name, got {unknown_notice:?}"
+    );
+    assert!(
+        unknown_notice[0].contains("no session named 'ghost'"),
+        "expected an unknown-session notification naming 'ghost', got {:?}",
+        unknown_notice[0]
+    );
+
+    // last-session gracefully handles a previous session that has since closed:
+    // active is alpha with previous=beta, so kill beta and press last.
+    run_cli(&server, &["kill-session", "-t", "beta"]);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after kill");
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('l'))
+        .await
+        .expect("last-session with a closed previous session is handled gracefully");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    let missing_notice = &configured.notifications()[before..];
+    assert_eq!(
+        missing_notice.len(),
+        1,
+        "expected exactly one notification for the closed previous session, got {missing_notice:?}"
+    );
+    assert!(
+        missing_notice[0].contains("no previous session"),
+        "expected a 'no previous session' notification, not an error switch, got {:?}",
+        missing_notice[0]
+    );
 
     server.shutdown().await.expect("server shuts down");
 }
