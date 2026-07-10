@@ -678,6 +678,37 @@ fn session_switch_builders_map_to_actions() {
 }
 
 #[test]
+fn run_shell_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn shell(ctx) { action.run_shell("wisp popup") }
+            fn shell_argv(ctx) { action.run_shell_argv(["wisp", "popup"]) }
+            define_action("shell", shell);
+            define_action("shell-argv", shell_argv);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("shell", demo_context()).unwrap(),
+        vec![Action::RunShell {
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                "wisp popup".to_owned()
+            ],
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("shell-argv", demo_context())
+            .unwrap(),
+        vec![Action::RunShell {
+            command: vec!["wisp".to_owned(), "popup".to_owned()],
+        }]
+    );
+}
+
+#[test]
 fn query_api_supports_smart_nav_style_scripts() {
     let engine = load_engine(
         r#"

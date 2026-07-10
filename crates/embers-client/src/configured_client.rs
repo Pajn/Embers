@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -71,6 +72,10 @@ pub struct ConfiguredClient<T> {
     viewport: Option<Size>,
     search_prompt: Option<SearchPrompt>,
     terminal_output: VecDeque<Vec<u8>>,
+    socket_path: Option<PathBuf>,
+    /// Notifications produced by background tasks (e.g. a failed `run_shell`
+    /// child), drained into `notifications` on the next input/event tick.
+    background_notifications: Arc<Mutex<Vec<String>>>,
 }
 
 impl<T> ConfiguredClient<T>
@@ -89,7 +94,15 @@ where
             viewport: None,
             search_prompt: None,
             terminal_output: VecDeque::new(),
+            socket_path: None,
+            background_notifications: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Record the socket this client is attached to, so `run_shell` children can
+    /// drive Embers via `$EMBERS_SOCKET` and the `embers` CLI (tmux `run-shell`).
+    pub fn set_socket_path(&mut self, socket_path: PathBuf) {
+        self.socket_path = Some(socket_path);
     }
 
     pub fn client(&self) -> &MuxClient<T> {
@@ -146,6 +159,7 @@ where
         viewport: Size,
         key: KeyEvent,
     ) -> Result<()> {
+        self.drain_background_notifications();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
@@ -363,6 +377,7 @@ where
     }
 
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        self.drain_background_notifications();
         let previous_render_activity = match event {
             ServerEvent::RenderInvalidated(render) => self
                 .client
@@ -678,6 +693,10 @@ where
                     }
                     None => Ok(()),
                 },
+                Action::RunShell { command } => {
+                    self.spawn_run_shell(command, current_session_id);
+                    Ok(())
+                }
                 action => {
                     match self
                         .execute_without_presentation(current_session_id, action)
@@ -1809,6 +1828,104 @@ where
         self.client.resync_all_sessions().await
     }
 
+    /// The working directory of the focused buffer in the given session, if known.
+    fn focused_buffer_cwd(&self, session_id: Option<SessionId>) -> Option<PathBuf> {
+        let session_id = session_id.or(self.active_session_id)?;
+        let state = self.client.state();
+        let session = state.sessions.get(&session_id)?;
+        let node = state.nodes.get(&session.focused_leaf_id?)?;
+        let buffer_id = node.buffer_view.as_ref()?.buffer_id;
+        state
+            .buffers
+            .get(&buffer_id)?
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+    }
+
+    /// Spawn a `run_shell` child detached in the client's login context.
+    ///
+    /// Output is discarded (unlike tmux, which shows it in a pane — capture into
+    /// a popup with `buffer_spawn` instead). `$EMBERS_SOCKET` is injected so the
+    /// child can drive Embers via the CLI. The client never awaits the child; a
+    /// background waiter surfaces a warning on non-zero exit.
+    fn spawn_run_shell(&mut self, command: Vec<String>, session_id: Option<SessionId>) {
+        let Some((program, args)) = command.split_first() else {
+            return;
+        };
+        let mut process = tokio::process::Command::new(program);
+        process
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(cwd) = self.focused_buffer_cwd(session_id) {
+            process.current_dir(cwd);
+        }
+        if let Some(socket_path) = &self.socket_path {
+            process.env("EMBERS_SOCKET", socket_path);
+        }
+
+        // Identify the command by its executable only. The full argument list
+        // may carry secrets (tokens, passwords) and these notifications are
+        // logged at WARN and shown in the status line.
+        let program_name = program.clone();
+        let sink = Arc::clone(&self.background_notifications);
+        match process.spawn() {
+            Ok(mut child) => {
+                tokio::spawn(async move {
+                    match child.wait().await {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => {
+                            push_background_notification(
+                                &sink,
+                                format_notification(
+                                    NotifyLevel::Warn,
+                                    &format!("run-shell `{program_name}` exited with {status}"),
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            push_background_notification(
+                                &sink,
+                                format_notification(
+                                    NotifyLevel::Warn,
+                                    &format!("run-shell `{program_name}` failed: {error}"),
+                                ),
+                            );
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                self.record_notification(format_notification(
+                    NotifyLevel::Warn,
+                    &format!("run-shell `{program_name}` could not start: {error}"),
+                ));
+            }
+        }
+    }
+
+    /// Move notifications produced by background tasks into the visible queue.
+    /// Returns `true` when at least one notification was surfaced, so callers
+    /// (e.g. the idle poll loop) know a redraw is warranted.
+    pub fn drain_background_notifications(&mut self) -> bool {
+        let drained: Vec<String> = {
+            let mut pending = self
+                .background_notifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.is_empty() {
+                return false;
+            }
+            std::mem::take(&mut *pending)
+        };
+        for message in drained {
+            self.record_notification(message);
+        }
+        true
+    }
+
     fn current_fallback_policy(&self) -> FallbackPolicy {
         self.config
             .active_script()
@@ -2475,10 +2592,7 @@ where
         let message = message.into();
         warn!("{message}");
         self.notifications.push(message);
-        if self.notifications.len() > 64 {
-            let overflow = self.notifications.len() - 64;
-            self.notifications.drain(0..overflow);
-        }
+        enforce_notification_cap(&mut self.notifications);
     }
 }
 
@@ -2747,6 +2861,22 @@ fn format_notification(level: NotifyLevel, message: &str) -> String {
         NotifyLevel::Error => format!("error: {message}"),
     }
 }
+
+fn push_background_notification(sink: &Arc<Mutex<Vec<String>>>, message: String) {
+    let mut pending = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.push(message);
+    enforce_notification_cap(&mut pending);
+}
+
+/// Retain only the newest [`MAX_NOTIFICATIONS`] messages.
+fn enforce_notification_cap(notifications: &mut Vec<String>) {
+    if notifications.len() > MAX_NOTIFICATIONS {
+        let overflow = notifications.len() - MAX_NOTIFICATIONS;
+        notifications.drain(0..overflow);
+    }
+}
+
+const MAX_NOTIFICATIONS: usize = 64;
 
 fn resolve_floating_geometry(spec: FloatingGeometrySpec, viewport: Size) -> FloatGeometry {
     let width = resolve_floating_size(spec.width, viewport.width);

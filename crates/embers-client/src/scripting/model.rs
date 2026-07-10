@@ -160,6 +160,9 @@ pub enum Action {
     LastSession,
     NextSession,
     PrevSession,
+    RunShell {
+        command: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

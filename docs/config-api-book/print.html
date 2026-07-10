@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-583bd70e.js";
+            window.path_to_searchindex_js = "searchindex-94998a29.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c8603eba.js"></script>
@@ -1551,6 +1551,66 @@ Description
 
 <div group="run_named_action" id="run_named_action-Description" class="tabcontent" style="display: block;">
 Run another named action by name.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell </h2>
+
+<pre><code class="language-rust ignore">fn run_shell(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell" id="link-run_shell-Description" class="tablinks active" onclick="openTab(event, &#39;run_shell&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell" id="link-run_shell-Example" class="tablinks" onclick="openTab(event, &#39;run_shell&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell" id="run_shell-Description" class="tabcontent" style="display: block;">
+Run a shell command line in the client's login context (tmux `run-shell`).
+<p>The string is executed as <code>/bin/sh -lc "&lt;command&gt;"</code>. Output is discarded;
+the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.</p>
+</div>
+
+<div group="run_shell" id="run_shell-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell("wisp popup")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell_argv </h2>
+
+<pre><code class="language-rust ignore">fn run_shell_argv(_: ActionApi, argv: Array) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell_argv" id="link-run_shell_argv-Description" class="tablinks active" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell_argv" id="link-run_shell_argv-Example" class="tablinks" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Description" class="tabcontent" style="display: block;">
+Run a command given as an explicit argv array, without a shell.
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell_argv(["wisp", "popup"])
+</code></pre>
 </div>
 
 </div>
@@ -3782,6 +3842,66 @@ Description
 
 <div group="run_named_action" id="run_named_action-Description-1" class="tabcontent" style="display: block;">
 Run another named action by name.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell </h2>
+
+<pre><code class="language-rust ignore">fn run_shell(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell" id="link-run_shell-Description-1" class="tablinks active" onclick="openTab(event, &#39;run_shell&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell" id="link-run_shell-Example-1" class="tablinks" onclick="openTab(event, &#39;run_shell&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell" id="run_shell-Description-1" class="tabcontent" style="display: block;">
+Run a shell command line in the client's login context (tmux `run-shell`).
+<p>The string is executed as <code>/bin/sh -lc "&lt;command&gt;"</code>. Output is discarded;
+the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.</p>
+</div>
+
+<div group="run_shell" id="run_shell-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell("wisp popup")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell_argv </h2>
+
+<pre><code class="language-rust ignore">fn run_shell_argv(_: ActionApi, argv: Array) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell_argv" id="link-run_shell_argv-Description-1" class="tablinks active" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell_argv" id="link-run_shell_argv-Example-1" class="tablinks" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Description-1" class="tabcontent" style="display: block;">
+Run a command given as an explicit argv array, without a shell.
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell_argv(["wisp", "popup"])
+</code></pre>
 </div>
 
 </div>

@@ -41,6 +41,7 @@ pub async fn run(
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(socket_path.clone());
 
     let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -176,10 +177,22 @@ pub async fn run(
                     }
                     SwitchedSession::Ignore => {}
                 }
+                // handle_event drains background notifications up front, but its
+                // own awaits (and the session-switch handling above) can race a
+                // background task pushing one after that drain; surface any such
+                // notification this frame instead of deferring it a poll.
+                configured.drain_background_notifications();
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
             None => {
+                // The poll timed out with no event. A background task (e.g. a
+                // run_shell child) may have failed while we were idle; surface
+                // it now instead of waiting for the next input or server event.
+                if configured.drain_background_notifications() {
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                    dirty = true;
+                }
                 continue;
             }
         }

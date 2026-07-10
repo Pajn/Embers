@@ -1351,6 +1351,113 @@ fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_shell_spawns_with_socket_env_and_reports_failures() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let socket_out = out_dir.path().join("socket.txt");
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        format!(
+            r#"
+                fn write_socket(ctx) {{ action.run_shell("printf %s \"$EMBERS_SOCKET\" > {out}") }}
+                fn fail(ctx) {{ action.run_shell("exit 3") }}
+                fn nop(ctx) {{ action.noop() }}
+                define_action("write-socket", write_socket);
+                define_action("fail", fail);
+                define_action("nop", nop);
+                bind("normal", "w", "write-socket");
+                bind("normal", "f", "fail");
+                bind("normal", "z", "nop");
+            "#,
+            out = socket_out.display()
+        ),
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(server.socket_path().to_path_buf());
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = configured
+        .client()
+        .state()
+        .sessions
+        .values()
+        .find(|session| session.name == "alpha")
+        .map(|session| session.id)
+        .expect("alpha session");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // run_shell spawns with $EMBERS_SOCKET injected (proves spawn + env).
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('w'))
+        .await
+        .expect("run-shell dispatch returns immediately");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let socket_string = server.socket_path().to_string_lossy().into_owned();
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(&socket_out)
+            && contents == socket_string
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run-shell did not write socket path"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // A non-zero exit surfaces a warning, drained on the next tick.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('f'))
+        .await
+        .expect("failing run-shell dispatch returns immediately");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        // The benign key triggers a drain of background notifications.
+        configured
+            .handle_key(alpha, size, KeyEvent::Char('z'))
+            .await
+            .expect("nop key");
+        if configured
+            .notifications()
+            .iter()
+            .any(|note| note.contains("run-shell") && note.contains("exited"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected a run-shell failure notification; got {:?}",
+            configured.notifications()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_switch_actions_move_between_sessions() {
     use embers_client::{ConfiguredClient, KeyEvent};
 

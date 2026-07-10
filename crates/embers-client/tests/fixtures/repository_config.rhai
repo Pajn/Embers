@@ -318,9 +318,15 @@ fn last_session(ctx) {
     action.last_session()
 }
 
+fn wisp_popup(ctx) {
+    action.run_shell("wisp popup")
+}
+
 define_action("last-session", last_session);
+define_action("wisp-popup", wisp_popup);
 
 bind("normal", "<leader>'", "last-session");
+bind("normal", "<leader>w", "wisp-popup");
 bind("normal", "<C-h>", "smart-nav-left");
 bind("normal", "<C-j>", "smart-nav-down");
 bind("normal", "<C-k>", "smart-nav-up");

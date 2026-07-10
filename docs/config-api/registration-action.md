@@ -1205,6 +1205,73 @@ Run another named action by name.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> run_shell </h2>
+
+```rust,ignore
+fn run_shell(_: ActionApi, command: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="run_shell" id="link-run_shell-Description"  class="tablinks active"
+    onclick="openTab(event, 'run_shell', 'Description')">
+Description
+</button>
+<button group="run_shell" id="link-run_shell-Example"  class="tablinks"
+    onclick="openTab(event, 'run_shell', 'Example')">
+Example
+</button>
+</div>
+
+<div group="run_shell" id="run_shell-Description" class="tabcontent"  style="display: block;" >
+Run a shell command line in the client's login context (tmux `run-shell`).
+
+The string is executed as `/bin/sh -lc "<command>"`. Output is discarded;
+the spawned tool can drive Embers via `$EMBERS_SOCKET` and the `embers` CLI.
+</div>
+<div group="run_shell" id="run_shell-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.run_shell("wisp popup")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> run_shell_argv </h2>
+
+```rust,ignore
+fn run_shell_argv(_: ActionApi, argv: Array) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="run_shell_argv" id="link-run_shell_argv-Description"  class="tablinks active"
+    onclick="openTab(event, 'run_shell_argv', 'Description')">
+Description
+</button>
+<button group="run_shell_argv" id="link-run_shell_argv-Example"  class="tablinks"
+    onclick="openTab(event, 'run_shell_argv', 'Example')">
+Example
+</button>
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Description" class="tabcontent"  style="display: block;" >
+Run a command given as an explicit argv array, without a shell.
+</div>
+<div group="run_shell_argv" id="run_shell_argv-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.run_shell_argv(["wisp", "popup"])
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> scroll_line_down </h2>
 
 ```rust,ignore

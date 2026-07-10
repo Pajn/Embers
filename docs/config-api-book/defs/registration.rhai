@@ -294,6 +294,27 @@ fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;
 
+/// Run a shell command line in the client's login context (tmux `run-shell`).
+///
+/// The string is executed as `/bin/sh -lc "<command>"`. Output is discarded;
+/// the spawned tool can drive Embers via `$EMBERS_SOCKET` and the `embers` CLI.
+///
+/// # Example
+///
+/// ```rhai
+/// action.run_shell("wisp popup")
+/// ```
+fn run_shell(_: ActionApi, command: string) -> Action;
+
+/// Run a command given as an explicit argv array, without a shell.
+///
+/// # Example
+///
+/// ```rhai
+/// action.run_shell_argv(["wisp", "popup"])
+/// ```
+fn run_shell_argv(_: ActionApi, argv: array) -> Action;
+
 /// Scroll one line downward in local scrollback.
 fn scroll_line_down(_: ActionApi) -> Action;
 
