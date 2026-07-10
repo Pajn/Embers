@@ -1,6 +1,7 @@
 use embers_core::RequestId;
 use embers_protocol::{ClientMessage, FloatingRequest, InputRequest, NodeRequest};
 
+use crate::input::{KeyCode, Modifiers, encode_key};
 use crate::presentation::{NavigationDirection, PresentationModel};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +24,12 @@ pub enum KeyEvent {
     Delete,
     PageUp,
     PageDown,
+    /// A key carrying an explicit modifier set (shift/multi-modifier combos and
+    /// function keys), produced by CSI-u aware host-terminal parsing.
+    Key {
+        code: KeyCode,
+        mods: Modifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,6 +141,9 @@ impl Controller {
             KeyEvent::Delete => input_request(presentation, request_id, b"\x1b[3~".to_vec()),
             KeyEvent::PageUp => input_request(presentation, request_id, b"\x1b[5~".to_vec()),
             KeyEvent::PageDown => input_request(presentation, request_id, b"\x1b[6~".to_vec()),
+            KeyEvent::Key { code, mods } => {
+                input_request(presentation, request_id, encode_key(code, mods, 0))
+            }
             KeyEvent::Bytes(_) => None,
         }
     }

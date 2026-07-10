@@ -2287,7 +2287,8 @@ where
             | KeyEvent::Insert
             | KeyEvent::Delete
             | KeyEvent::PageUp
-            | KeyEvent::PageDown => Ok(()),
+            | KeyEvent::PageDown
+            | KeyEvent::Key { .. } => Ok(()),
         }
     }
 
@@ -3273,6 +3274,7 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Delete => Ok(KeyToken::Delete),
         KeyEvent::PageUp => Ok(KeyToken::PageUp),
         KeyEvent::PageDown => Ok(KeyToken::PageDown),
+        KeyEvent::Key { code, mods } => Ok(KeyToken::Key { code, mods }),
         KeyEvent::Bytes(_) => Err(MuxError::invalid_input("raw bytes are handled separately")),
     }
 }
@@ -3305,6 +3307,9 @@ fn sequence_to_bytes(sequence: &[KeyToken]) -> Result<Vec<u8>> {
             KeyToken::Delete => bytes.extend_from_slice(b"\x1b[3~"),
             KeyToken::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
             KeyToken::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+            KeyToken::Key { code, mods } => {
+                bytes.extend(crate::input::encode_key(*code, *mods, 0));
+            }
             KeyToken::Leader => {
                 return Err(MuxError::invalid_input(
                     "leader placeholders cannot be sent directly",
