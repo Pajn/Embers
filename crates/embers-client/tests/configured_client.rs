@@ -243,6 +243,7 @@ fn second_session_state() -> embers_client::ClientState {
             focus_reporting: false,
             bracketed_paste: false,
             cursor: None,
+            keyboard_mode: 0,
         },
     );
     state

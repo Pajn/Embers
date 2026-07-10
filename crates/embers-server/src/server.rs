@@ -2811,6 +2811,7 @@ impl Runtime {
                     mouse_reporting: false,
                     focus_reporting: false,
                     bracketed_paste: false,
+                    keyboard_mode: 0,
                     cursor: None,
                 });
             }
@@ -2847,6 +2848,7 @@ impl Runtime {
             mouse_reporting: snapshot.modes.mouse_reporting,
             focus_reporting: snapshot.modes.focus_reporting,
             bracketed_paste: snapshot.modes.bracketed_paste,
+            keyboard_mode: snapshot.modes.keyboard_mode,
             cursor: snapshot.cursor,
         })
     }

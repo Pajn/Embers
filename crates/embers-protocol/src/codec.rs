@@ -2921,6 +2921,7 @@ fn encode_server_response<'a>(
                     bracketed_paste: r.bracketed_paste,
                     cursor,
                     styles,
+                    keyboard_mode: r.keyboard_mode,
                 },
             );
             fb::Envelope::create(
@@ -4308,6 +4309,7 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                     mouse_reporting: resp.mouse_reporting(),
                     focus_reporting: resp.focus_reporting(),
                     bracketed_paste: resp.bracketed_paste(),
+                    keyboard_mode: resp.keyboard_mode(),
                     cursor,
                 },
             )))
@@ -6340,6 +6342,7 @@ mod tests {
             focus_reporting: false,
             bracketed_paste: false,
             cursor: None,
+            keyboard_mode: 0,
         }))
     }
 

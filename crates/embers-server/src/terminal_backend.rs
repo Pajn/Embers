@@ -23,6 +23,7 @@ pub struct BackendMetadata {
     pub mouse_reporting: bool,
     pub focus_reporting: bool,
     pub bracketed_paste: bool,
+    pub keyboard_mode: u8,
     pub cursor: Option<CursorState>,
 }
 
@@ -232,6 +233,19 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Map the active kitty keyboard `TermMode` bits to the compact bitfield the
+/// client encoder consumes (bit 0 = disambiguate, bit 4 = report-all-keys).
+fn kitty_keyboard_mode(mode: TermMode) -> u8 {
+    let mut bits = 0;
+    if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+        bits |= 0b0000_0001;
+    }
+    if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+        bits |= 0b0001_0000;
+    }
+    bits
+}
+
 pub struct AlacrittyTerminalBackend {
     term: Term<BackendEventProxy>,
     parser: ansi::Processor,
@@ -317,6 +331,9 @@ impl AlacrittyTerminalBackend {
         };
         let config = Config {
             scrolling_history: max_scrollback_lines,
+            // Enable the kitty keyboard protocol so inner apps (e.g. nvim) can
+            // push/pop/query disambiguation flags; the reply rides Event::PtyWrite.
+            kitty_keyboard: true,
             ..Config::default()
         };
 
@@ -477,6 +494,7 @@ impl AlacrittyTerminalBackend {
             ),
             focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
             bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+            keyboard_mode: kitty_keyboard_mode(mode),
         }
     }
 
@@ -484,6 +502,8 @@ impl AlacrittyTerminalBackend {
         let grid = self.term.grid();
         grid.history_size().saturating_sub(grid.display_offset()) as u64
     }
+
+    // (kitty keyboard bitfield extracted below as a free function)
 
     fn total_lines(&self) -> u64 {
         let grid = self.term.grid();
@@ -524,6 +544,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
                 mouse_reporting: metadata.mouse_reporting,
                 focus_reporting: metadata.focus_reporting,
                 bracketed_paste: metadata.bracketed_paste,
+                keyboard_mode: metadata.keyboard_mode,
             },
         }
     }
@@ -581,6 +602,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             mouse_reporting: modes.mouse_reporting,
             focus_reporting: modes.focus_reporting,
             bracketed_paste: modes.bracketed_paste,
+            keyboard_mode: modes.keyboard_mode,
             cursor: self.cursor_state(),
         }
     }
@@ -1135,6 +1157,20 @@ mod tests {
         assert!(!disabled.mouse_reporting);
         assert!(!disabled.focus_reporting);
         assert!(!disabled.bracketed_paste);
+    }
+
+    #[test]
+    fn kitty_keyboard_mode_is_pushed_and_popped() {
+        let mut backend = backend(PtySize::new(10, 2));
+        assert_eq!(backend.metadata().keyboard_mode, 0);
+
+        // Push disambiguate-esc-codes (flags = 1).
+        backend.ingest_bytes(b"\x1b[>1u");
+        assert_eq!(backend.metadata().keyboard_mode & 0b0000_0001, 0b0000_0001);
+
+        // Pop restores the previous (empty) mode.
+        backend.ingest_bytes(b"\x1b[<u");
+        assert_eq!(backend.metadata().keyboard_mode, 0);
     }
 
     #[test]

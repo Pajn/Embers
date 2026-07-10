@@ -30,6 +30,10 @@ pub struct TerminalModes {
     pub mouse_reporting: bool,
     pub focus_reporting: bool,
     pub bracketed_paste: bool,
+    /// Kitty keyboard protocol flags active on the focused screen (bit 0 =
+    /// disambiguate-esc-codes, bit 4 = report-all-keys-as-esc). Zero when the
+    /// program has not enabled the protocol.
+    pub keyboard_mode: u8,
 }
 
 /// Semantic terminal color.

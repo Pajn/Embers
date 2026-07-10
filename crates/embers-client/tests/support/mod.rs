@@ -355,5 +355,6 @@ fn snapshot<const N: usize>(buffer_id: u64, lines: [&str; N]) -> VisibleSnapshot
         focus_reporting: false,
         bracketed_paste: false,
         cursor: None,
+        keyboard_mode: 0,
     }
 }

@@ -967,6 +967,7 @@ pub struct VisibleSnapshotResponse {
     pub mouse_reporting: bool,
     pub focus_reporting: bool,
     pub bracketed_paste: bool,
+    pub keyboard_mode: u8,
     pub cursor: Option<CursorState>,
 }
 
