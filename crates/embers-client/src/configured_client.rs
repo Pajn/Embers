@@ -194,6 +194,12 @@ where
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
+        // Under report-all-keys the host terminal sends CSI-u for every key,
+        // including ordinary typed text. Normalise an unmodified text key to its
+        // legacy form up front so every downstream path — binding tokenization,
+        // hints label matching, and search input — treats both encodings alike.
+        let key = normalize_text_key(key);
+
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
                 .handle_search_key(session_id, viewport, &presentation, key)
@@ -230,11 +236,12 @@ where
                             &binding.target,
                         ) {
                             let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+                            let mode = self.buffer_keyboard_mode(buffer_id);
                             return self
                                 .send_bytes_to_buffer(
                                     buffer_id,
                                     session_id,
-                                    sequence_to_bytes(&binding.sequence)?,
+                                    sequence_to_bytes(&binding.sequence, mode)?,
                                 )
                                 .await;
                         }
@@ -253,10 +260,11 @@ where
                     } => match fallback_policy {
                         FallbackPolicy::Passthrough => {
                             let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+                            let mode = self.buffer_keyboard_mode(buffer_id);
                             self.send_bytes_to_buffer(
                                 buffer_id,
                                 session_id,
-                                sequence_to_bytes(&sequence)?,
+                                sequence_to_bytes(&sequence, mode)?,
                             )
                             .await
                         }
@@ -1261,7 +1269,8 @@ where
             }
             Action::SendKeys { buffer_id, keys } => {
                 let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
-                self.send_bytes_to_buffer(buffer_id, session_id, sequence_to_bytes(&keys)?)
+                let mode = self.buffer_keyboard_mode(buffer_id);
+                self.send_bytes_to_buffer(buffer_id, session_id, sequence_to_bytes(&keys, mode)?)
                     .await
             }
             Action::SendBytes { buffer_id, bytes } => {
@@ -1941,6 +1950,17 @@ where
         self.client.switch_current_session(session_id).await?;
         self.set_active_session(session_id);
         self.client.resync_all_sessions().await
+    }
+
+    /// The kitty keyboard mode negotiated by the given buffer's inner program,
+    /// used so passthrough keys are re-encoded the way that program expects.
+    fn buffer_keyboard_mode(&self, buffer_id: BufferId) -> u8 {
+        self.client
+            .state()
+            .snapshots
+            .get(&buffer_id)
+            .map(|snapshot| snapshot.keyboard_mode)
+            .unwrap_or(0)
     }
 
     /// The working directory of the focused buffer in the given session, if known.
@@ -3257,6 +3277,9 @@ fn default_shell_command() -> Vec<String> {
 
 fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
     match key {
+        // A space keypress must match the `<Space>` binding token, which the
+        // grammar produces for a literal space.
+        KeyEvent::Char(' ') => Ok(KeyToken::Space),
         KeyEvent::Char(ch) => Ok(KeyToken::Char(ch)),
         KeyEvent::Enter => Ok(KeyToken::Enter),
         KeyEvent::Tab => Ok(KeyToken::Tab),
@@ -3274,57 +3297,110 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Delete => Ok(KeyToken::Delete),
         KeyEvent::PageUp => Ok(KeyToken::PageUp),
         KeyEvent::PageDown => Ok(KeyToken::PageDown),
-        KeyEvent::Key { code, mods } => Ok(KeyToken::Key { code, mods }),
+        KeyEvent::Key { code, mods } => Ok(normalize_key_token(code, mods)),
         KeyEvent::Bytes(_) => Err(MuxError::invalid_input("raw bytes are handled separately")),
     }
 }
 
-fn sequence_to_bytes(sequence: &[KeyToken]) -> Result<Vec<u8>> {
+/// Normalise an unmodified CSI-u report for an ordinary text key (the kitty
+/// encoding of typed text) to its legacy `KeyEvent`, so text-consuming modes like
+/// search treat both encodings identically. Modified keys and non-text keys are
+/// returned unchanged.
+fn normalize_text_key(key: KeyEvent) -> KeyEvent {
+    use crate::input::KeyCode;
+    match key {
+        KeyEvent::Key { code, mods } if mods.is_empty() => match code {
+            KeyCode::Char(ch) => KeyEvent::Char(ch),
+            KeyCode::Tab => KeyEvent::Tab,
+            KeyCode::Enter => KeyEvent::Enter,
+            KeyCode::Backspace => KeyEvent::Backspace,
+            KeyCode::Escape => KeyEvent::Escape,
+            other => KeyEvent::Key { code: other, mods },
+        },
+        other => other,
+    }
+}
+
+/// Collapse a single-modifier character key to the legacy `Ctrl`/`Alt` token so
+/// a CSI-u report (e.g. `\x1b[104;5u` for Ctrl+H) matches the same `<C-h>`
+/// binding a legacy control byte would, keeping the two key representations
+/// coherent. Everything else stays a `Key` token.
+fn normalize_key_token(code: crate::input::KeyCode, mods: crate::input::Modifiers) -> KeyToken {
+    use crate::input::{KeyCode, Modifiers};
+    if let KeyCode::Char(ch) = code {
+        if mods
+            == (Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            })
+        {
+            return KeyToken::Ctrl(ch.to_ascii_lowercase());
+        }
+        if mods
+            == (Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            })
+        {
+            return KeyToken::Alt(ch.to_ascii_lowercase());
+        }
+    }
+    // Binding tokens store character keys lowercased (shift is a modifier bit),
+    // so lowercase here too for hosts that report the shifted code point.
+    let code = match code {
+        KeyCode::Char(ch) => KeyCode::Char(ch.to_ascii_lowercase()),
+        other => other,
+    };
+    KeyToken::Key { code, mods }
+}
+
+fn sequence_to_bytes(sequence: &[KeyToken], mode: u8) -> Result<Vec<u8>> {
+    use crate::input::{KeyCode, Modifiers, encode_key};
+
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+
     let mut bytes = Vec::new();
     for token in sequence {
-        match token {
-            KeyToken::Char(ch) => {
-                let mut encoded = [0; 4];
-                bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
-            }
-            KeyToken::Space => bytes.push(b' '),
-            KeyToken::Tab => bytes.push(b'\t'),
-            KeyToken::Enter => bytes.push(b'\r'),
-            KeyToken::Backspace => bytes.push(0x7f),
-            KeyToken::Escape => bytes.push(0x1b),
-            KeyToken::Ctrl(ch) => bytes.push(ctrl_byte(*ch)?),
-            KeyToken::Alt(ch) => {
-                bytes.push(0x1b);
-                bytes.extend(sequence_to_bytes(&[KeyToken::Char(*ch)])?);
-            }
-            KeyToken::Up => bytes.extend_from_slice(b"\x1b[A"),
-            KeyToken::Down => bytes.extend_from_slice(b"\x1b[B"),
-            KeyToken::Left => bytes.extend_from_slice(b"\x1b[D"),
-            KeyToken::Right => bytes.extend_from_slice(b"\x1b[C"),
-            KeyToken::Home => bytes.extend_from_slice(b"\x1b[H"),
-            KeyToken::End => bytes.extend_from_slice(b"\x1b[F"),
-            KeyToken::Insert => bytes.extend_from_slice(b"\x1b[2~"),
-            KeyToken::Delete => bytes.extend_from_slice(b"\x1b[3~"),
-            KeyToken::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
-            KeyToken::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
-            KeyToken::Key { code, mods } => {
-                bytes.extend(crate::input::encode_key(*code, *mods, 0));
-            }
+        // Route every supported token through the mode-aware encoder. In legacy
+        // or disambiguate-only mode it still emits the plain legacy bytes for
+        // unmodified keys; under report-all-keys every key (ordinary characters
+        // and special keys like Tab) becomes a CSI-u escape sequence.
+        let (code, mods) = match token {
+            KeyToken::Char(ch) => (KeyCode::Char(*ch), Modifiers::NONE),
+            KeyToken::Space => (KeyCode::Char(' '), Modifiers::NONE),
+            KeyToken::Tab => (KeyCode::Tab, Modifiers::NONE),
+            KeyToken::Enter => (KeyCode::Enter, Modifiers::NONE),
+            KeyToken::Backspace => (KeyCode::Backspace, Modifiers::NONE),
+            KeyToken::Escape => (KeyCode::Escape, Modifiers::NONE),
+            KeyToken::Ctrl(ch) => (KeyCode::Char(*ch), ctrl),
+            KeyToken::Alt(ch) => (KeyCode::Char(*ch), alt),
+            KeyToken::Up => (KeyCode::Up, Modifiers::NONE),
+            KeyToken::Down => (KeyCode::Down, Modifiers::NONE),
+            KeyToken::Left => (KeyCode::Left, Modifiers::NONE),
+            KeyToken::Right => (KeyCode::Right, Modifiers::NONE),
+            KeyToken::Home => (KeyCode::Home, Modifiers::NONE),
+            KeyToken::End => (KeyCode::End, Modifiers::NONE),
+            KeyToken::Insert => (KeyCode::Insert, Modifiers::NONE),
+            KeyToken::Delete => (KeyCode::Delete, Modifiers::NONE),
+            KeyToken::PageUp => (KeyCode::PageUp, Modifiers::NONE),
+            KeyToken::PageDown => (KeyCode::PageDown, Modifiers::NONE),
+            KeyToken::Key { code, mods } => (*code, *mods),
             KeyToken::Leader => {
                 return Err(MuxError::invalid_input(
                     "leader placeholders cannot be sent directly",
                 ));
             }
-        }
+        };
+        bytes.extend(encode_key(code, mods, mode));
     }
     Ok(bytes)
-}
-
-fn ctrl_byte(ch: char) -> Result<u8> {
-    if !ch.is_ascii() {
-        return Err(MuxError::invalid_input("control keys must be ASCII"));
-    }
-    Ok((ch.to_ascii_lowercase() as u8) & 0x1f)
 }
 
 async fn rollback_created_buffer_on_error<T, U>(
@@ -3432,11 +3508,191 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use super::{ConfiguredClient, SearchPrompt, event_info};
+    use super::{ConfiguredClient, SearchPrompt, event_info, key_event_to_token};
     use crate::client::MuxClient;
     use crate::config::{ConfigDiscoveryOptions, ConfigManager};
-    use crate::input::NORMAL_MODE;
+    use crate::controller::KeyEvent;
+    use crate::input::{KeyToken, NORMAL_MODE};
     use crate::testing::FakeTransport;
+
+    #[test]
+    fn report_all_mode_routes_plain_keys_through_csi_u() {
+        use super::sequence_to_bytes;
+
+        // Compact keyboard-mode bitfield: bit 0 = disambiguate, bit 4 = report-all.
+        const DISAMBIGUATE_ONLY: u8 = 0b0000_0001;
+        const REPORT_ALL: u8 = 0b0001_0000;
+
+        // Disambiguate-only mode keeps unmodified plain keys as their legacy bytes.
+        assert_eq!(
+            sequence_to_bytes(&[KeyToken::Char('a')], DISAMBIGUATE_ONLY).unwrap(),
+            b"a".to_vec()
+        );
+        assert_eq!(
+            sequence_to_bytes(&[KeyToken::Tab], DISAMBIGUATE_ONLY).unwrap(),
+            b"\t".to_vec()
+        );
+
+        // Under report-all-keys, even ordinary characters and Tab become CSI-u.
+        assert_eq!(
+            sequence_to_bytes(&[KeyToken::Char('a')], REPORT_ALL).unwrap(),
+            b"\x1b[97u".to_vec()
+        );
+        assert_eq!(
+            sequence_to_bytes(&[KeyToken::Tab], REPORT_ALL).unwrap(),
+            b"\x1b[9u".to_vec()
+        );
+    }
+
+    #[test]
+    fn space_keypress_maps_to_the_space_binding_token() {
+        // A `<Space>` binding token is produced by the grammar for a literal
+        // space, so a space keypress must resolve to it (not Char(' ')).
+        assert_eq!(
+            key_event_to_token(KeyEvent::Char(' ')).unwrap(),
+            KeyToken::Space
+        );
+        assert_eq!(
+            key_event_to_token(KeyEvent::Char('a')).unwrap(),
+            KeyToken::Char('a')
+        );
+    }
+
+    #[test]
+    fn csi_u_single_modifier_char_normalizes_to_legacy_token() {
+        use crate::input::{KeyCode, Modifiers};
+        // A CSI-u Ctrl+H report must resolve to the same token as legacy `<C-h>`
+        // so a single binding matches both encodings.
+        assert_eq!(
+            key_event_to_token(KeyEvent::Key {
+                code: KeyCode::Char('h'),
+                mods: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+            .unwrap(),
+            KeyToken::Ctrl('h')
+        );
+        // Multi-modifier / special keys stay as Key tokens.
+        assert_eq!(
+            key_event_to_token(KeyEvent::Key {
+                code: KeyCode::Tab,
+                mods: Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+            .unwrap(),
+            KeyToken::Key {
+                code: KeyCode::Tab,
+                mods: Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_text_key_maps_unmodified_csi_u_to_legacy() {
+        use super::normalize_text_key;
+        use crate::input::{KeyCode, Modifiers};
+
+        // Unmodified CSI-u text keys collapse to their legacy form so search
+        // (and other text-consuming modes) treat both encodings identically.
+        assert_eq!(
+            normalize_text_key(KeyEvent::Key {
+                code: KeyCode::Char('a'),
+                mods: Modifiers::NONE,
+            }),
+            KeyEvent::Char('a')
+        );
+        assert_eq!(
+            normalize_text_key(KeyEvent::Key {
+                code: KeyCode::Enter,
+                mods: Modifiers::NONE,
+            }),
+            KeyEvent::Enter
+        );
+        // A modified key stays a Key (not text input)...
+        let ctrl_a = KeyEvent::Key {
+            code: KeyCode::Char('a'),
+            mods: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        };
+        assert_eq!(normalize_text_key(ctrl_a.clone()), ctrl_a);
+        // ...as does a non-text key like PageDown.
+        let page_down = KeyEvent::Key {
+            code: KeyCode::PageDown,
+            mods: Modifiers::NONE,
+        };
+        assert_eq!(normalize_text_key(page_down.clone()), page_down);
+    }
+
+    #[test]
+    fn report_all_csi_u_keys_tokenize_as_legacy() {
+        use super::{key_event_to_token, normalize_text_key};
+        use crate::input::{KeyCode, Modifiers};
+
+        // Under report-all-keys, ordinary chars, Space, and Tab arrive as CSI-u
+        // Key events; after the up-front normalization in handle_key they tokenize
+        // like their legacy forms, so `a`, `<Space>`, and `<Tab>` bindings (and
+        // hints labels, which match on the same Char events) still resolve.
+        let token = |code| {
+            key_event_to_token(normalize_text_key(KeyEvent::Key {
+                code,
+                mods: Modifiers::NONE,
+            }))
+            .unwrap()
+        };
+        assert_eq!(token(KeyCode::Char('a')), KeyToken::Char('a'));
+        assert_eq!(token(KeyCode::Char(' ')), KeyToken::Space);
+        assert_eq!(token(KeyCode::Tab), KeyToken::Tab);
+
+        // A modified CSI-u key is not text input; it keeps its modifier token.
+        let ctrl_a = KeyEvent::Key {
+            code: KeyCode::Char('a'),
+            mods: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        };
+        assert_eq!(
+            key_event_to_token(normalize_text_key(ctrl_a)).unwrap(),
+            KeyToken::Ctrl('a')
+        );
+    }
+
+    #[test]
+    fn shifted_char_reports_tokenize_lowercase() {
+        use super::key_event_to_token;
+        use crate::input::{KeyCode, Modifiers};
+
+        // A host reporting the shifted code point (Ctrl+Shift+T as 'T') must
+        // produce the same token as the kitty-style lowercase report, which is
+        // also how the binding grammar stores <C-S-T>.
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            key_event_to_token(KeyEvent::Key {
+                code: KeyCode::Char('T'),
+                mods: ctrl_shift,
+            })
+            .unwrap(),
+            KeyToken::Key {
+                code: KeyCode::Char('t'),
+                mods: ctrl_shift,
+            }
+        );
+    }
 
     #[test]
     fn attached_buffer_location_accepts_session_and_floating_locations() {

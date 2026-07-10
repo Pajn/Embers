@@ -326,13 +326,25 @@ fn enter_hints_action(ctx) {
     action.enter_hints()
 }
 
+fn next_tab_action(ctx) {
+    action.next_current_tabs()
+}
+
+fn prev_tab_action(ctx) {
+    action.prev_current_tabs()
+}
+
 define_action("last-session", last_session);
 define_action("wisp-popup", wisp_popup);
 define_action("hints", enter_hints_action);
+define_action("next-tab", next_tab_action);
+define_action("prev-tab", prev_tab_action);
 
 bind("normal", "<leader>'", "last-session");
 bind("normal", "<leader>w", "wisp-popup");
 bind("normal", "<leader><Space>", "hints");
+bind("normal", "<C-Tab>", "next-tab");
+bind("normal", "<C-S-Tab>", "prev-tab");
 bind("normal", "<C-h>", "smart-nav-left");
 bind("normal", "<C-j>", "smart-nav-down");
 bind("normal", "<C-k>", "smart-nav-up");

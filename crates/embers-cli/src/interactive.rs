@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use embers_client::{
-    ConfigManager, ConfiguredClient, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
-    MouseModifiers, MuxClient, RenderGrid, SocketTransport,
+    ConfigManager, ConfiguredClient, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
+    MouseEventKind, MouseModifiers, MuxClient, RenderGrid, SocketTransport,
 };
 use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
@@ -84,7 +84,7 @@ pub async fn run(
 
         loop {
             match input_rx.try_recv() {
-                Ok(TerminalEvent::Key(KeyEvent::Ctrl('q'))) => return Ok(()),
+                Ok(TerminalEvent::Key(key)) if is_quit_key(&key) => return Ok(()),
                 Ok(TerminalEvent::Key(key)) => {
                     if let Some(active_session_id) = session_id {
                         let viewport = content_viewport(terminal_size);
@@ -135,6 +135,7 @@ pub async fn run(
                         dirty = true;
                     }
                 },
+                Ok(TerminalEvent::Ignored) => {}
                 Ok(TerminalEvent::InputClosed) => return Ok(()),
                 Ok(TerminalEvent::InputError(message)) => {
                     return Err(MuxError::transport(message));
@@ -434,6 +435,10 @@ enum TerminalEvent {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Focus(bool),
+    /// A recognized report that carries no input to act on (e.g. a kitty
+    /// key-release when report-event-types is negotiated). Distinguished from an
+    /// unrecognized sequence so it isn't forwarded to the program as raw bytes.
+    Ignored,
     ConfigChanged,
     InputClosed,
     InputError(String),
@@ -561,6 +566,26 @@ fn read_escape_event(fd: libc::c_int) -> Result<TerminalEvent> {
     }
 }
 
+/// Match the hard-coded Ctrl+Q quit chord in both encodings the host terminal
+/// can deliver: the legacy control byte, and the CSI-u report sent once the
+/// kitty keyboard protocol is negotiated.
+fn is_quit_key(key: &KeyEvent) -> bool {
+    match key {
+        KeyEvent::Ctrl('q') => true,
+        KeyEvent::Key {
+            code: KeyCode::Char('q'),
+            mods,
+        } => {
+            *mods
+                == Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                }
+        }
+        _ => false,
+    }
+}
+
 fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
     let bytes = read_control_sequence(fd, b'[')?;
     if bytes == b"\x1b[200~" {
@@ -580,6 +605,12 @@ fn read_ss3_event(fd: libc::c_int) -> Result<TerminalEvent> {
         b'B' => Some(KeyEvent::Down),
         b'C' => Some(KeyEvent::Right),
         b'D' => Some(KeyEvent::Left),
+        // Unmodified F1-F4 arrive as SS3 P..S on typical terminals; only the
+        // modified forms use the `CSI 1;mods P` shape parsed elsewhere.
+        b'P'..=b'S' => Some(KeyEvent::Key {
+            code: KeyCode::Function(final_byte - b'P' + 1),
+            mods: Modifiers::NONE,
+        }),
         _ => None,
     };
     Ok(match key {
@@ -615,10 +646,153 @@ fn parse_csi_event(bytes: &[u8]) -> Option<TerminalEvent> {
         b"\x1b[4~" | b"\x1b[F" => Some(TerminalEvent::Key(KeyEvent::End)),
         b"\x1b[5~" => Some(TerminalEvent::Key(KeyEvent::PageUp)),
         b"\x1b[6~" => Some(TerminalEvent::Key(KeyEvent::PageDown)),
+        // Legacy backtab: the non-kitty encoding of Shift+Tab.
+        b"\x1b[Z" => Some(TerminalEvent::Key(KeyEvent::Key {
+            code: KeyCode::Tab,
+            mods: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        })),
         b"\x1b[I" => Some(TerminalEvent::Focus(true)),
         b"\x1b[O" => Some(TerminalEvent::Focus(false)),
-        _ => parse_sgr_mouse(bytes).map(TerminalEvent::Mouse),
+        _ => match parse_extended_key(bytes) {
+            Some(ExtendedKey::Event(key)) => Some(TerminalEvent::Key(key)),
+            // Recognized but carries no input (e.g. a key release): consume it so
+            // it never reaches the raw-byte fallback in `read_csi_event`.
+            Some(ExtendedKey::Consumed) => Some(TerminalEvent::Ignored),
+            None => parse_sgr_mouse(bytes).map(TerminalEvent::Mouse),
+        },
     }
+}
+
+/// The outcome of parsing an extended key report: a real key event, or a
+/// recognized report that should produce no input (so callers don't confuse it
+/// with an unrecognized sequence and echo raw bytes).
+enum ExtendedKey {
+    Event(KeyEvent),
+    Consumed,
+}
+
+/// Decode kitty modifier parameters (`1 + bitmask`) into [`Modifiers`]. The
+/// caps-lock (64) and num-lock (128) bits are ignored — lock state doesn't
+/// change which chord was pressed. Returns `None` for masks carrying modifiers
+/// we can't represent (hyper, meta), so the caller falls back to raw bytes
+/// rather than silently dropping a modifier.
+fn decode_kitty_mods(value: u32) -> Option<Modifiers> {
+    // The parameter is `1 + bitmask`; value 0 is malformed (there's no bitmask),
+    // so reject it rather than treating it as an empty modifier set.
+    let mask = value.checked_sub(1)? & !(64 | 128);
+    if mask & !0b1111 != 0 {
+        return None;
+    }
+    Some(Modifiers {
+        shift: mask & 1 != 0,
+        alt: mask & 2 != 0,
+        ctrl: mask & 4 != 0,
+        super_: mask & 8 != 0,
+    })
+}
+
+/// Parse a CSI-u (`CSI code;mods u`) or modified-legacy (`CSI 1;mods A`,
+/// `CSI n;mods ~`) key report into a modifier-carrying key event. Unmodified
+/// plain sequences are handled by the exact matches in `parse_csi_event`.
+fn parse_extended_key(bytes: &[u8]) -> Option<ExtendedKey> {
+    // Work on bytes: a CSI parameter/final region is ASCII, and a malformed
+    // sequence buffered up to the continuation timeout can carry an unterminated
+    // multibyte character, where splitting a `&str` mid-char would panic.
+    let body = bytes.strip_prefix(b"\x1b[")?;
+    let (&final_byte, params_bytes) = body.split_last()?;
+    let params = std::str::from_utf8(params_bytes).ok()?;
+
+    let mut parts = params.split(';');
+    let first: u32 = parts.next()?.parse().ok()?;
+    // Parse the modifier value and optional event type, but don't act on the
+    // event type until the key itself is validated below.
+    let (modifier_value, event_type) = match parts.next() {
+        Some(modifier) => {
+            let mut sub = modifier.split(':');
+            let value: u32 = sub.next()?.parse().ok()?;
+            let event_type = sub.next();
+            // The modifier field carries at most `mods:event-type`; a report
+            // with further colon-separated fields is malformed.
+            if sub.next().is_some() {
+                return None;
+            }
+            (value, event_type)
+        }
+        None => (1, None),
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let code = match final_byte {
+        b'u' => match first {
+            9 => KeyCode::Tab,
+            13 => KeyCode::Enter,
+            27 => KeyCode::Escape,
+            127 => KeyCode::Backspace,
+            other => {
+                // Kitty names functional keys (keypad, media keys, F13+) with
+                // Private Use Area code points (57344..=63743); none of them is
+                // a key we model, so fall back to raw bytes rather than
+                // reporting a typed PUA character.
+                if (57344..=63743).contains(&other) {
+                    return None;
+                }
+                KeyCode::Char(char::from_u32(other)?)
+            }
+        },
+        // Modified-legacy letter finals are `CSI 1;mods <letter>`: the leading
+        // parameter must be 1, otherwise it isn't a key report we recognize.
+        b'A' if first == 1 => KeyCode::Up,
+        b'B' if first == 1 => KeyCode::Down,
+        b'C' if first == 1 => KeyCode::Right,
+        b'D' if first == 1 => KeyCode::Left,
+        b'H' if first == 1 => KeyCode::Home,
+        b'F' if first == 1 => KeyCode::End,
+        b'P' if first == 1 => KeyCode::Function(1),
+        b'Q' if first == 1 => KeyCode::Function(2),
+        // No `CSI 1;mods R` arm for F3: that shape is also a cursor-position
+        // report (`CSI row;col R`), so terminals send modified F3 as its vt220
+        // tilde number instead (`CSI 13;mods~`), matched below.
+        b'S' if first == 1 => KeyCode::Function(4),
+        b'~' => match first {
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            13 => KeyCode::Function(3),
+            15 => KeyCode::Function(5),
+            17 => KeyCode::Function(6),
+            18 => KeyCode::Function(7),
+            19 => KeyCode::Function(8),
+            20 => KeyCode::Function(9),
+            21 => KeyCode::Function(10),
+            23 => KeyCode::Function(11),
+            24 => KeyCode::Function(12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    // Now that the key is known-supported, interpret the event type: consume a
+    // key-release report (type 3); accept press (1)/repeat (2) or an absent type;
+    // treat any other event type as unrecognized rather than silently consuming
+    // it. Prevents a release from being acted on as a press if report-event-types
+    // is ever negotiated.
+    match event_type {
+        None | Some("1") | Some("2") => {}
+        Some("3") => return Some(ExtendedKey::Consumed),
+        Some(_) => return None,
+    }
+
+    // A bare `CSI code u` with no modifiers still round-trips as a Key event,
+    // but plain arrows/nav without modifiers are matched exactly upstream. An
+    // unrepresentable modifier mask falls back to raw bytes.
+    let mods = decode_kitty_mods(modifier_value)?;
+    Some(ExtendedKey::Event(KeyEvent::Key { code, mods }))
 }
 
 fn parse_sgr_mouse(bytes: &[u8]) -> Option<MouseEvent> {
@@ -904,11 +1078,16 @@ fn terminal_enter_sequence(mouse_capture_enabled: bool) -> String {
     if mouse_capture_enabled {
         sequence.push_str(TERMINAL_ENABLE_MOUSE_SEQUENCE);
     }
+    // Push the kitty keyboard protocol (disambiguate-only) so the host terminal
+    // reports modifier combinations like C-Tab / C-S-Tab as CSI-u. Terminals
+    // that don't support it ignore this harmlessly.
+    sequence.push_str("\x1b[>1u");
     sequence
 }
 
 fn terminal_exit_sequence(mouse_capture_enabled: bool) -> String {
-    let mut sequence = String::from("\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l");
+    // Pop the kitty keyboard protocol pushed on enter.
+    let mut sequence = String::from("\x1b[<u\x1b[0m\x1b[2 q\x1b[?25h\x1b[?2004l");
     if mouse_capture_enabled {
         sequence.push_str(TERMINAL_DISABLE_MOUSE_SEQUENCE);
     }
@@ -995,9 +1174,238 @@ fn cursor_shape_code(shape: CursorShape) -> u8 {
 mod tests {
     use super::{
         TERMINAL_DISABLE_MOUSE_SEQUENCE, TERMINAL_ENABLE_MOUSE_SEQUENCE, TerminalEvent,
-        read_terminal_event, terminal_enter_sequence, terminal_exit_sequence,
+        is_quit_key, read_terminal_event, terminal_enter_sequence, terminal_exit_sequence,
     };
-    use embers_client::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
+    use embers_client::{
+        KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+    };
+
+    #[test]
+    fn parses_csi_u_and_modified_legacy_keys() {
+        let key = |bytes: &[u8]| {
+            with_pipe(bytes, read_terminal_event)
+                .expect("read succeeds")
+                .expect("event produced")
+        };
+
+        // Ctrl+I disambiguated from Tab (CSI 105 ; 5 u).
+        assert_eq!(
+            key(b"\x1b[105;5u"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Char('i'),
+                mods: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // Ctrl+Shift+Tab.
+        assert_eq!(
+            key(b"\x1b[9;6u"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Tab,
+                mods: Modifiers {
+                    shift: true,
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // Modified legacy arrow: Shift+Left.
+        assert_eq!(
+            key(b"\x1b[1;2D"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Left,
+                mods: Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // Modified function key: Alt+F5 (CSI 15 ; 3 ~).
+        assert_eq!(
+            key(b"\x1b[15;3~"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Function(5),
+                mods: Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // Unknown CSI falls back to raw bytes.
+        assert_eq!(
+            key(b"\x1b[99z"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[99z".to_vec()))
+        );
+        // A CSI carrying an unterminated multibyte char must not panic; it falls
+        // back to raw bytes (é = 0xc3 0xa9, neither a CSI final byte).
+        assert_eq!(
+            key(b"\x1b[\xc3\xa9"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[\xc3\xa9".to_vec()))
+        );
+        // A key-release report (event type 3) is consumed, not acted on as a
+        // press nor echoed to the program as raw bytes.
+        assert_eq!(key(b"\x1b[97;5:3u"), TerminalEvent::Ignored);
+        // A press with an explicit event type (1) still decodes.
+        assert_eq!(
+            key(b"\x1b[97;5:1u"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Char('a'),
+                mods: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // An unknown event type (not 1/2/3) is not consumed: it's unrecognized
+        // and falls back to raw bytes rather than being silently swallowed.
+        assert_eq!(
+            key(b"\x1b[97;5:4u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[97;5:4u".to_vec()))
+        );
+        // The modifier field is at most `mods:event-type`; extra colon fields
+        // are malformed, not silently ignored.
+        assert_eq!(
+            key(b"\x1b[97;5:1:2u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[97;5:1:2u".to_vec()))
+        );
+        // A release for an unsupported key is likewise unrecognized (the key is
+        // validated before the event type), not consumed.
+        assert_eq!(
+            key(b"\x1b[97;5:3z"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[97;5:3z".to_vec()))
+        );
+        // A modifier mask carrying an unrepresentable bit (hyper = mask bit 4,
+        // value 17) falls back to raw bytes instead of dropping the modifier.
+        assert_eq!(
+            key(b"\x1b[97;17u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[97;17u".to_vec()))
+        );
+        // A modifier value of 0 is malformed (the encoding is 1 + bitmask), so it
+        // falls back to raw bytes rather than decoding as an empty modifier set.
+        assert_eq!(
+            key(b"\x1b[97;0u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[97;0u".to_vec()))
+        );
+        // A modified-legacy letter final is only valid with a leading 1; a
+        // different leading parameter is not a recognized key report.
+        assert_eq!(
+            key(b"\x1b[5A"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[5A".to_vec()))
+        );
+        // The valid `CSI 1;mods A` form still decodes as a modified arrow.
+        assert_eq!(
+            key(b"\x1b[1;2A"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Up,
+                mods: Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parses_legacy_forms_of_extended_keys() {
+        let key = |bytes: &[u8]| {
+            with_pipe(bytes, read_terminal_event)
+                .expect("read succeeds")
+                .expect("event produced")
+        };
+
+        // Unmodified F1 arrives as SS3 P on typical terminals.
+        assert_eq!(
+            key(b"\x1bOP"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Function(1),
+                mods: Modifiers::NONE,
+            })
+        );
+        // Legacy backtab is Shift+Tab.
+        assert_eq!(
+            key(b"\x1b[Z"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Tab,
+                mods: Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // Modified F3 arrives as its vt220 tilde number (CSI 13;mods~).
+        assert_eq!(
+            key(b"\x1b[13;2~"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Function(3),
+                mods: Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+        // `CSI 1;2R` is a cursor-position report, not Shift+F3: it must fall
+        // back to raw bytes rather than decode as a key.
+        assert_eq!(
+            key(b"\x1b[1;2R"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[1;2R".to_vec()))
+        );
+    }
+
+    #[test]
+    fn unmapped_kitty_reports_degrade_gracefully() {
+        let key = |bytes: &[u8]| {
+            with_pipe(bytes, read_terminal_event)
+                .expect("read succeeds")
+                .expect("event produced")
+        };
+
+        // Kitty functional keys use Private Use Area code points (KP_Enter =
+        // 57414): they fall back to raw bytes, never to typed PUA characters.
+        assert_eq!(
+            key(b"\x1b[57414u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[57414u".to_vec()))
+        );
+        assert_eq!(
+            key(b"\x1b[57414;5u"),
+            TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[57414;5u".to_vec()))
+        );
+        // Lock modifiers are stripped, not treated as unrepresentable: Ctrl+H
+        // with num-lock active (mask 4|128, value 133) still decodes as Ctrl+H.
+        assert_eq!(
+            key(b"\x1b[104;133u"),
+            TerminalEvent::Key(KeyEvent::Key {
+                code: KeyCode::Char('h'),
+                mods: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn quit_chord_matches_both_encodings() {
+        assert!(is_quit_key(&KeyEvent::Ctrl('q')));
+        // The CSI-u report a kitty-protocol host sends for Ctrl+Q.
+        assert!(is_quit_key(&KeyEvent::Key {
+            code: KeyCode::Char('q'),
+            mods: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        }));
+        // Extra modifiers are a different chord.
+        assert!(!is_quit_key(&KeyEvent::Key {
+            code: KeyCode::Char('q'),
+            mods: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        }));
+    }
 
     fn with_pipe<T>(bytes: &[u8], test: impl FnOnce(libc::c_int) -> T) -> T {
         let mut fds = [0; 2];
