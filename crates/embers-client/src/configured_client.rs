@@ -136,6 +136,28 @@ where
         self.terminal_output.drain(..).collect()
     }
 
+    /// Emit an OSC 2 window-title update naming the given session, so the host
+    /// terminal's tab/window title follows the active session (tmux
+    /// `set-titles-string '#S'`). Called by the interactive client on attach; it
+    /// also fires on session switch and rename. No reset is emitted on exit —
+    /// terminals restore their own title, matching tmux.
+    pub fn emit_terminal_title(&mut self, session_id: SessionId) {
+        let Some(session_name) = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.name.clone())
+        else {
+            return;
+        };
+        // Strip control characters so a session name can't terminate the OSC 2
+        // sequence early or inject its own escape sequences into the host terminal.
+        let title: String = session_name.chars().filter(|ch| !ch.is_control()).collect();
+        self.terminal_output
+            .push_back(format!("\x1b]2;{title}\x07").into_bytes());
+    }
+
     pub fn status_line(&self, session_id: SessionId, socket_path: &Path) -> String {
         let session_name = self
             .client
@@ -398,9 +420,22 @@ where
         // the server (e.g. another client or a server-driven switch).
         if let ServerEvent::ClientChanged(changed) = event
             && self.client.cached_client_id() == Some(changed.client.id)
-            && let Some(session_id) = changed.client.current_session_id
         {
-            self.set_active_session(session_id);
+            match changed.client.current_session_id {
+                Some(session_id) => {
+                    self.set_active_session(session_id);
+                    self.emit_terminal_title(session_id);
+                }
+                // The server detached this client from every session; drop the
+                // now-stale active session instead of leaving it dangling.
+                None => self.clear_active_session(),
+            }
+        }
+        // Follow the active session's name in the host terminal title.
+        if let ServerEvent::SessionRenamed(renamed) = event
+            && self.active_session_id == Some(renamed.session_id)
+        {
+            self.emit_terminal_title(renamed.session_id);
         }
         let session_id = detached_session_id.or_else(|| self.event_session_id(event));
 
@@ -1792,6 +1827,14 @@ where
         if self.active_session_id != Some(session_id) {
             self.previous_session_id = self.active_session_id;
             self.active_session_id = Some(session_id);
+        }
+    }
+
+    /// Drop the active session (e.g. the server detached this client), keeping
+    /// the prior one so `last_session` can still toggle back to it.
+    fn clear_active_session(&mut self) {
+        if let Some(session_id) = self.active_session_id.take() {
+            self.previous_session_id = Some(session_id);
         }
     }
 

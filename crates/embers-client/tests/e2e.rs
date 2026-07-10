@@ -1458,6 +1458,87 @@ async fn run_shell_spawns_with_socket_env_and_reports_failures() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_title_follows_session_on_attach_switch_and_rename() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    async fn drain_until_contains(
+        configured: &mut ConfiguredClient<embers_client::SocketTransport>,
+        needle: &[u8],
+    ) {
+        let mut accumulated: Vec<u8> = configured.drain_terminal_output().concat();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !contains_subslice(&accumulated, needle) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for terminal output {:?}; got {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&accumulated)
+            );
+            let _ = configured
+                .process_next_event_timeout(Duration::from_millis(100))
+                .await;
+            accumulated.extend(configured.drain_terminal_output().concat());
+        }
+    }
+
+    let server = TestServer::start().await.expect("server starts");
+    two_sessions_with_shells(&server);
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let beta = session_id_by_name(configured.client(), "beta");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Attach-time title emission: `interactive::run` emits the title at startup by
+    // calling `emit_terminal_title` directly, which we exercise here — the full run
+    // loop needs a real TTY and input threads, so this covers the direct emission.
+    configured.emit_terminal_title(alpha);
+    let drained = configured.drain_terminal_output().concat();
+    assert!(
+        contains_subslice(&drained, b"\x1b]2;alpha\x07"),
+        "attach title missing in {:?}",
+        String::from_utf8_lossy(&drained)
+    );
+
+    // Switch: the own-client ClientChanged updates the title.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+    drain_until_contains(&mut configured, b"\x1b]2;beta\x07").await;
+
+    // Rename of the active session updates the title.
+    run_cli(&server, &["rename-session", "-t", "beta", "gamma"]);
+    drain_until_contains(&mut configured, b"\x1b]2;gamma\x07").await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_switch_actions_move_between_sessions() {
     use embers_client::{ConfiguredClient, KeyEvent};
 

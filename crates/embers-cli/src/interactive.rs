@@ -42,6 +42,9 @@ pub async fn run(
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
     configured.set_socket_path(socket_path.clone());
+    if let Some(session_id) = session_id {
+        configured.emit_terminal_title(session_id);
+    }
 
     let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
