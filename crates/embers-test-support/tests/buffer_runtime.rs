@@ -18,13 +18,24 @@ fn lines_text(lines: &[SnapshotLine]) -> String {
 }
 
 async fn create_buffer(connection: &mut TestConnection, command: &[&str]) -> BufferRecord {
+    create_buffer_with_env(connection, command, &[]).await
+}
+
+async fn create_buffer_with_env(
+    connection: &mut TestConnection,
+    command: &[&str],
+    env: &[(&str, &str)],
+) -> BufferRecord {
     let response = connection
         .request(&ClientMessage::Buffer(BufferRequest::Create {
             request_id: new_request_id(),
             title: Some("buffer".to_owned()),
             command: command.iter().map(|part| (*part).to_owned()).collect(),
             cwd: None,
-            env: Default::default(),
+            env: env
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
         }))
         .await
         .expect("create buffer request succeeds");
@@ -496,6 +507,105 @@ async fn detached_visible_capture_tracks_latest_size_and_output() {
         .expect("detached scrollback slice succeeds");
     assert!(slice.total_lines >= 2);
     assert!(lines_text(&slice.lines).contains("ready"));
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cursor_position_query_reply_reaches_the_inner_program() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    // The shell emits a DSR cursor-position query, then reads the CPR reply the
+    // keeper writes back to the PTY, proving the reply round-tripped through the
+    // real read loop and writer. The reply is `ESC [ <row> ; <col> R` with no
+    // newline, so the tty leaves canonical mode and we read one byte at a time
+    // until the `R` terminator (its length varies with the cursor position). This
+    // stays POSIX — `dd` and a byte loop — so it works under dash, whose `read`
+    // has no bashy `-d`. `-echo` keeps the raw escape out of the snapshot.
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-c",
+            "stty -icanon -echo min 1 time 0; printf '\\033[6n'; reply=; \
+             while c=$(dd bs=1 count=1 2>/dev/null); do reply=\"$reply$c\"; \
+             [ \"$c\" = R ] && break; done; stty icanon echo; \
+             printf 'CPR:%s\\n' \"${reply#*[}\"",
+        ],
+    )
+    .await;
+
+    let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "CPR:").await;
+    let text = snapshot.lines.join("\n");
+    // The reply body is `<row>;<col>`, so the printed marker carries a semicolon.
+    assert!(
+        text.contains("CPR:") && text.contains(';'),
+        "expected a cursor-position report in {text:?}"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_children_inherit_default_term_and_socket_env() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            "printf 'ENV:%s:%s:%s\\n' \"$TERM\" \"$COLORTERM\" \"$EMBERS_SOCKET\"",
+        ],
+    )
+    .await;
+
+    let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "ENV:").await;
+    // Join without a separator: a long socket path wraps across snapshot rows at
+    // the terminal width, so newlines would split the value mid-string.
+    let flat = snapshot.lines.join("");
+    assert!(
+        flat.contains("ENV:xterm-256color:truecolor:"),
+        "expected default TERM/COLORTERM in {flat:?}"
+    );
+    let socket = server.socket_path().to_string_lossy();
+    assert!(
+        flat.contains(socket.as_ref()),
+        "expected EMBERS_SOCKET {socket:?} in {flat:?}"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_env_hint_overrides_default_term() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer_with_env(
+        &mut connection,
+        &["/bin/sh", "-lc", "printf 'TERM=%s\\n' \"$TERM\""],
+        &[("TERM", "dumb")],
+    )
+    .await;
+
+    let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "TERM=").await;
+    let text = snapshot.lines.join("\n");
+    assert!(
+        text.contains("TERM=dumb"),
+        "expected user TERM override in {text:?}"
+    );
 
     server.shutdown().await.expect("shutdown server");
 }

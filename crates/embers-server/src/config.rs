@@ -4,6 +4,19 @@ use std::path::PathBuf;
 
 pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
 
+/// `TERM` advertised to buffer child processes. Embers ships no terminfo of its
+/// own; alacritty's emulation is closest to xterm and `xterm-256color` exists
+/// everywhere. A user-supplied `TERM` in the buffer spawn env still overrides
+/// this (hints are merged after the base env).
+pub const TERM_ENV_VAR: &str = "TERM";
+/// Default `TERM` value injected into buffer children.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+/// `COLORTERM` advertised to buffer child processes. Truthful at the parser
+/// level: alacritty accepts 24-bit SGR sequences.
+pub const COLORTERM_ENV_VAR: &str = "COLORTERM";
+/// Default `COLORTERM` value injected into buffer children.
+pub const DEFAULT_COLORTERM: &str = "truecolor";
+
 /// Environment variable overriding [`ResourceLimits::max_sessions`].
 pub const MAX_SESSIONS_ENV_VAR: &str = "EMBERS_MAX_SESSIONS";
 /// Environment variable overriding [`ResourceLimits::max_buffers`].
@@ -85,6 +98,14 @@ impl ServerConfig {
         buffer_env.insert(
             SOCKET_ENV_VAR.to_owned(),
             socket_path.as_os_str().to_owned(),
+        );
+        // Base terminal env for buffer children. User env hints are merged after
+        // this base (see `Server::spawn_buffer_runtime`), so a caller-specified
+        // TERM/COLORTERM still wins.
+        buffer_env.insert(TERM_ENV_VAR.to_owned(), OsString::from(DEFAULT_TERM));
+        buffer_env.insert(
+            COLORTERM_ENV_VAR.to_owned(),
+            OsString::from(DEFAULT_COLORTERM),
         );
         let workspace_path = socket_path.with_extension("workspace.json");
         let runtime_dir = socket_path.with_extension("runtimes");

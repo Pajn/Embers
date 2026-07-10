@@ -57,7 +57,13 @@ pub trait TerminalBackend: Send {
     fn capture_scrollback(&self) -> Vec<String>;
     fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> BackendScrollbackSlice;
     fn metadata(&self) -> BackendMetadata;
-    fn take_activity(&mut self) -> ActivityState;
+    /// Drain, under a single lock acquisition, the pending activity state and any
+    /// terminal replies the emulator generated while ingesting bytes
+    /// (device-attribute, cursor-position, and mode queries). The replies are
+    /// written back to the PTY master; the returned `Vec` is empty when there is
+    /// nothing pending. Combining the two drains keeps the read hot path to one
+    /// lock acquisition against the client-thread readers of the same state.
+    fn take_events(&mut self) -> (ActivityState, Vec<u8>);
     fn take_damage(&mut self) -> BackendDamage;
 }
 
@@ -106,6 +112,7 @@ struct BackendEventProxy {
 struct BackendEventState {
     title: Option<String>,
     bell_pending: bool,
+    pty_write: Vec<u8>,
 }
 
 impl BackendEventProxy {
@@ -128,6 +135,7 @@ impl EventListener for BackendEventProxy {
             Event::Title(title) => state.title = Some(title),
             Event::ResetTitle => state.title = None,
             Event::Bell => state.bell_pending = true,
+            Event::PtyWrite(text) => state.pty_write.extend_from_slice(text.as_bytes()),
             _ => {}
         }
     }
@@ -433,16 +441,20 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         }
     }
 
-    fn take_activity(&mut self) -> ActivityState {
+    fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
+        // Recover from a poisoned lock rather than crashing: the event state is
+        // plain data, and dropping replies here would leave inner apps waiting on
+        // query timeouts.
         let mut state = self
             .events
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if std::mem::take(&mut state.bell_pending) {
+        let activity = if std::mem::take(&mut state.bell_pending) {
             ActivityState::Bell
         } else {
             ActivityState::Activity
-        }
+        };
+        (activity, std::mem::take(&mut state.pty_write))
     }
 
     fn take_damage(&mut self) -> BackendDamage {
@@ -647,8 +659,8 @@ mod tests {
             BackendMetadata::default()
         }
 
-        fn take_activity(&mut self) -> ActivityState {
-            ActivityState::Activity
+        fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
+            (ActivityState::Activity, Vec::new())
         }
 
         fn take_damage(&mut self) -> BackendDamage {
@@ -990,11 +1002,69 @@ mod tests {
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_activity(), ActivityState::Bell);
+        assert_eq!(backend.take_events().0, ActivityState::Bell);
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_activity(), ActivityState::Activity);
+        assert_eq!(backend.take_events().0, ActivityState::Activity);
+    }
+
+    #[test]
+    fn da1_query_produces_device_attributes_reply() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b[c");
+
+        let reply = backend.take_events().1;
+        let text = String::from_utf8(reply).expect("reply is utf8");
+        assert!(text.starts_with("\x1b[?"), "reply: {text:?}");
+        assert!(text.ends_with('c'), "reply: {text:?}");
+
+        // Drained: a second call returns nothing.
+        assert!(backend.take_events().1.is_empty());
+    }
+
+    #[test]
+    fn dsr_cursor_position_report_reports_row_and_column() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"ab\x1b[6n");
+
+        let reply = backend.take_events().1;
+        let text = String::from_utf8(reply).expect("reply is utf8");
+        // Cursor sits after "ab" on row 1: CPR is ESC [ <row> ; <col> R.
+        assert_eq!(text, "\x1b[1;3R", "reply: {text:?}");
+    }
+
+    #[test]
+    fn decrqm_reports_bracketed_paste_mode() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b[?2004h\x1b[?2004$p");
+
+        let reply = backend.take_events().1;
+        let text = String::from_utf8(reply).expect("reply is utf8");
+        assert!(text.starts_with("\x1b[?2004;"), "reply: {text:?}");
+        assert!(text.ends_with("$y"), "reply: {text:?}");
+    }
+
+    #[test]
+    fn pty_writes_accumulate_alongside_title_and_bell() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b]0;embers\x07\x1b[c\x07");
+
+        let metadata = backend.metadata();
+        assert_eq!(metadata.title.as_deref(), Some("embers"));
+
+        // A single drain returns both the bell activity and the accumulated reply.
+        let (activity, reply) = backend.take_events();
+        assert_eq!(activity, ActivityState::Bell);
+        assert!(!reply.is_empty(), "device-attributes reply should survive");
     }
 
     #[test]
