@@ -292,6 +292,18 @@ pub enum BufferCommand {
         #[arg(long)]
         client: Option<NonZeroU64>,
     },
+    SetOption {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        key: String,
+        value: Option<String>,
+        #[arg(long, conflicts_with = "value")]
+        unset: bool,
+    },
+    ShowOptions {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -674,6 +686,84 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     at_root_tab,
                 )?;
                 Ok(format_buffer_location_line(&location))
+            }
+            BufferCommand::SetOption {
+                target,
+                key,
+                value,
+                unset,
+            } => {
+                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let value = if unset {
+                    None
+                } else {
+                    Some(value.ok_or_else(|| {
+                        MuxError::invalid_input(
+                            "buffer set-option requires a value (or --unset to clear it)",
+                        )
+                    })?)
+                };
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::SetUserOption {
+                        request_id: new_request_id(),
+                        buffer_id,
+                        key,
+                        value,
+                    }))
+                    .await?;
+                match response {
+                    ServerResponse::Buffer(response) => {
+                        ensure_matching_buffer_id(
+                            "buffer set-option",
+                            buffer_id,
+                            response.buffer.id,
+                        )?;
+                        Ok(String::new())
+                    }
+                    other => Err(MuxError::protocol(format!(
+                        "unexpected response to buffer set-option: {other:?}"
+                    ))),
+                }
+            }
+            BufferCommand::ShowOptions { target } => {
+                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::Get {
+                        request_id: new_request_id(),
+                        buffer_id,
+                    }))
+                    .await?;
+                match response {
+                    ServerResponse::Buffer(response) => {
+                        ensure_matching_buffer_id(
+                            "buffer show-options",
+                            buffer_id,
+                            response.buffer.id,
+                        )?;
+                        Ok(response
+                            .buffer
+                            .user_options
+                            .iter()
+                            .map(|(key, value)| {
+                                // JSON-encode both fields and tab-separate them
+                                // (like format_buffer_details) so a key or value
+                                // containing whitespace stays one parseable line
+                                // with an unambiguous field boundary.
+                                format!(
+                                    "{}\t{}",
+                                    serde_json::to_string(key)
+                                        .expect("user option keys serialize to JSON"),
+                                    serde_json::to_string(value)
+                                        .expect("user option values serialize to JSON"),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"))
+                    }
+                    other => Err(MuxError::protocol(format!(
+                        "unexpected response to buffer show-options: {other:?}"
+                    ))),
+                }
             }
         },
         Command::Node { command } => match command {
@@ -2605,6 +2695,7 @@ mod tests {
                 last_snapshot_seq: 0,
                 exit_code: None,
                 pipe: None,
+                user_options: Default::default(),
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -2641,6 +2732,7 @@ mod tests {
                 last_snapshot_seq: 0,
                 exit_code: None,
                 pipe: None,
+                user_options: Default::default(),
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -2685,6 +2777,7 @@ mod tests {
                 last_snapshot_seq: 0,
                 exit_code: None,
                 pipe: None,
+                user_options: Default::default(),
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );
@@ -2779,6 +2872,84 @@ mod tests {
             }
             other => panic!("expected buffer reveal command, got {other:?}"),
         }
+
+        let set_option =
+            Cli::try_parse_from(["embers", "buffer", "set-option", "-t", "p1", "is-vim", "1"])
+                .expect("set-option parses");
+        match set_option.command {
+            Some(Command::Buffer {
+                command:
+                    BufferCommand::SetOption {
+                        target,
+                        key,
+                        value,
+                        unset,
+                    },
+            }) => {
+                assert_eq!(target.as_deref(), Some("p1"));
+                assert_eq!(key, "is-vim");
+                assert_eq!(value.as_deref(), Some("1"));
+                assert!(!unset);
+            }
+            other => panic!("expected buffer set-option command, got {other:?}"),
+        }
+
+        let unset = Cli::try_parse_from(["embers", "buffer", "set-option", "--unset", "is-vim"])
+            .expect("set-option --unset parses");
+        match unset.command {
+            Some(Command::Buffer {
+                command:
+                    BufferCommand::SetOption {
+                        target,
+                        key,
+                        value,
+                        unset,
+                    },
+            }) => {
+                assert_eq!(target, None);
+                assert_eq!(key, "is-vim");
+                assert_eq!(value, None);
+                assert!(unset);
+            }
+            other => panic!("expected buffer set-option --unset command, got {other:?}"),
+        }
+
+        // A value with no --unset parses (the missing-value case is rejected at
+        // runtime, not at the parser); --unset combined with a value conflicts.
+        let no_value = Cli::try_parse_from(["embers", "buffer", "set-option", "is-vim"])
+            .expect("set-option without a value still parses");
+        assert!(matches!(
+            no_value.command,
+            Some(Command::Buffer {
+                command: BufferCommand::SetOption {
+                    value: None,
+                    unset: false,
+                    ..
+                },
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["embers", "buffer", "set-option", "--unset", "is-vim", "1"])
+                .is_err(),
+            "--unset combined with a value should be rejected"
+        );
+
+        let show_options = Cli::try_parse_from(["embers", "buffer", "show-options", "-t", "p2"])
+            .expect("show-options parses");
+        match show_options.command {
+            Some(Command::Buffer {
+                command: BufferCommand::ShowOptions { target },
+            }) => assert_eq!(target.as_deref(), Some("p2")),
+            other => panic!("expected buffer show-options command, got {other:?}"),
+        }
+        let show_options_default = Cli::try_parse_from(["embers", "buffer", "show-options"])
+            .expect("show-options without a target parses");
+        assert!(matches!(
+            show_options_default.command,
+            Some(Command::Buffer {
+                command: BufferCommand::ShowOptions { target: None },
+            })
+        ));
     }
 
     #[test]

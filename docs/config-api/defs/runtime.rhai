@@ -665,6 +665,11 @@ fn title(tab: TabInfo) -> String;
 /// ReturnType: `string | ()`
 fn tty_path(buffer: BufferRef) -> ?;
 
+/// Look up a runtime user option set on the buffer via `embers buffer set-option`.
+///
+/// ReturnType: `string | ()`
+fn user_option(buffer: BufferRef, key: string) -> ?;
+
 /// Return the formatter viewport width in cells.
 fn viewport_width(bar: TabBarContext) -> int;
 

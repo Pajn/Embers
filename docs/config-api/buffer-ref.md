@@ -427,3 +427,27 @@ ReturnType: `string | ()`
 </div>
 </div>
 </br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> user_option </h2>
+
+```rust,ignore
+fn user_option(buffer: BufferRef, key: String) -> ?
+```
+
+<div>
+<div class="tab">
+<button group="user_option" id="link-user_option-Description"  class="tablinks active"
+    onclick="openTab(event, 'user_option', 'Description')">
+Description
+</button>
+</div>
+
+<div group="user_option" id="user_option-Description" class="tabcontent"  style="display: block;" >
+Look up a runtime user option set on the buffer via `embers buffer set-option`.
+
+ReturnType: `string | ()`
+</div>
+
+</div>
+</div>
+</br>

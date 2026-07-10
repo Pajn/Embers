@@ -185,6 +185,7 @@ impl Context {
                         exit_code: buffer.exit_code,
                         tty_path: None,
                         snapshot_lines,
+                        user_options: buffer.user_options.clone(),
                     },
                 )
             })
@@ -339,6 +340,7 @@ pub struct BufferRef {
     pub exit_code: Option<i32>,
     pub tty_path: Option<String>,
     pub snapshot_lines: Vec<String>,
+    pub user_options: BTreeMap<String, String>,
 }
 
 impl BufferRef {
@@ -359,6 +361,10 @@ impl BufferRef {
 
     pub fn env_hint(&self, key: &str) -> Option<String> {
         self.env.get(key).cloned()
+    }
+
+    pub fn user_option(&self, key: &str) -> Option<String> {
+        self.user_options.get(key).cloned()
     }
 
     pub fn snapshot_text(&self, limit: usize) -> String {

@@ -2935,6 +2935,7 @@ mod tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location,
                 false,

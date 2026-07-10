@@ -261,6 +261,15 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
         | BufferRequest::StopPipe { buffer_id, .. } => {
             validate_required_buffer_id(*buffer_id, "buffer_request.buffer_id")
         }
+        BufferRequest::SetUserOption { buffer_id, key, .. } => {
+            validate_required_buffer_id(*buffer_id, "buffer_request.buffer_id")?;
+            if key.is_empty() {
+                return Err(ProtocolError::InvalidMessage(
+                    "buffer_request.user_option_key must not be empty",
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -426,6 +435,13 @@ fn decode_string_map(
     field: &'static str,
 ) -> Result<std::collections::BTreeMap<String, String>, ProtocolError> {
     let Some(keys) = keys else {
+        // Keys and values must both be absent or both present; values without
+        // keys is a malformed frame, not an empty map.
+        if values.is_some() {
+            return Err(ProtocolError::InvalidMessageOwned(format!(
+                "{field} has values without keys"
+            )));
+        }
         return Ok(std::collections::BTreeMap::new());
     };
     let Some(values) = values else {
@@ -1235,6 +1251,31 @@ fn encode_buffer_request<'a>(
             None,
             None,
         ),
+        BufferRequest::SetUserOption { buffer_id, .. } => (
+            fb::BufferOp::SetUserOption,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+    };
+
+    // A present (possibly empty) `user_option_value` string encodes `Some`; an
+    // absent one encodes `None`. Flatbuffers string presence carries this on its
+    // own, so no separate has-value flag is needed.
+    let (user_option_key_str, user_option_value_str) = match req {
+        BufferRequest::SetUserOption { key, value, .. } => (Some(key.as_str()), value.as_deref()),
+        _ => (None, None),
     };
 
     let title = title_str.map(|s| builder.create_string(s));
@@ -1251,6 +1292,8 @@ fn encode_buffer_request<'a>(
         let values = env.values().cloned().collect::<Vec<_>>();
         create_string_vector(builder, &values)
     });
+    let user_option_key = user_option_key_str.map(|s| builder.create_string(s));
+    let user_option_value = user_option_value_str.map(|s| builder.create_string(s));
 
     let buffer_req = fb::BufferRequest::create(
         builder,
@@ -1271,6 +1314,8 @@ fn encode_buffer_request<'a>(
             cwd,
             env_keys,
             env_values,
+            user_option_key,
+            user_option_value,
         },
     );
 
@@ -3165,6 +3210,10 @@ fn encode_buffer_record<'a>(
     let env_values_vec = record.env.values().cloned().collect::<Vec<_>>();
     let env_keys = create_string_vector(builder, &env_keys_vec);
     let env_values = create_string_vector(builder, &env_values_vec);
+    let user_option_keys_vec = record.user_options.keys().cloned().collect::<Vec<_>>();
+    let user_option_values_vec = record.user_options.values().cloned().collect::<Vec<_>>();
+    let user_option_keys = create_string_vector(builder, &user_option_keys_vec);
+    let user_option_values = create_string_vector(builder, &user_option_values_vec);
 
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
@@ -3219,6 +3268,8 @@ fn encode_buffer_record<'a>(
             has_exit_code: record.exit_code.is_some(),
             env_keys: Some(env_keys),
             env_values: Some(env_values),
+            user_option_keys: Some(user_option_keys),
+            user_option_values: Some(user_option_values),
         },
     )
 }
@@ -3630,6 +3681,18 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         req.buffer_id(),
                         "buffer_request.buffer_id",
                     )?,
+                },
+                fb::BufferOp::SetUserOption => BufferRequest::SetUserOption {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                    key: required(req.user_option_key(), "buffer_request.user_option_key")?
+                        .to_owned(),
+                    // Presence of the value string distinguishes `Some("")` from
+                    // `None`; an absent string decodes to `None`.
+                    value: req.user_option_value().map(|value| value.to_owned()),
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown buffer op")),
             };
@@ -4449,6 +4512,11 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         _ => return Err(ProtocolError::InvalidMessage("unknown activity state")),
     };
     let env = decode_string_map(record.env_keys(), record.env_values(), "buffer_record.env")?;
+    let user_options = decode_string_map(
+        record.user_option_keys(),
+        record.user_option_values(),
+        "buffer_record.user_options",
+    )?;
     let kind = match record.kind() {
         fb::BufferKindWire::Pty => BufferRecordKind::Pty,
         fb::BufferKindWire::Helper => BufferRecordKind::Helper,
@@ -4499,6 +4567,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
             None
         },
         env,
+        user_options,
     };
     record
         .validate()
@@ -4797,6 +4866,7 @@ mod tests {
             last_snapshot_seq: 1,
             exit_code: None,
             env: BTreeMap::new(),
+            user_options: Default::default(),
         };
 
         let error = record
@@ -4835,6 +4905,7 @@ mod tests {
             last_snapshot_seq: 1,
             exit_code: None,
             env: BTreeMap::new(),
+            user_options: Default::default(),
         };
 
         let error = record
@@ -5212,6 +5283,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5249,6 +5321,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5287,6 +5360,7 @@ mod tests {
                         last_snapshot_seq: 0,
                         exit_code: None,
                         env: Default::default(),
+                        user_options: Default::default(),
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -5315,6 +5389,7 @@ mod tests {
                         last_snapshot_seq: 0,
                         exit_code: None,
                         env: Default::default(),
+                        user_options: Default::default(),
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -5342,6 +5417,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5389,6 +5465,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -5431,6 +5508,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -5469,6 +5547,7 @@ mod tests {
                 last_snapshot_seq: 0,
                 exit_code: None,
                 env: Default::default(),
+                user_options: Default::default(),
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -5504,6 +5583,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             }),
         ))
@@ -5529,6 +5609,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             }),
         ))
@@ -5569,6 +5650,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             }),
         ))
@@ -5594,6 +5676,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             }),
         ))
@@ -5691,6 +5774,7 @@ mod tests {
                     last_snapshot_seq: 0,
                     exit_code: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             }),
         ))
@@ -5795,6 +5879,23 @@ mod tests {
             error,
             ProtocolError::InvalidMessageOwned(message)
                 if message == "buffer_request.command first segment must not be empty"
+        ));
+    }
+
+    #[test]
+    fn encode_buffer_request_rejects_empty_user_option_key() {
+        let error = encode_client_message(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: RequestId(1),
+            buffer_id: BufferId(7),
+            key: String::new(),
+            value: Some("value".to_owned()),
+        }))
+        .expect_err("empty user option key should be rejected");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidMessage(message)
+                if message == "buffer_request.user_option_key must not be empty"
         ));
     }
 

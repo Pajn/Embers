@@ -486,6 +486,14 @@ mod documented_ref_api {
         dynamic_option_string(buffer.env_hint(key))
     }
 
+    /// Look up a runtime user option set on the buffer via `embers buffer set-option`.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "user_option")]
+    pub fn buffer_user_option(buffer: &mut BufferRef, key: &str) -> Dynamic {
+        dynamic_option_string(buffer.user_option(key))
+    }
+
     /// Return a text snapshot limited to the requested line count.
     #[rhai_fn(return_raw, name = "snapshot_text")]
     pub fn buffer_snapshot_text(

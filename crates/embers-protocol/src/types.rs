@@ -155,6 +155,12 @@ pub enum BufferRequest {
         request_id: RequestId,
         buffer_id: BufferId,
     },
+    SetUserOption {
+        request_id: RequestId,
+        buffer_id: BufferId,
+        key: String,
+        value: Option<String>,
+    },
 }
 
 impl BufferRequest {
@@ -173,7 +179,8 @@ impl BufferRequest {
             | Self::Reveal { request_id, .. }
             | Self::OpenHistory { request_id, .. }
             | Self::StartPipe { request_id, .. }
-            | Self::StopPipe { request_id, .. } => *request_id,
+            | Self::StopPipe { request_id, .. }
+            | Self::SetUserOption { request_id, .. } => *request_id,
         }
     }
 }
@@ -669,6 +676,7 @@ pub struct BufferRecord {
     pub last_snapshot_seq: u64,
     pub exit_code: Option<i32>,
     pub env: BTreeMap<String, String>,
+    pub user_options: BTreeMap<String, String>,
 }
 
 impl BufferRecord {

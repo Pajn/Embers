@@ -83,15 +83,29 @@ fn is_nvim_buffer(ctx) {
         return false;
     }
 
+    if !buffer.is_visible() || buffer.is_detached() || node.kind() != "buffer_view" {
+        return false;
+    }
+
+    // Prefer the user option set by the nvim autocmds (see below); it survives
+    // shells launched inside the pane the way tmux @pane-is-vim does. An explicit
+    // "0" means Vim reported it is no longer active, so trust it and stop. Only an
+    // unset () value falls back to matching the direct child process name for panes
+    // spawned straight into nvim.
+    let is_vim = buffer.user_option("is-vim");
+    if is_vim == "1" {
+        return true;
+    }
+    if is_vim == "0" {
+        return false;
+    }
+
     let name = buffer.process_name();
     if name == () {
         return false;
     }
 
-    buffer.is_visible()
-        && !buffer.is_detached()
-        && node.kind() == "buffer_view"
-        && (name == "nvim" || name == "vim" || name == "nvr")
+    name == "nvim" || name == "vim" || name == "nvr"
 }
 
 fn smart_nav_left(ctx) {

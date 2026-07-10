@@ -609,3 +609,72 @@ async fn user_env_hint_overrides_default_term() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+async fn set_user_option(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    key: &str,
+    value: Option<&str>,
+) -> ServerResponse {
+    connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id,
+            key: key.to_owned(),
+            value: value.map(|value| value.to_owned()),
+        }))
+        .await
+        .expect("set user option request succeeds")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_options_can_be_set_unset_and_read_back() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(&mut connection, &["/bin/sh", "-lc", "cat"]).await;
+    assert!(buffer.user_options.is_empty());
+
+    match set_user_option(&mut connection, buffer.id, "is-vim", Some("1")).await {
+        ServerResponse::Buffer(response) => {
+            assert_eq!(response.buffer.user_options.get("is-vim").map(String::as_str), Some("1"));
+        }
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+
+    let fetched = get_buffer(&mut connection, buffer.id).await;
+    assert_eq!(fetched.user_options.get("is-vim").map(String::as_str), Some("1"));
+
+    // Unsetting removes the key.
+    match set_user_option(&mut connection, buffer.id, "is-vim", None).await {
+        ServerResponse::Buffer(response) => {
+            assert!(!response.buffer.user_options.contains_key("is-vim"));
+        }
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+    let fetched = get_buffer(&mut connection, buffer.id).await;
+    assert!(fetched.user_options.is_empty());
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_user_option_rejects_unknown_buffer() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let response =
+        set_user_option(&mut connection, embers_core::BufferId(9_999_999), "k", Some("v")).await;
+    assert!(
+        matches!(response, ServerResponse::Error(_)),
+        "expected error response for unknown buffer, got {response:?}"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}

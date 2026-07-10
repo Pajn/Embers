@@ -11,7 +11,7 @@ use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
 };
 
-use crate::support::{SESSION_ID, demo_state};
+use crate::support::{FOCUSED_BUFFER_ID, SESSION_ID, demo_state};
 
 #[test]
 fn action_helpers_roundtrip_to_typed_actions() {
@@ -593,6 +593,52 @@ fn open_buffer_history_rejects_negative_buffer_id() {
         error
             .to_string()
             .contains("buffer id must be zero or greater")
+    );
+}
+
+#[test]
+fn scripts_can_read_buffer_user_options() {
+    // A refreshed BufferRecord (as delivered after RenderInvalidated) carries user
+    // options; a smart-splits style guard should observe them like tmux @pane-is-vim.
+    let mut state = demo_state();
+    state
+        .buffers
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("focused buffer exists")
+        .user_options
+        .insert("is-vim".to_owned(), "1".to_owned());
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .unwrap();
+    let context = Context::from_state(&state, Some(&presentation));
+
+    let engine = load_engine(
+        r#"
+            fn nav(ctx) {
+                let buffer = ctx.current_buffer();
+                if buffer.user_option("is-vim") == "1" {
+                    action.send_keys_current("h")
+                } else {
+                    action.focus_left()
+                }
+            }
+            define_action("nav", nav);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("nav", context).unwrap(),
+        vec![Action::SendKeys {
+            buffer_id: None,
+            keys: vec![KeyToken::Char('h')],
+        }]
     );
 }
 

@@ -750,6 +750,7 @@ mod zoom_tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             );
         }
@@ -840,6 +841,7 @@ mod zoom_tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             );
         }
@@ -916,6 +918,7 @@ mod zoom_tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             );
         }
@@ -1039,6 +1042,7 @@ mod zoom_tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
             );
         }
@@ -1062,6 +1066,7 @@ mod zoom_tests {
                 exit_code: None,
                 pipe: None,
                 env: Default::default(),
+                user_options: Default::default(),
             },
         );
         state.floating.insert(
@@ -1167,6 +1172,7 @@ mod zoom_tests {
                 exit_code: None,
                 pipe: None,
                 env: Default::default(),
+                user_options: Default::default(),
             },
         );
 

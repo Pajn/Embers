@@ -82,6 +82,7 @@ enum BufferOp : ubyte {
   Inspect = 11,
   StartPipe = 12,
   StopPipe = 13,
+  SetUserOption = 14,
 }
 
 enum NodeOp : ubyte {
@@ -232,6 +233,8 @@ table BufferRequest {
   client_id:ulong = 0 (id: 13);
   history_scope:BufferHistoryScopeWire = Full (id: 14);
   history_placement:BufferHistoryPlacementWire = Tab (id: 15);
+  user_option_key:string (id: 16);
+  user_option_value:string (id: 17);
 }
 
 table NodeRequest {
@@ -340,6 +343,8 @@ table BufferRecord {
   helper_scope:BufferHistoryScopeWire = Full (id: 19);
   has_helper_scope:bool = false (id: 20);
   pipe:BufferPipeRecord (id: 21);
+  user_option_keys:[string] (id: 22);
+  user_option_values:[string] (id: 23);
 }
 
 table BufferPipeRecord {

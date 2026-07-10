@@ -323,6 +323,7 @@ fn buffer(
         last_snapshot_seq: 0,
         exit_code: None,
         pipe: None,
+        user_options: Default::default(),
     }
 }
 
