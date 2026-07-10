@@ -13,7 +13,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -27,7 +27,7 @@ use portable_pty::{
     PtySystem,
 };
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::{AlacrittyTerminalBackend, RawByteRouter, TerminalBackend};
 
@@ -36,6 +36,16 @@ const CONNECT_RETRY_ATTEMPTS: usize = 1200;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const KEEPER_PIPE_WRITE_QUEUE_CAPACITY: usize = 64;
+/// Bound on bytes queued for the PTY master. Every writer — client input
+/// (`KeeperRequest::Write`) and emulator replies (device-attribute /
+/// cursor-position / mode-query responses) — hands off through this queue, which
+/// a single dedicated writer thread drains. Because no caller holds a lock during
+/// the blocking `write_all`, a child that stops reading its input backpressures
+/// the queue instead of stalling request handling or the read loop. The read loop
+/// (the only thread draining child output) must never block, so it drops replies
+/// best-effort when the queue is full and keeps draining, which lets the child
+/// make progress and unblocks the writer.
+const KEEPER_WRITE_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct BufferRuntimeUpdate {
@@ -211,7 +221,11 @@ impl KeeperScrollbackSlice {
 struct KeeperRuntime {
     surface: Mutex<KeeperSurface>,
     master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// All PTY-master writes are submitted here and serialized by the writer
+    /// thread that owns the underlying writer (see `keeper_writer_loop`). Keeping
+    /// the writer off the request path means no handler holds a lock across a
+    /// blocking write.
+    write_tx: SyncSender<Vec<u8>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
@@ -672,9 +686,12 @@ impl KeeperSurface {
         }
     }
 
-    fn route_output(&mut self, bytes: &[u8]) -> ActivityState {
+    /// Ingest PTY output and return the resulting activity plus any terminal
+    /// replies the emulator generated (device-attribute / cursor-position / mode
+    /// queries). The caller writes the replies back to the PTY master.
+    fn route_output(&mut self, bytes: &[u8]) -> (ActivityState, Vec<u8>) {
         self.router.route_output(self.backend.as_mut(), bytes);
-        self.backend.take_activity()
+        self.backend.take_events()
     }
 
     fn resize(&mut self, size: PtySize) {
@@ -956,10 +973,20 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         .take_writer()
         .map_err(|error| MuxError::pty(error.to_string()))?;
 
+    // A single writer thread owns the writer and drains every PTY-master write
+    // (client input and emulator replies) from this bounded queue, so no request
+    // handler holds a lock across a blocking write. The only senders live in the
+    // shared runtime; the thread ends once the last runtime reference is dropped.
+    let (write_tx, write_rx) = sync_channel(KEEPER_WRITE_QUEUE_CAPACITY);
+    let writer_join = thread::Builder::new()
+        .name(format!("keeper-writer-{}", cli.socket_path.display()))
+        .spawn(move || keeper_writer_loop(writer, write_rx))
+        .map_err(|error| MuxError::internal(error.to_string()))?;
+
     let runtime = Arc::new(KeeperRuntime {
         surface: Mutex::new(KeeperSurface::new(cli.size)),
         master: Mutex::new(pair.master),
-        writer: Mutex::new(writer),
+        write_tx,
         killer: Mutex::new(killer),
         pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
@@ -986,6 +1013,10 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
 
     let _ = reader_join.join();
     let _ = wait_join.join();
+    // Drop the last runtime reference so the write channel disconnects and the
+    // writer thread finishes draining before we join it.
+    drop(runtime);
+    let _ = writer_join.join();
     Ok(())
 }
 
@@ -1116,13 +1147,13 @@ impl KeeperRuntime {
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
         self.ensure_running()?;
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| MuxError::internal("runtime keeper writer lock poisoned"))?;
-        writer.write_all(&bytes)?;
-        writer.flush()?;
-        Ok(())
+        // Hand off to the writer thread. This is a bounded send: it blocks only
+        // when the queue is full (backpressure from a child that is not reading
+        // its input) and never holds the writer, so it cannot stall other writers
+        // or the read loop. A send error means the writer thread is gone.
+        self.write_tx
+            .send(bytes)
+            .map_err(|_| MuxError::internal("runtime keeper writer channel closed"))
     }
 
     fn resize(&self, size: PtySize) -> Result<()> {
@@ -1262,7 +1293,7 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     Err(_) => break,
                 };
                 let bytes = &buffer[..read];
-                let activity = surface.route_output(bytes);
+                let (activity, replies) = surface.route_output(bytes);
                 if let Ok(mut pipe) = runtime.pipe.lock()
                     && let Some(pipe) = pipe.as_mut()
                 {
@@ -1272,9 +1303,41 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
                 }
+                // Release the surface lock before handing off the replies.
+                drop(surface);
+                if !replies.is_empty() {
+                    // Never write to the master from this thread: a blocked write
+                    // would stop draining child output and could deadlock. Hand
+                    // the reply to the writer thread without blocking; if the queue
+                    // is full (writer stuck on a full input buffer) drop the reply
+                    // — continuing to drain lets the child progress and recover.
+                    match runtime.write_tx.try_send(replies) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            debug!("terminal query reply queue full; dropping reply");
+                        }
+                        Err(TrySendError::Disconnected(_)) => break,
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
+        }
+    }
+}
+
+/// Own the PTY-master writer and serialize every write submitted through the
+/// runtime's write queue (client input and emulator replies).
+///
+/// Running on its own thread means a master write that blocks (child not draining
+/// its input) applies backpressure to the queue rather than stalling any request
+/// handler or the read loop. A write can still fail once the child has exited
+/// while the queue drains; log at debug and keep going. Ends when every sender —
+/// all held in the shared runtime — is dropped.
+fn keeper_writer_loop(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<u8>>) {
+    for bytes in write_rx {
+        if let Err(error) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+            debug!(%error, "failed to write to pty master");
         }
     }
 }
