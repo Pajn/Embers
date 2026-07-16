@@ -67,9 +67,12 @@ pub enum KeyCode {
 }
 
 /// Kitty keyboard mode bits (a subset of the alacritty `TermMode` kitty flags).
-/// `DISAMBIGUATE_ESC_CODES` is the flag that turns on CSI-u encoding.
+/// `DISAMBIGUATE_ESC_CODES` is the flag that turns on CSI-u encoding. The bit
+/// positions mirror the kitty protocol's own flag numbering (bit 0 disambiguate,
+/// bit 3 report-all-keys) so the compact `keyboard_mode` byte never reuses a spec
+/// bit position for a different meaning.
 pub const KITTY_DISAMBIGUATE_ESC_CODES: u8 = 0b0000_0001;
-pub const KITTY_REPORT_ALL_KEYS_AS_ESC: u8 = 0b0001_0000;
+pub const KITTY_REPORT_ALL_KEYS_AS_ESC: u8 = 0b0000_1000;
 
 /// True when the mode requests disambiguated (CSI-u) encoding.
 pub const fn mode_disambiguates(mode: u8) -> bool {

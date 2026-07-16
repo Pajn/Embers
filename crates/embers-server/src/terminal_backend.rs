@@ -234,14 +234,16 @@ fn percent_decode(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Map the active kitty keyboard `TermMode` bits to the compact bitfield the
-/// client encoder consumes (bit 0 = disambiguate, bit 4 = report-all-keys).
+/// client encoder consumes. Bit positions follow the kitty protocol's own flag
+/// numbering (bit 0 = disambiguate, bit 3 = report-all-keys) so the byte never
+/// reuses a spec bit position for a different flag.
 fn kitty_keyboard_mode(mode: TermMode) -> u8 {
     let mut bits = 0;
     if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
         bits |= 0b0000_0001;
     }
     if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
-        bits |= 0b0001_0000;
+        bits |= 0b0000_1000;
     }
     bits
 }

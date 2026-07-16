@@ -3519,9 +3519,9 @@ mod tests {
     fn report_all_mode_routes_plain_keys_through_csi_u() {
         use super::sequence_to_bytes;
 
-        // Compact keyboard-mode bitfield: bit 0 = disambiguate, bit 4 = report-all.
+        // Compact keyboard-mode bitfield: bit 0 = disambiguate, bit 3 = report-all.
         const DISAMBIGUATE_ONLY: u8 = 0b0000_0001;
-        const REPORT_ALL: u8 = 0b0001_0000;
+        const REPORT_ALL: u8 = 0b0000_1000;
 
         // Disambiguate-only mode keeps unmodified plain keys as their legacy bytes.
         assert_eq!(
