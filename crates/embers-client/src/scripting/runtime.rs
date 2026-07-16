@@ -165,8 +165,8 @@ pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
 #[export_module]
 mod documented_context_api {
     use super::{
-        Array, Context, Dynamic, NativeCallContext, dynamic_option_custom, parse_buffer_id,
-        parse_floating_id, parse_node_id, with_call_position,
+        Array, Context, Dynamic, NativeCallContext, dynamic_option_custom, dynamic_option_string,
+        parse_buffer_id, parse_floating_id, parse_node_id, with_call_position,
     };
 
     /// Return the active input mode name.
@@ -181,6 +181,14 @@ mod documented_context_api {
     #[rhai_fn(name = "event")]
     pub fn event(context: &mut Context) -> Dynamic {
         dynamic_option_custom(context.event())
+    }
+
+    /// Return the text selected in hint mode, when a hint callback is running.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "hint_selection")]
+    pub fn hint_selection(context: &mut Context) -> Dynamic {
+        dynamic_option_string(context.hint_selection())
     }
 
     /// Return the current session reference, if any.
@@ -484,6 +492,14 @@ mod documented_ref_api {
     #[rhai_fn(name = "env_hint")]
     pub fn buffer_env_hint(buffer: &mut BufferRef, key: &str) -> Dynamic {
         dynamic_option_string(buffer.env_hint(key))
+    }
+
+    /// Look up a runtime user option set on the buffer via `embers buffer set-option`.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "user_option")]
+    pub fn buffer_user_option(buffer: &mut BufferRef, key: &str) -> Dynamic {
+        dynamic_option_string(buffer.user_option(key))
     }
 
     /// Return a text snapshot limited to the requested line count.
@@ -918,12 +934,12 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, ImmutableString, Map, NativeCallContext, NavigationDirection,
-        TreeSpec, parse_action_array, parse_buffer_history_placement, parse_buffer_history_scope,
-        parse_buffer_id, parse_bytes, parse_floating_id, parse_floating_options,
-        parse_floating_spec, parse_index, parse_key_sequence, parse_node_break_destination,
-        parse_node_id, parse_node_join_placement, parse_notify_level, parse_split_direction,
-        with_call_position,
+        Action, ActionApi, Array, Dynamic, ImmutableString, Map, NativeCallContext,
+        NavigationDirection, TreeSpec, parse_action_array, parse_buffer_history_placement,
+        parse_buffer_history_scope, parse_buffer_id, parse_bytes, parse_floating_id,
+        parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
+        parse_node_break_destination, parse_node_id, parse_node_join_placement, parse_notify_level,
+        parse_split_direction, with_call_position,
     };
 
     /// Build a no-op action.
@@ -968,6 +984,105 @@ mod documented_action_api {
     #[rhai_fn(name = "clear_pending_keys")]
     pub fn clear_pending_keys(_: &mut ActionApi) -> Action {
         Action::ClearPendingKeys
+    }
+
+    /// Switch the client to the session with the given name (tmux `switch-client -t`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.switch_session("work")
+    /// ```
+    #[rhai_fn(name = "switch_session")]
+    pub fn switch_session(_: &mut ActionApi, name: &str) -> Action {
+        Action::SwitchSession {
+            name: name.to_owned(),
+        }
+    }
+
+    /// Switch back to the previously active session (tmux `switch-client -l`).
+    #[rhai_fn(name = "last_session")]
+    pub fn last_session(_: &mut ActionApi) -> Action {
+        Action::LastSession
+    }
+
+    /// Switch to the next session in list order, wrapping around.
+    #[rhai_fn(name = "next_session")]
+    pub fn next_session(_: &mut ActionApi) -> Action {
+        Action::NextSession
+    }
+
+    /// Switch to the previous session in list order, wrapping around.
+    #[rhai_fn(name = "prev_session")]
+    pub fn prev_session(_: &mut ActionApi) -> Action {
+        Action::PrevSession
+    }
+
+    /// Run a shell command line in the client's login context (tmux `run-shell`).
+    ///
+    /// The string is executed as `/bin/sh -lc "<command>"`. Output is discarded;
+    /// the spawned tool can drive Embers via `$EMBERS_SOCKET` and the `embers` CLI.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.run_shell("wisp popup")
+    /// ```
+    #[rhai_fn(name = "run_shell")]
+    pub fn run_shell(_: &mut ActionApi, command: &str) -> Action {
+        Action::RunShell {
+            command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()],
+        }
+    }
+
+    /// Enter thumbs-style hint mode: label the matches in the visible pane and
+    /// copy the selected one to the clipboard (OSC 52).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.enter_hints()
+    /// ```
+    #[rhai_fn(name = "enter_hints")]
+    pub fn enter_hints(_: &mut ActionApi) -> Action {
+        Action::EnterHints { action: None }
+    }
+
+    /// Enter hint mode, invoking the named action with the selected text exposed
+    /// as `ctx.hint_selection()` instead of copying it.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.enter_hints_with("open-url")
+    /// ```
+    #[rhai_fn(name = "enter_hints_with")]
+    pub fn enter_hints_with(_: &mut ActionApi, action: &str) -> Action {
+        Action::EnterHints {
+            action: Some(action.to_owned()),
+        }
+    }
+
+    /// Run a command given as an explicit argv array, without a shell.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.run_shell_argv(["wisp", "popup"])
+    /// ```
+    #[rhai_fn(return_raw, name = "run_shell_argv")]
+    pub fn run_shell_argv(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        argv: Array,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            let command = super::parse_string_array(Dynamic::from(argv))?;
+            if command.is_empty() {
+                return Err("run_shell_argv requires at least one argument".into());
+            }
+            Ok(Action::RunShell { command })
+        })
     }
 
     /// Focus the view to the left of the current node.

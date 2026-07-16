@@ -17,6 +17,7 @@ base64.workspace = true
 directories.workspace = true
 embers-core.workspace = true
 embers-protocol.workspace = true
+regex.workspace = true
 # `definitions_with_scope` used by scripting/documentation.rs is gated behind `internals`.
 rhai = { workspace = true, features = ["internals", "metadata"] }
 rhai-autodocs.workspace = true

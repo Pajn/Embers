@@ -72,6 +72,7 @@ pub struct Buffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    pub user_options: BTreeMap<String, String>,
     runtime_socket_path: Option<PathBuf>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
@@ -97,6 +98,7 @@ impl Buffer {
             command,
             cwd,
             env,
+            user_options: BTreeMap::new(),
             runtime_socket_path: None,
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
@@ -127,6 +129,7 @@ impl fmt::Debug for Buffer {
             .field("command", &self.command)
             .field("cwd", &self.cwd)
             .field("env", &self.env)
+            .field("user_options", &self.user_options)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
@@ -146,6 +149,7 @@ impl PartialEq for Buffer {
             && self.command == other.command
             && self.cwd == other.cwd
             && self.env == other.env
+            && self.user_options == other.user_options
             && self.state == other.state
             && self.attachment == other.attachment
             && self.pty_size == other.pty_size

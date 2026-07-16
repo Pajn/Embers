@@ -105,6 +105,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         last_snapshot_seq: buffer.last_snapshot_seq,
         exit_code,
         env: buffer.env.clone(),
+        user_options: buffer.user_options.clone(),
     }
 }
 

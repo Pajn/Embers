@@ -149,6 +149,26 @@ fn detach_buffer(_: ActionApi) -> Action;
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Enter thumbs-style hint mode: label the matches in the visible pane and
+/// copy the selected one to the clipboard (OSC 52).
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints()
+/// ```
+fn enter_hints(_: ActionApi) -> Action;
+
+/// Enter hint mode, invoking the named action with the selected text exposed
+/// as `ctx.hint_selection()` instead of copying it.
+///
+/// # Example
+///
+/// ```rhai
+/// action.enter_hints_with("open-url")
+/// ```
+fn enter_hints_with(_: ActionApi, action: string) -> Action;
+
 /// Enter a specific input mode by name.
 fn enter_mode(_: ActionApi, mode: string) -> Action;
 
@@ -211,6 +231,9 @@ fn kill_buffer(_: ActionApi) -> Action;
 /// Kill a buffer by id.
 fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Switch back to the previously active session (tmux `switch-client -l`).
+fn last_session(_: ActionApi) -> Action;
+
 /// Leave the active input mode.
 fn leave_mode(_: ActionApi) -> Action;
 
@@ -250,6 +273,9 @@ fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
 
+/// Switch to the next session in list order, wrapping around.
+fn next_session(_: ActionApi) -> Action;
+
 /// Select the next tab in a specific tabs node.
 fn next_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
@@ -270,6 +296,9 @@ fn open_floating(_: ActionApi, tree: TreeSpec, options: map) -> Action;
 /// Select the previous tab in the currently focused tabs node.
 fn prev_current_tabs(_: ActionApi) -> Action;
 
+/// Switch to the previous session in list order, wrapping around.
+fn prev_session(_: ActionApi) -> Action;
+
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
@@ -284,6 +313,27 @@ fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
 
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;
+
+/// Run a shell command line in the client's login context (tmux `run-shell`).
+///
+/// The string is executed as `/bin/sh -lc "<command>"`. Output is discarded;
+/// the spawned tool can drive Embers via `$EMBERS_SOCKET` and the `embers` CLI.
+///
+/// # Example
+///
+/// ```rhai
+/// action.run_shell("wisp popup")
+/// ```
+fn run_shell(_: ActionApi, command: string) -> Action;
+
+/// Run a command given as an explicit argv array, without a shell.
+///
+/// # Example
+///
+/// ```rhai
+/// action.run_shell_argv(["wisp", "popup"])
+/// ```
+fn run_shell_argv(_: ActionApi, argv: array) -> Action;
 
 /// Scroll one line downward in local scrollback.
 fn scroll_line_down(_: ActionApi) -> Action;
@@ -360,6 +410,15 @@ fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;
 /// Swap the current node with a sibling.
 fn swap_current_node(_: ActionApi, sibling_node_id: int) -> Action;
 
+/// Switch the client to the session with the given name (tmux `switch-client -t`).
+///
+/// # Example
+///
+/// ```rhai
+/// action.switch_session("work")
+/// ```
+fn switch_session(_: ActionApi, name: string) -> Action;
+
 /// Toggle a named input mode.
 fn toggle_mode(_: ActionApi, mode: string) -> Action;
 
@@ -378,6 +437,20 @@ fn yank_selection(_: ActionApi) -> Action;
 /// Zoom the session's currently focused node.
 /// There is intentionally no separate `zoom_node(node_id)` helper in this API surface.
 fn zoom_current_node(_: ActionApi) -> Action;
+
+/// Replace the hint patterns used by `action.enter_hints()` with the given
+/// regex strings. A non-string element or an invalid regex is an error. An
+/// empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+/// IPs, numbers).
+///
+/// # Example
+///
+/// ```rhai
+/// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+/// ```
+///
+/// # rhai-autodocs:index:26
+fn set_patterns(hints: HintsApi, patterns: array) -> ();
 
 /// Toggle focus-on-click behavior.
 ///
@@ -476,3 +549,5 @@ let tabbar: TabbarApi;
 let theme: ThemeApi;
 
 let mouse: MouseApi;
+
+let hints: HintsApi;

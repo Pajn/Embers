@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>EventInfo - Embers Config API</title>
+        <title>Hints - Embers Config API</title>
 
 
         <!-- Custom HTML head -->
@@ -174,154 +174,33 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="eventinfo"><a class="header" href="#eventinfo">EventInfo</a></h1>
+                        <h1 id="hints"><a class="header" href="#hints">Hints</a></h1>
 <p><code>Namespace: global</code></p>
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
-<h2 class="func-name"> <code>fn</code> buffer_id </h2>
+<h2 class="func-name"> <code>fn</code> set_patterns </h2>
 
-<pre><code class="language-rust ignore">fn buffer_id(event: EventInfo) -&gt; ?</code></pre>
+<pre><code class="language-rust ignore">fn set_patterns(hints: HintsApi, patterns: Array)</code></pre>
 <div>
 <div class="tab">
-<button group="buffer_id" id="link-buffer_id-Description" class="tablinks active" onclick="openTab(event, &#39;buffer_id&#39;, &#39;Description&#39;)">
+<button group="set_patterns" id="link-set_patterns-Description" class="tablinks active" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Description&#39;)">
 Description
+</button>
+<button group="set_patterns" id="link-set_patterns-Example" class="tablinks" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Example&#39;)">
+Example
 </button>
 </div>
 
-<div group="buffer_id" id="buffer_id-Description" class="tabcontent" style="display: block;">
-Return the buffer id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
+<div group="set_patterns" id="set_patterns-Description" class="tabcontent" style="display: block;">
+Replace the hint patterns used by `action.enter_hints()` with the given
+regex strings. A non-string element or an invalid regex is an error. An
+empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+IPs, numbers).
 </div>
 
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> client_id </h2>
-
-<pre><code class="language-rust ignore">fn client_id(event: EventInfo) -&gt; ?</code></pre>
-<div>
-<div class="tab">
-<button group="client_id" id="link-client_id-Description" class="tablinks active" onclick="openTab(event, &#39;client_id&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="client_id" id="client_id-Description" class="tabcontent" style="display: block;">
-Return the client id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
-</div>
-
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> floating_id </h2>
-
-<pre><code class="language-rust ignore">fn floating_id(event: EventInfo) -&gt; ?</code></pre>
-<div>
-<div class="tab">
-<button group="floating_id" id="link-floating_id-Description" class="tablinks active" onclick="openTab(event, &#39;floating_id&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="floating_id" id="floating_id-Description" class="tabcontent" style="display: block;">
-Return the floating id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
-</div>
-
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> name </h2>
-
-<pre><code class="language-rust ignore">fn name(event: EventInfo) -&gt; String</code></pre>
-<div>
-<div class="tab">
-<button group="name" id="link-name-Description" class="tablinks active" onclick="openTab(event, &#39;name&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="name" id="name-Description" class="tabcontent" style="display: block;">
-Return the event name.
-</div>
-
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> node_id </h2>
-
-<pre><code class="language-rust ignore">fn node_id(event: EventInfo) -&gt; ?</code></pre>
-<div>
-<div class="tab">
-<button group="node_id" id="link-node_id-Description" class="tablinks active" onclick="openTab(event, &#39;node_id&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="node_id" id="node_id-Description" class="tabcontent" style="display: block;">
-Return the node id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
-</div>
-
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> previous_session_id </h2>
-
-<pre><code class="language-rust ignore">fn previous_session_id(event: EventInfo) -&gt; ?</code></pre>
-<div>
-<div class="tab">
-<button group="previous_session_id" id="link-previous_session_id-Description" class="tablinks active" onclick="openTab(event, &#39;previous_session_id&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="previous_session_id" id="previous_session_id-Description" class="tabcontent" style="display: block;">
-Return the previous session id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
-</div>
-
-</div>
-
-</div>
-
-
-<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
-    
-<h2 class="func-name"> <code>fn</code> session_id </h2>
-
-<pre><code class="language-rust ignore">fn session_id(event: EventInfo) -&gt; ?</code></pre>
-<div>
-<div class="tab">
-<button group="session_id" id="link-session_id-Description" class="tablinks active" onclick="openTab(event, &#39;session_id&#39;, &#39;Description&#39;)">
-Description
-</button>
-</div>
-
-<div group="session_id" id="session_id-Description" class="tabcontent" style="display: block;">
-Return the session id attached to an event, or `()`.
-<p>ReturnType: <code>int | ()</code></p>
+<div group="set_patterns" id="set_patterns-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+</code></pre>
 </div>
 
 </div>
@@ -334,11 +213,11 @@ Return the session id attached to an event, or `()`.
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="mux.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="mouse.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="session-ref.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="theme.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -348,11 +227,11 @@ Return the session id attached to an event, or `()`.
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="mux.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="mouse.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="session-ref.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="theme.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>

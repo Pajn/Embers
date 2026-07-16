@@ -18,6 +18,7 @@ pub struct Context {
     buffers: BTreeMap<BufferId, BufferRef>,
     nodes: BTreeMap<NodeId, NodeRef>,
     floating: BTreeMap<FloatingId, FloatingRef>,
+    hint_selection: Option<String>,
 }
 
 impl Context {
@@ -185,6 +186,7 @@ impl Context {
                         exit_code: buffer.exit_code,
                         tty_path: None,
                         snapshot_lines,
+                        user_options: buffer.user_options.clone(),
                     },
                 )
             })
@@ -225,12 +227,22 @@ impl Context {
             buffers,
             nodes,
             floating,
+            hint_selection: None,
         }
     }
 
     pub fn with_event(mut self, event: EventInfo) -> Self {
         self.event = Some(event);
         self
+    }
+
+    pub fn with_hint_selection(mut self, selection: impl Into<String>) -> Self {
+        self.hint_selection = Some(selection.into());
+        self
+    }
+
+    pub fn hint_selection(&self) -> Option<String> {
+        self.hint_selection.clone()
     }
 
     pub fn current_mode(&self) -> &str {
@@ -339,6 +351,7 @@ pub struct BufferRef {
     pub exit_code: Option<i32>,
     pub tty_path: Option<String>,
     pub snapshot_lines: Vec<String>,
+    pub user_options: BTreeMap<String, String>,
 }
 
 impl BufferRef {
@@ -359,6 +372,10 @@ impl BufferRef {
 
     pub fn env_hint(&self, key: &str) -> Option<String> {
         self.env.get(key).cloned()
+    }
+
+    pub fn user_option(&self, key: &str) -> Option<String> {
+        self.user_options.get(key).cloned()
     }
 
     pub fn snapshot_text(&self, limit: usize) -> String {

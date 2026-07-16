@@ -609,3 +609,168 @@ async fn user_env_hint_overrides_default_term() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+async fn set_user_option(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    key: &str,
+    value: Option<&str>,
+) -> ServerResponse {
+    connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id,
+            key: key.to_owned(),
+            value: value.map(|value| value.to_owned()),
+        }))
+        .await
+        .expect("set user option request succeeds")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_options_can_be_set_unset_and_read_back() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(&mut connection, &["/bin/sh", "-lc", "cat"]).await;
+    assert!(buffer.user_options.is_empty());
+
+    match set_user_option(&mut connection, buffer.id, "is-vim", Some("1")).await {
+        ServerResponse::Buffer(response) => {
+            assert_eq!(
+                response
+                    .buffer
+                    .user_options
+                    .get("is-vim")
+                    .map(String::as_str),
+                Some("1")
+            );
+        }
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+
+    let fetched = get_buffer(&mut connection, buffer.id).await;
+    assert_eq!(
+        fetched.user_options.get("is-vim").map(String::as_str),
+        Some("1")
+    );
+
+    // Unsetting removes the key.
+    match set_user_option(&mut connection, buffer.id, "is-vim", None).await {
+        ServerResponse::Buffer(response) => {
+            assert!(!response.buffer.user_options.contains_key("is-vim"));
+        }
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+    let fetched = get_buffer(&mut connection, buffer.id).await;
+    assert!(fetched.user_options.is_empty());
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_user_option_rejects_unknown_buffer() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let response = set_user_option(
+        &mut connection,
+        embers_core::BufferId(9_999_999),
+        "k",
+        Some("v"),
+    )
+    .await;
+    assert!(
+        matches!(response, ServerResponse::Error(_)),
+        "expected error response for unknown buffer, got {response:?}"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+async fn wait_for_cwd(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    expected: &str,
+) -> BufferRecord {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let buffer = get_buffer(connection, buffer_id).await;
+        if buffer.cwd.as_deref() == Some(expected) {
+            return buffer;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for buffer {buffer_id} cwd == {expected:?}; got {:?}",
+                buffer.cwd
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc7_report_updates_buffer_cwd() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    // The shell reports a working directory via OSC 7; the keeper sniffs it and it
+    // flows through to the buffer record (this path wins over pid polling, so the
+    // reported directory need not exist).
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            "printf '\\033]7;file://host/tmp/osc7-embers\\007'; sleep 5",
+        ],
+    )
+    .await;
+
+    wait_for_cwd(&mut connection, buffer.id, "/tmp/osc7-embers").await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+// Resolving cwd from the child pid is host/OS specific and can race the shell's
+// own startup; keep it opt-in like the other PTY smoke tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "pid-based cwd resolution is environment sensitive"]
+async fn pid_polling_reports_shell_cwd() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize tempdir");
+    let expected = canonical.to_string_lossy().into_owned();
+
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-lc",
+            &format!("cd {} && sleep 5", shell_quote(&expected)),
+        ],
+    )
+    .await;
+
+    wait_for_cwd(&mut connection, buffer.id, &expected).await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}

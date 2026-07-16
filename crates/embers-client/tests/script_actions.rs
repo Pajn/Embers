@@ -11,7 +11,7 @@ use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
 };
 
-use crate::support::{SESSION_ID, demo_state};
+use crate::support::{FOCUSED_BUFFER_ID, SESSION_ID, demo_state};
 
 #[test]
 fn action_helpers_roundtrip_to_typed_actions() {
@@ -593,6 +593,143 @@ fn open_buffer_history_rejects_negative_buffer_id() {
         error
             .to_string()
             .contains("buffer id must be zero or greater")
+    );
+}
+
+#[test]
+fn scripts_can_read_buffer_user_options() {
+    // A refreshed BufferRecord (as delivered after RenderInvalidated) carries user
+    // options; a smart-splits style guard should observe them like tmux @pane-is-vim.
+    let mut state = demo_state();
+    state
+        .buffers
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("focused buffer exists")
+        .user_options
+        .insert("is-vim".to_owned(), "1".to_owned());
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .unwrap();
+    let context = Context::from_state(&state, Some(&presentation));
+
+    let engine = load_engine(
+        r#"
+            fn nav(ctx) {
+                let buffer = ctx.current_buffer();
+                if buffer.user_option("is-vim") == "1" {
+                    action.send_keys_current("h")
+                } else {
+                    action.focus_left()
+                }
+            }
+            define_action("nav", nav);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("nav", context).unwrap(),
+        vec![Action::SendKeys {
+            buffer_id: None,
+            keys: vec![KeyToken::Char('h')],
+        }]
+    );
+}
+
+#[test]
+fn session_switch_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn go_switch(ctx) { action.switch_session("work") }
+            fn go_last(ctx) { action.last_session() }
+            fn go_next(ctx) { action.next_session() }
+            fn go_prev(ctx) { action.prev_session() }
+            define_action("switch", go_switch);
+            define_action("last", go_last);
+            define_action("next", go_next);
+            define_action("prev", go_prev);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("switch", demo_context()).unwrap(),
+        vec![Action::SwitchSession {
+            name: "work".to_owned()
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("last", demo_context()).unwrap(),
+        vec![Action::LastSession]
+    );
+    assert_eq!(
+        engine.run_named_action("next", demo_context()).unwrap(),
+        vec![Action::NextSession]
+    );
+    assert_eq!(
+        engine.run_named_action("prev", demo_context()).unwrap(),
+        vec![Action::PrevSession]
+    );
+}
+
+#[test]
+fn run_shell_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn shell(ctx) { action.run_shell("wisp popup") }
+            fn shell_argv(ctx) { action.run_shell_argv(["wisp", "popup"]) }
+            define_action("shell", shell);
+            define_action("shell-argv", shell_argv);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("shell", demo_context()).unwrap(),
+        vec![Action::RunShell {
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-lc".to_owned(),
+                "wisp popup".to_owned()
+            ],
+        }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("shell-argv", demo_context())
+            .unwrap(),
+        vec![Action::RunShell {
+            command: vec!["wisp".to_owned(), "popup".to_owned()],
+        }]
+    );
+}
+
+#[test]
+fn enter_hints_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn hints(ctx) { action.enter_hints() }
+            fn hints_with(ctx) { action.enter_hints_with("open-url") }
+            define_action("hints", hints);
+            define_action("hints-with", hints_with);
+        "#,
+    );
+
+    assert_eq!(
+        engine.run_named_action("hints", demo_context()).unwrap(),
+        vec![Action::EnterHints { action: None }]
+    );
+    assert_eq!(
+        engine
+            .run_named_action("hints-with", demo_context())
+            .unwrap(),
+        vec![Action::EnterHints {
+            action: Some("open-url".to_owned())
+        }]
     );
 }
 

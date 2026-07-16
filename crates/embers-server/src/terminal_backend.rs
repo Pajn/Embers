@@ -68,7 +68,9 @@ pub trait TerminalBackend: Send {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RawByteRouter;
+pub struct RawByteRouter {
+    osc7: Osc7Scanner,
+}
 
 impl RawByteRouter {
     /// Route client-originated bytes before they reach the PTY.
@@ -81,11 +83,153 @@ impl RawByteRouter {
 
     /// Route PTY output bytes before terminal emulation.
     ///
-    /// Today this forwards output directly into the backend, making the raw-routing seam explicit
-    /// without introducing policy beyond passthrough.
+    /// Output is forwarded directly into the backend (alacritty drops OSC 7), while a
+    /// side scanner sniffs OSC 7 `file://host/path` working-directory reports so the
+    /// keeper can report the shell's live cwd the way tmux does.
     pub fn route_output(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
+        self.osc7.feed(bytes);
         backend.ingest_bytes(bytes);
     }
+
+    /// The most recent working directory reported by the inner shell via OSC 7, if any.
+    pub fn reported_cwd(&self) -> Option<PathBuf> {
+        self.osc7.cwd.clone()
+    }
+}
+
+/// Streaming scanner for OSC 7 (`ESC ] 7 ; file://<host><path> (BEL | ESC \)`) working
+/// directory reports. Sequences may split across read chunks, so state is retained
+/// between `feed` calls. Only OSC sequences whose numeric prefix is `7` are buffered;
+/// any other OSC payload (titles, large OSC 52 clipboard blobs, …) is skipped without
+/// accumulation.
+#[derive(Clone, Debug, Default)]
+struct Osc7Scanner {
+    state: Osc7State,
+    buf: Vec<u8>,
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Osc7State {
+    /// Scanning ordinary output for the ESC that could begin a sequence.
+    #[default]
+    Ground,
+    /// Saw ESC; expecting `]` to enter an OSC.
+    Escape,
+    /// Inside an OSC whose prefix is (still possibly) `7`; buffering the payload.
+    Collect,
+    /// Inside `7;` OSC and saw ESC; a following `\` terminates (ST).
+    CollectEscape,
+    /// Inside a non-`7` OSC; discarding until the terminator.
+    Skip,
+    /// Inside a skipped OSC and saw ESC; a following `\` terminates (ST).
+    SkipEscape,
+}
+
+/// Upper bound on a buffered OSC 7 payload; a real cwd URI is far shorter, and this
+/// caps memory if a malformed sequence never terminates.
+const OSC7_MAX_PAYLOAD: usize = 4096;
+
+impl Osc7Scanner {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.step(byte);
+        }
+    }
+
+    fn step(&mut self, byte: u8) {
+        const ESC: u8 = 0x1b;
+        const BEL: u8 = 0x07;
+        match self.state {
+            Osc7State::Ground => {
+                if byte == ESC {
+                    self.state = Osc7State::Escape;
+                }
+            }
+            Osc7State::Escape => {
+                if byte == b']' {
+                    self.buf.clear();
+                    self.state = Osc7State::Collect;
+                } else if byte == ESC {
+                    // Stay armed on a run of ESCs.
+                } else {
+                    self.state = Osc7State::Ground;
+                }
+            }
+            Osc7State::Collect => match byte {
+                BEL => {
+                    self.finish();
+                    self.state = Osc7State::Ground;
+                }
+                ESC => self.state = Osc7State::CollectEscape,
+                _ => {
+                    // OSC 7 begins with the single digit `7`; anything else is a
+                    // different OSC we don't care about. Cap the payload so a
+                    // malformed, never-terminated sequence can't grow unbounded.
+                    if (self.buf.is_empty() && byte != b'7') || self.buf.len() >= OSC7_MAX_PAYLOAD {
+                        self.state = Osc7State::Skip;
+                    } else {
+                        self.buf.push(byte);
+                    }
+                }
+            },
+            Osc7State::CollectEscape => {
+                if byte == b'\\' {
+                    self.finish();
+                }
+                self.state = Osc7State::Ground;
+            }
+            Osc7State::Skip => match byte {
+                BEL => self.state = Osc7State::Ground,
+                ESC => self.state = Osc7State::SkipEscape,
+                _ => {}
+            },
+            Osc7State::SkipEscape => {
+                self.state = Osc7State::Ground;
+            }
+        }
+    }
+
+    /// Parse a completed `7;file://host/path` payload and store the decoded path.
+    fn finish(&mut self) {
+        let payload = match self.buf.strip_prefix(b"7;") {
+            Some(rest) => rest,
+            None => return,
+        };
+        let Some(rest) = payload.strip_prefix(b"file://") else {
+            return;
+        };
+        // Skip the authority (hostname) up to the first path separator.
+        let path_start = rest.iter().position(|&b| b == b'/').unwrap_or(rest.len());
+        let path_bytes = &rest[path_start..];
+        if path_bytes.is_empty() {
+            return;
+        }
+        let decoded = percent_decode(path_bytes);
+        if let Ok(text) = String::from_utf8(decoded) {
+            self.cwd = Some(PathBuf::from(text));
+        }
+    }
+}
+
+/// Percent-decode a byte slice (`%XX` escapes) as used by `file://` URIs.
+fn percent_decode(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = (bytes[index + 1] as char).to_digit(16);
+            let lo = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    out
 }
 
 pub struct AlacrittyTerminalBackend {
@@ -1069,7 +1213,7 @@ mod tests {
 
     #[test]
     fn raw_byte_router_is_explicit_passthrough_for_input_and_output() {
-        let mut router = RawByteRouter;
+        let mut router = RawByteRouter::default();
         let mut backend = StubBackend::default();
         let input = b"\x1b[200~paste\x1b[201~".to_vec();
 
@@ -1079,6 +1223,47 @@ mod tests {
         router.route_output(&mut backend, b" world");
 
         assert_eq!(backend.ingested, b"hello world");
+    }
+
+    #[test]
+    fn router_sniffs_osc7_cwd_reports() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        assert_eq!(router.reported_cwd(), None);
+
+        // BEL-terminated, whole in one chunk.
+        router.route_output(&mut backend, b"\x1b]7;file://host/tmp/work\x07");
+        assert_eq!(router.reported_cwd(), Some(PathBuf::from("/tmp/work")));
+        // Output still passes through unchanged.
+        assert!(backend.ingested.ends_with(b"\x07"));
+
+        // ST-terminated, percent-encoded space.
+        router.route_output(&mut backend, b"\x1b]7;file://host/tmp/a%20b\x1b\\");
+        assert_eq!(router.reported_cwd(), Some(PathBuf::from("/tmp/a b")));
+    }
+
+    #[test]
+    fn router_reassembles_osc7_split_across_chunks() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        router.route_output(&mut backend, b"\x1b]7;file://ho");
+        router.route_output(&mut backend, b"st/home/u");
+        assert_eq!(router.reported_cwd(), None, "not terminated yet");
+        router.route_output(&mut backend, b"ser\x07");
+        assert_eq!(router.reported_cwd(), Some(PathBuf::from("/home/user")));
+    }
+
+    #[test]
+    fn router_ignores_non_osc7_sequences() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // OSC 0 title and OSC 52 clipboard must not be mistaken for a cwd report.
+        router.route_output(&mut backend, b"\x1b]0;a title\x07");
+        router.route_output(&mut backend, b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(router.reported_cwd(), None);
+        // A malformed OSC 7 (no file:// scheme) is rejected.
+        router.route_output(&mut backend, b"\x1b]7;notauri\x07");
+        assert_eq!(router.reported_cwd(), None);
     }
 
     #[test]

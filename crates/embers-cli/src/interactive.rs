@@ -41,6 +41,10 @@ pub async fn run(
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(socket_path.clone());
+    if let Some(session_id) = session_id {
+        configured.emit_terminal_title(session_id);
+    }
 
     let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -138,6 +142,20 @@ pub async fn run(
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Ok(()),
             }
+
+            // A dispatched action (switch/reveal a buffer or session) may have
+            // changed the active session inside the client. Reconcile before the
+            // next queued input is read, so a following key targets the new
+            // session rather than the old one — not just after the queue drains.
+            // Detach (active becomes None) is left to the ClientChanged path, and
+            // a not-yet-initialised None is ignored.
+            if let Some(active_session_id) = configured.active_session_id()
+                && Some(active_session_id) != session_id
+            {
+                ensure_root_window(configured.client_mut(), active_session_id).await?;
+                session_id = Some(active_session_id);
+                dirty = true;
+            }
         }
 
         let next_size = terminal.size()?;
@@ -162,10 +180,22 @@ pub async fn run(
                     }
                     SwitchedSession::Ignore => {}
                 }
+                // handle_event drains background notifications up front, but its
+                // own awaits (and the session-switch handling above) can race a
+                // background task pushing one after that drain; surface any such
+                // notification this frame instead of deferring it a poll.
+                configured.drain_background_notifications();
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
             None => {
+                // The poll timed out with no event. A background task (e.g. a
+                // run_shell child) may have failed while we were idle; surface
+                // it now instead of waiting for the next input or server event.
+                if configured.drain_background_notifications() {
+                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                    dirty = true;
+                }
                 continue;
             }
         }

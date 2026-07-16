@@ -140,6 +140,24 @@ fn client_message_families_round_trip() {
             request_id: RequestId(159),
             buffer_id: BufferId(20),
         }),
+        ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: RequestId(1591),
+            buffer_id: BufferId(20),
+            key: "is-vim".to_owned(),
+            value: Some("1".to_owned()),
+        }),
+        ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: RequestId(1592),
+            buffer_id: BufferId(20),
+            key: "is-vim".to_owned(),
+            value: None,
+        }),
+        ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: RequestId(1593),
+            buffer_id: BufferId(20),
+            key: "is-vim".to_owned(),
+            value: Some(String::new()),
+        }),
         ClientMessage::Node(NodeRequest::GetTree {
             request_id: RequestId(16),
             session_id: SessionId(10),
@@ -726,5 +744,6 @@ fn sample_buffer_record(
         last_snapshot_seq: 9,
         exit_code,
         env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
+        user_options: std::collections::BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]),
     }
 }

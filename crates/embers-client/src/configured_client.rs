@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -18,8 +19,8 @@ use crate::client::MuxClient;
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::input::{
-    FallbackPolicy, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,
-    resolve_key,
+    FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE,
+    SELECT_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::renderer::Renderer;
@@ -27,7 +28,9 @@ use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
     NotifyLevel, TabBarContext, TreeSpec,
 };
-use crate::state::{SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState};
+use crate::state::{
+    HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
+};
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
@@ -67,9 +70,15 @@ pub struct ConfiguredClient<T> {
     renderer: Renderer,
     notifications: Vec<String>,
     active_session_id: Option<SessionId>,
+    previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
     search_prompt: Option<SearchPrompt>,
+    hints_node: Option<NodeId>,
     terminal_output: VecDeque<Vec<u8>>,
+    socket_path: Option<PathBuf>,
+    /// Notifications produced by background tasks (e.g. a failed `run_shell`
+    /// child), drained into `notifications` on the next input/event tick.
+    background_notifications: Arc<Mutex<Vec<String>>>,
 }
 
 impl<T> ConfiguredClient<T>
@@ -84,10 +93,20 @@ where
             renderer: Renderer,
             notifications: Vec::new(),
             active_session_id: None,
+            previous_session_id: None,
             viewport: None,
             search_prompt: None,
+            hints_node: None,
             terminal_output: VecDeque::new(),
+            socket_path: None,
+            background_notifications: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Record the socket this client is attached to, so `run_shell` children can
+    /// drive Embers via `$EMBERS_SOCKET` and the `embers` CLI (tmux `run-shell`).
+    pub fn set_socket_path(&mut self, socket_path: PathBuf) {
+        self.socket_path = Some(socket_path);
     }
 
     pub fn client(&self) -> &MuxClient<T> {
@@ -106,8 +125,46 @@ where
         &self.notifications
     }
 
+    /// The name of the active input mode (e.g. "normal", "hints").
+    pub fn current_mode(&self) -> &str {
+        self.input_state.current_mode()
+    }
+
+    /// The session the client is currently focused on, if any.
+    pub fn active_session_id(&self) -> Option<SessionId> {
+        self.active_session_id
+    }
+
+    /// The session the client was focused on before the current one, used by
+    /// `last_session` (tmux `switch-client -l`).
+    pub fn previous_session_id(&self) -> Option<SessionId> {
+        self.previous_session_id
+    }
+
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
         self.terminal_output.drain(..).collect()
+    }
+
+    /// Emit an OSC 2 window-title update naming the given session, so the host
+    /// terminal's tab/window title follows the active session (tmux
+    /// `set-titles-string '#S'`). Called by the interactive client on attach; it
+    /// also fires on session switch and rename. No reset is emitted on exit —
+    /// terminals restore their own title, matching tmux.
+    pub fn emit_terminal_title(&mut self, session_id: SessionId) {
+        let Some(session_name) = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.name.clone())
+        else {
+            return;
+        };
+        // Strip control characters so a session name can't terminate the OSC 2
+        // sequence early or inject its own escape sequences into the host terminal.
+        let title: String = session_name.chars().filter(|ch| !ch.is_control()).collect();
+        self.terminal_output
+            .push_back(format!("\x1b]2;{title}\x07").into_bytes());
     }
 
     pub fn status_line(&self, session_id: SessionId, socket_path: &Path) -> String {
@@ -133,12 +190,19 @@ where
         viewport: Size,
         key: KeyEvent,
     ) -> Result<()> {
+        self.drain_background_notifications();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
                 .handle_search_key(session_id, viewport, &presentation, key)
+                .await;
+        }
+
+        if self.input_state.current_mode() == HINTS_MODE {
+            return self
+                .handle_hints_key(session_id, viewport, &presentation, key)
                 .await;
         }
 
@@ -270,6 +334,14 @@ where
                         .await;
                 }
                 if settings.wheel_scroll && !self.view_is_alternate_screen(target_leaf.node_id) {
+                    // Scrolling replaces this pane's visible_lines directly (not via
+                    // a snapshot apply, which would invalidate hints), so hint labels
+                    // captured against the old viewport would map to the wrong
+                    // content. Clear them when the hinted pane itself is scrolled;
+                    // scrolling a different pane leaves the hinted pane untouched.
+                    if self.hints_node == Some(target_leaf.node_id) {
+                        self.cancel_active_hints();
+                    }
                     let delta = match event.kind {
                         MouseEventKind::WheelUp => -(WHEEL_SCROLL_LINES as i64),
                         MouseEventKind::WheelDown => WHEEL_SCROLL_LINES as i64,
@@ -281,6 +353,9 @@ where
             }
             MouseEventKind::Press(_) | MouseEventKind::Release(_) | MouseEventKind::Drag(_) => {
                 if settings.click_focus && !target_leaf.focused {
+                    // Focus is moving to a different pane; a hints overlay on the
+                    // previously focused node is now stale, so tear it down.
+                    self.cancel_active_hints();
                     self.focus_node(session_id, target_leaf.node_id).await?;
                 }
                 if settings.click_forward && mouse_reporting && point_in_content {
@@ -350,6 +425,7 @@ where
     }
 
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        self.drain_background_notifications();
         let previous_render_activity = match event {
             ServerEvent::RenderInvalidated(render) => self
                 .client
@@ -365,6 +441,36 @@ where
         self.client.handle_event(event).await?;
         if let ServerEvent::RenderInvalidated(event) = event {
             self.client.refresh_buffer_snapshot(event.buffer_id).await?;
+        }
+        // Keep last-session tracking in sync when our own session changes through
+        // the server (e.g. another client or a server-driven switch).
+        if let ServerEvent::ClientChanged(changed) = event
+            && self.client.cached_client_id() == Some(changed.client.id)
+        {
+            match changed.client.current_session_id {
+                Some(session_id) => {
+                    self.set_active_session(session_id);
+                    self.emit_terminal_title(session_id);
+                }
+                // The server detached this client from every session; drop the
+                // now-stale active session instead of leaving it dangling.
+                None => self.clear_active_session(),
+            }
+        }
+        // Follow the active session's name in the host terminal title.
+        if let ServerEvent::SessionRenamed(renamed) = event
+            && self.active_session_id == Some(renamed.session_id)
+        {
+            self.emit_terminal_title(renamed.session_id);
+        }
+        // A server-driven focus change (e.g. another client) that moves focus off
+        // our hints node orphans the overlay, so drop it and leave hints mode.
+        if let ServerEvent::FocusChanged(focus) = event
+            && self.active_session_id == Some(focus.session_id)
+            && self.hints_node.is_some()
+            && focus.focused_leaf_id != self.hints_node
+        {
+            self.cancel_active_hints();
         }
         let session_id = detached_session_id.or_else(|| self.event_session_id(event));
 
@@ -472,6 +578,12 @@ where
         } else {
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
+            // Also drop any active hints overlay so it can't outlive its mode.
+            if let Some(node_id) = self.hints_node.take()
+                && let Some(state) = self.client.state_mut().view_state_mut(node_id)
+            {
+                state.hints_state = None;
+            }
         }
     }
 
@@ -556,7 +668,7 @@ where
                     )
                     .await?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -576,7 +688,7 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(Some(buffer_id), location, "buffer reveal")?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
@@ -602,12 +714,72 @@ where
                     let (session_id, _) =
                         Self::attached_buffer_location(None, location, "buffer history")?;
                     current_session_id = Some(session_id);
-                    self.active_session_id = Some(session_id);
+                    self.set_active_session(session_id);
                     if let Some(viewport) = current_viewport {
                         self.set_active_view(session_id, viewport);
                     }
                     self.client.resync_all_sessions().await
                 }
+                Action::SwitchSession { name } => match self.resolve_session_by_name(&name) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => {
+                        self.record_notification(format_notification(
+                            NotifyLevel::Warn,
+                            &format!("no session named '{name}'"),
+                        ));
+                        Ok(())
+                    }
+                },
+                Action::LastSession => match self
+                    .previous_session_id
+                    .filter(|id| self.client.state().sessions.contains_key(id))
+                {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => {
+                        // Unset, or the previous session has since closed.
+                        self.previous_session_id = None;
+                        self.record_notification(format_notification(
+                            NotifyLevel::Info,
+                            "no previous session",
+                        ));
+                        Ok(())
+                    }
+                },
+                Action::NextSession => match self.cycled_session(true) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                },
+                Action::PrevSession => match self.cycled_session(false) {
+                    Some(target) => {
+                        self.perform_session_switch(target).await?;
+                        current_session_id = Some(target);
+                        Ok(())
+                    }
+                    None => Ok(()),
+                },
+                Action::RunShell { command } => {
+                    self.spawn_run_shell(command, current_session_id);
+                    Ok(())
+                }
+                Action::EnterHints { action } => match (current_session_id, current_viewport) {
+                    (Some(session_id), Some(viewport)) => {
+                        let presentation = self.prepare_presentation(session_id, viewport).await?;
+                        self.enter_hints_mode(action, &presentation)
+                    }
+                    _ => Ok(()),
+                },
                 action => {
                     match self
                         .execute_without_presentation(current_session_id, action)
@@ -1693,8 +1865,180 @@ where
     }
 
     fn set_active_view(&mut self, session_id: SessionId, viewport: Size) {
-        self.active_session_id = Some(session_id);
+        self.set_active_session(session_id);
         self.viewport = Some(viewport);
+    }
+
+    /// Update the active session, remembering the prior one so `last_session`
+    /// (tmux `switch-client -l`) can toggle back to it.
+    fn set_active_session(&mut self, session_id: SessionId) {
+        if self.active_session_id != Some(session_id) {
+            // The overlay is anchored to a node in the old session; it can't
+            // survive the switch, so tear it down before we move on.
+            self.cancel_active_hints();
+            // Only record the current session as `previous` when switching
+            // directly between sessions. When reattaching after a detach (active
+            // is None), keep the session `clear_active_session` already stored so
+            // `last_session` can still toggle back to it.
+            if let Some(active) = self.active_session_id {
+                self.previous_session_id = Some(active);
+            }
+            self.active_session_id = Some(session_id);
+        }
+    }
+
+    /// Drop the active session (e.g. the server detached this client), keeping
+    /// the prior one so `last_session` can still toggle back to it.
+    fn clear_active_session(&mut self) {
+        if let Some(session_id) = self.active_session_id.take() {
+            self.cancel_active_hints();
+            self.previous_session_id = Some(session_id);
+        }
+    }
+
+    /// Drop any active hints overlay. Used when the active session changes or is
+    /// detached, so a stale overlay can't linger on a node we're leaving.
+    fn cancel_active_hints(&mut self) {
+        let Some(node_id) = self.hints_node.take() else {
+            return;
+        };
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.hints_state = None;
+        }
+        // Fully leave hints mode so the next key is processed normally instead of
+        // being routed to `handle_hints_key` for an overlay that no longer exists.
+        self.input_state.set_mode(NORMAL_MODE);
+    }
+
+    fn resolve_session_by_name(&self, name: &str) -> Option<SessionId> {
+        self.client
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == name)
+            .map(|session| session.id)
+    }
+
+    /// The next (or previous) session id in list-sessions order, wrapping around.
+    /// Returns `None` when there are no sessions or only the current one.
+    fn cycled_session(&self, forward: bool) -> Option<SessionId> {
+        let ids: Vec<SessionId> = self.client.state().sessions.keys().copied().collect();
+        if ids.len() < 2 {
+            return None;
+        }
+        let current = self.active_session_id?;
+        let index = ids.iter().position(|id| *id == current)?;
+        let len = ids.len();
+        let next = if forward {
+            (index + 1) % len
+        } else {
+            (index + len - 1) % len
+        };
+        Some(ids[next])
+    }
+
+    async fn perform_session_switch(&mut self, session_id: SessionId) -> Result<()> {
+        self.client.switch_current_session(session_id).await?;
+        self.set_active_session(session_id);
+        self.client.resync_all_sessions().await
+    }
+
+    /// The working directory of the focused buffer in the given session, if known.
+    fn focused_buffer_cwd(&self, session_id: Option<SessionId>) -> Option<PathBuf> {
+        let session_id = session_id.or(self.active_session_id)?;
+        let state = self.client.state();
+        let session = state.sessions.get(&session_id)?;
+        let node = state.nodes.get(&session.focused_leaf_id?)?;
+        let buffer_id = node.buffer_view.as_ref()?.buffer_id;
+        state
+            .buffers
+            .get(&buffer_id)?
+            .cwd
+            .as_ref()
+            .map(PathBuf::from)
+    }
+
+    /// Spawn a `run_shell` child detached in the client's login context.
+    ///
+    /// Output is discarded (unlike tmux, which shows it in a pane — capture into
+    /// a popup with `buffer_spawn` instead). `$EMBERS_SOCKET` is injected so the
+    /// child can drive Embers via the CLI. The client never awaits the child; a
+    /// background waiter surfaces a warning on non-zero exit.
+    fn spawn_run_shell(&mut self, command: Vec<String>, session_id: Option<SessionId>) {
+        let Some((program, args)) = command.split_first() else {
+            return;
+        };
+        let mut process = tokio::process::Command::new(program);
+        process
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(cwd) = self.focused_buffer_cwd(session_id) {
+            process.current_dir(cwd);
+        }
+        if let Some(socket_path) = &self.socket_path {
+            process.env("EMBERS_SOCKET", socket_path);
+        }
+
+        // Identify the command by its executable only. The full argument list
+        // may carry secrets (tokens, passwords) and these notifications are
+        // logged at WARN and shown in the status line.
+        let program_name = program.clone();
+        let sink = Arc::clone(&self.background_notifications);
+        match process.spawn() {
+            Ok(mut child) => {
+                tokio::spawn(async move {
+                    match child.wait().await {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => {
+                            push_background_notification(
+                                &sink,
+                                format_notification(
+                                    NotifyLevel::Warn,
+                                    &format!("run-shell `{program_name}` exited with {status}"),
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            push_background_notification(
+                                &sink,
+                                format_notification(
+                                    NotifyLevel::Warn,
+                                    &format!("run-shell `{program_name}` failed: {error}"),
+                                ),
+                            );
+                        }
+                    }
+                });
+            }
+            Err(error) => {
+                self.record_notification(format_notification(
+                    NotifyLevel::Warn,
+                    &format!("run-shell `{program_name}` could not start: {error}"),
+                ));
+            }
+        }
+    }
+
+    /// Move notifications produced by background tasks into the visible queue.
+    /// Returns `true` when at least one notification was surfaced, so callers
+    /// (e.g. the idle poll loop) know a redraw is warranted.
+    pub fn drain_background_notifications(&mut self) -> bool {
+        let drained: Vec<String> = {
+            let mut pending = self
+                .background_notifications
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.is_empty() {
+                return false;
+            }
+            std::mem::take(&mut *pending)
+        };
+        for message in drained {
+            self.record_notification(message);
+        }
+        true
     }
 
     fn current_fallback_policy(&self) -> FallbackPolicy {
@@ -1960,6 +2304,232 @@ where
             prompt.query.push_str(&String::from_utf8_lossy(&bytes));
         }
         Ok(())
+    }
+
+    fn enter_hints_mode(
+        &mut self,
+        on_select: Option<String>,
+        presentation: &PresentationModel,
+    ) -> Result<()> {
+        let leaf = self.focused_leaf(presentation)?;
+        let node_id = leaf.node_id;
+        let buffer_id = leaf.buffer_id;
+        if self.view_is_alternate_screen(node_id) {
+            return Ok(());
+        }
+
+        // Scan the same lines the renderer draws: the local visible lines when
+        // present, otherwise the buffer's visible snapshot, positioned by the
+        // same follow-output offset the overlay uses.
+        let (lines, top_line) = {
+            let state = self.client.state();
+            let view_state = state.view_state(node_id);
+            let rendered: Vec<embers_core::SnapshotLine> = match view_state
+                .map(|view| view.visible_lines.as_slice())
+                .filter(|lines| !lines.is_empty())
+            {
+                Some(lines) => lines.to_vec(),
+                None => state
+                    .snapshots
+                    .get(&buffer_id)
+                    .map(|snapshot| snapshot.lines.clone())
+                    .unwrap_or_default(),
+            };
+            let scroll_top = view_state.map(|view| view.scroll_top_line).unwrap_or(0);
+            let follow = view_state.map(|view| view.follow_output).unwrap_or(true);
+            let content_rows = usize::from(leaf.rect.size.height.saturating_sub(1));
+            let position = crate::renderer::follow_output_position(
+                &rendered,
+                content_rows,
+                scroll_top,
+                follow,
+            );
+            let displayed = rendered[position.display_offset.min(rendered.len())..].to_vec();
+            (displayed, position.displayed_top_line)
+        };
+        if lines.is_empty() {
+            self.record_notification(format_notification(NotifyLevel::Info, "no hints found"));
+            return Ok(());
+        }
+
+        let pattern_sources = &self.config.active_script().loaded_config().hints.patterns;
+        let patterns = if pattern_sources.is_empty() {
+            crate::hints::default_patterns()
+        } else {
+            crate::hints::compile_patterns(pattern_sources)
+        };
+        let matches = crate::hints::scan(&lines, &patterns, top_line);
+        if matches.is_empty() {
+            self.record_notification(format_notification(NotifyLevel::Info, "no hints found"));
+            return Ok(());
+        }
+
+        let Some(state) = self.client.state_mut().view_state_mut(node_id) else {
+            // No view state to attach the overlay to; don't enter a hints mode
+            // that would have no matches.
+            return Ok(());
+        };
+        state.hints_state = Some(HintsState {
+            matches,
+            typed: String::new(),
+            on_select,
+        });
+        self.hints_node = Some(node_id);
+        self.input_state.set_mode(HINTS_MODE);
+        Ok(())
+    }
+
+    async fn handle_hints_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        _presentation: &PresentationModel,
+        key: KeyEvent,
+    ) -> Result<()> {
+        let Some(node_id) = self.hints_node else {
+            self.input_state.set_mode(NORMAL_MODE);
+            return Ok(());
+        };
+        // The overlay can be invalidated out from under us — e.g. a fresh
+        // snapshot clears hints_state because the visible content changed. If
+        // that happened, tear the overlay down and drop back to NORMAL_MODE so
+        // we don't stay stuck in HINTS_MODE swallowing every non-Escape key.
+        let overlay_active = self
+            .client
+            .state()
+            .view_state(node_id)
+            .is_some_and(|state| state.hints_state.is_some());
+        if !overlay_active {
+            self.cancel_hints(node_id);
+            return Ok(());
+        }
+        match key {
+            KeyEvent::Escape => {
+                self.cancel_hints(node_id);
+                Ok(())
+            }
+            KeyEvent::Backspace => {
+                if let Some(state) = self
+                    .client
+                    .state_mut()
+                    .view_state_mut(node_id)
+                    .and_then(|state| state.hints_state.as_mut())
+                {
+                    state.typed.pop();
+                }
+                Ok(())
+            }
+            KeyEvent::Char(ch) => {
+                self.hints_type_char(session_id, viewport, node_id, ch)
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Append a character to the typed hint prefix, selecting on a unique full
+    /// match and ignoring characters that match no label.
+    async fn hints_type_char(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        node_id: NodeId,
+        ch: char,
+    ) -> Result<()> {
+        let (selected, extend) = {
+            let Some(state) = self
+                .client
+                .state()
+                .view_state(node_id)
+                .and_then(|state| state.hints_state.as_ref())
+            else {
+                return Ok(());
+            };
+            let mut typed = state.typed.clone();
+            typed.push(ch);
+            let any_prefix = state
+                .matches
+                .iter()
+                .any(|hint| hint.label.starts_with(&typed));
+            if !any_prefix {
+                // Not a valid continuation; ignore the keystroke.
+                (None, None)
+            } else if let Some(hint) = state.matches.iter().find(|hint| hint.label == typed) {
+                (Some(hint.clone()), None)
+            } else {
+                (None, Some(typed))
+            }
+        };
+
+        if let Some(typed) = extend {
+            if let Some(state) = self
+                .client
+                .state_mut()
+                .view_state_mut(node_id)
+                .and_then(|state| state.hints_state.as_mut())
+            {
+                state.typed = typed;
+            }
+            return Ok(());
+        }
+        if let Some(hint) = selected {
+            return self.select_hint(session_id, viewport, node_id, hint).await;
+        }
+        Ok(())
+    }
+
+    fn cancel_hints(&mut self, node_id: NodeId) {
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.hints_state = None;
+        }
+        self.hints_node = None;
+        self.input_state.set_mode(NORMAL_MODE);
+    }
+
+    async fn select_hint(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        node_id: NodeId,
+        hint: crate::state::HintMatch,
+    ) -> Result<()> {
+        let on_select = self
+            .client
+            .state()
+            .view_state(node_id)
+            .and_then(|state| state.hints_state.as_ref())
+            .and_then(|state| state.on_select.clone());
+        self.cancel_hints(node_id);
+
+        match on_select {
+            Some(name) => {
+                let context = self
+                    .context_for(Some(session_id), Some(viewport), None)
+                    .with_hint_selection(hint.text.clone());
+                match self.config.active_script().run_named_action(&name, context) {
+                    Ok(actions) => {
+                        self.execute_actions(Some(session_id), Some(viewport), actions)
+                            .await
+                    }
+                    Err(error) => {
+                        self.record_notification(error.to_string());
+                        Ok(())
+                    }
+                }
+            }
+            None => {
+                // Report only the length, not the copied text: record_notification
+                // logs at WARN and the status line renders it, so raw hint text
+                // (possibly a secret or control chars) must not leak in.
+                let copied = hint.text.chars().count();
+                self.enqueue_clipboard(hint.text);
+                self.record_notification(format_notification(
+                    NotifyLevel::Info,
+                    &format!("copied {copied} characters"),
+                ));
+                Ok(())
+            }
+        }
     }
 
     async fn commit_search_prompt(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
@@ -2363,10 +2933,7 @@ where
         let message = message.into();
         warn!("{message}");
         self.notifications.push(message);
-        if self.notifications.len() > 64 {
-            let overflow = self.notifications.len() - 64;
-            self.notifications.drain(0..overflow);
-        }
+        enforce_notification_cap(&mut self.notifications);
     }
 }
 
@@ -2635,6 +3202,22 @@ fn format_notification(level: NotifyLevel, message: &str) -> String {
         NotifyLevel::Error => format!("error: {message}"),
     }
 }
+
+fn push_background_notification(sink: &Arc<Mutex<Vec<String>>>, message: String) {
+    let mut pending = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.push(message);
+    enforce_notification_cap(&mut pending);
+}
+
+/// Retain only the newest [`MAX_NOTIFICATIONS`] messages.
+fn enforce_notification_cap(notifications: &mut Vec<String>) {
+    if notifications.len() > MAX_NOTIFICATIONS {
+        let overflow = notifications.len() - MAX_NOTIFICATIONS;
+        notifications.drain(0..overflow);
+    }
+}
+
+const MAX_NOTIFICATIONS: usize = 64;
 
 fn resolve_floating_geometry(spec: FloatingGeometrySpec, viewport: Size) -> FloatGeometry {
     let width = resolve_floating_size(spec.width, viewport.width);
@@ -2935,6 +3518,7 @@ mod tests {
                     exit_code: None,
                     pipe: None,
                     env: Default::default(),
+                    user_options: Default::default(),
                 },
                 location,
                 false,

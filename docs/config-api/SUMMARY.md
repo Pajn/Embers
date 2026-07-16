@@ -8,6 +8,7 @@
 - [System (Registration)](registration-system.md)
 - [UI (Registration)](registration-ui.md)
 - [Mouse](mouse.md)
+- [Hints](hints.md)
 - [Theme](theme.md)
 - [Tabbar](tabbar.md)
 - [Action](action.md)

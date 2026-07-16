@@ -20,7 +20,7 @@ use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
 use super::types::{
-    LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
+    HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -29,6 +29,7 @@ fn populate_common_registration_scope(scope: &mut rhai::Scope<'static>) {
     scope.push("tabbar", TabbarApi::new());
     scope.push("theme", ThemeApi::new());
     scope.push("mouse", MouseApi::new());
+    scope.push("hints", HintsApi::new());
 }
 
 thread_local! {
@@ -256,6 +257,7 @@ struct RegistrationState {
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
     mouse: MouseSettings,
+    hints: HintsSettings,
     theme: ThemeSpec,
 }
 
@@ -358,6 +360,7 @@ impl RegistrationState {
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
             mouse: self.mouse,
+            hints: self.hints,
             theme: self.theme,
         })
     }
@@ -549,6 +552,24 @@ impl MouseApi {
             .expect("registration lock")
             .mouse
             .wheel_forward = value;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HintsApi {}
+
+impl HintsApi {
+    fn new() -> Self {
+        Self {}
+    }
+
+    fn set_patterns(&self, position: Position, patterns: Vec<String>) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .hints
+            .patterns = patterns;
         Ok(())
     }
 }
@@ -818,14 +839,62 @@ mod mouse_registration_api {
     }
 }
 
+#[export_module]
+mod hints_registration_api {
+    use super::*;
+
+    /// Replace the hint patterns used by `action.enter_hints()` with the given
+    /// regex strings. A non-string element or an invalid regex is an error. An
+    /// empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+    /// IPs, numbers).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:26
+    #[rhai_fn(return_raw, name = "set_patterns")]
+    pub fn set_patterns(
+        ctx: NativeCallContext,
+        hints: HintsApi,
+        patterns: rhai::Array,
+    ) -> RhaiResultOf<()> {
+        let position = ctx.call_position();
+        let mut parsed = Vec::with_capacity(patterns.len());
+        for value in patterns {
+            let Some(text) = value.try_cast::<rhai::ImmutableString>() else {
+                return Err(runtime_error(
+                    "hints.set_patterns expects an array of strings",
+                    position,
+                ));
+            };
+            let text = text.to_string();
+            // Reject invalid regexes at config time rather than silently
+            // dropping them when hints are entered.
+            if let Err(error) = regex::Regex::new(&text) {
+                return Err(runtime_error(
+                    format!("hints.set_patterns has an invalid regex {text:?}: {error}"),
+                    position,
+                ));
+            }
+            parsed.push(text);
+        }
+        hints.set_patterns(position, parsed)
+    }
+}
+
 fn register_api(engine: &mut Engine) {
     engine.register_type_with_name::<TabbarApi>("TabbarApi");
     engine.register_type_with_name::<ThemeApi>("ThemeApi");
     engine.register_type_with_name::<MouseApi>("MouseApi");
+    engine.register_type_with_name::<HintsApi>("HintsApi");
     engine.register_global_module(rhai::exported_module!(registration_globals).into());
     engine.register_global_module(rhai::exported_module!(tabbar_registration_api).into());
     engine.register_global_module(rhai::exported_module!(theme_registration_api).into());
     engine.register_global_module(rhai::exported_module!(mouse_registration_api).into());
+    engine.register_global_module(rhai::exported_module!(hints_registration_api).into());
 }
 
 pub(crate) fn register_documented_registration_api(engine: &mut Engine) {

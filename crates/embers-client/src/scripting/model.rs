@@ -154,6 +154,18 @@ pub enum Action {
     RunNamedAction {
         name: String,
     },
+    SwitchSession {
+        name: String,
+    },
+    LastSession,
+    NextSession,
+    PrevSession,
+    RunShell {
+        command: Vec<String>,
+    },
+    EnterHints {
+        action: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

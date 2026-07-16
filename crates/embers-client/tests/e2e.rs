@@ -40,6 +40,14 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is utf-8")
 }
 
+/// Create two sessions ("alpha", "beta"), each with a single shell window.
+fn two_sessions_with_shells(server: &TestServer) {
+    run_cli(server, &["new-session", "alpha"]);
+    run_cli(server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    run_cli(server, &["new-session", "beta"]);
+    run_cli(server, &["new-window", "-t", "beta", "--", "/bin/sh"]);
+}
+
 async fn create_session(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::Create {
@@ -1308,6 +1316,466 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
         "expected indexed red SGR in client output:\n{ansi:?}"
     );
     assert!(grid.render().contains("RED-TEXT"));
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        r#"
+            fn go_alpha(ctx) { action.switch_session("alpha") }
+            fn go_beta(ctx) { action.switch_session("beta") }
+            fn go_last(ctx) { action.last_session() }
+            fn go_next(ctx) { action.next_session() }
+            fn go_ghost(ctx) { action.switch_session("ghost") }
+            define_action("go-alpha", go_alpha);
+            define_action("go-beta", go_beta);
+            define_action("go-last", go_last);
+            define_action("go-next", go_next);
+            define_action("go-ghost", go_ghost);
+            bind("normal", "p", "go-alpha");
+            bind("normal", "o", "go-beta");
+            bind("normal", "l", "go-last");
+            bind("normal", "c", "go-next");
+            bind("normal", "x", "go-ghost");
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    (config, tempdir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_shell_spawns_with_socket_env_and_reports_failures() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let socket_out = out_dir.path().join("socket.txt");
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        format!(
+            r#"
+                fn write_socket(ctx) {{ action.run_shell("printf %s \"$EMBERS_SOCKET\" > {out}") }}
+                fn fail(ctx) {{ action.run_shell("exit 3") }}
+                fn nop(ctx) {{ action.noop() }}
+                define_action("write-socket", write_socket);
+                define_action("fail", fail);
+                define_action("nop", nop);
+                bind("normal", "w", "write-socket");
+                bind("normal", "f", "fail");
+                bind("normal", "z", "nop");
+            "#,
+            out = socket_out.display()
+        ),
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(server.socket_path().to_path_buf());
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = configured
+        .client()
+        .state()
+        .sessions
+        .values()
+        .find(|session| session.name == "alpha")
+        .map(|session| session.id)
+        .expect("alpha session");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // run_shell spawns with $EMBERS_SOCKET injected (proves spawn + env).
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('w'))
+        .await
+        .expect("run-shell dispatch returns immediately");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let socket_string = server.socket_path().to_string_lossy().into_owned();
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(&socket_out)
+            && contents == socket_string
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run-shell did not write socket path"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // A non-zero exit surfaces a warning, drained on the next tick.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('f'))
+        .await
+        .expect("failing run-shell dispatch returns immediately");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        // The benign key triggers a drain of background notifications.
+        configured
+            .handle_key(alpha, size, KeyEvent::Char('z'))
+            .await
+            .expect("nop key");
+        if configured
+            .notifications()
+            .iter()
+            .any(|note| note.contains("run-shell") && note.contains("exited"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected a run-shell failure notification; got {:?}",
+            configured.notifications()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hints_copy_and_callback_over_a_url() {
+    use base64::Engine as _;
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(
+        &server,
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--",
+            "/bin/sh",
+            "-lc",
+            "printf 'X https://example.com/x Y\\n'; cat",
+        ],
+    );
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        r#"
+            fn go_hints(ctx) { action.enter_hints() }
+            fn go_hints_cb(ctx) { action.enter_hints_with("capture") }
+            fn capture(ctx) { action.notify("info", ctx.hint_selection()) }
+            define_action("go-hints", go_hints);
+            define_action("go-hints-cb", go_hints_cb);
+            define_action("capture", capture);
+            bind("normal", "h", "go-hints");
+            bind("normal", "j", "go-hints-cb");
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Fetch the pane's visible snapshot (it rendered before we attached, so no
+    // render event is pending) and retry until entering hints finds the URL.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let buffer_ids: Vec<_> = configured
+            .client()
+            .state()
+            .buffers
+            .keys()
+            .copied()
+            .collect();
+        for buffer_id in buffer_ids {
+            let _ = configured
+                .client_mut()
+                .refresh_buffer_snapshot(buffer_id)
+                .await;
+        }
+        configured
+            .handle_key(alpha, size, KeyEvent::Char('h'))
+            .await
+            .expect("enter hints");
+        if configured.current_mode() == "hints" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "hints never found the URL; notes {:?}",
+            configured.notifications()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = configured.drain_terminal_output();
+
+    // The single match is labelled "a"; typing it copies the URL via OSC 52.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("select hint");
+    assert_eq!(configured.current_mode(), "normal");
+    let out = configured.drain_terminal_output().concat();
+    let encoded = base64::engine::general_purpose::STANDARD.encode("https://example.com/x");
+    let expected = format!("\x1b]52;c;{encoded}\x07");
+    assert!(
+        contains_subslice(&out, expected.as_bytes()),
+        "expected OSC 52 clipboard for the URL in {:?}",
+        String::from_utf8_lossy(&out)
+    );
+
+    // The callback variant invokes the named action with ctx.hint_selection().
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('j'))
+        .await
+        .expect("enter hints with callback");
+    assert_eq!(configured.current_mode(), "hints");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("select hint for callback");
+    assert!(
+        configured
+            .notifications()
+            .iter()
+            .skip(before)
+            .any(|note| note.contains("https://example.com/x")),
+        "callback should notify with the selected URL; got {:?}",
+        configured.notifications()
+    );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_title_follows_session_on_attach_switch_and_rename() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    async fn drain_until_contains(
+        configured: &mut ConfiguredClient<embers_client::SocketTransport>,
+        needle: &[u8],
+    ) {
+        let mut accumulated: Vec<u8> = configured.drain_terminal_output().concat();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !contains_subslice(&accumulated, needle) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for terminal output {:?}; got {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&accumulated)
+            );
+            let _ = configured
+                .process_next_event_timeout(Duration::from_millis(100))
+                .await;
+            accumulated.extend(configured.drain_terminal_output().concat());
+        }
+    }
+
+    let server = TestServer::start().await.expect("server starts");
+    two_sessions_with_shells(&server);
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let beta = session_id_by_name(configured.client(), "beta");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Attach-time title emission: `interactive::run` emits the title at startup by
+    // calling `emit_terminal_title` directly, which we exercise here — the full run
+    // loop needs a real TTY and input threads, so this covers the direct emission.
+    configured.emit_terminal_title(alpha);
+    let drained = configured.drain_terminal_output().concat();
+    assert!(
+        contains_subslice(&drained, b"\x1b]2;alpha\x07"),
+        "attach title missing in {:?}",
+        String::from_utf8_lossy(&drained)
+    );
+
+    // Switch: the own-client ClientChanged updates the title.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+    drain_until_contains(&mut configured, b"\x1b]2;beta\x07").await;
+
+    // Rename of the active session updates the title.
+    run_cli(&server, &["rename-session", "-t", "beta", "gamma"]);
+    drain_until_contains(&mut configured, b"\x1b]2;gamma\x07").await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_switch_actions_move_between_sessions() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    // Two sessions, each with a live shell pane.
+    two_sessions_with_shells(&server);
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync sessions");
+
+    let session_id = |configured: &ConfiguredClient<_>, name: &str| {
+        configured
+            .client()
+            .state()
+            .sessions
+            .values()
+            .find(|session| session.name == name)
+            .map(|session| session.id)
+            .unwrap_or_else(|| panic!("session {name} exists"))
+    };
+    let alpha = session_id(&configured, "alpha");
+    let beta = session_id(&configured, "beta");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+
+    // Switch by name: alpha -> beta.
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+
+    // Last-session toggles back to alpha, then forward to beta again.
+    configured
+        .handle_key(beta, size, KeyEvent::Char('l'))
+        .await
+        .expect("last session");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('l'))
+        .await
+        .expect("last session again");
+    assert_eq!(configured.active_session_id(), Some(beta));
+
+    // Cycle wraps across the two sessions.
+    configured
+        .handle_key(beta, size, KeyEvent::Char('c'))
+        .await
+        .expect("cycle next");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+
+    // Unknown session name notifies without changing the active session.
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('x'))
+        .await
+        .expect("unknown session name is handled");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    let unknown_notice = &configured.notifications()[before..];
+    assert_eq!(
+        unknown_notice.len(),
+        1,
+        "expected exactly one notification for the unknown session name, got {unknown_notice:?}"
+    );
+    assert!(
+        unknown_notice[0].contains("no session named 'ghost'"),
+        "expected an unknown-session notification naming 'ghost', got {:?}",
+        unknown_notice[0]
+    );
+
+    // last-session gracefully handles a previous session that has since closed:
+    // active is alpha with previous=beta, so kill beta and press last.
+    run_cli(&server, &["kill-session", "-t", "beta"]);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after kill");
+    let before = configured.notifications().len();
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('l'))
+        .await
+        .expect("last-session with a closed previous session is handled gracefully");
+    assert_eq!(configured.active_session_id(), Some(alpha));
+    let missing_notice = &configured.notifications()[before..];
+    assert_eq!(
+        missing_notice.len(),
+        1,
+        "expected exactly one notification for the closed previous session, got {missing_notice:?}"
+    );
+    assert!(
+        missing_notice[0].contains("no previous session"),
+        "expected a 'no previous session' notification, not an error switch, got {:?}",
+        missing_notice[0]
+    );
 
     server.shutdown().await.expect("server shuts down");
 }

@@ -252,6 +252,30 @@ ReturnType: `NodeRef | ()`
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> hint_selection </h2>
+
+```rust,ignore
+fn hint_selection(context: Context) -> ?
+```
+
+<div>
+<div class="tab">
+<button group="hint_selection" id="link-hint_selection-Description"  class="tablinks active"
+    onclick="openTab(event, 'hint_selection', 'Description')">
+Description
+</button>
+</div>
+
+<div group="hint_selection" id="hint_selection-Description" class="tabcontent"  style="display: block;" >
+Return the text selected in hint mode, when a hint callback is running.
+
+ReturnType: `string | ()`
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> sessions </h2>
 
 ```rust,ignore

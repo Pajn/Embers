@@ -12,6 +12,41 @@ use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Renderer;
 
+/// Follow-output viewport positioning shared by the renderer and the hints scan
+/// so overlays align with drawn content.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FollowOutputView {
+    /// Leading rendered lines to skip so the bottom `content_rows` are shown.
+    pub display_offset: usize,
+    /// Absolute line number of the first displayed line.
+    pub displayed_top_line: u64,
+}
+
+/// Compute the follow-output display offset and top line for a pane. When
+/// `follow_output` is false the offset is zero (the caller's scroll position is
+/// used as-is).
+pub(crate) fn follow_output_position(
+    lines: &[SnapshotLine],
+    content_rows: usize,
+    scroll_top_line: u64,
+    follow_output: bool,
+) -> FollowOutputView {
+    let display_offset = if follow_output {
+        let significant = lines
+            .iter()
+            .rposition(|line| !line.text.is_empty())
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        significant.saturating_sub(content_rows)
+    } else {
+        0
+    };
+    FollowOutputView {
+        display_offset,
+        displayed_top_line: scroll_top_line.saturating_add(display_offset as u64),
+    }
+}
+
 impl Renderer {
     pub fn render(&self, state: &ClientState, model: &PresentationModel) -> RenderGrid {
         self.render_with_tab_bars(state, model, &BTreeMap::new())
@@ -205,25 +240,24 @@ impl Renderer {
             });
 
         let content_rows = usize::from(height.saturating_sub(1));
-        let display_offset = view_state
-            .filter(|view| view.follow_output)
-            .map(|_| {
-                rendered_lines.map_or(0, |lines| {
-                    let significant_len = lines
-                        .iter()
-                        .rposition(|line| !line.text.is_empty())
-                        .map(|index| index + 1)
-                        .unwrap_or(0);
-                    significant_len.saturating_sub(content_rows)
-                })
-            })
-            .unwrap_or(0);
-        let displayed_top_line = view_state
+        let position = view_state
             .map(|view| {
-                view.scroll_top_line
-                    .saturating_add(u64::try_from(display_offset).unwrap_or(u64::MAX))
+                follow_output_position(
+                    rendered_lines.unwrap_or(&[]),
+                    content_rows,
+                    view.scroll_top_line,
+                    view.follow_output,
+                )
             })
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                // No view state yet (e.g. a snapshot arrived before the reducer
+                // built one): default to following output at the bottom of the
+                // rendered content, matching a freshly-created view, instead of
+                // pinning to the top of the buffer.
+                follow_output_position(rendered_lines.unwrap_or(&[]), content_rows, 0, true)
+            });
+        let display_offset = position.display_offset;
+        let displayed_top_line = position.displayed_top_line;
         let displayed_view_lines =
             rendered_lines.map(|lines| &lines[display_offset.min(lines.len())..]);
 
@@ -264,6 +298,17 @@ impl Renderer {
                     displayed_top_line,
                     displayed_view_lines.unwrap_or(rendered_lines.unwrap_or(&[])),
                     selection_state,
+                );
+            }
+            if let Some(hints_state) = &view_state.hints_state {
+                render_hints_overlay(
+                    grid,
+                    x,
+                    y + 1,
+                    width,
+                    content_rows,
+                    displayed_top_line,
+                    hints_state,
                 );
             }
             if !view_state.follow_output {
@@ -668,6 +713,72 @@ fn scroll_indicator_style() -> CellStyle {
     CellStyle {
         dim: true,
         reverse: true,
+        ..CellStyle::default()
+    }
+}
+
+fn render_hints_overlay(
+    grid: &mut RenderGrid,
+    x: u16,
+    y: u16,
+    width: u16,
+    content_rows: usize,
+    top_line: u64,
+    hints_state: &crate::state::HintsState,
+) {
+    // Count the typed prefix once; it's the same for every label character below.
+    let typed_len = hints_state.typed.chars().count();
+    for hint in &hints_state.matches {
+        // A label still consistent with what has been typed so far stays active;
+        // labels that no longer match the prefix are dropped from the overlay.
+        if !hint.label.starts_with(&hints_state.typed) {
+            continue;
+        }
+        if hint.line < top_line {
+            continue;
+        }
+        let Some(relative_row) = u16::try_from(hint.line - top_line).ok() else {
+            continue;
+        };
+        // Never draw past the pane's content rows onto the row below it.
+        if usize::from(relative_row) >= content_rows {
+            continue;
+        }
+        // Dim the matched text so the labels stand out.
+        grid.restyle_range(
+            x,
+            y.saturating_add(relative_row),
+            hint.start_col.min(width),
+            hint.end_col.min(width),
+            |base| CellStyle { dim: true, ..base },
+        );
+        // Draw the label characters at the start of the match, highlighting the
+        // portion already typed.
+        let label_row = y.saturating_add(relative_row);
+        for (offset, ch) in hint.label.chars().enumerate() {
+            let Some(offset) = u16::try_from(offset).ok() else {
+                break;
+            };
+            let column = hint.start_col.saturating_add(offset);
+            if column >= width {
+                break;
+            }
+            let typed = usize::from(offset) < typed_len;
+            grid.put_char_styled(
+                x.saturating_add(column),
+                label_row,
+                ch,
+                hint_label_style(typed),
+            );
+        }
+    }
+}
+
+fn hint_label_style(typed: bool) -> CellStyle {
+    CellStyle {
+        bold: true,
+        reverse: !typed,
+        underline: typed,
         ..CellStyle::default()
     }
 }

@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-60b5c002.js";
+            window.path_to_searchindex_js = "searchindex-3b02c077.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c8603eba.js"></script>
+        <script src="toc-22d094e2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -190,6 +190,7 @@
 <li><a href="#context">context</a></li>
 <li><a href="#eventinfo">event-info</a></li>
 <li><a href="#floatingref">floating-ref</a></li>
+<li><a href="#hints">hints</a></li>
 <li><a href="#mouse">mouse</a></li>
 <li><a href="#mux">mux</a></li>
 <li><a href="#noderef">node-ref</a></li>
@@ -688,6 +689,66 @@ Detach a buffer by id.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> enter_hints </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints" id="link-enter_hints-Description" class="tablinks active" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints" id="link-enter_hints-Example" class="tablinks" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints" id="enter_hints-Description" class="tabcontent" style="display: block;">
+Enter thumbs-style hint mode: label the matches in the visible pane and
+copy the selected one to the clipboard (OSC 52).
+</div>
+
+<div group="enter_hints" id="enter_hints-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints()
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints_with </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints_with(_: ActionApi, action: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints_with" id="link-enter_hints_with-Description" class="tablinks active" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints_with" id="link-enter_hints_with-Example" class="tablinks" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Description" class="tabcontent" style="display: block;">
+Enter hint mode, invoking the named action with the selected text exposed
+as `ctx.hint_selection()` instead of copying it.
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints_with("open-url")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> enter_mode </h2>
 
 <pre><code class="language-rust ignore">fn enter_mode(_: ActionApi, mode: String) -&gt; Action</code></pre>
@@ -1076,6 +1137,27 @@ Kill a buffer by id.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> last_session </h2>
+
+<pre><code class="language-rust ignore">fn last_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="last_session" id="link-last_session-Description" class="tablinks active" onclick="openTab(event, &#39;last_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="last_session" id="last_session-Description" class="tabcontent" style="display: block;">
+Switch back to the previously active session (tmux `switch-client -l`).
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> leave_mode </h2>
 
 <pre><code class="language-rust ignore">fn leave_mode(_: ActionApi) -&gt; Action</code></pre>
@@ -1264,6 +1346,27 @@ Select the next tab in the currently focused tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> next_session </h2>
+
+<pre><code class="language-rust ignore">fn next_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="next_session" id="link-next_session-Description" class="tablinks active" onclick="openTab(event, &#39;next_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="next_session" id="next_session-Description" class="tabcontent" style="display: block;">
+Switch to the next session in list order, wrapping around.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> next_tab </h2>
 
 <pre><code class="language-rust ignore">fn next_tab(_: ActionApi, tabs_node_id: int) -&gt; Action</code></pre>
@@ -1392,6 +1495,27 @@ Select the previous tab in the currently focused tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> prev_session </h2>
+
+<pre><code class="language-rust ignore">fn prev_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="prev_session" id="link-prev_session-Description" class="tablinks active" onclick="openTab(event, &#39;prev_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="prev_session" id="prev_session-Description" class="tabcontent" style="display: block;">
+Switch to the previous session in list order, wrapping around.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> prev_tab </h2>
 
 <pre><code class="language-rust ignore">fn prev_tab(_: ActionApi, tabs_node_id: int) -&gt; Action</code></pre>
@@ -1488,6 +1612,66 @@ Description
 
 <div group="run_named_action" id="run_named_action-Description" class="tabcontent" style="display: block;">
 Run another named action by name.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell </h2>
+
+<pre><code class="language-rust ignore">fn run_shell(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell" id="link-run_shell-Description" class="tablinks active" onclick="openTab(event, &#39;run_shell&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell" id="link-run_shell-Example" class="tablinks" onclick="openTab(event, &#39;run_shell&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell" id="run_shell-Description" class="tabcontent" style="display: block;">
+Run a shell command line in the client's login context (tmux `run-shell`).
+<p>The string is executed as <code>/bin/sh -lc "&lt;command&gt;"</code>. Output is discarded;
+the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.</p>
+</div>
+
+<div group="run_shell" id="run_shell-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell("wisp popup")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell_argv </h2>
+
+<pre><code class="language-rust ignore">fn run_shell_argv(_: ActionApi, argv: Array) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell_argv" id="link-run_shell_argv-Description" class="tablinks active" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell_argv" id="link-run_shell_argv-Example" class="tablinks" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Description" class="tabcontent" style="display: block;">
+Run a command given as an explicit argv array, without a shell.
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell_argv(["wisp", "popup"])
+</code></pre>
 </div>
 
 </div>
@@ -1910,6 +2094,35 @@ Description
 
 <div group="swap_current_node" id="swap_current_node-Description" class="tabcontent" style="display: block;">
 Swap the current node with a sibling.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> switch_session </h2>
+
+<pre><code class="language-rust ignore">fn switch_session(_: ActionApi, name: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="switch_session" id="link-switch_session-Description" class="tablinks active" onclick="openTab(event, &#39;switch_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="switch_session" id="link-switch_session-Example" class="tablinks" onclick="openTab(event, &#39;switch_session&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="switch_session" id="switch_session-Description" class="tabcontent" style="display: block;">
+Switch the client to the session with the given name (tmux `switch-client -t`).
+</div>
+
+<div group="switch_session" id="switch_session-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.switch_session("work")
+</code></pre>
 </div>
 
 </div>
@@ -2499,6 +2712,41 @@ Toggle client-side wheel scrolling.
 
 
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="hints"><a class="header" href="#hints">Hints</a></h1>
+<p><code>Namespace: global</code></p>
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_patterns </h2>
+
+<pre><code class="language-rust ignore">fn set_patterns(hints: HintsApi, patterns: Array)</code></pre>
+<div>
+<div class="tab">
+<button group="set_patterns" id="link-set_patterns-Description" class="tablinks active" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_patterns" id="link-set_patterns-Example" class="tablinks" onclick="openTab(event, &#39;set_patterns&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_patterns" id="set_patterns-Description" class="tabcontent" style="display: block;">
+Replace the hint patterns used by `action.enter_hints()` with the given
+regex strings. A non-string element or an invalid regex is an error. An
+empty list restores the built-in default set (URLs, paths, SHAs, UUIDs,
+IPs, numbers).
+</div>
+
+<div group="set_patterns" id="set_patterns-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="theme"><a class="header" href="#theme">Theme</a></h1>
 <p><code>Namespace: global</code></p>
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
@@ -2818,6 +3066,66 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description-1" class="tabcontent" style="display: block;">
 Detach a buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints" id="link-enter_hints-Description-1" class="tablinks active" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints" id="link-enter_hints-Example-1" class="tablinks" onclick="openTab(event, &#39;enter_hints&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints" id="enter_hints-Description-1" class="tabcontent" style="display: block;">
+Enter thumbs-style hint mode: label the matches in the visible pane and
+copy the selected one to the clipboard (OSC 52).
+</div>
+
+<div group="enter_hints" id="enter_hints-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints()
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> enter_hints_with </h2>
+
+<pre><code class="language-rust ignore">fn enter_hints_with(_: ActionApi, action: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="enter_hints_with" id="link-enter_hints_with-Description-1" class="tablinks active" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="enter_hints_with" id="link-enter_hints_with-Example-1" class="tablinks" onclick="openTab(event, &#39;enter_hints_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Description-1" class="tabcontent" style="display: block;">
+Enter hint mode, invoking the named action with the selected text exposed
+as `ctx.hint_selection()` instead of copying it.
+</div>
+
+<div group="enter_hints_with" id="enter_hints_with-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.enter_hints_with("open-url")
+</code></pre>
 </div>
 
 </div>
@@ -3215,6 +3523,27 @@ Kill a buffer by id.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> last_session </h2>
+
+<pre><code class="language-rust ignore">fn last_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="last_session" id="link-last_session-Description-1" class="tablinks active" onclick="openTab(event, &#39;last_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="last_session" id="last_session-Description-1" class="tabcontent" style="display: block;">
+Switch back to the previously active session (tmux `switch-client -l`).
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> leave_mode </h2>
 
 <pre><code class="language-rust ignore">fn leave_mode(_: ActionApi) -&gt; Action</code></pre>
@@ -3403,6 +3732,27 @@ Select the next tab in the currently focused tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> next_session </h2>
+
+<pre><code class="language-rust ignore">fn next_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="next_session" id="link-next_session-Description-1" class="tablinks active" onclick="openTab(event, &#39;next_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="next_session" id="next_session-Description-1" class="tabcontent" style="display: block;">
+Switch to the next session in list order, wrapping around.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> next_tab </h2>
 
 <pre><code class="language-rust ignore">fn next_tab(_: ActionApi, tabs_node_id: int) -&gt; Action</code></pre>
@@ -3531,6 +3881,27 @@ Select the previous tab in the currently focused tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> prev_session </h2>
+
+<pre><code class="language-rust ignore">fn prev_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="prev_session" id="link-prev_session-Description-1" class="tablinks active" onclick="openTab(event, &#39;prev_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="prev_session" id="prev_session-Description-1" class="tabcontent" style="display: block;">
+Switch to the previous session in list order, wrapping around.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> prev_tab </h2>
 
 <pre><code class="language-rust ignore">fn prev_tab(_: ActionApi, tabs_node_id: int) -&gt; Action</code></pre>
@@ -3627,6 +3998,66 @@ Description
 
 <div group="run_named_action" id="run_named_action-Description-1" class="tabcontent" style="display: block;">
 Run another named action by name.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell </h2>
+
+<pre><code class="language-rust ignore">fn run_shell(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell" id="link-run_shell-Description-1" class="tablinks active" onclick="openTab(event, &#39;run_shell&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell" id="link-run_shell-Example-1" class="tablinks" onclick="openTab(event, &#39;run_shell&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell" id="run_shell-Description-1" class="tabcontent" style="display: block;">
+Run a shell command line in the client's login context (tmux `run-shell`).
+<p>The string is executed as <code>/bin/sh -lc "&lt;command&gt;"</code>. Output is discarded;
+the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.</p>
+</div>
+
+<div group="run_shell" id="run_shell-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell("wisp popup")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_shell_argv </h2>
+
+<pre><code class="language-rust ignore">fn run_shell_argv(_: ActionApi, argv: Array) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_shell_argv" id="link-run_shell_argv-Description-1" class="tablinks active" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_shell_argv" id="link-run_shell_argv-Example-1" class="tablinks" onclick="openTab(event, &#39;run_shell_argv&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Description-1" class="tabcontent" style="display: block;">
+Run a command given as an explicit argv array, without a shell.
+</div>
+
+<div group="run_shell_argv" id="run_shell_argv-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.run_shell_argv(["wisp", "popup"])
+</code></pre>
 </div>
 
 </div>
@@ -4049,6 +4480,35 @@ Description
 
 <div group="swap_current_node" id="swap_current_node-Description-1" class="tabcontent" style="display: block;">
 Swap the current node with a sibling.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> switch_session </h2>
+
+<pre><code class="language-rust ignore">fn switch_session(_: ActionApi, name: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="switch_session" id="link-switch_session-Description-1" class="tablinks active" onclick="openTab(event, &#39;switch_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="switch_session" id="link-switch_session-Example-1" class="tablinks" onclick="openTab(event, &#39;switch_session&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="switch_session" id="switch_session-Description-1" class="tabcontent" style="display: block;">
+Switch the client to the session with the given name (tmux `switch-client -t`).
+</div>
+
+<div group="switch_session" id="switch_session-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.switch_session("work")
+</code></pre>
 </div>
 
 </div>
@@ -4657,6 +5117,28 @@ Description
 <div group="find_node" id="find_node-Description" class="tabcontent" style="display: block;">
 Find a node by numeric id. Returns `()` when it does not exist.
 <p>ReturnType: <code>NodeRef | ()</code></p>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> hint_selection </h2>
+
+<pre><code class="language-rust ignore">fn hint_selection(context: Context) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="hint_selection" id="link-hint_selection-Description" class="tablinks active" onclick="openTab(event, &#39;hint_selection&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="hint_selection" id="hint_selection-Description" class="tabcontent" style="display: block;">
+Return the text selected in hint mode, when a hint callback is running.
+<p>ReturnType: <code>string | ()</code></p>
 </div>
 
 </div>
@@ -5561,6 +6043,28 @@ Description
 
 <div group="tty_path" id="tty_path-Description" class="tabcontent" style="display: block;">
 Return the controlling TTY path, if any.
+<p>ReturnType: <code>string | ()</code></p>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> user_option </h2>
+
+<pre><code class="language-rust ignore">fn user_option(buffer: BufferRef, key: String) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="user_option" id="link-user_option-Description" class="tablinks active" onclick="openTab(event, &#39;user_option&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="user_option" id="user_option-Description" class="tabcontent" style="display: block;">
+Look up a runtime user option set on the buffer via `embers buffer set-option`.
 <p>ReturnType: <code>string | ()</code></p>
 </div>
 

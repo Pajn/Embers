@@ -58,6 +58,51 @@ use crate::{
 /// reattached client recovers via resync, are dropped when the queue is full.
 const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 
+/// Caps on runtime-settable pane user options. Each option is re-encoded into
+/// every `BufferRecord` (list/get responses and RenderInvalidated broadcasts),
+/// so an unbounded map would let a client inflate frames without limit — and a
+/// record that exceeds the frame size limit becomes permanently un-listable.
+const MAX_USER_OPTIONS_PER_BUFFER: usize = 256;
+const MAX_USER_OPTION_KEY_LEN: usize = 256;
+const MAX_USER_OPTION_VALUE_LEN: usize = 4096;
+
+/// Aggregate size budget for a `BuffersResponse`. Per-buffer caps alone don't
+/// bound the *total* list: with up to `max_buffers` records (default 2048), each
+/// carrying env and user options, the encoded response can exceed the protocol
+/// frame cap (`MAX_FRAME_LEN`, 8 MiB), which makes the whole list un-sendable and
+/// fails the request. We stop adding records past this budget (kept comfortably
+/// under the frame cap to absorb estimation slack) rather than emit a dead frame.
+const BUFFERS_RESPONSE_BUDGET: usize = 7 * 1024 * 1024;
+
+/// Conservative upper bound on a `BufferRecord`'s flatbuffers-encoded size, used
+/// to keep `BuffersResponse` under [`BUFFERS_RESPONSE_BUDGET`]. It overestimates
+/// (generous fixed and per-field overhead) so the real encoded frame always lands
+/// within budget even though the exact flatbuffers layout isn't computed here.
+fn estimated_buffer_record_size(record: &embers_protocol::BufferRecord) -> usize {
+    // Fixed scalar fields, the table, and its vtable.
+    const RECORD_OVERHEAD: usize = 256;
+    // Length prefix, offset, and padding per variable-length string/vector entry.
+    const FIELD_OVERHEAD: usize = 16;
+    let mut size = RECORD_OVERHEAD;
+    size += record.title.len() + FIELD_OVERHEAD;
+    size += record.cwd.as_ref().map_or(0, String::len) + FIELD_OVERHEAD;
+    for arg in &record.command {
+        size += arg.len() + FIELD_OVERHEAD;
+    }
+    if let Some(pipe) = &record.pipe {
+        for arg in &pipe.command {
+            size += arg.len() + FIELD_OVERHEAD;
+        }
+    }
+    for (key, value) in &record.env {
+        size += key.len() + value.len() + 2 * FIELD_OVERHEAD;
+    }
+    for (key, value) in &record.user_options {
+        size += key.len() + value.len() + 2 * FIELD_OVERHEAD;
+    }
+    size
+}
+
 #[derive(Debug)]
 pub struct Server {
     config: ServerConfig,
@@ -1009,7 +1054,7 @@ impl Runtime {
                 }
 
                 let state = self.state.lock().await;
-                let buffers = state
+                let matching: Vec<_> = state
                     .buffers
                     .values()
                     .filter(|buffer| {
@@ -1032,8 +1077,28 @@ impl Runtime {
                             None => true,
                         }
                     })
-                    .map(buffer_record)
                     .collect();
+                let total = matching.len();
+                let mut buffers = Vec::with_capacity(total);
+                let mut budget = 0usize;
+                for buffer in matching {
+                    let record = buffer_record(buffer);
+                    let size = estimated_buffer_record_size(&record);
+                    // Always include at least one record; past that, stop before
+                    // the aggregate response could exceed the frame cap.
+                    if !buffers.is_empty() && budget.saturating_add(size) > BUFFERS_RESPONSE_BUDGET
+                    {
+                        break;
+                    }
+                    budget += size;
+                    buffers.push(record);
+                }
+                if buffers.len() < total {
+                    warn!(
+                        included = buffers.len(),
+                        total, "buffer list truncated to stay under the response frame budget"
+                    );
+                }
 
                 (
                     ServerResponse::Buffers(BuffersResponse {
@@ -1287,6 +1352,18 @@ impl Runtime {
                 request_id,
                 buffer_id,
             } => match self.stop_buffer_pipe(buffer_id).await {
+                Ok((buffer, events)) => (
+                    ServerResponse::Buffer(BufferResponse { request_id, buffer }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            BufferRequest::SetUserOption {
+                request_id,
+                buffer_id,
+                key,
+                value,
+            } => match self.set_buffer_user_option(buffer_id, key, value).await {
                 Ok((buffer, events)) => (
                     ServerResponse::Buffer(BufferResponse { request_id, buffer }),
                     events,
@@ -2198,6 +2275,71 @@ impl Runtime {
         ))
     }
 
+    async fn set_buffer_user_option(
+        &self,
+        buffer_id: BufferId,
+        key: String,
+        value: Option<String>,
+    ) -> Result<(embers_protocol::BufferRecord, Vec<ServerEvent>)> {
+        let (buffer, changed) = {
+            let mut state = self.state.lock().await;
+            let Some(record) = state.buffers.get_mut(&buffer_id) else {
+                return Err(MuxError::not_found(format!(
+                    "buffer {buffer_id} was not found"
+                )));
+            };
+            let changed = match value {
+                Some(value) => {
+                    if key.len() > MAX_USER_OPTION_KEY_LEN {
+                        return Err(MuxError::invalid_input(format!(
+                            "user option key exceeds {MAX_USER_OPTION_KEY_LEN} bytes"
+                        )));
+                    }
+                    if value.len() > MAX_USER_OPTION_VALUE_LEN {
+                        return Err(MuxError::invalid_input(format!(
+                            "user option value exceeds {MAX_USER_OPTION_VALUE_LEN} bytes"
+                        )));
+                    }
+                    // Setting a new key is capped; updating an existing key (or
+                    // removing, below) is always allowed so clients can't get
+                    // wedged once at the limit.
+                    if !record.user_options.contains_key(&key)
+                        && record.user_options.len() >= MAX_USER_OPTIONS_PER_BUFFER
+                    {
+                        return Err(MuxError::invalid_input(format!(
+                            "buffer already has the maximum of {MAX_USER_OPTIONS_PER_BUFFER} user options"
+                        )));
+                    }
+                    // Setting a key to the value it already holds changes nothing.
+                    if record
+                        .user_options
+                        .get(&key)
+                        .is_some_and(|existing| *existing == value)
+                    {
+                        false
+                    } else {
+                        record.user_options.insert(key, value);
+                        true
+                    }
+                }
+                // `remove` returns the old value, so `is_some()` is true only when
+                // an entry actually existed to remove.
+                None => record.user_options.remove(&key).is_some(),
+            };
+            (buffer_record(state.buffer(buffer_id)?), changed)
+        };
+        // A no-op set/unset leaves the record untouched, so don't invalidate
+        // renders for it; only broadcast when the options actually changed.
+        let events = if changed {
+            vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                buffer_id,
+            })]
+        } else {
+            Vec::new()
+        };
+        Ok((buffer, events))
+    }
+
     async fn resolve_reveal_client_id(
         &self,
         connection_id: u64,
@@ -2578,6 +2720,19 @@ impl Runtime {
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
+        // Re-read cwd after the sync: the runtime may have reported a new working
+        // directory (e.g. via OSC 7) that `sync_buffer_runtime_status` just wrote
+        // into the buffer record. `buffer_cwd` captured before the sync is stale.
+        let response_cwd = {
+            let state = self.state.lock().await;
+            match state.buffers.get(&buffer_id) {
+                // Preserve a deliberately-cleared cwd (`None`) on an existing
+                // buffer; only fall back to the captured value when the buffer is
+                // gone entirely.
+                Some(buffer) => buffer.cwd.clone(),
+                None => buffer_cwd,
+            }
+        };
 
         Ok(SnapshotResponse {
             request_id,
@@ -2586,7 +2741,7 @@ impl Runtime {
             size: snapshot.size,
             lines: snapshot.lines,
             title: snapshot.title.or(Some(buffer_title)),
-            cwd: buffer_cwd.map(|path| path.display().to_string()),
+            cwd: response_cwd.map(|path| path.display().to_string()),
         })
     }
 
@@ -2664,6 +2819,19 @@ impl Runtime {
         let runtime = self.buffer_runtime(buffer_id).await?;
         let snapshot = runtime.capture_visible_snapshot(buffer_cwd.clone()).await?;
         self.sync_buffer_runtime_status(buffer_id, &runtime).await?;
+        // Re-read cwd after the sync: the runtime may have reported a new working
+        // directory (e.g. via OSC 7) that `sync_buffer_runtime_status` just wrote
+        // into the buffer record; the pre-sync `snapshot.cwd`/`buffer_cwd` is stale.
+        let response_cwd = {
+            let state = self.state.lock().await;
+            match state.buffers.get(&buffer_id) {
+                // Preserve a deliberately-cleared cwd (`None`) on an existing
+                // buffer; only fall back to the captured value when the buffer is
+                // gone entirely.
+                Some(buffer) => buffer.cwd.clone(),
+                None => buffer_cwd,
+            }
+        };
 
         Ok(VisibleSnapshotResponse {
             request_id,
@@ -2672,7 +2840,7 @@ impl Runtime {
             size: snapshot.size,
             lines: snapshot.lines,
             title: snapshot.title,
-            cwd: snapshot.cwd.map(|path| path.display().to_string()),
+            cwd: response_cwd.map(|path| path.display().to_string()),
             viewport_top_line: snapshot.viewport_top_line,
             total_lines: snapshot.total_lines,
             alternate_screen: snapshot.modes.alternate_screen,
@@ -2757,6 +2925,20 @@ impl Runtime {
                             buffer.title = next_title;
                         }
                     }
+                    render_invalidated = true;
+                }
+                // The shell can change directory without advancing the snapshot
+                // sequence, so accept same-sequence cwd updates; reject only
+                // stale, lower-sequence ones (consistent with the pipe branch).
+                // A `None` from the runtime means "cwd currently unresolved" (no
+                // OSC 7 yet, pid lookup failed, unsupported platform) — not
+                // "cleared" — so never let it wipe a directory we already know.
+                if sequence_current
+                    && let Some(cwd) = update.cwd
+                    && cwd.is_some()
+                    && cwd != buffer.cwd
+                {
+                    buffer.cwd = cwd;
                     render_invalidated = true;
                 }
                 if sequence_current && let Some(pipe) = update.pipe {
@@ -2882,6 +3064,7 @@ impl Runtime {
                 activity: status.activity,
                 title: Some(status.title.clone()),
                 pipe: Some(status.pipe.clone()),
+                cwd: Some(status.cwd.clone()),
             },
         )
         .await;
@@ -3543,6 +3726,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
+        MAX_USER_OPTION_KEY_LEN, MAX_USER_OPTION_VALUE_LEN, MAX_USER_OPTIONS_PER_BUFFER,
         OUTBOUND_CHANNEL_CAPACITY, Runtime, ShutdownSignal, Subscription, wait_for_shutdown,
     };
     use crate::ResourceLimits;
@@ -3792,6 +3976,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_buffer_user_option_enforces_caps() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            state.create_buffer("shell", vec!["/bin/sh".to_owned()], None)
+        };
+
+        // Over-long value and key are rejected.
+        assert!(
+            runtime
+                .set_buffer_user_option(
+                    buffer_id,
+                    "k".to_owned(),
+                    Some("x".repeat(MAX_USER_OPTION_VALUE_LEN + 1)),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .set_buffer_user_option(
+                    buffer_id,
+                    "k".repeat(MAX_USER_OPTION_KEY_LEN + 1),
+                    Some("v".to_owned()),
+                )
+                .await
+                .is_err()
+        );
+
+        // Fill to the per-buffer cap with distinct keys.
+        for i in 0..MAX_USER_OPTIONS_PER_BUFFER {
+            runtime
+                .set_buffer_user_option(buffer_id, format!("k{i}"), Some("v".to_owned()))
+                .await
+                .expect("within cap");
+        }
+        // A brand-new key beyond the cap is rejected...
+        assert!(
+            runtime
+                .set_buffer_user_option(buffer_id, "overflow".to_owned(), Some("v".to_owned()))
+                .await
+                .is_err()
+        );
+        // ...but updating an existing key stays allowed even at the cap...
+        runtime
+            .set_buffer_user_option(buffer_id, "k0".to_owned(), Some("updated".to_owned()))
+            .await
+            .expect("update existing key at cap");
+        // ...and removing is always allowed.
+        runtime
+            .set_buffer_user_option(buffer_id, "k0".to_owned(), None)
+            .await
+            .expect("remove at cap");
+    }
+
+    #[tokio::test]
+    async fn set_buffer_user_option_emits_events_only_on_change() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            state.create_buffer("shell", vec!["/bin/sh".to_owned()], None)
+        };
+
+        // Setting a new key changes the record → RenderInvalidated emitted.
+        let (_, events) = runtime
+            .set_buffer_user_option(buffer_id, "is-vim".to_owned(), Some("1".to_owned()))
+            .await
+            .expect("set new key");
+        assert_eq!(events.len(), 1);
+
+        // Setting the same key to the same value is a no-op → no events.
+        let (_, events) = runtime
+            .set_buffer_user_option(buffer_id, "is-vim".to_owned(), Some("1".to_owned()))
+            .await
+            .expect("no-op set");
+        assert!(events.is_empty());
+
+        // Changing the value emits again.
+        let (_, events) = runtime
+            .set_buffer_user_option(buffer_id, "is-vim".to_owned(), Some("0".to_owned()))
+            .await
+            .expect("change value");
+        assert_eq!(events.len(), 1);
+
+        // Removing an existing key changes the record → event.
+        let (_, events) = runtime
+            .set_buffer_user_option(buffer_id, "is-vim".to_owned(), None)
+            .await
+            .expect("remove existing key");
+        assert_eq!(events.len(), 1);
+
+        // Removing an absent key is a no-op → no events.
+        let (_, events) = runtime
+            .set_buffer_user_option(buffer_id, "is-vim".to_owned(), None)
+            .await
+            .expect("no-op remove");
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn buffer_list_is_truncated_under_frame_budget() {
+        let runtime = Arc::new(Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        ));
+
+        // Give each buffer ~1 MiB of env so a handful of them together would push
+        // the encoded BuffersResponse past the frame budget.
+        let big_value = "x".repeat(1024 * 1024);
+        let created = 10usize;
+        {
+            let mut state = runtime.state.lock().await;
+            for i in 0..created {
+                let env = BTreeMap::from([(format!("BIG{i}"), big_value.clone())]);
+                state.create_buffer_with_env(
+                    format!("buf{i}"),
+                    vec!["/bin/sh".to_owned()],
+                    None,
+                    env,
+                );
+            }
+        }
+
+        let (response, _events) = runtime
+            .dispatch_buffer(
+                1,
+                BufferRequest::List {
+                    request_id: RequestId(1),
+                    session_id: None,
+                    attached_only: false,
+                    detached_only: false,
+                },
+            )
+            .await;
+
+        match response {
+            ServerResponse::Buffers(response) => {
+                assert!(
+                    response.buffers.len() < created,
+                    "expected the list to be truncated under the budget, got {} of {created}",
+                    response.buffers.len()
+                );
+                assert!(
+                    !response.buffers.is_empty(),
+                    "at least one buffer should always be returned"
+                );
+            }
+            other => panic!("expected buffers response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn open_history_buffer_is_rejected_when_buffer_limit_reached() {
         let tempdir = tempdir().expect("tempdir");
         let mut state = ServerState::new();
@@ -3882,6 +4236,7 @@ mod tests {
                     activity: ActivityState::Bell,
                     title: Some(Some("stale-title".to_owned())),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -3906,6 +4261,7 @@ mod tests {
                     activity: ActivityState::Bell,
                     title: Some(Some("fresh-title".to_owned())),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -3971,6 +4327,7 @@ mod tests {
                         exit_code: Some(0),
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
+                    cwd: None,
                 },
             )
             .await;
@@ -4030,6 +4387,7 @@ mod tests {
                         exit_code: Some(0),
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
+                    cwd: None,
                 },
             )
             .await;
@@ -4083,6 +4441,7 @@ mod tests {
                     activity: ActivityState::Idle,
                     title: Some(None),
                     pipe: None,
+                    cwd: None,
                 },
             )
             .await;
@@ -4096,6 +4455,79 @@ mod tests {
             .clone();
         assert_eq!(buffer.last_snapshot_seq, 6);
         assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_keeps_known_cwd_when_runtime_reports_none() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer(
+                "shell",
+                vec!["/bin/sh".to_owned()],
+                Some(PathBuf::from("/home/user")),
+            );
+            state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created")
+                .last_snapshot_seq = 5;
+            buffer_id
+        };
+
+        // The runtime couldn't resolve a live cwd (no OSC 7 yet, pid lookup
+        // failed, etc.). That is "unknown", not "cleared", so the spawn cwd must
+        // survive rather than being wiped to None.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: Some(None),
+                },
+            )
+            .await;
+
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.cwd, Some(PathBuf::from("/home/user")));
+
+        // A resolved directory still updates it.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 6,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: Some(Some(PathBuf::from("/tmp/work"))),
+                },
+            )
+            .await;
+        let buffer = runtime
+            .state
+            .lock()
+            .await
+            .buffer(buffer_id)
+            .expect("buffer exists")
+            .clone();
+        assert_eq!(buffer.cwd, Some(PathBuf::from("/tmp/work")));
     }
 
     #[tokio::test]

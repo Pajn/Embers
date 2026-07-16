@@ -120,6 +120,12 @@ where
         }
     }
 
+    /// The client id if it has already been resolved (e.g. after attach or a
+    /// switch), without issuing a request.
+    pub fn cached_client_id(&self) -> Option<u64> {
+        self.client_id.get()
+    }
+
     pub async fn process_next_event_timeout(
         &mut self,
         timeout: std::time::Duration,
