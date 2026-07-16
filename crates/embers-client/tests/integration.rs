@@ -2,7 +2,6 @@ mod config_api_docs;
 mod config_loading;
 mod configured_client;
 mod context;
-mod controller;
 mod e2e;
 mod presentation;
 mod reducer;
