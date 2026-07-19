@@ -528,6 +528,10 @@ table VisibleSnapshotResponse {
   // Appended (append-only evolution): parallel per-line styling. Absent for
   // plain buffers, so plain frames stay byte-identical to pre-styling frames.
   styles:[StyledLine];
+  // Appended: kitty keyboard protocol flags, using the protocol's own flag
+  // numbering (bit 0 disambiguate, bit 3 report-all-keys; bit 4 would be
+  // report-associated-text, unused here).
+  keyboard_mode:ubyte = 0;
 }
 
 table ScrollbackSliceResponse {

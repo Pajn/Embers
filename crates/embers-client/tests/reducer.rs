@@ -176,6 +176,7 @@ fn visible_snapshot(
         focus_reporting: false,
         bracketed_paste: false,
         cursor: None,
+        keyboard_mode: 0,
     }
 }
 

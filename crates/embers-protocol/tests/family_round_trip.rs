@@ -503,6 +503,7 @@ fn server_envelope_families_round_trip() {
                 position: CursorPosition { row: 1, col: 2 },
                 shape: CursorShape::Beam,
             }),
+            keyboard_mode: 1,
         })),
         ServerEnvelope::Response(ServerResponse::ScrollbackSlice(ScrollbackSliceResponse {
             request_id: RequestId(402),

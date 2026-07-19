@@ -20,14 +20,12 @@ pub use config::{
     default_config_path, discover_config, load_config_source,
 };
 pub use configured_client::ConfiguredClient;
-pub use controller::{
-    Controller, KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-};
+pub use controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
 pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor};
 pub use input::{
-    BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, InputResolution, InputState,
-    KeyParseError, KeySequence, KeyToken, ModeSpec, NORMAL_MODE, SEARCH_MODE, SELECT_MODE,
-    expand_leader, parse_key_sequence, resolve_key,
+    BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
+    KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, SEARCH_MODE,
+    SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
 };
 pub use presentation::{
     DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, TabItem,
