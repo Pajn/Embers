@@ -1,7 +1,7 @@
 mod automation;
 mod interactive;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroU64;
@@ -32,7 +32,7 @@ use embers_protocol::{
     NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
     SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
 };
-use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
+use embers_server::{BUFFER_ENV_VAR, SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 use tracing::warn;
 
@@ -448,6 +448,11 @@ pub enum JoinPlacementArg {
 
 async fn execute(socket: &Path, command: Command) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
+    connection.pane_buffer = pane_buffer(
+        std::env::var(BUFFER_ENV_VAR).ok().as_deref(),
+        std::env::var_os(SOCKET_ENV_VAR).as_deref(),
+        socket,
+    );
     execute_command(&mut connection, command).await
 }
 
@@ -769,7 +774,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 value,
                 unset,
             } => {
-                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
                 let value = if unset {
                     None
                 } else {
@@ -802,7 +807,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 }
             }
             BufferCommand::ShowOptions { target } => {
-                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
                 let response = connection
                     .request(ClientMessage::Buffer(BufferRequest::Get {
                         request_id: new_request_id(),
@@ -1191,7 +1196,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             enter,
             keys,
         } => {
-            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
             if keys.is_empty() && !enter {
                 return Err(MuxError::invalid_input(
                     "send-keys requires at least one key or --enter",
@@ -1204,18 +1209,18 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             connection
                 .request(ClientMessage::Input(embers_protocol::InputRequest::Send {
                     request_id: new_request_id(),
-                    buffer_id: pane.buffer_id,
+                    buffer_id,
                     bytes,
                 }))
                 .await?;
             Ok(String::new())
         }
         Command::CapturePane { target } => {
-            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
             let response = connection
                 .request(ClientMessage::Buffer(BufferRequest::Capture {
                     request_id: new_request_id(),
-                    buffer_id: pane.buffer_id,
+                    buffer_id,
                 }))
                 .await?;
             let snapshot = expect_capture(response, "capture-pane")?;
@@ -1748,6 +1753,23 @@ impl Drop for ServerPidFile {
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
+    /// The buffer of the pane the command runs in, when it runs inside a pane
+    /// of this server (see [`pane_buffer`]). Commands given no target act on
+    /// that pane, its window and its session, like tmux with `TMUX_PANE`.
+    pane_buffer: Option<BufferId>,
+}
+
+/// The buffer a command run inside a pane belongs to: `EMBERS_BUFFER`, which
+/// the server sets in every pane, taken only when the pane's `EMBERS_SOCKET`
+/// is the socket the command talks to. A command aimed at another server, or
+/// run outside any pane, has none.
+fn pane_buffer(
+    buffer: Option<&str>,
+    pane_socket: Option<&OsStr>,
+    socket: &Path,
+) -> Option<BufferId> {
+    let buffer_id = buffer?.trim().parse::<u64>().ok()?;
+    (Path::new(pane_socket?) == socket).then_some(BufferId(buffer_id))
 }
 
 impl CliConnection {
@@ -1755,7 +1777,34 @@ impl CliConnection {
         let client = ProtocolClient::connect(path)
             .await
             .map_err(|error| MuxError::transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            pane_buffer: None,
+        })
+    }
+
+    /// Where the pane the command runs in is shown, if it runs in one.
+    async fn pane_location(&mut self) -> Result<Option<BufferLocation>> {
+        let Some(buffer_id) = self.pane_buffer else {
+            return Ok(None);
+        };
+        let response = self
+            .request(ClientMessage::Buffer(BufferRequest::GetLocation {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await?;
+        expect_buffer_location(response, "buffer location").map(Some)
+    }
+
+    /// The buffer a buffer-level command acts on: the target pane's, else the
+    /// buffer of the pane the command runs in (shown or not), else the
+    /// focused pane's.
+    async fn resolve_buffer(&mut self, target: Option<&str>) -> Result<BufferId> {
+        match (target, self.pane_buffer) {
+            (None, Some(buffer_id)) => Ok(buffer_id),
+            _ => Ok(self.resolve_pane(target).await?.buffer_id),
+        }
     }
 
     async fn request(&mut self, message: ClientMessage) -> Result<ServerResponse> {
@@ -1906,7 +1955,20 @@ impl CliConnection {
     }
 
     async fn resolve_session_record(&mut self, target: Option<&str>) -> Result<SessionRecord> {
+        let pane_session = match target {
+            None => self
+                .pane_location()
+                .await?
+                .and_then(BufferLocation::session_id),
+            Some(_) => None,
+        };
         let sessions = self.list_sessions().await?;
+        if let Some(session_id) = pane_session {
+            return sessions
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| MuxError::not_found(format!("session {session_id} was not found")));
+        }
         match target {
             Some(target) => sessions
                 .into_iter()
@@ -1928,6 +1990,23 @@ impl CliConnection {
     }
 
     async fn resolve_window(&mut self, target: Option<&str>) -> Result<ResolvedWindow> {
+        if target.is_none()
+            && let Some(BufferLocationAttachment::Session {
+                session_id,
+                node_id,
+            }) = self
+                .pane_location()
+                .await?
+                .map(|location| location.attachment)
+        {
+            let snapshot = self.session_snapshot(session_id).await?;
+            let (index, child_id) = window_containing(&snapshot, node_id)?;
+            return Ok(ResolvedWindow {
+                snapshot,
+                index,
+                child_id,
+            });
+        }
         let (session_target, selector) = split_scoped_target(target);
         let snapshot = self
             .resolve_session_snapshot(session_target.as_deref())
@@ -1968,6 +2047,18 @@ impl CliConnection {
                 resolved_pane(snapshot, pane_id)
             }
             None => {
+                if let Some(location) = self.pane_location().await? {
+                    let (Some(session_id), Some(pane_id)) =
+                        (location.session_id(), location.node_id())
+                    else {
+                        return Err(MuxError::not_found(format!(
+                            "buffer {} of this pane ({BUFFER_ENV_VAR}) is not shown in a session",
+                            location.buffer_id
+                        )));
+                    };
+                    let snapshot = self.session_snapshot(session_id).await?;
+                    return resolved_pane(snapshot, pane_id);
+                }
                 let snapshot = self.resolve_session_snapshot(None).await?;
                 let pane_id = snapshot
                     .session
@@ -2000,6 +2091,18 @@ impl CliConnection {
                 }
             }
             None => {
+                if let Some(BufferLocationAttachment::Floating {
+                    session_id,
+                    floating_id,
+                    ..
+                }) = self
+                    .pane_location()
+                    .await?
+                    .map(|location| location.attachment)
+                {
+                    let snapshot = self.session_snapshot(session_id).await?;
+                    return floating_record(&snapshot, floating_id).cloned();
+                }
                 let snapshot = self.resolve_session_snapshot(None).await?;
                 let popup_id = snapshot
                     .session
@@ -2052,6 +2155,32 @@ struct ResolvedPane {
     snapshot: SessionSnapshot,
     leaf_id: NodeId,
     buffer_id: BufferId,
+}
+
+/// The root window holding `node_id`: its index and the node it shows.
+fn window_containing(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<(u32, NodeId)> {
+    let Some((tabs_node, tabs)) = root_tabs(snapshot)? else {
+        return Ok((0, snapshot.session.root_node_id));
+    };
+    let mut child_id = node_id;
+    loop {
+        let parent_id = node_record(snapshot, child_id)?.parent_id.ok_or_else(|| {
+            MuxError::not_found(format!("node {node_id} is not in a window of its session"))
+        })?;
+        if parent_id == tabs_node.id {
+            break;
+        }
+        child_id = parent_id;
+    }
+    let index = tabs
+        .tabs
+        .iter()
+        .position(|tab| tab.child_id == child_id)
+        .ok_or_else(|| MuxError::protocol(format!("window of node {node_id} is not a root tab")))?;
+    Ok((
+        u32::try_from(index).expect("tab index fits into protocol width"),
+        child_id,
+    ))
 }
 
 fn resolved_pane(snapshot: SessionSnapshot, pane_id: NodeId) -> Result<ResolvedPane> {
@@ -2816,8 +2945,20 @@ mod tests {
     use super::{
         BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
         JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
-        resolve_window_index, split_scoped_required, split_scoped_target,
+        pane_buffer, resolve_window_index, split_scoped_required, split_scoped_target,
     };
+
+    #[test]
+    fn pane_buffer_is_only_taken_for_the_panes_own_server() {
+        let socket = Path::new("/run/embers/embers.sock");
+        let same = Some(std::ffi::OsStr::new("/run/embers/embers.sock"));
+        let other = Some(std::ffi::OsStr::new("/run/embers/other.sock"));
+        assert_eq!(pane_buffer(Some("7"), same, socket), Some(BufferId(7)));
+        assert_eq!(pane_buffer(Some("7"), other, socket), None);
+        assert_eq!(pane_buffer(Some("7"), None, socket), None);
+        assert_eq!(pane_buffer(None, same, socket), None);
+        assert_eq!(pane_buffer(Some("%7"), same, socket), None);
+    }
 
     #[test]
     fn parser_accepts_global_socket_after_subcommand() {

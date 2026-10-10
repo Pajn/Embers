@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::config::{ResourceLimits, RestoreConfig};
+use crate::config::{BUFFER_ENV_VAR, ResourceLimits, RestoreConfig};
 use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
 };
@@ -2347,6 +2347,11 @@ impl Runtime {
         for (key, value) in env_hints {
             buffer_env.insert(key, OsString::from(value));
         }
+        // The buffer's own id goes in last so no hint can name another buffer.
+        buffer_env.insert(
+            BUFFER_ENV_VAR.to_owned(),
+            OsString::from(buffer_id.to_string()),
+        );
         let runtime = BufferRuntimeHandle::spawn(
             buffer_id,
             self.runtime_socket_path(buffer_id)?,

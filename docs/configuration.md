@@ -22,6 +22,24 @@ config API (key bindings, modes, actions, themes, tab bars, hooks) see
 A limit set to `0`, empty, or an unparseable value is ignored, so the default
 applies.
 
+### Set in panes
+
+The server sets these in the environment of every pane's program:
+
+| Variable | Value |
+| --- | --- |
+| `EMBERS_SOCKET` | The server's control socket, so `embers` run in a pane reaches the server the pane belongs to. |
+| `EMBERS_BUFFER` | The id of the pane's buffer, like tmux's `TMUX_PANE`. It is set after the environment the pane was created with, so it always names the pane's own buffer, including after the pane is restored. |
+| `TERM`, `COLORTERM` | `xterm-256color` and `truecolor` unless the pane's environment sets them (see [Terminal capabilities](#terminal-capabilities)). |
+
+An `embers` command run inside a pane uses `EMBERS_BUFFER` when it is given no
+`-t` target and `EMBERS_SOCKET` names the socket the command talks to: pane
+commands (`send-keys`, `capture-pane`, `buffer set-option`, `split-window`,
+`kill-pane`, ...) act on that pane, window commands on its window, session
+commands on its session and `kill-popup` on the popup it is in. A buffer that
+is not shown in any pane still takes buffer commands such as `send-keys`,
+`capture-pane` and `buffer set-option`.
+
 ## Socket path
 
 When `--socket`/`EMBERS_SOCKET` is not set, the socket is resolved to the first

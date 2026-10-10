@@ -623,6 +623,37 @@ async fn buffer_children_inherit_default_term_and_socket_env() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_children_see_their_own_buffer_id() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let script = "printf 'BUFFER:%s:\\n' \"$EMBERS_BUFFER\"";
+    let first = create_buffer(&mut connection, &["/bin/sh", "-lc", script]).await;
+    // An env hint cannot point a pane at another buffer.
+    let second = create_buffer_with_env(
+        &mut connection,
+        &["/bin/sh", "-lc", script],
+        &[("EMBERS_BUFFER", "999")],
+    )
+    .await;
+
+    for buffer in [first, second] {
+        let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "BUFFER:").await;
+        let text = snapshot.lines.join("\n");
+        let expected = format!("BUFFER:{}:", buffer.id.0);
+        assert!(
+            text.contains(&expected),
+            "expected {expected:?} in {text:?}"
+        );
+    }
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_env_hint_overrides_default_term() {
     let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");

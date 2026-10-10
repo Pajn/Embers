@@ -16,8 +16,8 @@ pub use buffer_runtime::{
     run_runtime_keeper,
 };
 pub use config::{
-    DEFAULT_RESTORE_COMMANDS, RESTORE_COMMANDS_ENV_VAR, RESTORE_ENV_VAR, ResourceLimits,
-    RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
+    BUFFER_ENV_VAR, DEFAULT_RESTORE_COMMANDS, RESTORE_COMMANDS_ENV_VAR, RESTORE_ENV_VAR,
+    ResourceLimits, RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
 };
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,

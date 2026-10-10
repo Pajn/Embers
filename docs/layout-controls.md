@@ -167,11 +167,14 @@ bind("normal", "<C-h>", "smart-nav-left");
 
 smart-splits.nvim only sets `@pane-is-vim` under tmux, so Neovim needs its own
 autocommands to set the Embers option. Panes inherit `EMBERS_SOCKET`, so the
-`embers` command reaches the right server:
+`embers` command reaches the right server, and `EMBERS_BUFFER`, the id of the
+pane's buffer, so without `-t` the command sets the option on Neovim's own pane,
+whichever pane is focused and however many sessions exist (see
+[Set in panes](configuration.md#set-in-panes)):
 
 ```lua
 local function set_is_vim(value)
-  if vim.env.EMBERS_SOCKET then
+  if vim.env.EMBERS_BUFFER then
     vim.system({ "embers", "buffer", "set-option", "is-vim", value })
   end
 end
@@ -182,12 +185,6 @@ vim.api.nvim_create_autocmd({ "VimLeavePre", "VimSuspend" }, {
   callback = function() set_is_vim("0") end,
 })
 ```
-
-Without `-t`, `embers buffer set-option` sets the option on the focused pane,
-and it needs a session target when more than one session exists. Embers does
-not give a pane's processes an identifier for their own pane, like tmux's
-`TMUX_PANE`, so this marks the right pane when Neovim starts or resumes in the
-focused pane of the only session.
 
 The full example lives in
 [`crates/embers-client/tests/fixtures/repository_config.rhai`](../crates/embers-client/tests/fixtures/repository_config.rhai).

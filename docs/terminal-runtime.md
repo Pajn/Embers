@@ -211,7 +211,8 @@ after a reboot) cannot be reattached and is marked `Interrupted`. With restore o
 every interrupted PTY buffer then gets a fresh keeper:
 
 - same buffer id, title, environment hints and place in the layout, so panes come back where they
-  were; detached buffers come back detached
+  were; detached buffers come back detached. The new process sees the same `EMBERS_BUFFER`, which
+  every buffer's process gets (see `docs/configuration.md`)
 - started in the last known working directory, or its nearest ancestor that still exists
 - if the buffer ran a shell, the same shell starts. If its last foreground job was an allowlisted
   program, that command line is typed into the new shell once it prints its prompt, the way

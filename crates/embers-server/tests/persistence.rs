@@ -764,6 +764,22 @@ async fn restore_starts_a_fresh_shell_in_the_last_directory_when_the_keeper_is_g
     )
     .await;
 
+    // The fresh shell still knows which buffer it runs in.
+    send_input(
+        &mut client,
+        RequestId(610),
+        buffer_id,
+        b"echo buffer-''id=$EMBERS_BUFFER\r",
+    )
+    .await;
+    let _ = wait_for_restored_line(
+        &mut client,
+        RequestId(611),
+        buffer_id,
+        &format!("buffer-id={}", buffer_id.0),
+    )
+    .await;
+
     let restored_pid = restored.pid.expect("restored buffer has a pid");
     drop(client);
     handle.shutdown().await.expect("shutdown restarted server");

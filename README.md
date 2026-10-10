@@ -95,6 +95,12 @@ programs they show; pass `--detach` to keep them running as detached buffers
 instead. A pane closes when its program exits, unless its buffer has
 `remain-on-exit` set (`embers buffer set-option remain-on-exit on`).
 
+Every pane's processes get `EMBERS_SOCKET` and `EMBERS_BUFFER`, the id of the
+pane's buffer, much like tmux's `TMUX` and `TMUX_PANE`. A command run inside a
+pane without `-t` acts on that pane, its window and its session rather than on
+the focused ones, so a script or editor in a pane can run, for example,
+`embers buffer set-option is-vim 1` to mark its own pane.
+
 ## Logging
 
 The tracing filter is resolved from the first of these that is set, highest

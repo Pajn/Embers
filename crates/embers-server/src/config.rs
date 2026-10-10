@@ -7,6 +7,10 @@ use embers_core::BufferId;
 use crate::runtime_dir::keeper_socket_path;
 
 pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
+/// Environment variable set in every buffer's environment to the buffer's
+/// id, like tmux's `TMUX_PANE`, so a program can name its own pane: `embers`
+/// commands run inside a pane without a target act on that pane.
+pub const BUFFER_ENV_VAR: &str = "EMBERS_BUFFER";
 
 /// `TERM` advertised to buffer child processes. Embers ships no terminfo of its
 /// own; alacritty's emulation is closest to xterm and `xterm-256color` exists
