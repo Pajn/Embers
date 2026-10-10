@@ -156,7 +156,7 @@ impl Harness {
                 other => panic!("expected buffer response, got {other:?}"),
             }
         }
-        match self
+        let view_id = match self
             .request(|request_id| {
                 ClientMessage::Node(NodeRequest::Split {
                     request_id,
@@ -167,14 +167,22 @@ impl Harness {
             })
             .await
         {
-            ServerResponse::SessionSnapshot(_) => {}
+            // Read the new view from the split's own snapshot: a command that
+            // has already exited is cleaned up as soon as the split attaches
+            // it, so its record may be gone by the next request.
+            ServerResponse::SessionSnapshot(response) => response
+                .snapshot
+                .nodes
+                .iter()
+                .find(|node| {
+                    node.buffer_view
+                        .as_ref()
+                        .is_some_and(|view| view.buffer_id == buffer.id)
+                })
+                .map(|node| node.id)
+                .expect("split pane shows the buffer"),
             other => panic!("expected session snapshot, got {other:?}"),
-        }
-        let view_id = self
-            .get_buffer(buffer.id)
-            .await
-            .and_then(|record| record.attachment_node_id)
-            .expect("split pane shows the buffer");
+        };
         Pane {
             session_id,
             buffer_id: buffer.id,
