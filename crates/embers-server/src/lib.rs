@@ -21,8 +21,9 @@ pub use config::{
 };
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
-    BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, InterruptedBuffer, Node,
-    REMAIN_ON_EXIT_OPTION, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, IS_VIM_OPTION,
+    InterruptedBuffer, Node, REMAIN_ON_EXIT_OPTION, RunningBuffer, Session, SplitNode, TabEntry,
+    TabsNode,
 };
 pub use server::{Server, ServerHandle};
 pub use state::ServerState;

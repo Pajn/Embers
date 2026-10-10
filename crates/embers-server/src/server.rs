@@ -32,7 +32,8 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::config::{BUFFER_ENV_VAR, ResourceLimits, RestoreConfig};
 use crate::model::{
-    BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
+    BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
+    IS_VIM_OPTION, Node,
 };
 use crate::persist::{encode_workspace, load_workspace, write_workspace};
 use crate::protocol::{
@@ -738,6 +739,8 @@ impl Runtime {
             buffer.command = plan.command.clone();
             buffer.cwd = plan.cwd.clone();
             buffer.foreground_command = None;
+            // The program that set it is gone; a rerun Neovim sets it again.
+            buffer.user_options.remove(IS_VIM_OPTION);
             plan
         };
         self.spawn_buffer_runtime(buffer_id).await?;
@@ -2593,7 +2596,10 @@ impl Runtime {
         };
         // A no-op set/unset leaves the record untouched, so don't invalidate
         // renders for it; only broadcast when the options actually changed.
+        // The only event is a render invalidation, which does not save the
+        // workspace by itself, so ask for that here.
         let events = if changed {
+            self.mark_workspace_dirty();
             vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
                 buffer_id,
             })]

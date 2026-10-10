@@ -918,3 +918,95 @@ async fn restore_can_be_turned_off() {
     assert_eq!(restored.state, BufferRecordState::Interrupted);
     handle.shutdown().await.expect("shutdown restarted server");
 }
+
+async fn set_option(client: &mut ProtocolClient, buffer_id: BufferId, key: &str, value: &str) {
+    let _ = request_buffer(
+        client,
+        BufferRequest::SetUserOption {
+            request_id: RequestId(901),
+            buffer_id,
+            key: key.to_owned(),
+            value: Some(value.to_owned()),
+        },
+    )
+    .await;
+}
+
+async fn buffer_options(
+    client: &mut ProtocolClient,
+    buffer_id: BufferId,
+) -> std::collections::BTreeMap<String, String> {
+    wait_for_running_buffer(client, RequestId(902), buffer_id)
+        .await
+        .user_options
+}
+
+#[tokio::test]
+async fn pane_options_survive_restarts() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let workspace_path = config.workspace_path.clone();
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+    let buffer_id = create_shell_buffer(&mut client, RequestId(903), "opts", tempdir.path()).await;
+    set_option(&mut client, buffer_id, "remain-on-exit", "on").await;
+    set_option(&mut client, buffer_id, "is-vim", "1").await;
+    set_option(&mut client, buffer_id, "theme", "dark").await;
+    wait_for_saved_workspace(&workspace_path, "the pane options", |contents| {
+        contents.contains("\"remain-on-exit\"")
+            && contents.contains("\"is-vim\"")
+            && contents.contains("\"theme\"")
+    })
+    .await;
+    let all_options = buffer_options(&mut client, buffer_id).await;
+
+    // The keeper survives a clean restart, and so does everything set on it.
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    assert_eq!(buffer_options(&mut client, buffer_id).await, all_options);
+    let pid = wait_for_running_buffer(&mut client, RequestId(904), buffer_id)
+        .await
+        .pid
+        .expect("buffer pid");
+
+    // A fresh process after the keeper is gone keeps the pane's settings but
+    // not is-vim, which described the program that ran in it.
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+    stop_keepers(&config, &[(buffer_id, pid)]).await;
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server after the keeper is gone");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored = buffer_options(&mut client, buffer_id).await;
+    let mut expected = all_options.clone();
+    expected.remove("is-vim");
+    assert_eq!(restored, expected);
+    let pid = wait_for_running_buffer(&mut client, RequestId(905), buffer_id)
+        .await
+        .pid
+        .expect("restored buffer pid");
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown final server");
+    stop_keepers(&config, &[(buffer_id, pid)]).await;
+}

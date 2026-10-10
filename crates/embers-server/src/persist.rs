@@ -62,6 +62,10 @@ pub struct PersistedBuffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    /// Options set on the buffer (`embers buffer set-option`), such as
+    /// `remain-on-exit`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_options: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_command: Option<Vec<String>>,
     #[serde(default)]
@@ -375,6 +379,7 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         command: buffer.command.clone(),
         cwd: buffer.cwd.clone(),
         env: buffer.env.clone(),
+        user_options: buffer.user_options.clone(),
         foreground_command: buffer.foreground_command.clone(),
         runtime_socket_path: buffer.runtime_socket_path().cloned(),
         state: persisted_buffer_state(&buffer.state),
@@ -395,6 +400,7 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
         buffer.cwd,
         buffer.env,
     );
+    restored.user_options = buffer.user_options;
     restored.foreground_command = buffer.foreground_command;
     restored.set_runtime_socket_path(buffer.runtime_socket_path);
     restored.state = restored_buffer_state(buffer.state)?;

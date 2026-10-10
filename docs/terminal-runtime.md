@@ -184,15 +184,16 @@ socket in the server's runtime directory.
 
 The server saves the workspace to `<socket>.workspace.json`: sessions, the layout tree (splits,
 tabs, floating windows, focus and zoom) and every buffer record. For a buffer that is its id,
-title, command, environment hints, last known working directory, the command line of the job last
-seen in its foreground, its keeper socket path, its lifecycle state and its attachment. Terminal
-contents and scrollback are not saved; they live in the keeper only.
+title, command, environment hints, the options set on it (`embers buffer set-option`), last known
+working directory, the command line of the job last seen in its foreground, its keeper socket path,
+its lifecycle state and its attachment. Terminal contents and scrollback are not saved; they live
+in the keeper only.
 
 The workspace is saved whenever it changes, not only on a clean shutdown:
 
 - every request that changes sessions, layout or buffers (any request that emits an event other
   than a render invalidation)
-- a buffer's title, working directory or foreground command changing
+- a buffer's title, working directory, foreground command or options changing
 - a buffer exiting
 - server startup, once keepers are reattached or restored
 
@@ -213,6 +214,8 @@ every interrupted PTY buffer then gets a fresh keeper:
 - same buffer id, title, environment hints and place in the layout, so panes come back where they
   were; detached buffers come back detached. The new process sees the same `EMBERS_BUFFER`, which
   every buffer's process gets (see `docs/configuration.md`)
+- same options, such as `remain-on-exit`, except `is-vim`: it described the program that ran in
+  the pane, which is gone, and a Neovim started again sets it again
 - started in the last known working directory, or its nearest ancestor that still exists
 - if the buffer ran a shell, the same shell starts. If its last foreground job was an allowlisted
   program, that command line is typed into the new shell once it prints its prompt, the way

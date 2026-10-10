@@ -102,6 +102,12 @@ pub struct Buffer {
 /// command did not exit with status 0. Any other value, or none, means off.
 pub const REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
 
+/// Buffer option Neovim sets on its own pane, like tmux's `@pane-is-vim`, so
+/// smart navigation can tell it runs there. It describes the program running
+/// in the buffer rather than the pane, so it is dropped when a restore starts
+/// a fresh process in the buffer.
+pub const IS_VIM_OPTION: &str = "is-vim";
+
 impl Buffer {
     pub(crate) fn new(
         id: BufferId,
