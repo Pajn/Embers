@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-3b02c077.js";
+            window.path_to_searchindex_js = "searchindex-a4d555d8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -268,6 +268,41 @@ Description
 
 <div group="on" id="on-Description" class="tabcontent" style="display: block;">
 Attach a callback to an emitted event such as `buffer_bell`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_clipboard </h2>
+
+<pre><code class="language-rust ignore">fn set_clipboard(enabled: bool)</code></pre>
+<div>
+<div class="tab">
+<button group="set_clipboard" id="link-set_clipboard-Description" class="tablinks active" onclick="openTab(event, &#39;set_clipboard&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_clipboard" id="link-set_clipboard-Example" class="tablinks" onclick="openTab(event, &#39;set_clipboard&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_clipboard" id="set_clipboard-Description" class="tabcontent" style="display: block;">
+Choose whether programs in panes may set the system clipboard.
+<p>When on (the default), an OSC 52 clipboard write from a program in a
+pane, such as a Neovim yank over SSH, is passed on to the terminal
+running the Embers client, which puts it on the system clipboard. This
+matches tmux’s <code>set-clipboard on</code>. When off, those writes are dropped.
+Programs can never read the clipboard through Embers: OSC 52 queries are
+always ignored.</p>
+</div>
+
+<div group="set_clipboard" id="set_clipboard-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_clipboard(false);
+</code></pre>
 </div>
 
 </div>

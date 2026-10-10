@@ -1,9 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, CursorPosition, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection,
-    StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId,
+    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -563,6 +563,16 @@ fn server_envelope_families_round_trip() {
         })),
         ServerEnvelope::Event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
             buffer_id: BufferId(11),
+        })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Clipboard,
+            text: "yanked\nline".to_owned(),
+        })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Primary,
+            text: String::new(),
         })),
     ];
 

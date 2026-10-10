@@ -1356,6 +1356,111 @@ async fn osc8_hyperlink_reaches_client_ansi_lines() {
     assert!(plain.contains("DOCLINK after"));
 }
 
+/// Attach a configured client to a session whose pane copies "hi" with OSC 52
+/// once it reads a line, trigger the copy, and return the client's host
+/// terminal output collected until the clipboard event was handled.
+async fn pane_osc52_output(config_source: &str) -> Vec<u8> {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    // Wait for a line first so the copy happens after the client is attached.
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "yank",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "read _; printf '\\033]52;c;%s\\a' $(printf hi | base64); sleep 5".to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "yank".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add yank tab succeeds");
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(config_dir.path().join("config.rhai"), config_source).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("trigger copy");
+
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "clipboard event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        output.extend(configured.drain_terminal_output().concat());
+        if matches!(event, Some(embers_protocol::ServerEvent::Clipboard(_))) {
+            break;
+        }
+    }
+    server.shutdown().await.expect("server shuts down");
+    output
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc52_from_pane_reaches_client_terminal_output() {
+    let output = pane_osc52_output("").await;
+    assert!(
+        contains_subslice(&output, b"\x1b]52;c;aGk=\x07"),
+        "expected OSC 52 for \"hi\" in {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc52_from_pane_is_dropped_when_clipboard_is_off() {
+    let output = pane_osc52_output("set_clipboard(false);").await;
+    assert!(
+        !contains_subslice(&output, b"\x1b]52;"),
+        "expected no OSC 52 in {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

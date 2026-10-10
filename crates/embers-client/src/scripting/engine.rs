@@ -259,6 +259,7 @@ struct RegistrationState {
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
+    clipboard: Option<bool>,
 }
 
 impl RegistrationState {
@@ -362,6 +363,7 @@ impl RegistrationState {
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
+            clipboard: self.clipboard.unwrap_or(true),
         })
     }
 }
@@ -752,6 +754,31 @@ mod registration_globals {
                 "event handler",
                 ctx.call_position(),
             )?);
+        Ok(())
+    }
+
+    /// Choose whether programs in panes may set the system clipboard.
+    ///
+    /// When on (the default), an OSC 52 clipboard write from a program in a
+    /// pane, such as a Neovim yank over SSH, is passed on to the terminal
+    /// running the Embers client, which puts it on the system clipboard. This
+    /// matches tmux's `set-clipboard on`. When off, those writes are dropped.
+    /// Programs can never read the clipboard through Embers: OSC 52 queries are
+    /// always ignored.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_clipboard(false);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:8
+    #[rhai_fn(return_raw, global, name = "set_clipboard")]
+    pub fn set_clipboard(ctx: NativeCallContext, enabled: bool) -> RhaiResultOf<()> {
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .clipboard = Some(enabled);
         Ok(())
     }
 }

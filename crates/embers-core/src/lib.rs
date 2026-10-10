@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod diagnostics;
 pub mod error;
 pub mod geometry;
@@ -5,6 +6,7 @@ pub mod ids;
 pub mod metadata;
 pub mod snapshot;
 
+pub use clipboard::{ClipboardSelection, ClipboardWrite, MAX_CLIPBOARD_WRITE_BYTES};
 pub use diagnostics::{
     RequestContext, format_focus_path, format_tree_dump, init_server_tracing, init_test_tracing,
     init_tracing, new_request_id, request_span,

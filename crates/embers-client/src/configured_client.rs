@@ -7,7 +7,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, FloatGeometry, MuxError, NodeId, Point, Result,
+    SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
@@ -473,6 +474,13 @@ where
                 // now-stale active session instead of leaving it dangling.
                 None => self.clear_active_session(),
             }
+        }
+        // A program in a pane set the clipboard (OSC 52): pass it on to the
+        // host terminal unless the config turned that off.
+        if let ServerEvent::Clipboard(clipboard) = event
+            && self.config.active_script().loaded_config().clipboard
+        {
+            self.enqueue_osc52(clipboard.selection, &clipboard.text);
         }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
@@ -1792,6 +1800,7 @@ where
             }
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -2869,11 +2878,17 @@ where
     }
 
     fn enqueue_clipboard(&mut self, text: String) {
+        self.enqueue_osc52(ClipboardSelection::Clipboard, &text);
+    }
+
+    /// Queue an OSC 52 write that puts `text` on the host terminal's clipboard.
+    fn enqueue_osc52(&mut self, selection: ClipboardSelection, text: &str) {
         use base64::Engine as _;
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let parameter = selection.osc52_parameter();
         self.terminal_output
-            .push_back(format!("\x1b]52;c;{encoded}\x07").into_bytes());
+            .push_back(format!("\x1b]52;{parameter};{encoded}\x07").into_bytes());
     }
 
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
@@ -3474,6 +3489,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::FocusChanged(_) => "focus_changed",
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
+        ServerEvent::Clipboard(_) => "clipboard",
     }
 }
 
@@ -3508,6 +3524,7 @@ fn event_info(
             info.floating_id = event.focused_floating_id;
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;

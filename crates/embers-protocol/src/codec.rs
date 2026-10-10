@@ -1,9 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, CursorShape, CursorState, ErrorCode, FloatGeometry,
-    FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection,
-    StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorShape, CursorState, ErrorCode,
+    FloatGeometry, FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, SnapshotLine,
+    SplitDirection, StyledRun, TermColor, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -1669,6 +1669,9 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         ServerEvent::RenderInvalidated(event) => {
             validate_required_buffer_id(event.buffer_id, "render_invalidated_event.buffer_id")
         }
+        ServerEvent::Clipboard(event) => {
+            validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
+        }
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
             validate_optional_session_id(
@@ -3236,6 +3239,29 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::Clipboard(e) => {
+            let text = builder.create_string(&e.text);
+            let event = fb::ClipboardEvent::create(
+                builder,
+                &fb::ClipboardEventArgs {
+                    buffer_id: e.buffer_id.into(),
+                    selection: match e.selection {
+                        ClipboardSelection::Clipboard => fb::ClipboardSelectionWire::Clipboard,
+                        ClipboardSelection::Primary => fb::ClipboardSelectionWire::Primary,
+                    },
+                    text: Some(text),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::ClipboardEvent,
+                    clipboard_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -4527,6 +4553,26 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
             Ok(ServerEnvelope::Event(ServerEvent::RenderInvalidated(
                 RenderInvalidatedEvent {
                     buffer_id: BufferId(event.buffer_id()),
+                },
+            )))
+        }
+        fb::MessageKind::ClipboardEvent => {
+            let event = required(envelope.clipboard_event(), "clipboard_event")?;
+            let selection = match event.selection() {
+                fb::ClipboardSelectionWire::Clipboard => ClipboardSelection::Clipboard,
+                fb::ClipboardSelectionWire::Primary => ClipboardSelection::Primary,
+                other => {
+                    return Err(ProtocolError::InvalidMessageOwned(format!(
+                        "unknown clipboard selection {}",
+                        other.0
+                    )));
+                }
+            };
+            Ok(ServerEnvelope::Event(ServerEvent::Clipboard(
+                ClipboardEvent {
+                    buffer_id: BufferId(event.buffer_id()),
+                    selection,
+                    text: event.text().unwrap_or_default().to_owned(),
                 },
             )))
         }

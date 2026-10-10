@@ -140,6 +140,9 @@ pub struct LoadedConfig {
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
+    /// Forward OSC 52 clipboard writes from programs in panes to the host
+    /// terminal (`set_clipboard`). On by default.
+    pub clipboard: bool,
 }
 
 impl LoadedConfig {
@@ -175,6 +178,7 @@ impl fmt::Debug for LoadedConfig {
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
+            .field("clipboard", &self.clipboard)
             .finish()
     }
 }

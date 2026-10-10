@@ -41,6 +41,7 @@ enum MessageKind : ubyte {
   SessionRenamedEvent = 48,
   ClientChangedEvent = 49,
   BufferPipeChangedEvent = 50,
+  ClipboardEvent = 51,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -193,6 +194,11 @@ enum NodeRecordKindWire : ubyte {
   BufferView = 0,
   Split = 1,
   Tabs = 2,
+}
+
+enum ClipboardSelectionWire : ubyte {
+  Clipboard = 0,
+  Primary = 1,
 }
 
 enum CursorShapeWire : ubyte {
@@ -606,6 +612,14 @@ table RenderInvalidatedEvent {
   buffer_id:ulong;
 }
 
+// An OSC 52 clipboard write from a program in `buffer_id`, sent only to the
+// clients currently showing that buffer's session. `text` is decoded.
+table ClipboardEvent {
+  buffer_id:ulong;
+  selection:ClipboardSelectionWire = Clipboard;
+  text:string;
+}
+
 table SessionRenamedEvent {
   session_id:ulong;
   name:string;
@@ -658,6 +672,7 @@ table Envelope {
   buffer_location_response:BufferLocationResponse (id: 36);
   buffer_with_location_response:BufferWithLocationResponse (id: 37);
   buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
+  clipboard_event:ClipboardEvent (id: 39);
 }
 
 root_type Envelope;

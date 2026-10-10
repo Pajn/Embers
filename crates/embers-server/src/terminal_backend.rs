@@ -5,14 +5,18 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink as AlacrittyHyperlink, LineLength};
-use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage, TermMode};
+use alacritty_terminal::term::{
+    ClipboardType, Config, LineDamageBounds, Osc52, Term, TermDamage, TermMode,
+};
 use alacritty_terminal::vte::ansi::{
     self, Color as AnsiColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use embers_core::{
-    ActivityState, CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, PtySize,
-    SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
+    ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
+    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, PtySize, SnapshotLine, StyledRun, TermColor,
+    TerminalModes, TerminalSnapshot,
 };
+use tracing::debug;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackendMetadata {
@@ -32,6 +36,18 @@ pub struct BackendScrollbackSlice {
     pub start_line: u64,
     pub total_lines: u64,
     pub lines: Vec<SnapshotLine>,
+}
+
+/// One-shot signals drained from the backend after ingesting output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendEvents {
+    pub activity: ActivityState,
+    /// Replies to terminal queries, to be written back to the PTY master. Empty
+    /// when there is nothing pending.
+    pub replies: Vec<u8>,
+    /// The most recent OSC 52 clipboard write since the last drain. Writes in
+    /// one batch replace each other, as they would on a real clipboard.
+    pub clipboard: Option<ClipboardWrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,13 +74,13 @@ pub trait TerminalBackend: Send {
     fn capture_scrollback(&self) -> Vec<String>;
     fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> BackendScrollbackSlice;
     fn metadata(&self) -> BackendMetadata;
-    /// Drain, under a single lock acquisition, the pending activity state and any
+    /// Drain, under a single lock acquisition, the pending activity state, any
     /// terminal replies the emulator generated while ingesting bytes
-    /// (device-attribute, cursor-position, and mode queries). The replies are
-    /// written back to the PTY master; the returned `Vec` is empty when there is
-    /// nothing pending. Combining the two drains keeps the read hot path to one
-    /// lock acquisition against the client-thread readers of the same state.
-    fn take_events(&mut self) -> (ActivityState, Vec<u8>);
+    /// (device-attribute, cursor-position, and mode queries), and the latest
+    /// OSC 52 clipboard write. The replies are written back to the PTY master.
+    /// Combining the drains keeps the read hot path to one lock acquisition
+    /// against the client-thread readers of the same state.
+    fn take_events(&mut self) -> BackendEvents;
     fn take_damage(&mut self) -> BackendDamage;
 }
 
@@ -273,6 +289,7 @@ struct BackendEventState {
     title: Option<String>,
     bell_pending: bool,
     pty_write: Vec<u8>,
+    clipboard: Option<ClipboardWrite>,
 }
 
 impl BackendEventProxy {
@@ -296,6 +313,22 @@ impl EventListener for BackendEventProxy {
             Event::ResetTitle => state.title = None,
             Event::Bell => state.bell_pending = true,
             Event::PtyWrite(text) => state.pty_write.extend_from_slice(text.as_bytes()),
+            // OSC 52 stores. Loads (clipboard queries) never get here: the
+            // emulator runs with `Osc52::OnlyCopy`, so it drops them unanswered.
+            Event::ClipboardStore(clipboard, text) => {
+                if text.len() > MAX_CLIPBOARD_WRITE_BYTES {
+                    debug!(
+                        bytes = text.len(),
+                        "dropping oversized OSC 52 clipboard write"
+                    );
+                    return;
+                }
+                let selection = match clipboard {
+                    ClipboardType::Clipboard => ClipboardSelection::Clipboard,
+                    ClipboardType::Selection => ClipboardSelection::Primary,
+                };
+                state.clipboard = Some(ClipboardWrite { selection, text });
+            }
             _ => {}
         }
     }
@@ -336,6 +369,10 @@ impl AlacrittyTerminalBackend {
             // Enable the kitty keyboard protocol so inner apps (e.g. nvim) can
             // push/pop/query disambiguation flags; the reply rides Event::PtyWrite.
             kitty_keyboard: true,
+            // Accept OSC 52 clipboard writes (forwarded to attached clients) but
+            // deny reads: answering one would hand whatever is on the clipboard
+            // to any program that asks, including one on a remote host.
+            osc52: Osc52::OnlyCopy,
             ..Config::default()
         };
 
@@ -629,7 +666,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         }
     }
 
-    fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
+    fn take_events(&mut self) -> BackendEvents {
         // Recover from a poisoned lock rather than crashing: the event state is
         // plain data, and dropping replies here would leave inner apps waiting on
         // query timeouts.
@@ -642,7 +679,11 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         } else {
             ActivityState::Activity
         };
-        (activity, std::mem::take(&mut state.pty_write))
+        BackendEvents {
+            activity,
+            replies: std::mem::take(&mut state.pty_write),
+            clipboard: state.clipboard.take(),
+        }
     }
 
     fn take_damage(&mut self) -> BackendDamage {
@@ -830,12 +871,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
-        RawByteRouter, TerminalBackend,
+        AlacrittyTerminalBackend, BackendDamage, BackendEvents, BackendMetadata,
+        BackendScrollbackSlice, RawByteRouter, TerminalBackend,
     };
     use crate::config::DEFAULT_MAX_SCROLLBACK_LINES;
     use embers_core::{
-        ActivityState, CellAttrs, CursorShape, PtySize, SnapshotLine, TermColor, TerminalSnapshot,
+        ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorShape, PtySize,
+        SnapshotLine, TermColor, TerminalSnapshot,
     };
 
     fn backend(size: PtySize) -> AlacrittyTerminalBackend {
@@ -891,8 +933,12 @@ mod tests {
             BackendMetadata::default()
         }
 
-        fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
-            (ActivityState::Activity, Vec::new())
+        fn take_events(&mut self) -> BackendEvents {
+            BackendEvents {
+                activity: ActivityState::Activity,
+                replies: Vec::new(),
+                clipboard: None,
+            }
         }
 
         fn take_damage(&mut self) -> BackendDamage {
@@ -1338,11 +1384,11 @@ mod tests {
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_events().0, ActivityState::Bell);
+        assert_eq!(backend.take_events().activity, ActivityState::Bell);
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_events().0, ActivityState::Activity);
+        assert_eq!(backend.take_events().activity, ActivityState::Activity);
     }
 
     #[test]
@@ -1352,13 +1398,13 @@ mod tests {
 
         backend.ingest_bytes(b"\x1b[c");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         assert!(text.starts_with("\x1b[?"), "reply: {text:?}");
         assert!(text.ends_with('c'), "reply: {text:?}");
 
         // Drained: a second call returns nothing.
-        assert!(backend.take_events().1.is_empty());
+        assert!(backend.take_events().replies.is_empty());
     }
 
     #[test]
@@ -1368,7 +1414,7 @@ mod tests {
 
         backend.ingest_bytes(b"ab\x1b[6n");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         // Cursor sits after "ab" on row 1: CPR is ESC [ <row> ; <col> R.
         assert_eq!(text, "\x1b[1;3R", "reply: {text:?}");
@@ -1381,7 +1427,7 @@ mod tests {
 
         backend.ingest_bytes(b"\x1b[?2004h\x1b[?2004$p");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         assert!(text.starts_with("\x1b[?2004;"), "reply: {text:?}");
         assert!(text.ends_with("$y"), "reply: {text:?}");
@@ -1398,9 +1444,51 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("embers"));
 
         // A single drain returns both the bell activity and the accumulated reply.
-        let (activity, reply) = backend.take_events();
-        assert_eq!(activity, ActivityState::Bell);
-        assert!(!reply.is_empty(), "device-attributes reply should survive");
+        let events = backend.take_events();
+        assert_eq!(events.activity, ActivityState::Bell);
+        assert!(
+            !events.replies.is_empty(),
+            "device-attributes reply should survive"
+        );
+    }
+
+    #[test]
+    fn osc52_store_surfaces_as_a_clipboard_write() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        // "hi" in base64, to the clipboard; then "yo" to the primary selection,
+        // which replaces it within one drain.
+        backend.ingest_bytes(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(
+            backend.take_events().clipboard,
+            Some(ClipboardWrite {
+                selection: ClipboardSelection::Clipboard,
+                text: "hi".to_owned(),
+            })
+        );
+        assert_eq!(backend.take_events().clipboard, None, "drained");
+
+        backend.ingest_bytes(b"\x1b]52;c;aGk=\x1b\\\x1b]52;p;eW8=\x1b\\");
+        assert_eq!(
+            backend.take_events().clipboard,
+            Some(ClipboardWrite {
+                selection: ClipboardSelection::Primary,
+                text: "yo".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn osc52_query_is_denied_without_a_reply() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b]52;c;?\x07");
+
+        let events = backend.take_events();
+        assert_eq!(events.clipboard, None);
+        assert!(events.replies.is_empty(), "replies: {:?}", events.replies);
     }
 
     #[test]

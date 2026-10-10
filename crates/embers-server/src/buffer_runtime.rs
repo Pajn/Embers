@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, Hyperlink, MuxError, PtySize, Result, SnapshotLine, StyledRun,
-    TerminalSnapshot,
+    ActivityState, BufferId, ClipboardWrite, Hyperlink, MuxError, PtySize, Result, SnapshotLine,
+    StyledRun, TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -32,7 +32,7 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
-use crate::{AlacrittyTerminalBackend, RawByteRouter, TerminalBackend};
+use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
 
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
 const CONNECT_RETRY_ATTEMPTS: usize = 1200;
@@ -78,6 +78,9 @@ pub struct BufferRuntimeStatus {
     pub exit_code: Option<i32>,
     pub pipe: Option<BufferRuntimePipeStatus>,
     pub cwd: Option<PathBuf>,
+    /// Count of OSC 52 clipboard writes the keeper has seen. The poller fetches
+    /// the latest write whenever this advances.
+    pub clipboard_sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +123,8 @@ struct RuntimeThreads {
 pub struct BufferRuntimeCallbacks {
     pub on_output: Arc<dyn Fn(BufferId, BufferRuntimeUpdate) + Send + Sync>,
     pub on_exit: Arc<dyn Fn(BufferId, Option<i32>) + Send + Sync>,
+    /// A program in the buffer wrote to the clipboard with OSC 52.
+    pub on_clipboard: Arc<dyn Fn(BufferId, ClipboardWrite) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -162,11 +167,16 @@ enum KeeperRequest {
     StopPipe,
     StopPipeAfterExit,
     Kill,
+    /// Fetch the latest OSC 52 clipboard write. Only sent once a status reply
+    /// reports a `clipboard_sequence`, which keepers without clipboard
+    /// forwarding never do.
+    Clipboard,
 }
 
 #[derive(Serialize, Deserialize)]
 enum KeeperResponse {
     Status(KeeperStatus),
+    Clipboard(Option<KeeperClipboard>),
     Snapshot(KeeperSnapshot),
     VisibleSnapshot(TerminalSnapshot),
     ScrollbackSlice(KeeperScrollbackSlice),
@@ -188,6 +198,19 @@ struct KeeperStatus {
     // predates live-cwd reporting.
     #[serde(default)]
     cwd: Option<PathBuf>,
+    // Defaulted for the same reason: an older keeper reports 0 and is never
+    // asked for clipboard writes.
+    #[serde(default)]
+    clipboard_sequence: u64,
+}
+
+/// The latest OSC 52 clipboard write a keeper has seen. The payload is held
+/// (not queued) and fetched separately from status, so status polls stay small
+/// and a burst of writes costs one transfer of the last one.
+#[derive(Clone, Serialize, Deserialize)]
+struct KeeperClipboard {
+    sequence: u64,
+    write: ClipboardWrite,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -255,6 +278,7 @@ struct KeeperRuntime {
     pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
     activity: Mutex<ActivityState>,
+    clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
     pid: Option<u32>,
 }
@@ -587,9 +611,20 @@ impl KeeperConnection {
                 exit_code: status.exit_code,
                 pipe: status.pipe,
                 cwd: status.cwd,
+                clipboard_sequence: status.clipboard_sequence,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    fn clipboard(&mut self) -> Result<Option<KeeperClipboard>> {
+        match self.request(KeeperRequest::Clipboard)? {
+            KeeperResponse::Clipboard(clipboard) => Ok(clipboard),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper clipboard response: {other_kind}",
                 other_kind = keeper_response_kind(&other)
             ))),
         }
@@ -712,10 +747,11 @@ impl KeeperSurface {
         }
     }
 
-    /// Ingest PTY output and return the resulting activity plus any terminal
-    /// replies the emulator generated (device-attribute / cursor-position / mode
-    /// queries). The caller writes the replies back to the PTY master.
-    fn route_output(&mut self, bytes: &[u8]) -> (ActivityState, Vec<u8>) {
+    /// Ingest PTY output and return the resulting activity, any terminal replies
+    /// the emulator generated (device-attribute / cursor-position / mode
+    /// queries), and any clipboard write. The caller writes the replies back to
+    /// the PTY master.
+    fn route_output(&mut self, bytes: &[u8]) -> BackendEvents {
         self.router.route_output(self.backend.as_mut(), bytes);
         self.backend.take_events()
     }
@@ -1033,6 +1069,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
         activity: Mutex::new(ActivityState::Idle),
+        clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         pid,
     });
@@ -1171,6 +1208,16 @@ fn handle_keeper_request(
             runtime.kill()?;
             Ok((KeeperResponse::Ok, false))
         }
+        KeeperRequest::Clipboard => Ok((
+            KeeperResponse::Clipboard(
+                runtime
+                    .clipboard
+                    .lock()
+                    .map_err(|_| MuxError::internal("runtime keeper clipboard lock poisoned"))?
+                    .clone(),
+            ),
+            false,
+        )),
     }
 }
 
@@ -1201,6 +1248,12 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
+        let clipboard_sequence = self
+            .clipboard
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper clipboard lock poisoned"))?
+            .as_ref()
+            .map_or(0, |clipboard| clipboard.sequence);
         let title = surface.backend.metadata().title.clone();
         let reported_cwd = surface.router.reported_cwd();
         drop(surface);
@@ -1234,6 +1287,7 @@ impl KeeperRuntime {
             exit_code: exit_code.flatten(),
             pipe,
             cwd,
+            clipboard_sequence,
         })
     }
 
@@ -1385,7 +1439,11 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     Err(_) => break,
                 };
                 let bytes = &buffer[..read];
-                let (activity, replies) = surface.route_output(bytes);
+                let BackendEvents {
+                    activity,
+                    replies,
+                    clipboard,
+                } = surface.route_output(bytes);
                 if let Ok(mut pipe) = runtime.pipe.lock()
                     && let Some(pipe) = pipe.as_mut()
                 {
@@ -1394,6 +1452,12 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
+                }
+                if let Some(write) = clipboard
+                    && let Ok(mut latest) = runtime.clipboard.lock()
+                {
+                    let sequence = latest.as_ref().map_or(0, |held| held.sequence) + 1;
+                    *latest = Some(KeeperClipboard { sequence, write });
                 }
                 // Release the surface lock before handing off the replies.
                 drop(surface);
@@ -1570,6 +1634,9 @@ fn spawn_status_poller(
             let mut last_title = initial.title.clone();
             let mut last_activity = initial.activity;
             let mut last_pipe = initial.pipe.clone();
+            // Seed from the attach-time status so a reattaching server does not
+            // replay a clipboard write that was already delivered (or dropped).
+            let mut last_clipboard = initial.clipboard_sequence;
             // Seed as unknown (not `initial.cwd`) so the first poll always reports
             // the current directory: an OSC 7 report or pid resolution may already
             // be present at attach, and the buffer record must still learn it.
@@ -1582,7 +1649,14 @@ fn spawn_status_poller(
                         Ok(connection) => connection,
                         Err(_) => break,
                     };
-                    match connection.status() {
+                    match connection.status().and_then(|status| {
+                        let clipboard = if status.clipboard_sequence > last_clipboard {
+                            connection.clipboard()?
+                        } else {
+                            None
+                        };
+                        Ok((status, clipboard))
+                    }) {
                         Ok(status) => status,
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
@@ -1599,6 +1673,14 @@ fn spawn_status_poller(
                         }
                     }
                 };
+
+                let (status, clipboard) = status;
+                if let Some(clipboard) = clipboard
+                    && clipboard.sequence > last_clipboard
+                {
+                    last_clipboard = clipboard.sequence;
+                    (callbacks.on_clipboard)(inner.buffer_id, clipboard.write);
+                }
 
                 if let Some(update) = status_update_delta(
                     &status,
@@ -1870,6 +1952,7 @@ fn read_message<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Result
 fn keeper_response_kind(response: &KeeperResponse) -> &'static str {
     match response {
         KeeperResponse::Status(_) => "status",
+        KeeperResponse::Clipboard(_) => "clipboard",
         KeeperResponse::Snapshot(_) => "snapshot",
         KeeperResponse::VisibleSnapshot(_) => "visible_snapshot",
         KeeperResponse::ScrollbackSlice(_) => "scrollback_slice",
@@ -1967,6 +2050,7 @@ mod tests {
             exit_code: None,
             pipe: None,
             cwd: cwd.map(std::path::PathBuf::from),
+            clipboard_sequence: 0,
         }
     }
 
@@ -2141,6 +2225,7 @@ mod tests {
                         .send((buffer_id, exit_code))
                         .expect("send exit notification");
                 }),
+                on_clipboard: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2151,6 +2236,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 cwd: None,
+                clipboard_sequence: 0,
             },
         )
         .expect("spawn poller");
@@ -2197,6 +2283,7 @@ mod tests {
                         .send((buffer_id, exit_code))
                         .expect("send exit notification");
                 }),
+                on_clipboard: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2213,6 +2300,7 @@ mod tests {
                     stop_reason: None,
                 }),
                 cwd: None,
+                clipboard_sequence: 0,
             },
         )
         .expect("spawn poller");

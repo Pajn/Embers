@@ -520,6 +520,24 @@ fn define_mode(mode_name: string, options: map) -> ();
 /// # rhai-autodocs:index:7
 fn on(event_name: string, callback: Fn) -> ();
 
+/// Choose whether programs in panes may set the system clipboard.
+///
+/// When on (the default), an OSC 52 clipboard write from a program in a
+/// pane, such as a Neovim yank over SSH, is passed on to the terminal
+/// running the Embers client, which puts it on the system clipboard. This
+/// matches tmux's `set-clipboard on`. When off, those writes are dropped.
+/// Programs can never read the clipboard through Embers: OSC 52 queries are
+/// always ignored.
+///
+/// # Example
+///
+/// ```rhai
+/// set_clipboard(false);
+/// ```
+///
+/// # rhai-autodocs:index:8
+fn set_clipboard(enabled: bool) -> ();
+
 /// Set the leader sequence used in binding notations.
 ///
 /// # Example
