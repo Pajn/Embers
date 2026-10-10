@@ -3,8 +3,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, SplitDirection,
-    Timestamp,
+    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
+    SplitDirection, Timestamp,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +16,9 @@ pub struct Session {
     pub focused_leaf: Option<NodeId>,
     pub focused_floating: Option<FloatingId>,
     pub zoomed_node: Option<NodeId>,
+    /// The area an attached client last drew this session in. Panes created
+    /// without a client use it to start at their drawn size.
+    pub viewport: Option<Size>,
     pub created_at: Timestamp,
 }
 

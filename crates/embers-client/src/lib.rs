@@ -10,6 +10,7 @@ mod pty_sizes;
 pub mod renderer;
 pub mod scripting;
 pub mod socket_transport;
+pub mod spawn_size;
 pub mod state;
 pub mod testing;
 pub mod transport;
@@ -41,6 +42,7 @@ pub use scripting::{
     TabSpec, TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
+pub use spawn_size::{PanePlacement, spawn_pty_size};
 pub use state::{
     BufferViewState, ClientState, HintMatch, HintsState, SearchMatch, SearchState, SelectionKind,
     SelectionPoint, SelectionState,

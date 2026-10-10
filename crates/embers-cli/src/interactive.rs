@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use embers_client::{
     ConfigManager, ConfiguredClient, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, MouseModifiers, MuxClient, RenderGrid, SocketTransport,
+    MouseEventKind, MouseModifiers, MuxClient, PanePlacement, RenderGrid, SocketTransport,
+    spawn_pty_size,
 };
-use embers_core::{CursorShape, MuxError, Result, SessionId, Size};
+use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -34,7 +35,13 @@ pub async fn run(
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
-    let initial_session_id = ensure_session_ready(&mut client, requested_target.as_deref()).await?;
+    // The first window of a new session is created before the first frame, so
+    // size it from the terminal directly.
+    let initial_viewport = terminal_size(io::stdout().as_raw_fd())
+        .ok()
+        .map(content_viewport);
+    let initial_session_id =
+        ensure_session_ready(&mut client, requested_target.as_deref(), initial_viewport).await?;
     client.switch_current_session(initial_session_id).await?;
     let mut session_id = Some(initial_session_id);
     let config = ConfigManager::from_process(config_path)
@@ -158,7 +165,12 @@ pub async fn run(
             if let Some(active_session_id) = configured.active_session_id()
                 && Some(active_session_id) != session_id
             {
-                ensure_root_window(configured.client_mut(), active_session_id).await?;
+                ensure_root_window(
+                    configured.client_mut(),
+                    active_session_id,
+                    Some(content_viewport(terminal_size)),
+                )
+                .await?;
                 session_id = Some(active_session_id);
                 dirty = true;
             }
@@ -171,40 +183,46 @@ pub async fn run(
             continue;
         }
 
-        match configured
-            .process_next_event_timeout(EVENT_POLL_INTERVAL)
-            .await?
-        {
-            Some(event) => {
-                match switched_session_id(&event, attached_client_id) {
-                    SwitchedSession::Switched(next_session_id) => {
-                        ensure_root_window(configured.client_mut(), next_session_id).await?;
-                        session_id = Some(next_session_id);
-                    }
-                    SwitchedSession::Detached => {
-                        session_id = None;
-                    }
-                    SwitchedSession::Ignore => {}
-                }
-                // handle_event drains background notifications up front, but its
-                // own awaits (and the session-switch handling above) can race a
-                // background task pushing one after that drain; surface any such
-                // notification this frame instead of deferring it a poll.
-                configured.drain_background_notifications();
+        // Every event that has arrived is handled before the next frame, so a
+        // layout change is drawn, and its panes resized, without waiting
+        // behind a busy pane's output events one frame each.
+        let events = configured
+            .process_ready_events_timeout(EVENT_POLL_INTERVAL)
+            .await?;
+        if events.is_empty() {
+            // The poll timed out with no event. A background task (e.g. a
+            // run_shell child) may have failed while we were idle; surface it
+            // now instead of waiting for the next input or server event.
+            if configured.drain_background_notifications() {
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
-            None => {
-                // The poll timed out with no event. A background task (e.g. a
-                // run_shell child) may have failed while we were idle; surface
-                // it now instead of waiting for the next input or server event.
-                if configured.drain_background_notifications() {
-                    terminal.write_bytes(&drain_terminal_output(&mut configured))?;
-                    dirty = true;
+            continue;
+        }
+        for event in &events {
+            match switched_session_id(event, attached_client_id) {
+                SwitchedSession::Switched(next_session_id) => {
+                    ensure_root_window(
+                        configured.client_mut(),
+                        next_session_id,
+                        Some(content_viewport(terminal_size)),
+                    )
+                    .await?;
+                    session_id = Some(next_session_id);
                 }
-                continue;
+                SwitchedSession::Detached => {
+                    session_id = None;
+                }
+                SwitchedSession::Ignore => {}
             }
         }
+        // handle_event drains background notifications up front, but its own
+        // awaits (and the session-switch handling above) can race a background
+        // task pushing one after that drain; surface any such notification
+        // this frame instead of deferring it a poll.
+        configured.drain_background_notifications();
+        terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+        dirty = true;
     }
 }
 
@@ -269,13 +287,14 @@ mod client_switch_tests {
 async fn ensure_session_ready(
     client: &mut MuxClient<SocketTransport>,
     target: Option<&str>,
+    viewport: Option<Size>,
 ) -> Result<SessionId> {
     client.resync_all_sessions().await?;
     let session_id = match select_session_id(client, target)? {
         Some(session_id) => session_id,
         None => create_session(client, target.unwrap_or(DEFAULT_SESSION_NAME)).await?,
     };
-    ensure_root_window(client, session_id).await?;
+    ensure_root_window(client, session_id, viewport).await?;
     client.resync_session(session_id).await?;
     Ok(session_id)
 }
@@ -325,9 +344,12 @@ async fn create_session(client: &mut MuxClient<SocketTransport>, name: &str) -> 
     }
 }
 
+/// Gives `session_id` a first window when it has none, spawned at the size it
+/// will be drawn at in `viewport`.
 async fn ensure_root_window(
     client: &mut MuxClient<SocketTransport>,
     session_id: SessionId,
+    viewport: Option<Size>,
 ) -> Result<()> {
     client.resync_session(session_id).await?;
     if session_has_root_window(client, session_id)? {
@@ -336,7 +358,10 @@ async fn ensure_root_window(
 
     let command = default_shell_command();
     let title = default_title(&command, "shell");
-    let buffer_id = create_buffer(client, &command, &title).await?;
+    let size = viewport.and_then(|viewport| {
+        spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
+    });
+    let buffer_id = create_buffer(client, &command, &title, size).await?;
     let response = client
         .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: client.next_request_id(),
@@ -381,6 +406,7 @@ async fn create_buffer(
     client: &mut MuxClient<SocketTransport>,
     command: &[String],
     title: &str,
+    size: Option<PtySize>,
 ) -> Result<embers_core::BufferId> {
     let response = client
         .request_message(ClientMessage::Buffer(BufferRequest::Create {
@@ -389,6 +415,7 @@ async fn create_buffer(
             command: command.to_vec(),
             cwd: None,
             env: Default::default(),
+            size,
         }))
         .await?;
     match response {

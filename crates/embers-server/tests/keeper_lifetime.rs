@@ -99,6 +99,7 @@ async fn keepers_outlive_shutdown_but_exit_once_their_socket_is_removed() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -162,6 +163,7 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await

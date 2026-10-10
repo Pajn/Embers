@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
-    SessionId, SnapshotLine, SplitDirection, WireError,
+    SessionId, Size, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +64,13 @@ pub enum SessionRequest {
         session_id: SessionId,
         index: u32,
     },
+    /// Records the area an attached client draws the session in, so panes
+    /// created without a client can still be spawned at their drawn size.
+    SetViewport {
+        request_id: RequestId,
+        session_id: SessionId,
+        viewport: Size,
+    },
 }
 
 impl SessionRequest {
@@ -77,7 +84,8 @@ impl SessionRequest {
             | Self::AddRootTab { request_id, .. }
             | Self::SelectRootTab { request_id, .. }
             | Self::RenameRootTab { request_id, .. }
-            | Self::CloseRootTab { request_id, .. } => *request_id,
+            | Self::CloseRootTab { request_id, .. }
+            | Self::SetViewport { request_id, .. } => *request_id,
         }
     }
 }
@@ -90,6 +98,9 @@ pub enum BufferRequest {
         command: Vec<String>,
         cwd: Option<String>,
         env: BTreeMap<String, String>,
+        /// The PTY size to start the command at: the size the buffer will be
+        /// drawn at once placed. `None` uses the server default.
+        size: Option<PtySize>,
     },
     List {
         request_id: RequestId,
@@ -649,6 +660,9 @@ pub struct SessionRecord {
     pub focused_leaf_id: Option<NodeId>,
     pub focused_floating_id: Option<FloatingId>,
     pub zoomed_node_id: Option<NodeId>,
+    /// The area the session was last drawn in by an attached client; see
+    /// `SessionRequest::SetViewport`.
+    pub viewport: Option<Size>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

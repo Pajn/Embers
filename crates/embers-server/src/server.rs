@@ -956,6 +956,16 @@ impl Runtime {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            // No event: the viewport only seeds the size of panes created
+            // later, and other clients draw at their own size anyway.
+            SessionRequest::SetViewport {
+                request_id,
+                session_id,
+                viewport,
+            } => match state.set_session_viewport(session_id, viewport) {
+                Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
         }
     }
 
@@ -971,6 +981,7 @@ impl Runtime {
                 command,
                 cwd,
                 env,
+                size,
             } => {
                 if command.is_empty() {
                     return (
@@ -999,12 +1010,21 @@ impl Runtime {
                             Vec::new(),
                         );
                     }
-                    state.create_buffer_with_env(
+                    let buffer_id = state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
                         cwd.map(Into::into),
                         env,
-                    )
+                    );
+                    // Start the command at the size it will be drawn at, so it
+                    // never sees the default size first.
+                    if let Some(size) = size
+                        && let Err(error) = state.set_buffer_size(buffer_id, size)
+                    {
+                        let _ = state.remove_buffer(buffer_id);
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                    buffer_id
                 };
 
                 if let Err(error) = self.spawn_buffer_runtime(buffer_id).await {
@@ -3910,6 +3930,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_viewport_is_kept_and_seeds_new_sessions() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let create = |request_id, name: &str| SessionRequest::Create {
+            request_id: RequestId(request_id),
+            name: name.to_owned(),
+        };
+        let session_viewport = |response| match response {
+            ServerResponse::SessionSnapshot(response) => response.snapshot.session.viewport,
+            other => panic!("expected session snapshot, got {other:?}"),
+        };
+
+        let (response, _) = runtime.dispatch_session(create(1, "alpha")).await;
+        assert_eq!(session_viewport(response), None);
+        let alpha = runtime
+            .state
+            .lock()
+            .await
+            .sessions
+            .keys()
+            .copied()
+            .next()
+            .expect("session");
+        let viewport = embers_core::Size {
+            width: 120,
+            height: 40,
+        };
+        let (response, events) = runtime
+            .dispatch_session(SessionRequest::SetViewport {
+                request_id: RequestId(2),
+                session_id: alpha,
+                viewport,
+            })
+            .await;
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.is_empty());
+        let (response, _) = runtime
+            .dispatch_session(SessionRequest::Get {
+                request_id: RequestId(3),
+                session_id: alpha,
+            })
+            .await;
+        assert_eq!(session_viewport(response), Some(viewport));
+
+        // A session no client has drawn yet starts with the last viewport.
+        let (response, _) = runtime.dispatch_session(create(4, "beta")).await;
+        assert_eq!(session_viewport(response), Some(viewport));
+    }
+
+    #[tokio::test]
     async fn create_buffer_is_rejected_when_buffer_limit_reached() {
         let runtime = Arc::new(Runtime::new(
             ServerState::new(),
@@ -3940,6 +4016,7 @@ mod tests {
                     command: vec!["/bin/sh".to_owned()],
                     cwd: None,
                     env: BTreeMap::new(),
+                    size: None,
                 },
             )
             .await;

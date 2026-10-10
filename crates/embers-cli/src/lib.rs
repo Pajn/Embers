@@ -16,9 +16,10 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
+use embers_client::{ClientState, PanePlacement, spawn_pty_size};
 use embers_core::{
-    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Result, SessionId, SplitDirection,
-    new_request_id,
+    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
+    SplitDirection, new_request_id,
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
@@ -879,8 +880,10 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
+            let snapshot = connection.session_snapshot(session.id).await?;
+            let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, None)
+                .create_buffer(Some(window_title.clone()), command, None, size)
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -956,14 +959,21 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
             let command = buffer_command(command);
-            let buffer = connection
-                .create_buffer(Some(default_title(&command, "pane")), command, None)
-                .await?;
             let direction = if horizontal {
                 SplitDirection::Horizontal
             } else {
                 SplitDirection::Vertical
             };
+            let size = spawn_size(
+                &pane.snapshot,
+                PanePlacement::Split {
+                    leaf_id: pane.leaf_id,
+                    direction,
+                },
+            );
+            let buffer = connection
+                .create_buffer(Some(default_title(&command, "pane")), command, None, size)
+                .await?;
             let response = connection
                 .request(ClientMessage::Node(NodeRequest::Split {
                     request_id: new_request_id(),
@@ -1091,8 +1101,11 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let popup_title = title.unwrap_or_else(|| default_title(&command, "popup"));
+            let geometry = FloatGeometry::new(x, y, width, height);
+            let snapshot = connection.session_snapshot(session.id).await?;
+            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, None)
+                .create_buffer(Some(popup_title.clone()), command, None, size)
                 .await?;
             let response = connection
                 .request(ClientMessage::Floating(FloatingRequest::Create {
@@ -1100,7 +1113,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     session_id: session.id,
                     root_node_id: None,
                     buffer_id: Some(buffer.buffer.id),
-                    geometry: FloatGeometry::new(x, y, width, height),
+                    geometry,
                     title: Some(popup_title),
                     focus: true,
                     close_on_empty: true,
@@ -1621,6 +1634,7 @@ impl CliConnection {
         title: Option<String>,
         command: Vec<String>,
         cwd: Option<String>,
+        size: Option<PtySize>,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -1629,6 +1643,7 @@ impl CliConnection {
                 command,
                 cwd,
                 env: Default::default(),
+                size,
             }))
             .await?
         {
@@ -2510,6 +2525,16 @@ fn parse_floating_id(raw: &str) -> Result<FloatingId> {
     raw.parse::<u64>().map(FloatingId).map_err(|_| {
         MuxError::invalid_input(format!("popup target '{raw}' is not a valid popup id"))
     })
+}
+
+/// The size a pane created at `placement` in `snapshot`'s session will be
+/// drawn at, from the viewport an attached client last reported for the
+/// session. `None` (the server default) when no client ever drew it.
+fn spawn_size(snapshot: &SessionSnapshot, placement: PanePlacement) -> Option<PtySize> {
+    let viewport = snapshot.session.viewport?;
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(snapshot.clone());
+    spawn_pty_size(&state, snapshot.session.id, viewport, placement)
 }
 
 fn buffer_command(command: Vec<String>) -> Vec<String> {

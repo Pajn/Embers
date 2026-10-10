@@ -65,6 +65,7 @@ enum SessionOp : ubyte {
   RenameRootTab = 6,
   CloseRootTab = 7,
   Rename = 8,
+  SetViewport = 9,
 }
 
 enum BufferOp : ubyte {
@@ -214,6 +215,8 @@ table SessionRequest {
   title:string (id: 5);
   force:bool = false (id: 6);
   index:uint = 0 (id: 7);
+  viewport_cols:ushort = 0 (id: 8);
+  viewport_rows:ushort = 0 (id: 9);
 }
 
 table BufferRequest {
@@ -235,6 +238,8 @@ table BufferRequest {
   history_placement:BufferHistoryPlacementWire = Tab (id: 15);
   user_option_key:string (id: 16);
   user_option_value:string (id: 17);
+  pty_cols:ushort = 0 (id: 18);
+  pty_rows:ushort = 0 (id: 19);
 }
 
 table NodeRequest {
@@ -318,6 +323,8 @@ table SessionRecord {
   focused_leaf_id:ulong = 0 (id: 4);
   focused_floating_id:ulong = 0 (id: 5);
   zoomed_node_id:ulong = 0 (id: 6);
+  viewport_cols:ushort = 0 (id: 7);
+  viewport_rows:ushort = 0 (id: 8);
 }
 
 table BufferRecord {

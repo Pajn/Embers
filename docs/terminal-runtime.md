@@ -71,6 +71,26 @@ A failed resize is retried on a later frame, at most once a second, while the bu
 visible running PTY. The retry is dropped if another client resized the buffer in the meantime, so
 it never takes a size back that a successful request would have left alone.
 
+New panes start at their drawn size, so a program that reads its size at startup never sees a
+default size first. `BufferRequest::Create` takes an optional PTY size that the server applies
+before spawning the command; without one the buffer starts at 80x24. The requester works the size
+out with `spawn_pty_size`: it applies the placement that follows (split, new window or tab, popup,
+replaced pane) to a copy of the session layout and projects it like a frame, so the size includes
+all client chrome. The server knows the split tree but not that chrome, which is why it does not
+compute the size itself.
+
+- The interactive client's actions (`split_with`, `insert_tab_*`, `open_floating`,
+  `replace_*`) and the first window of a new session use the client's own viewport.
+- CLI commands (`split-window`, `new-window`, `display-popup`) use the session's viewport: the
+  content area an attached client last drew it in, which each client reports with
+  `SessionRequest::SetViewport` when it changes and the server keeps in memory after the client
+  detaches. A
+  new session starts with the viewport last reported for any session. When none is known yet, the
+  pane starts at 80x24 and is resized once a client draws it.
+
+The size is a best-effort start: a placement hidden behind a zoom is not sized, and the attached
+client still resizes every visible pane to its drawn size on the next frame.
+
 ## Detached buffer policy
 
 Detached PTY buffers keep the last assigned `pty_size` until another explicit resize arrives.

@@ -142,6 +142,11 @@ where
         self.transport.next_event().await
     }
 
+    /// The next event if one has already arrived, without waiting for one.
+    pub async fn ready_event(&mut self) -> Result<Option<ServerEvent>> {
+        self.transport.ready_event().await
+    }
+
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
         self.state.apply_event(event);
         self.resync_for_event(event).await

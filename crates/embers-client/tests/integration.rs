@@ -10,4 +10,5 @@ mod repo_config;
 mod script_actions;
 mod script_engine;
 mod socket_transport;
+mod spawn_size;
 mod support;

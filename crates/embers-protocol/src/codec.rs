@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CellAttrs, CursorShape, CursorState, ErrorCode, FloatGeometry,
-    FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection, StyledRun,
-    TermColor, WireError,
+    FloatingId, NodeId, PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection,
+    StyledRun, TermColor, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -155,6 +155,29 @@ fn validate_optional_node_id(
     Ok(())
 }
 
+/// Sizes travel as a `cols`/`rows` pair of `ushort`s that are both zero when
+/// the size is absent, so a present size must be non-zero in both directions.
+fn validate_cells(cols: u16, rows: u16, field: &'static str) -> Result<(), ProtocolError> {
+    if cols == 0 || rows == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero in both directions"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_optional_cells(
+    cols: u16,
+    rows: u16,
+    field: &'static str,
+) -> Result<Option<(u16, u16)>, ProtocolError> {
+    if cols == 0 && rows == 0 {
+        return Ok(None);
+    }
+    validate_cells(cols, rows, field)?;
+    Ok(Some((cols, rows)))
+}
+
 fn validate_optional_floating_id(
     floating_id: Option<FloatingId>,
     field: &'static str,
@@ -233,12 +256,23 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
         | SessionRequest::CloseRootTab { session_id, .. } => {
             validate_required_session_id(*session_id, "session_request.session_id")
         }
+        SessionRequest::SetViewport {
+            session_id,
+            viewport,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "session_request.session_id")?;
+            validate_cells(viewport.width, viewport.height, "session_request.viewport")
+        }
     }
 }
 
 fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
     match req {
-        BufferRequest::Create { .. } => Ok(()),
+        BufferRequest::Create { size, .. } => match size {
+            Some(size) => validate_cells(size.cols, size.rows, "buffer_request.pty_size"),
+            None => Ok(()),
+        },
         BufferRequest::List { session_id, .. } => {
             validate_optional_session_id(*session_id, "buffer_request.session_id")
         }
@@ -928,6 +962,20 @@ fn encode_session_request<'a>(
             false,
             *index,
         ),
+        SessionRequest::SetViewport { session_id, .. } => (
+            fb::SessionOp::SetViewport,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
+    };
+    let (viewport_cols, viewport_rows) = match req {
+        SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
+        _ => (0, 0),
     };
 
     let name = name_str.map(|s| builder.create_string(s));
@@ -943,6 +991,8 @@ fn encode_session_request<'a>(
             title,
             force,
             index,
+            viewport_cols,
+            viewport_rows,
         },
     );
 
@@ -1295,6 +1345,12 @@ fn encode_buffer_request<'a>(
     let user_option_key = user_option_key_str.map(|s| builder.create_string(s));
     let user_option_value = user_option_value_str.map(|s| builder.create_string(s));
 
+    let (pty_cols, pty_rows) = match req {
+        BufferRequest::Create {
+            size: Some(size), ..
+        } => (size.cols, size.rows),
+        _ => (0, 0),
+    };
     let buffer_req = fb::BufferRequest::create(
         builder,
         &fb::BufferRequestArgs {
@@ -1316,6 +1372,8 @@ fn encode_buffer_request<'a>(
             env_values,
             user_option_key,
             user_option_value,
+            pty_cols,
+            pty_rows,
         },
     );
 
@@ -1414,7 +1472,13 @@ fn validate_session_record(record: &SessionRecord) -> Result<(), ProtocolError> 
         record.focused_floating_id,
         "session_record.focused_floating_id",
     )?;
-    validate_optional_node_id(record.zoomed_node_id, "session_record.zoomed_node_id")
+    validate_optional_node_id(record.zoomed_node_id, "session_record.zoomed_node_id")?;
+    match record.viewport {
+        Some(viewport) => {
+            validate_cells(viewport.width, viewport.height, "session_record.viewport")
+        }
+        None => Ok(()),
+    }
 }
 
 fn validate_buffer_record(record: &BufferRecord) -> Result<(), ProtocolError> {
@@ -3191,6 +3255,8 @@ fn encode_session_record<'a>(
             focused_leaf_id: record.focused_leaf_id.map(|n| n.into()).unwrap_or(0),
             focused_floating_id: record.focused_floating_id.map(|f| f.into()).unwrap_or(0),
             zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
+            viewport_cols: record.viewport.map_or(0, |viewport| viewport.width),
+            viewport_rows: record.viewport.map_or(0, |viewport| viewport.height),
         },
     )
 }
@@ -3556,6 +3622,24 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     )?,
                     index: req.index(),
                 },
+                fb::SessionOp::SetViewport => {
+                    validate_cells(
+                        req.viewport_cols(),
+                        req.viewport_rows(),
+                        "session_request.viewport",
+                    )?;
+                    SessionRequest::SetViewport {
+                        request_id,
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "session_request.session_id",
+                        )?,
+                        viewport: Size {
+                            width: req.viewport_cols(),
+                            height: req.viewport_rows(),
+                        },
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };
             Ok(ClientMessage::Session(session_request))
@@ -3568,12 +3652,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let command_vec: Vec<String> = command.iter().map(|s| s.to_owned()).collect();
                     let env =
                         decode_string_map(req.env_keys(), req.env_values(), "buffer_request.env")?;
+                    let size = decode_optional_cells(
+                        req.pty_cols(),
+                        req.pty_rows(),
+                        "buffer_request.pty_size",
+                    )?
+                    .map(|(cols, rows)| PtySize::new(cols, rows));
                     BufferRequest::Create {
                         request_id,
                         title: req.title().map(|t| t.to_owned()),
                         command: command_vec,
                         cwd: req.cwd().map(|c| c.to_owned()),
                         env,
+                        size,
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -4491,6 +4582,12 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
         } else {
             Some(NodeId(record.zoomed_node_id()))
         },
+        viewport: decode_optional_cells(
+            record.viewport_cols(),
+            record.viewport_rows(),
+            "session_record.viewport",
+        )?
+        .map(|(width, height)| Size { width, height }),
     })
 }
 
@@ -5149,6 +5246,8 @@ mod tests {
                 title: None,
                 force: false,
                 index: 0,
+                viewport_cols: 0,
+                viewport_rows: 0,
             },
         );
 
@@ -5751,6 +5850,7 @@ mod tests {
                     focused_leaf_id: None,
                     focused_floating_id: None,
                     zoomed_node_id: Some(NodeId(0)),
+                    viewport: None,
                 }],
             }),
         ))

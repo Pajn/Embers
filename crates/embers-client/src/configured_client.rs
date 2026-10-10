@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -7,11 +7,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
+    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, PtySize, Result, SessionId,
+    Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
     ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent, ServerResponse,
+    SessionRequest,
 };
 
 use crate::RenderGrid;
@@ -29,6 +31,7 @@ use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
     NotifyLevel, TabBarContext, TreeSpec,
 };
+use crate::spawn_size::{PanePlacement, spawn_pty_size};
 use crate::state::{
     HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
 };
@@ -36,6 +39,9 @@ use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
 const MAX_EXPANDED_ACTIONS: usize = 256;
+/// Most events `process_ready_events_timeout` handles before the caller gets
+/// to draw, so a flood of output cannot hold off input and frames for long.
+const MAX_EVENT_BATCH: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
@@ -74,6 +80,9 @@ pub struct ConfiguredClient<T> {
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
     pty_sizes: PtySizeSync,
+    /// The viewport last reported to the server, so it is only sent again
+    /// when it changes.
+    reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
     hints_node: Option<NodeId>,
     terminal_output: VecDeque<Vec<u8>>,
@@ -98,6 +107,7 @@ where
             previous_session_id: None,
             viewport: None,
             pty_sizes: PtySizeSync::default(),
+            reported_viewport: None,
             search_prompt: None,
             hints_node: None,
             terminal_output: VecDeque::new(),
@@ -435,6 +445,40 @@ where
         };
         self.handle_event(&event).await?;
         Ok(Some(event))
+    }
+
+    /// Waits up to `timeout` for a server event, then handles it together with
+    /// every event that has already arrived behind it, and returns the handled
+    /// events in order.
+    ///
+    /// Handling one event per frame lets a busy pane's `RenderInvalidated`
+    /// events arrive faster than they are drawn, so a layout change queued
+    /// behind them, and the PTY resizes the next frame sends for it, would wait
+    /// for the whole backlog. Within a batch only the last `RenderInvalidated`
+    /// of each buffer is handled: it refreshes to the same latest snapshot the
+    /// earlier ones would have.
+    pub async fn process_ready_events_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ServerEvent>> {
+        let Some(first) = tokio::time::timeout(timeout, self.client.next_event())
+            .await
+            .ok()
+            .transpose()?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut batch = vec![first];
+        while batch.len() < MAX_EVENT_BATCH
+            && let Some(event) = self.client.ready_event().await?
+        {
+            batch.push(event);
+        }
+        let batch = coalesce_render_invalidations(batch);
+        for event in &batch {
+            self.handle_event(event).await?;
+        }
+        Ok(batch)
     }
 
     pub async fn next_event(&mut self) -> Result<ServerEvent> {
@@ -1208,8 +1252,12 @@ where
                 let focused_leaf = presentation
                     .focused_leaf()
                     .ok_or_else(|| MuxError::invalid_input("no focused leaf to split"))?;
+                let placement = PanePlacement::Split {
+                    leaf_id: focused_leaf.node_id,
+                    direction,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, new_child)
+                    .resolve_tree_buffer(session_id, presentation, new_child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1230,8 +1278,14 @@ where
                 self.client.resync_all_sessions().await
             }
             Action::OpenFloating { spec } => {
+                let geometry = resolve_floating_geometry(spec.geometry, viewport);
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, spec.tree)
+                    .resolve_tree_buffer(
+                        session_id,
+                        presentation,
+                        spec.tree,
+                        PanePlacement::Floating { geometry },
+                    )
                     .await?;
                 let result = self
                     .client
@@ -1240,7 +1294,7 @@ where
                         session_id,
                         root_node_id: None,
                         buffer_id: Some(buffer.id()),
-                        geometry: resolve_floating_geometry(spec.geometry, viewport),
+                        geometry,
                         title: spec.title,
                         focus: spec.focus,
                         close_on_empty: spec.close_on_empty,
@@ -1317,8 +1371,11 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
+                let placement = PanePlacement::Tab {
+                    tabs_node_id: tabs.node_id,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child)
+                    .resolve_tree_buffer(session_id, presentation, child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1348,8 +1405,11 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
+                let placement = PanePlacement::Tab {
+                    tabs_node_id: tabs.node_id,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child)
+                    .resolve_tree_buffer(session_id, presentation, child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1377,8 +1437,9 @@ where
                 let node_id = node_id
                     .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
                     .ok_or_else(|| MuxError::invalid_input("no focused node to replace"))?;
+                let placement = PanePlacement::Replace { leaf_id: node_id };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, tree)
+                    .resolve_tree_buffer(session_id, presentation, tree, placement)
                     .await?;
                 let result = self
                     .client
@@ -1550,12 +1611,24 @@ where
         }
     }
 
+    /// The buffer `tree` names, spawning it first when the tree asks for a
+    /// new one. A new buffer is started at the size it will be drawn at once
+    /// placed at `placement`.
     async fn resolve_tree_buffer(
         &self,
-        _session_id: SessionId,
+        session_id: SessionId,
         presentation: &PresentationModel,
         tree: TreeSpec,
+        placement: PanePlacement,
     ) -> Result<ResolvedTreeBuffer> {
+        let size = || {
+            spawn_pty_size(
+                self.client.state(),
+                session_id,
+                presentation.viewport,
+                placement,
+            )
+        };
         match tree {
             TreeSpec::BufferCurrent => presentation
                 .focused_buffer_id()
@@ -1563,16 +1636,19 @@ where
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
             TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
             TreeSpec::BufferSpawn(spec) => self
-                .create_buffer(spec)
+                .create_buffer(spec, size())
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             TreeSpec::BufferEmpty => self
-                .create_buffer(crate::scripting::BufferSpawnSpec {
-                    title: Some("shell".to_owned()),
-                    command: default_shell_command(),
-                    cwd: None,
-                    env: Default::default(),
-                })
+                .create_buffer(
+                    crate::scripting::BufferSpawnSpec {
+                        title: Some("shell".to_owned()),
+                        command: default_shell_command(),
+                        cwd: None,
+                        env: Default::default(),
+                    },
+                    size(),
+                )
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             other => Err(MuxError::invalid_input(format!(
@@ -1581,7 +1657,11 @@ where
         }
     }
 
-    async fn create_buffer(&self, spec: crate::scripting::BufferSpawnSpec) -> Result<BufferId> {
+    async fn create_buffer(
+        &self,
+        spec: crate::scripting::BufferSpawnSpec,
+        size: Option<PtySize>,
+    ) -> Result<BufferId> {
         let response = self
             .client
             .request_message(ClientMessage::Buffer(BufferRequest::Create {
@@ -1590,6 +1670,7 @@ where
                 command: spec.command,
                 cwd: spec.cwd,
                 env: spec.env,
+                size,
             }))
             .await?;
 
@@ -2135,7 +2216,11 @@ where
     /// redraw at the new size. A failed resize (e.g. the buffer exited
     /// meanwhile) only leaves that PTY at its old size, so it is logged and
     /// left for a later sync to retry rather than returned.
+    ///
+    /// The viewport itself is reported to the server too, so panes created
+    /// from the CLI can be spawned at the size this client will draw them.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        self.report_viewport(session_id, viewport).await;
         let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
             let result = self
@@ -2153,6 +2238,29 @@ where
             }
         }
         Ok(())
+    }
+
+    async fn report_viewport(&mut self, session_id: SessionId, viewport: Size) {
+        if self.reported_viewport == Some((session_id, viewport))
+            || viewport.width == 0
+            || viewport.height == 0
+        {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Session(SessionRequest::SetViewport {
+                request_id: self.client.next_request_id(),
+                session_id,
+                viewport,
+            }))
+            .await;
+        match result {
+            Ok(_) => self.reported_viewport = Some((session_id, viewport)),
+            // Only the size of panes created later depends on it, so a
+            // failure is retried on the next sync rather than returned.
+            Err(error) => warn!("failed to report viewport of session {session_id}: {error}"),
+        }
     }
 
     async fn refresh_local_viewports(&mut self, presentation: &PresentationModel) -> Result<()> {
@@ -3459,6 +3567,22 @@ where
             Err(error)
         }
     }
+}
+
+/// Drops each `RenderInvalidated` that a later one for the same buffer in
+/// `events` supersedes, keeping the order of everything else.
+fn coalesce_render_invalidations(events: Vec<ServerEvent>) -> Vec<ServerEvent> {
+    let mut seen = BTreeSet::new();
+    let mut kept = events
+        .into_iter()
+        .rev()
+        .filter(|event| match event {
+            ServerEvent::RenderInvalidated(render) => seen.insert(render.buffer_id),
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    kept.reverse();
+    kept
 }
 
 fn event_name(event: &ServerEvent) -> &'static str {

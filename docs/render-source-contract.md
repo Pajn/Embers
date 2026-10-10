@@ -22,6 +22,8 @@ Each visible line is a `SnapshotLine { text, runs }`: the plain text plus run-le
 
 For event handling, the client also refreshes the affected `BufferRecord` before dispatching `RenderInvalidated` hooks. That keeps metadata-only consumers such as bell automation aligned with the latest server state.
 
+The interactive client handles every event that has already arrived before it draws the next frame, rather than one event per frame, so a layout change is never queued behind a busy pane's output. Within such a batch only the last `RenderInvalidated` of each buffer is handled (and its hooks dispatched once), since it refreshes to the same latest snapshot the earlier ones would have.
+
 ### Metadata synchronization
 
 Visible snapshots may carry title and mode changes that affect UI immediately. Buffer metadata still lives on the durable `BufferRecord`, so activity, bell state, and detached-buffer discovery remain queryable even when a buffer is hidden.

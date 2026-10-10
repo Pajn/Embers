@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, IdAllocator, MuxError, NodeId, PtySize,
-    Result, SessionId, SplitDirection, Timestamp,
+    Result, SessionId, Size, SplitDirection, Timestamp,
 };
 use embers_protocol::NodeJoinPlacement;
 
@@ -59,6 +59,9 @@ pub struct ServerState {
     pub buffers: BTreeMap<BufferId, Buffer>,
     pub nodes: BTreeMap<NodeId, Node>,
     pub floating: BTreeMap<FloatingId, FloatingWindow>,
+    /// The viewport most recently reported for any session, which new
+    /// sessions start with.
+    last_viewport: Option<Size>,
     session_ids: IdAllocator<SessionId>,
     buffer_ids: IdAllocator<BufferId>,
     node_ids: IdAllocator<NodeId>,
@@ -78,6 +81,7 @@ impl ServerState {
             buffers: BTreeMap::new(),
             nodes: BTreeMap::new(),
             floating: BTreeMap::new(),
+            last_viewport: None,
             session_ids: IdAllocator::new(1),
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
@@ -165,6 +169,7 @@ impl ServerState {
             buffers,
             nodes,
             floating,
+            last_viewport: None,
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
             buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
@@ -367,10 +372,17 @@ impl ServerState {
                 focused_leaf: None,
                 focused_floating: None,
                 zoomed_node: None,
+                viewport: self.last_viewport,
                 created_at: Timestamp::now(),
             },
         );
         session_id
+    }
+
+    pub fn set_session_viewport(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        self.session_mut(session_id)?.viewport = Some(viewport);
+        self.last_viewport = Some(viewport);
+        Ok(())
     }
 
     pub fn create_buffer(

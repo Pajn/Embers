@@ -135,6 +135,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -148,6 +149,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -300,6 +302,7 @@ async fn clean_restart_stops_ephemeral_buffer_pipes() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -404,6 +407,7 @@ async fn long_server_socket_path_still_spawns_and_restores_keepers() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
