@@ -2003,6 +2003,7 @@ fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
             // reported is stuck, so make sure it goes away either way.
             let _ = child.kill();
         }
+        reap_keeper_process(child);
         return ready;
     }
 
@@ -2028,6 +2029,26 @@ fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         Err(RecvTimeoutError::Disconnected) => {
             Err(MuxError::pty("runtime keeper exited before it was ready"))
         }
+    }
+}
+
+/// Stack size for the threads that reap keeper processes; they only block in
+/// `waitpid`.
+const KEEPER_REAPER_STACK_SIZE: usize = 64 * 1024;
+
+/// Wait for a spawned keeper process on a background thread, so it is reaped
+/// whenever it exits instead of lingering as a zombie while the server runs.
+/// A keeper that outlives the server is reparented and reaped by init.
+fn reap_keeper_process(mut child: std::process::Child) {
+    let pid = child.id();
+    let spawned = thread::Builder::new()
+        .name(format!("keeper-reaper-{pid}"))
+        .stack_size(KEEPER_REAPER_STACK_SIZE)
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    if let Err(error) = spawned {
+        error!(%error, pid, "failed to start keeper reaper thread");
     }
 }
 

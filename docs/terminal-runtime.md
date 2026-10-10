@@ -145,6 +145,9 @@ socket in the server's runtime directory.
 - spawning a buffer waits until its keeper reports, on its stdout, that its socket is listening
   and its child is running, or why it failed to start; the server only connects after that
   report, so it never sees a socket that exists but does not accept connections yet
+- the server reaps every keeper process it spawned once that keeper exits, so keepers that exit
+  while the server runs do not linger as zombies; keepers that outlive the server are reparented
+  and reaped by the system
 - a clean server shutdown (a signal to the server process) leaves keepers running, so a restarted
   server can reattach through their sockets and restore `Running` buffers
 - `kill-server` (`ClientMessage::KillServer`) instead tells every keeper to stop its child
