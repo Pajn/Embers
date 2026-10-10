@@ -10,7 +10,7 @@ use embers_protocol::NodeJoinPlacement;
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
-    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    RemainOnExit, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
     CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
@@ -77,6 +77,9 @@ pub struct ServerState {
     /// The viewport most recently reported for any session, which new
     /// sessions start with.
     last_viewport: Option<Size>,
+    /// Whether exited buffers that do not set the `remain-on-exit` option
+    /// stay in their views; the server sets it from its config.
+    pub remain_on_exit: RemainOnExit,
     session_ids: IdAllocator<SessionId>,
     buffer_ids: IdAllocator<BufferId>,
     node_ids: IdAllocator<NodeId>,
@@ -97,6 +100,7 @@ impl ServerState {
             nodes: BTreeMap::new(),
             floating: BTreeMap::new(),
             last_viewport: None,
+            remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(1),
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
@@ -185,6 +189,7 @@ impl ServerState {
             nodes,
             floating,
             last_viewport: None,
+            remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
             buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
@@ -491,16 +496,33 @@ impl ServerState {
     /// `remain-on-exit off`:
     ///
     /// - an attached exited buffer has its view closed and its record removed,
-    ///   unless it [remains on exit](Buffer::remains_on_exit), in which case it
-    ///   stays in its view until that view is closed
+    ///   unless it [remains on exit](Buffer::remains_on_exit) (its option, or
+    ///   else [`Self::remain_on_exit`]), in which case it stays in its view
+    ///   until that view is closed
     /// - a detached exited buffer has its record removed, unless it has never
     ///   been attached: buffers are created detached and attached by a later
     ///   request, and one whose command exits in between is kept until it is
     ///   shown
+    /// - a helper buffer (a history view) whose view closed has its record
+    ///   removed: it only exists to be shown
     ///
     /// Run after every change that can exit, attach or detach a buffer.
     pub fn dispose_exited_buffers(&mut self) -> DisposedBuffers {
         let mut disposed = DisposedBuffers::default();
+        let closed_helpers = self
+            .buffers
+            .values()
+            .filter(|buffer| {
+                matches!(buffer.kind, BufferKind::Helper(_))
+                    && matches!(buffer.attachment, BufferAttachment::Detached)
+            })
+            .map(|buffer| buffer.id)
+            .collect::<Vec<_>>();
+        for buffer_id in closed_helpers {
+            if self.remove_buffer(buffer_id).is_ok() {
+                disposed.removed_buffers.push(buffer_id);
+            }
+        }
         let exited = self
             .buffers
             .values()
@@ -513,7 +535,7 @@ impl ServerState {
                     buffer.id,
                     buffer.attachment.clone(),
                     buffer.ever_attached,
-                    buffer.remains_on_exit(),
+                    buffer.remains_on_exit(self.remain_on_exit),
                 )
             })
             .collect::<Vec<_>>();

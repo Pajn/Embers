@@ -17,6 +17,7 @@ config API (key bindings, modes, actions, themes, tab bars, hooks) see
 | `EMBERS_MAX_BUFFERS` | `2048` | server | Ceiling on concurrently live buffers. Each buffer owns a PTY-backed child process plus scrollback, so this is the dominant resource bound. |
 | `EMBERS_MAX_SCROLLBACK_LINES` | `10000` | server | Scrollback lines retained per buffer. |
 | `EMBERS_RESTORE` | on | server | Set to `0`, `off`, `false` or `no` to leave panes whose keeper is gone `Interrupted` instead of restoring them. |
+| `EMBERS_REMAIN_ON_EXIT` | `off` | server | Default of the `remain-on-exit` pane option for panes that do not set it: `on` keeps a pane whose program exited as a dead pane, `failed` only when it exited with a nonzero status. A pane's own option wins. |
 | `EMBERS_RESTORE_COMMANDS` | `vi vim nvim emacs man less more tail top htop irssi weechat mutt` | server | Programs run again when a pane is restored, separated by commas or spaces. Replaces the default; set but empty, no program is run again. |
 
 A limit set to `0`, empty, or an unparseable value is ignored, so the default
@@ -92,6 +93,24 @@ are environment variables rather than Rhai config settings. Set them where the
 server is launched; a server started by `embers` inherits that command's
 environment. See [`terminal-runtime.md`](terminal-runtime.md) for exactly what is
 saved and when.
+
+## Dead panes
+
+A pane closes when its program exits, like tmux with `remain-on-exit off`. The
+`remain-on-exit` pane option keeps it as a dead pane that can still be
+captured: `on` always, `failed` only when the program exited with a nonzero
+status.
+
+```sh
+# Keep this pane once its program exits
+embers buffer set-option -t 4 remain-on-exit on
+# Keep every pane that does not say otherwise
+EMBERS_REMAIN_ON_EXIT=on embers
+```
+
+The server-wide default is an environment variable for the same reason as the
+restore settings: the server reads it when it starts, before any client config
+is loaded.
 
 ## Logging
 

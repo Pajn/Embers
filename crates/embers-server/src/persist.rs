@@ -410,6 +410,9 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
     restored.last_snapshot_seq = buffer.last_snapshot_seq;
     restored.kind = restored_buffer_kind(buffer.kind);
     restored.created_at = timestamp_from_millis(buffer.created_at_ms)?;
+    // Created by an earlier server: whatever request created it is long
+    // done, so an exited restored buffer is cleaned up even if never shown.
+    restored.ever_attached = true;
     Ok(restored)
 }
 

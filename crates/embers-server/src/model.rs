@@ -93,7 +93,8 @@ pub struct Buffer {
     /// buffer is created detached and attached by a later request, so an exit
     /// before its first attachment does not remove it (see
     /// [`ServerState::dispose_exited_buffers`](crate::ServerState::dispose_exited_buffers)).
-    /// Not persisted: restored buffers start out as never shown.
+    /// Not persisted: a restored buffer was created by an earlier server, so
+    /// it counts as shown and is cleaned up like any other.
     pub ever_attached: bool,
     /// The bell count of the buffer's runtime as last applied, so a bell is
     /// recorded once even when later output replaced the runtime's activity
@@ -104,8 +105,32 @@ pub struct Buffer {
 
 /// Buffer option that keeps an exited buffer in its view instead of closing
 /// the view, like tmux's `remain-on-exit`: `on` always, `failed` only when the
-/// command did not exit with status 0. Any other value, or none, means off.
+/// command did not exit with status 0. Any other value means off; unset, the
+/// server-wide default applies (see [`RemainOnExit`]).
 pub const REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
+
+/// A `remain-on-exit` setting: whether an exited buffer stays in its view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemainOnExit {
+    /// Close the view and remove the buffer.
+    #[default]
+    Off,
+    /// Keep the dead pane.
+    On,
+    /// Keep the dead pane only when the command did not exit with status 0.
+    Failed,
+}
+
+impl RemainOnExit {
+    /// Parse an option value: `on` and `failed`, anything else is off.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "on" => Self::On,
+            "failed" => Self::Failed,
+            _ => Self::Off,
+        }
+    }
+}
 
 /// Buffer option Neovim sets on its own pane, like tmux's `@pane-is-vim`, so
 /// smart navigation can tell it runs there. It describes the program running
@@ -144,19 +169,19 @@ impl Buffer {
     }
 
     /// Whether this buffer stays in its view after its command exits, per its
-    /// [`REMAIN_ON_EXIT_OPTION`].
-    pub fn remains_on_exit(&self) -> bool {
-        match self
+    /// [`REMAIN_ON_EXIT_OPTION`], or `default` when the option is not set.
+    pub fn remains_on_exit(&self, default: RemainOnExit) -> bool {
+        let setting = self
             .user_options
             .get(REMAIN_ON_EXIT_OPTION)
-            .map(String::as_str)
-        {
-            Some("on") => true,
-            Some("failed") => match &self.state {
+            .map_or(default, |value| RemainOnExit::parse(value));
+        match setting {
+            RemainOnExit::On => true,
+            RemainOnExit::Failed => match &self.state {
                 BufferState::Exited(exited) => exited.exit_code != Some(0),
                 _ => true,
             },
-            _ => false,
+            RemainOnExit::Off => false,
         }
     }
 

@@ -220,21 +220,23 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
         );
     }
 
-    // A restarted server keeps the record as exited.
+    // A restarted server cleans the exited, detached record up instead of
+    // keeping it.
     let handle = Server::new(config).start().await.expect("restart server");
     let mut client = ProtocolClient::connect(&socket_path)
         .await
         .expect("reconnect client");
-    let restored = request_buffer(
-        &mut client,
-        BufferRequest::Get {
+    let restored = client
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
             request_id: RequestId(305),
             buffer_id: buffer.id,
-        },
-    )
-    .await
-    .buffer;
-    assert_eq!(restored.state, BufferRecordState::Exited);
+        }))
+        .await
+        .expect("get request round-trips");
+    assert!(
+        matches!(&restored, ServerResponse::Error(error) if error.error.code == embers_core::ErrorCode::NotFound),
+        "exited buffer should not be restored, got {restored:?}"
+    );
     handle.shutdown().await.expect("shutdown restarted server");
 }
 

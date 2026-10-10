@@ -1297,7 +1297,9 @@ where
                 .await
             {
                 Ok(ServerResponse::Buffer(response)) => response.buffer,
-                Ok(_) | Err(MuxError::NotFound(_)) => continue,
+                Ok(_) => continue,
+                // Gone already: a history view's buffer goes with its view.
+                Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(error),
             };
             if buffer.attachment_node_id.is_some() || buffer.state != BufferRecordState::Running {
@@ -1312,7 +1314,8 @@ where
                 }))
                 .await
             {
-                Ok(_) | Err(MuxError::NotFound(_) | MuxError::Conflict(_)) => {}
+                Ok(_) => {}
+                Err(error) if error.is_not_found() || error.is_conflict() => {}
                 Err(error) => return Err(error),
             }
         }

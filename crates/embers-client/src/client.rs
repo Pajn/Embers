@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use embers_core::{BufferId, ErrorCode, IdAllocator, MuxError, RequestId, Result, SessionId};
+use embers_core::{BufferId, IdAllocator, MuxError, RequestId, Result, SessionId};
 use embers_protocol::{
     BufferRequest, ClientMessage, ClientRecord, ClientRequest, ScrollbackSliceResponse,
     ServerEvent, ServerResponse, SessionRequest, SnapshotResponse, SubscribeRequest,
@@ -164,7 +164,7 @@ where
             .await?;
 
         match expect_response(response) {
-            Err(error) if is_not_found(&error) => {
+            Err(error) if error.is_not_found() => {
                 self.state.remove_session(session_id);
                 Ok(())
             }
@@ -215,7 +215,7 @@ where
             .await?;
 
         match expect_response(response) {
-            Err(error) if is_not_found(&error) => self.forget_buffer(buffer_id).await,
+            Err(error) if error.is_not_found() => self.forget_buffer(buffer_id).await,
             response => match response? {
                 ServerResponse::VisibleSnapshot(snapshot) => {
                     self.state.apply_buffer_snapshot(snapshot);
@@ -240,7 +240,7 @@ where
             .await?;
 
         match expect_response(response) {
-            Err(error) if is_not_found(&error) => self.forget_buffer(buffer_id).await,
+            Err(error) if error.is_not_found() => self.forget_buffer(buffer_id).await,
             response => match response? {
                 ServerResponse::Buffer(response) => {
                     self.state.apply_buffer_record(response.buffer);
@@ -407,15 +407,6 @@ impl MuxClient<SocketTransport> {
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let transport = SocketTransport::connect(path).await?;
         Ok(Self::new(transport))
-    }
-}
-
-/// Whether the server answered that what was asked about does not exist.
-fn is_not_found(error: &MuxError) -> bool {
-    match error {
-        MuxError::Wire(error) => error.code == ErrorCode::NotFound,
-        MuxError::NotFound(_) => true,
-        _ => false,
     }
 }
 

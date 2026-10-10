@@ -74,14 +74,19 @@ after its command exits has to be kept:
 - the `remain-on-exit` buffer option (`embers buffer set-option -t <pane> remain-on-exit on`)
   keeps an attached exited buffer in its view as a dead pane, still capturable; `failed` keeps it
   only when the command did not exit with status 0. Closing the dead pane's view removes the
-  record. The option does not keep a detached buffer.
+  record. The option does not keep a detached buffer. Buffers that do not set the option follow
+  the server-wide default, `EMBERS_REMAIN_ON_EXIT` (see `docs/configuration.md`), which is off
+  unless set; a buffer's own option, `off` included, wins over it.
 - a buffer that exits before it has ever been attached is kept: buffers are created detached and
   attached by a later request, so a command that ends at once must not take its record with it.
   Once attached it is cleaned up like any other exited buffer, so its pane closes right away
-  unless `remain-on-exit` is set.
+  unless `remain-on-exit` is set. This only covers buffers created by the running server: a
+  buffer restored from the workspace was created long before, so a restored buffer that is
+  exited and detached is removed when the server starts.
 
-Cleanup runs when a buffer exits and after every request that can attach or detach a buffer.
-Helper buffers (history views) have no command and are not affected.
+Cleanup runs when the server starts, when a buffer exits and after every request that can attach
+or detach a buffer. Helper buffers (history views) have no command; a helper buffer's record is
+removed once its view closes, since it only exists to be shown.
 
 ## When a session's last pane closes
 

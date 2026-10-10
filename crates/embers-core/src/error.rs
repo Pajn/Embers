@@ -107,11 +107,40 @@ impl MuxError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
+
+    /// Whether this says that what was asked about does not exist, raised
+    /// here or reported by the server.
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            Self::NotFound(_) => true,
+            Self::Wire(error) => error.code == ErrorCode::NotFound,
+            _ => false,
+        }
+    }
+
+    /// Whether this is a conflict with the current state, raised here or
+    /// reported by the server.
+    pub fn is_conflict(&self) -> bool {
+        match self {
+            Self::Conflict(_) => true,
+            Self::Wire(error) => error.code == ErrorCode::Conflict,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, WireError};
+    use super::{ErrorCode, MuxError, WireError};
+
+    #[test]
+    fn not_found_and_conflict_are_recognised_from_the_server_too() {
+        assert!(MuxError::not_found("gone").is_not_found());
+        assert!(MuxError::from(WireError::new(ErrorCode::NotFound, "gone")).is_not_found());
+        assert!(!MuxError::from(WireError::new(ErrorCode::Conflict, "busy")).is_not_found());
+        assert!(MuxError::from(WireError::new(ErrorCode::Conflict, "busy")).is_conflict());
+        assert!(MuxError::conflict("busy").is_conflict());
+    }
 
     #[test]
     fn wire_error_renders_with_code() {

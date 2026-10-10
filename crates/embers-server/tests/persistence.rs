@@ -1010,3 +1010,63 @@ async fn pane_options_survive_restarts() {
     handle.shutdown().await.expect("shutdown final server");
     stop_keepers(&config, &[(buffer_id, pid)]).await;
 }
+
+#[tokio::test]
+async fn exited_detached_buffers_are_not_kept_across_a_restart() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let workspace_path = config.workspace_path.clone();
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+    // Never shown, so it is kept after it exits, waiting to be attached.
+    let buffer_id = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(1001),
+            title: Some("done".to_owned()),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 0".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+        },
+    )
+    .await
+    .buffer
+    .id;
+    wait_for_saved_workspace(&workspace_path, "the exited buffer", |contents| {
+        contents.contains("\"exited\"")
+    })
+    .await;
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+
+    // Its creation is long over, so nothing is waiting to show it.
+    let response = client
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: RequestId(1002),
+            buffer_id,
+        }))
+        .await
+        .expect("get request round-trips");
+    assert!(
+        matches!(&response, ServerResponse::Error(error) if error.error.code == embers_core::ErrorCode::NotFound),
+        "restored exited detached buffer should be removed, got {response:?}"
+    );
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+}

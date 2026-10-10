@@ -128,10 +128,11 @@ impl Server {
             std::fs::remove_file(&self.config.socket_path)?;
         }
 
-        let restored_state = load_workspace(&self.config.workspace_path)?;
+        let mut state = load_workspace(&self.config.workspace_path)?.unwrap_or_default();
+        state.remain_on_exit = self.config.remain_on_exit;
         let socket_path = self.config.socket_path.clone();
         let mut runtime = Runtime::new(
-            restored_state.unwrap_or_default(),
+            state,
             self.config.socket_path.clone(),
             self.config.workspace_path.clone(),
             self.config.runtime_dir.clone(),
@@ -141,6 +142,9 @@ impl Server {
         runtime.restore = self.config.restore.clone();
         let runtime = Arc::new(runtime);
         runtime.restore_buffer_runtimes().await?;
+        // Clean up buffers that are done: exited while the server was away, or
+        // saved exited and detached. No client is connected yet to tell.
+        runtime.dispose_exited_buffers(&mut Vec::new()).await;
         // Record what the restore changed (reattached pids, restarted panes).
         runtime.mark_workspace_dirty();
         let workspace_saver = runtime.spawn_workspace_saver();

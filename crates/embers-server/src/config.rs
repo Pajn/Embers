@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use embers_core::BufferId;
 
+use crate::model::RemainOnExit;
 use crate::runtime_dir::keeper_socket_path;
 
 pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
@@ -82,6 +83,19 @@ impl ResourceLimits {
         }
         limits
     }
+}
+
+/// Environment variable setting the server-wide default of the
+/// `remain-on-exit` buffer option (`on`, `failed` or `off`), for buffers that
+/// do not set it themselves.
+pub const REMAIN_ON_EXIT_ENV_VAR: &str = "EMBERS_REMAIN_ON_EXIT";
+
+/// The server-wide `remain-on-exit` default from [`REMAIN_ON_EXIT_ENV_VAR`];
+/// off when unset.
+fn remain_on_exit_from_env() -> RemainOnExit {
+    std::env::var(REMAIN_ON_EXIT_ENV_VAR)
+        .map(|value| RemainOnExit::parse(&value))
+        .unwrap_or_default()
 }
 
 /// Environment variable turning restore of panes whose keeper is gone on or off.
@@ -168,6 +182,9 @@ pub struct ServerConfig {
     pub buffer_env: BTreeMap<String, OsString>,
     pub limits: ResourceLimits,
     pub restore: RestoreConfig,
+    /// Whether exited buffers that do not set the `remain-on-exit` option
+    /// stay in their views.
+    pub remain_on_exit: RemainOnExit,
 }
 
 impl ServerConfig {
@@ -194,6 +211,7 @@ impl ServerConfig {
             buffer_env,
             limits: ResourceLimits::from_env(),
             restore: RestoreConfig::from_env(),
+            remain_on_exit: remain_on_exit_from_env(),
         }
     }
 
@@ -225,6 +243,14 @@ mod tests {
         );
         assert!(parse_command_list("").is_empty());
         assert!(parse_command_list(" , ").is_empty());
+    }
+
+    #[test]
+    fn remain_on_exit_values_parse_like_the_buffer_option() {
+        assert_eq!(RemainOnExit::parse("on"), RemainOnExit::On);
+        assert_eq!(RemainOnExit::parse(" Failed "), RemainOnExit::Failed);
+        assert_eq!(RemainOnExit::parse("off"), RemainOnExit::Off);
+        assert_eq!(RemainOnExit::parse("yes"), RemainOnExit::Off);
     }
 
     #[test]

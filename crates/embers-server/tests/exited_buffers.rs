@@ -8,7 +8,7 @@ use embers_protocol::{
     BufferRecord, BufferRecordState, BufferRequest, ClientMessage, NodeRequest, ProtocolClient,
     ServerResponse, SessionRequest, SessionSnapshot,
 };
-use embers_server::{REMAIN_ON_EXIT_OPTION, Server, ServerConfig, ServerHandle};
+use embers_server::{REMAIN_ON_EXIT_OPTION, RemainOnExit, Server, ServerConfig, ServerHandle};
 use tempfile::TempDir;
 use tokio::time::{Duration, Instant, sleep};
 
@@ -21,13 +21,16 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    async fn start_with(configure: impl FnOnce(&mut ServerConfig)) -> Self {
         init_test_tracing();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let socket_path = tempdir.path().join("mux.sock");
-        let handle = Server::new(ServerConfig::new(socket_path.clone()))
-            .start()
-            .await
-            .expect("start server");
+        let mut config = ServerConfig::new(socket_path.clone());
+        configure(&mut config);
+        let handle = Server::new(config).start().await.expect("start server");
         let client = ProtocolClient::connect(&socket_path)
             .await
             .expect("connect client");
@@ -313,6 +316,31 @@ async fn remain_on_exit_keeps_a_capturable_dead_pane_until_it_is_closed() {
         other => panic!("expected session snapshot, got {other:?}"),
     }
     assert!(harness.get_buffer(pane.buffer_id).await.is_none());
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn server_wide_remain_on_exit_keeps_dead_panes_unless_a_pane_turns_it_off() {
+    let mut harness = Harness::start_with(|config| config.remain_on_exit = RemainOnExit::On).await;
+    let kept = harness
+        .split_with(&["/bin/sh", "-c", "sleep 0.3"], None)
+        .await;
+    harness
+        .wait_for_buffer_state(kept.buffer_id, BufferRecordState::Exited)
+        .await;
+    sleep(Duration::from_millis(200)).await;
+    let record = harness
+        .get_buffer(kept.buffer_id)
+        .await
+        .expect("the server default keeps the dead pane");
+    assert_eq!(record.attachment_node_id, Some(kept.view_id));
+
+    // The pane option still wins over the server default.
+    let closed = harness
+        .split_with(&["/bin/sh", "-c", "sleep 0.3"], Some("off"))
+        .await;
+    harness.wait_for_buffer_removed(closed.buffer_id).await;
 
     harness.shutdown().await;
 }

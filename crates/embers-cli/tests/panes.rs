@@ -508,6 +508,25 @@ async fn buffer_show_and_history_open_helper_buffers() {
         "helper buffers should reject input with a read-only conflict, got {send:?}"
     );
 
+    // Closing the history view removes the helper buffer; nothing else can
+    // show it.
+    let helper_view = helper.attachment_node_id.expect("helper is shown");
+    run_cli(&server, ["kill-pane", "-t", &helper_view.to_string()]);
+    let gone = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: RequestId(5),
+            buffer_id: helper.id,
+        }))
+        .await
+        .expect("get helper returns a response");
+    assert!(
+        matches!(
+            gone,
+            ServerResponse::Error(ref response) if response.error.code == ErrorCode::NotFound
+        ),
+        "helper buffer should be removed with its view, got {gone:?}"
+    );
+
     server.shutdown().await.expect("shutdown server");
 }
 
