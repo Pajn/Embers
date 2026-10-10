@@ -5124,7 +5124,17 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Backspace => Ok(KeyToken::Backspace),
         KeyEvent::Escape => Ok(KeyToken::Escape),
         KeyEvent::Ctrl(ch) => Ok(KeyToken::Ctrl(ch.to_ascii_lowercase())),
-        KeyEvent::Alt(ch) => Ok(KeyToken::Alt(ch.to_ascii_lowercase())),
+        // A legacy host sends Alt+Shift+h as ESC H; keep the shift so it
+        // matches `<M-H>` and is not taken for `<M-h>`.
+        KeyEvent::Alt(ch) if ch.is_ascii_uppercase() => Ok(KeyToken::Key {
+            code: crate::input::KeyCode::Char(ch.to_ascii_lowercase()),
+            mods: crate::input::Modifiers {
+                alt: true,
+                shift: true,
+                ..crate::input::Modifiers::NONE
+            },
+        }),
+        KeyEvent::Alt(ch) => Ok(KeyToken::Alt(ch)),
         KeyEvent::Up => Ok(KeyToken::Up),
         KeyEvent::Down => Ok(KeyToken::Down),
         KeyEvent::Left => Ok(KeyToken::Left),
@@ -5454,6 +5464,41 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn legacy_alt_shift_letters_keep_their_shift() {
+        use super::sequence_to_bytes;
+        use crate::input::{KeyCode, Modifiers};
+        let alt_shift_h = KeyToken::Key {
+            code: KeyCode::Char('h'),
+            mods: Modifiers {
+                alt: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        };
+        // ESC H from a legacy host is Alt+Shift+h, matching `<M-H>`, not `<M-h>`.
+        assert_eq!(key_event_to_token(KeyEvent::Alt('H')).unwrap(), alt_shift_h);
+        assert_eq!(
+            key_event_to_token(KeyEvent::Alt('h')).unwrap(),
+            KeyToken::Alt('h')
+        );
+        // The CSI-u report of the same chord resolves to the same token.
+        assert_eq!(
+            key_event_to_token(KeyEvent::Key {
+                code: KeyCode::Char('h'),
+                mods: Modifiers {
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+            .unwrap(),
+            alt_shift_h
+        );
+        // Unbound, it reaches the pane as ESC H again.
+        assert_eq!(sequence_to_bytes(&[alt_shift_h], 0).unwrap(), b"\x1bH");
     }
 
     #[test]

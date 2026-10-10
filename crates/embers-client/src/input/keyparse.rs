@@ -211,7 +211,12 @@ fn parse_modified_token(token: &str) -> Result<KeyToken, KeyParseError> {
                 ..Modifiers::NONE
             })
         {
-            return Ok(KeyToken::Alt(ch.to_ascii_lowercase()));
+            // tmux's `M-H` is Alt+Shift+h; only a lowercase letter is plain Alt.
+            if ch.is_ascii_uppercase() {
+                mods.shift = true;
+            } else {
+                return Ok(KeyToken::Alt(ch));
+            }
         }
     }
 
@@ -265,6 +270,25 @@ fn single_char_token(token: &str) -> Option<char> {
 mod tests {
     use super::super::encoding::{KeyCode, Modifiers};
     use super::{KeyParseError, KeyToken, expand_leader, parse_key_sequence};
+
+    #[test]
+    fn alt_with_an_uppercase_letter_is_alt_shift() {
+        // tmux's `M-H` is Alt+Shift+h, a different key from `M-h`.
+        let alt_shift_h = vec![KeyToken::Key {
+            code: KeyCode::Char('h'),
+            mods: Modifiers {
+                alt: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        }];
+        assert_eq!(parse_key_sequence("<M-H>").unwrap(), alt_shift_h);
+        assert_eq!(parse_key_sequence("<A-S-h>").unwrap(), alt_shift_h);
+        assert_eq!(
+            parse_key_sequence("<M-h>").unwrap(),
+            vec![KeyToken::Alt('h')]
+        );
+    }
 
     #[test]
     fn parses_shift_multi_modifier_and_function_keys() {
