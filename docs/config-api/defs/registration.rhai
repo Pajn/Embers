@@ -516,6 +516,17 @@ fn select_other_end(_: ActionApi) -> Action;
 /// Select a tab by index in a specific tabs node.
 fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action;
 
+/// Select a window (a root tab of the current session) by its number, which
+/// counts from the base index set with `set_base_index` (0 when unset), like
+/// tmux `select-window -t :N`.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>1", action.select_window(1));
+/// ```
+fn select_window(_: ActionApi, number: int) -> Action;
+
 /// Send a string of bytes to a specific buffer.
 fn send_bytes(_: ActionApi, buffer_id: int, bytes: string) -> Action;
 
@@ -707,6 +718,29 @@ fn define_mode(mode_name: string, options: map) -> ();
 ///
 /// # rhai-autodocs:index:7
 fn on(event_name: string, callback: Fn) -> ();
+
+/// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+///
+/// Windows are a session's root tabs. Their numbers are what
+/// `TabInfo.number()` gives tab bar formatters and what
+/// `action.select_window` takes. Windows are always numbered without gaps:
+/// closing one renumbers the windows after it, like tmux with
+/// `renumber-windows on`.
+///
+/// This setting covers the client and the commands it runs from the command
+/// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+/// instead; set that variable where the server and your shells start to use
+/// the same numbering everywhere. Without this call the client uses
+/// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+///
+/// # Example
+///
+/// ```rhai
+/// set_base_index(1);
+/// ```
+///
+/// # rhai-autodocs:index:9
+fn set_base_index(index: int) -> ();
 
 /// Choose whether programs in panes may set the system clipboard.
 ///

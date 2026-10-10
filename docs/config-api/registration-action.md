@@ -2473,6 +2473,40 @@ Select a tab by index in a specific tabs node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> select_window </h2>
+
+```rust,ignore
+fn select_window(_: ActionApi, number: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="select_window" id="link-select_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'select_window', 'Description')">
+Description
+</button>
+<button group="select_window" id="link-select_window-Example"  class="tablinks"
+    onclick="openTab(event, 'select_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="select_window" id="select_window-Description" class="tabcontent"  style="display: block;" >
+Select a window (a root tab of the current session) by its number, which
+counts from the base index set with `set_base_index` (0 when unset), like
+tmux `select-window -t :N`.
+</div>
+<div group="select_window" id="select_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>1", action.select_window(1));
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> send_bytes </h2>
 
 ```rust,ignore

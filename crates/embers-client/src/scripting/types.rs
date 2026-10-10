@@ -152,6 +152,8 @@ pub struct LoadedConfig {
     /// Forward OSC 52 clipboard writes from programs in panes to the host
     /// terminal (`set_clipboard`). On by default.
     pub clipboard: bool,
+    /// Number of the first window (`set_base_index`), if the config set one.
+    pub base_index: Option<u32>,
 }
 
 impl LoadedConfig {
@@ -188,6 +190,7 @@ impl fmt::Debug for LoadedConfig {
             .field("hints", &self.hints)
             .field("theme", &self.theme)
             .field("clipboard", &self.clipboard)
+            .field("base_index", &self.base_index)
             .finish()
     }
 }

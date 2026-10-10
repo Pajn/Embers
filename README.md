@@ -80,6 +80,11 @@ embers --socket /tmp/my-embers.sock list-sessions
 EMBERS_SOCKET=/tmp/my-embers.sock embers attach
 ```
 
+Windows are numbered from 0 unless a base index is set (`EMBERS_BASE_INDEX=1`,
+`--base-index 1`, or `set_base_index(1)` in the config), as with tmux's
+`base-index`. Closing a window renumbers the ones after it. See
+[`docs/commands.md`](docs/commands.md).
+
 Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-9e18f3ae.js";
+            window.path_to_searchindex_js = "searchindex-9c9f773a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -351,6 +351,45 @@ Description
 
 <div group="on" id="on-Description" class="tabcontent" style="display: block;">
 Attach a callback to an emitted event such as `buffer_bell`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_base_index </h2>
+
+<pre><code class="language-rust ignore">fn set_base_index(index: int)</code></pre>
+<div>
+<div class="tab">
+<button group="set_base_index" id="link-set_base_index-Description" class="tablinks active" onclick="openTab(event, &#39;set_base_index&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_base_index" id="link-set_base_index-Example" class="tablinks" onclick="openTab(event, &#39;set_base_index&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_base_index" id="set_base_index-Description" class="tabcontent" style="display: block;">
+Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+<p>Windows are a session’s root tabs. Their numbers are what
+<code>TabInfo.number()</code> gives tab bar formatters and what
+<code>action.select_window</code> takes. Windows are always numbered without gaps:
+closing one renumbers the windows after it, like tmux with
+<code>renumber-windows on</code>.</p>
+<p>This setting covers the client and the commands it runs from the command
+prompt. The <code>embers</code> CLI reads <code>EMBERS_BASE_INDEX</code> (or <code>--base-index</code>)
+instead; set that variable where the server and your shells start to use
+the same numbering everywhere. Without this call the client uses
+<code>EMBERS_BASE_INDEX</code> when it is set, and numbers windows from 0 otherwise.</p>
+</div>
+
+<div group="set_base_index" id="set_base_index-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_base_index(1);
+</code></pre>
 </div>
 
 </div>
@@ -2789,6 +2828,37 @@ Description
 
 <div group="select_tab" id="select_tab-Description" class="tabcontent" style="display: block;">
 Select a tab by index in a specific tabs node.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> select_window </h2>
+
+<pre><code class="language-rust ignore">fn select_window(_: ActionApi, number: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="select_window" id="link-select_window-Description" class="tablinks active" onclick="openTab(event, &#39;select_window&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="select_window" id="link-select_window-Example" class="tablinks" onclick="openTab(event, &#39;select_window&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="select_window" id="select_window-Description" class="tabcontent" style="display: block;">
+Select a window (a root tab of the current session) by its number, which
+counts from the base index set with `set_base_index` (0 when unset), like
+tmux `select-window -t :N`.
+</div>
+
+<div group="select_window" id="select_window-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;1", action.select_window(1));
+</code></pre>
 </div>
 
 </div>
@@ -6108,6 +6178,37 @@ Select a tab by index in a specific tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> select_window </h2>
+
+<pre><code class="language-rust ignore">fn select_window(_: ActionApi, number: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="select_window" id="link-select_window-Description-1" class="tablinks active" onclick="openTab(event, &#39;select_window&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="select_window" id="link-select_window-Example-1" class="tablinks" onclick="openTab(event, &#39;select_window&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="select_window" id="select_window-Description-1" class="tabcontent" style="display: block;">
+Select a window (a root tab of the current session) by its number, which
+counts from the base index set with `set_base_index` (0 when unset), like
+tmux `select-window -t :N`.
+</div>
+
+<div group="select_window" id="select_window-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;1", action.select_window(1));
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> send_bytes </h2>
 
 <pre><code class="language-rust ignore">fn send_bytes(_: ActionApi, buffer_id: int, bytes: String) -&gt; Action
@@ -8591,7 +8692,7 @@ Description
 </div>
 
 <div group="index" id="index-Description" class="tabcontent" style="display: block;">
-Return the zero-based tab index.
+Return the zero-based tab index, as `action.select_tab` takes it.
 </div>
 
 </div>
@@ -8613,6 +8714,38 @@ Description
 
 <div group="is_active" id="is_active-Description" class="tabcontent" style="display: block;">
 Return whether the tab is active.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> number </h2>
+
+<pre><code class="language-rust ignore">fn number(tab: TabInfo) -&gt; int</code></pre>
+<div>
+<div class="tab">
+<button group="number" id="link-number-Description" class="tablinks active" onclick="openTab(event, &#39;number&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="number" id="link-number-Example" class="tablinks" onclick="openTab(event, &#39;number&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="number" id="number-Description" class="tabcontent" style="display: block;">
+Return the tab's window number: its index plus the base index set with
+`set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+the numbers match CLI targets such as `select-window -t work:2` and
+`action.select_window`.
+</div>
+
+<div group="number" id="number-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let label = `${tab.number()}:${tab.title()}`;
+</code></pre>
 </div>
 
 </div>

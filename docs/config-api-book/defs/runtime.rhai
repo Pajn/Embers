@@ -565,6 +565,17 @@ fn select_other_end(_: ActionApi) -> Action;
 /// Select a tab by index in a specific tabs node.
 fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action;
 
+/// Select a window (a root tab of the current session) by its number, which
+/// counts from the base index set with `set_base_index` (0 when unset), like
+/// tmux `select-window -t :N`.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>1", action.select_window(1));
+/// ```
+fn select_window(_: ActionApi, number: int) -> Action;
+
 /// Send a string of bytes to a specific buffer.
 fn send_bytes(_: ActionApi, buffer_id: int, bytes: string) -> Action;
 
@@ -754,7 +765,7 @@ fn id(node: NodeRef) -> int;
 /// Return the numeric session id.
 fn id(session: SessionRef) -> int;
 
-/// Return the zero-based tab index.
+/// Return the zero-based tab index, as `action.select_tab` takes it.
 fn index(tab: TabInfo) -> int;
 
 /// Return whether the tab is active.
@@ -817,6 +828,18 @@ fn node_id(buffer: BufferRef) -> ?;
 ///
 /// ReturnType: `int | ()`
 fn node_id(event: EventInfo) -> ?;
+
+/// Return the tab's window number: its index plus the base index set with
+/// `set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+/// the numbers match CLI targets such as `select-window -t work:2` and
+/// `action.select_window`.
+///
+/// # Example
+///
+/// ```rhai
+/// let label = `${tab.number()}:${tab.title()}`;
+/// ```
+fn number(tab: TabInfo) -> int;
 
 /// Return the parent node id, if any.
 ///

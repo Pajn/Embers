@@ -260,6 +260,7 @@ struct RegistrationState {
     hints: HintsSettings,
     theme: ThemeSpec,
     clipboard: Option<bool>,
+    base_index: Option<u32>,
 }
 
 impl RegistrationState {
@@ -364,6 +365,7 @@ impl RegistrationState {
             hints: self.hints,
             theme: self.theme,
             clipboard: self.clipboard.unwrap_or(true),
+            base_index: self.base_index,
         })
     }
 }
@@ -797,6 +799,48 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .clipboard = Some(enabled);
+        Ok(())
+    }
+
+    /// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+    ///
+    /// Windows are a session's root tabs. Their numbers are what
+    /// `TabInfo.number()` gives tab bar formatters and what
+    /// `action.select_window` takes. Windows are always numbered without gaps:
+    /// closing one renumbers the windows after it, like tmux with
+    /// `renumber-windows on`.
+    ///
+    /// This setting covers the client and the commands it runs from the command
+    /// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+    /// instead; set that variable where the server and your shells start to use
+    /// the same numbering everywhere. Without this call the client uses
+    /// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_base_index(1);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:9
+    #[rhai_fn(return_raw, global, name = "set_base_index")]
+    pub fn set_base_index(ctx: NativeCallContext, index: i64) -> RhaiResultOf<()> {
+        let index = u32::try_from(index)
+            .ok()
+            .filter(|index| *index <= crate::numbering::MAX_BASE_INDEX)
+            .ok_or_else(|| {
+                runtime_error(
+                    format!(
+                        "base index must be between 0 and {}",
+                        crate::numbering::MAX_BASE_INDEX
+                    ),
+                    ctx.call_position(),
+                )
+            })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .base_index = Some(index);
         Ok(())
     }
 }

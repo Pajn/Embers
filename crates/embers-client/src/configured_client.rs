@@ -160,6 +160,17 @@ where
         &self.notifications
     }
 
+    /// The window base index (tmux `base-index`): the config's
+    /// `set_base_index`, else `EMBERS_BASE_INDEX`, else `None` for numbering
+    /// from 0.
+    pub fn base_index(&self) -> Option<u32> {
+        self.config
+            .active_script()
+            .loaded_config()
+            .base_index
+            .or_else(crate::numbering::base_index_from_env)
+    }
+
     /// The name of the active input mode (e.g. "normal", "hints").
     pub fn current_mode(&self) -> &str {
         self.input_state.current_mode()
@@ -681,7 +692,8 @@ where
         let mut recorded_formatter_error = false;
         for tabs in &presentation.tab_bars {
             let bar_context =
-                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width);
+                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
+                    .with_base_index(self.base_index());
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
@@ -1365,6 +1377,38 @@ where
                         request_id: self.client.next_request_id(),
                         tabs_node_id: tabs.node_id,
                         index,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
+            Action::SelectWindow { number } => {
+                let count = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .map_or(1, |root| {
+                        root.tabs.as_ref().map_or(1, |tabs| tabs.tabs.len())
+                    });
+                let Some(index) = crate::numbering::window_position(
+                    number,
+                    count,
+                    self.base_index().unwrap_or(0),
+                ) else {
+                    self.record_notification(format_notification(
+                        NotifyLevel::Warn,
+                        &format!("no window {number}"),
+                    ));
+                    return Ok(());
+                };
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(index).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
                     }))
                     .await?;
                 self.client.resync_session(session_id).await
@@ -2452,6 +2496,10 @@ where
         }
         if let Some(socket_path) = &self.socket_path {
             process.env("EMBERS_SOCKET", socket_path);
+        }
+        // So `embers` commands the child runs number windows like this client.
+        if let Some(base_index) = self.base_index() {
+            process.env(crate::numbering::BASE_INDEX_ENV_VAR, base_index.to_string());
         }
 
         // Identify the command by its executable only. The full argument list

@@ -114,6 +114,51 @@ Attach a callback to an emitted event such as `buffer_bell`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_base_index </h2>
+
+```rust,ignore
+fn set_base_index(index: int)
+```
+
+<div>
+<div class="tab">
+<button group="set_base_index" id="link-set_base_index-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_base_index', 'Description')">
+Description
+</button>
+<button group="set_base_index" id="link-set_base_index-Example"  class="tablinks"
+    onclick="openTab(event, 'set_base_index', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_base_index" id="set_base_index-Description" class="tabcontent"  style="display: block;" >
+Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+
+Windows are a session's root tabs. Their numbers are what
+`TabInfo.number()` gives tab bar formatters and what
+`action.select_window` takes. Windows are always numbered without gaps:
+closing one renumbers the windows after it, like tmux with
+`renumber-windows on`.
+
+This setting covers the client and the commands it runs from the command
+prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+instead; set that variable where the server and your shells start to use
+the same numbering everywhere. Without this call the client uses
+`EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+</div>
+<div group="set_base_index" id="set_base_index-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_base_index(1);
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_clipboard </h2>
 
 ```rust,ignore

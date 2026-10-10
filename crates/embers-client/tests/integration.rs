@@ -15,3 +15,4 @@ mod socket_transport;
 mod spawn_size;
 mod split_resize;
 mod support;
+mod window_numbering;

@@ -6,6 +6,7 @@ pub mod copy_mode;
 pub mod grid;
 pub mod hints;
 pub mod input;
+pub mod numbering;
 pub mod presentation;
 mod pty_sizes;
 pub mod renderer;
@@ -32,6 +33,9 @@ pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
     KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, SEARCH_MODE,
     SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
+};
+pub use numbering::{
+    BASE_INDEX_ENV_VAR, base_index_from_env, parse_base_index, window_number, window_position,
 };
 pub use presentation::{
     DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,

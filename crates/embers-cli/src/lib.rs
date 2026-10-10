@@ -18,7 +18,7 @@ use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
     ClientState, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
-    drawn_viewport, spawn_pty_size,
+    drawn_viewport, spawn_pty_size, window_number, window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -55,6 +55,11 @@ pub struct Cli {
     pub log: Option<String>,
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Number windows from this index, like tmux `base-index`. Defaults to
+    /// `EMBERS_BASE_INDEX`; when neither is set, window numbers start at 0 and
+    /// numeric targets are accepted as 0- or 1-based unless that is ambiguous.
+    #[arg(long = "base-index", global = true, value_name = "N", value_parser = parse_base_index_arg)]
+    pub base_index: Option<u32>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -83,6 +88,20 @@ impl Cli {
         }
         "info".to_owned()
     }
+
+    /// The window base index from `--base-index`, then `EMBERS_BASE_INDEX`.
+    pub fn base_index(&self) -> Option<u32> {
+        self.base_index.or_else(embers_client::base_index_from_env)
+    }
+}
+
+fn parse_base_index_arg(value: &str) -> std::result::Result<u32, String> {
+    embers_client::parse_base_index(value).ok_or_else(|| {
+        format!(
+            "expected a number from 0 to {}",
+            embers_client::numbering::MAX_BASE_INDEX
+        )
+    })
 }
 
 #[derive(Debug, Subcommand)]
@@ -425,8 +444,9 @@ pub enum JoinPlacementArg {
     TabAfter,
 }
 
-async fn execute(socket: &Path, command: Command) -> Result<String> {
+async fn execute(socket: &Path, command: Command, base_index: Option<u32>) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
+    connection.base_index = base_index;
     execute_command(&mut connection, command).await
 }
 
@@ -941,13 +961,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
-            Ok(format!("{index}\t{title}"))
+            let number = window_number(index as usize, connection.base_index);
+            Ok(format!("{number}\t{title}"))
         }
         Command::ListWindows { target } => {
             let snapshot = connection
                 .resolve_session_snapshot(target.as_deref())
                 .await?;
-            Ok(format_windows(&snapshot)?)
+            Ok(format_windows(&snapshot, connection.base_index)?)
         }
         Command::SelectWindow { target } => {
             let window = connection.resolve_window(Some(&target)).await?;
@@ -1245,6 +1266,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
 
 pub async fn run(cli: Cli) -> Result<()> {
     let log_filter = cli.log_filter();
+    let base_index = cli.base_index();
     let Cli {
         socket,
         config,
@@ -1295,7 +1317,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Some(Command::Serve) => run_server(socket, &log_filter).await,
                 Some(command) => {
                     ensure_server_process(&socket, &log_filter).await?;
-                    let output = execute(&socket, command).await?;
+                    let output = execute(&socket, command, base_index).await?;
                     if !output.is_empty() {
                         println!("{output}");
                     }
@@ -1659,6 +1681,9 @@ impl Drop for ServerPidFile {
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
+    /// Window base index (tmux `base-index`); `None` keeps the legacy
+    /// numbering described in [`embers_client::numbering`].
+    base_index: Option<u32>,
 }
 
 impl CliConnection {
@@ -1666,7 +1691,10 @@ impl CliConnection {
         let client = ProtocolClient::connect(path)
             .await
             .map_err(|error| MuxError::transport(error.to_string()))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            base_index: None,
+        })
     }
 
     async fn request(&mut self, message: ClientMessage) -> Result<ServerResponse> {
@@ -1810,7 +1838,7 @@ impl CliConnection {
             .await?;
         let (index, child_id) = {
             if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref())?;
+                let index = resolve_window_index(root_tabs, selector.as_deref(), self.base_index)?;
                 let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
                     MuxError::not_found(format!(
                         "window index {index} is not present in session {}",
@@ -1820,7 +1848,8 @@ impl CliConnection {
                 (index, tab.child_id)
             } else {
                 let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index = resolve_single_window_index(&title, selector.as_deref())?;
+                let index =
+                    resolve_single_window_index(&title, selector.as_deref(), self.base_index)?;
                 (index, snapshot.session.root_node_id)
             }
         };
@@ -2215,7 +2244,7 @@ fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
         .unwrap_or_else(|| session_id.to_string())
 }
 
-fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
+fn format_windows(snapshot: &SessionSnapshot, base_index: Option<u32>) -> Result<String> {
     if let Some((_, tabs)) = root_tabs(snapshot)? {
         Ok(tabs
             .tabs
@@ -2223,7 +2252,8 @@ fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
             .enumerate()
             .map(|(index, tab)| {
                 format!(
-                    "{index}\t{}\t{}",
+                    "{}\t{}\t{}",
+                    window_number(index, base_index),
                     usize::from(u32::try_from(index).ok() == Some(tabs.active)),
                     tab.title
                 )
@@ -2232,7 +2262,7 @@ fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
             .join("\n"))
     } else {
         let title = window_title(snapshot, snapshot.session.root_node_id)?;
-        Ok(format!("0\t1\t{title}"))
+        Ok(format!("{}\t1\t{title}", window_number(0, base_index)))
     }
 }
 
@@ -2356,10 +2386,24 @@ fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<N
     }
 }
 
-fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&str>) -> Result<u32> {
+fn resolve_window_index(
+    tabs: &embers_protocol::TabsRecord,
+    selector: Option<&str>,
+    base_index: Option<u32>,
+) -> Result<u32> {
     let Some(selector) = selector else {
         return Ok(tabs.active);
     };
+
+    if let Some(base_index) = base_index
+        && let Ok(number) = selector.parse::<u64>()
+    {
+        return window_position(number, tabs.tabs.len(), base_index)
+            .map(|position| u32::try_from(position).expect("tab index fits into protocol width"))
+            .ok_or_else(|| {
+                MuxError::not_found(format!("window index '{selector}' is out of range"))
+            });
+    }
 
     if let Ok(index) = selector.parse::<u32>() {
         let mut candidates = Vec::new();
@@ -2403,10 +2447,24 @@ fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&st
     }
 }
 
-fn resolve_single_window_index(title: &str, selector: Option<&str>) -> Result<u32> {
+fn resolve_single_window_index(
+    title: &str,
+    selector: Option<&str>,
+    base_index: Option<u32>,
+) -> Result<u32> {
     let Some(selector) = selector else {
         return Ok(0);
     };
+
+    if let Some(base_index) = base_index
+        && let Ok(number) = selector.parse::<u64>()
+    {
+        return window_position(number, 1, base_index)
+            .map(|_| 0)
+            .ok_or_else(|| {
+                MuxError::not_found(format!("window index '{selector}' is out of range"))
+            });
+    }
 
     if let Ok(index) = selector.parse::<u32>() {
         return match index {
@@ -2692,7 +2750,8 @@ mod tests {
     use super::{
         BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
         JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
-        resolve_window_index, split_scoped_required, split_scoped_target,
+        resolve_single_window_index, resolve_window_index, split_scoped_required,
+        split_scoped_target,
     };
 
     #[test]
@@ -2803,16 +2862,46 @@ mod tests {
             ],
         };
 
-        let error = resolve_window_index(&tabs, Some("1")).expect_err("index is ambiguous");
+        let error = resolve_window_index(&tabs, Some("1"), None).expect_err("index is ambiguous");
         assert!(
             error
                 .to_string()
                 .contains("ambiguous between 0-based and 1-based")
         );
         assert_eq!(
-            resolve_window_index(&tabs, Some("0")).expect("zero resolves"),
+            resolve_window_index(&tabs, Some("0"), None).expect("zero resolves"),
             0
         );
+    }
+
+    #[test]
+    fn numeric_window_indices_count_from_a_set_base_index() {
+        let tabs = TabsRecord {
+            active: 0,
+            tabs: ["one", "two"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, title)| TabRecord {
+                    title: title.to_owned(),
+                    child_id: NodeId(index as u64 + 1),
+                    synchronize_panes: false,
+                })
+                .collect(),
+        };
+
+        assert_eq!(resolve_window_index(&tabs, Some("1"), Some(1)).unwrap(), 0);
+        assert_eq!(resolve_window_index(&tabs, Some("2"), Some(1)).unwrap(), 1);
+        assert!(resolve_window_index(&tabs, Some("0"), Some(1)).is_err());
+        assert_eq!(resolve_window_index(&tabs, Some("1"), Some(0)).unwrap(), 1);
+        assert_eq!(
+            resolve_window_index(&tabs, Some("two"), Some(1)).unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_single_window_index("solo", Some("1"), Some(1)).unwrap(),
+            0
+        );
+        assert!(resolve_single_window_index("solo", Some("0"), Some(1)).is_err());
     }
 
     #[test]

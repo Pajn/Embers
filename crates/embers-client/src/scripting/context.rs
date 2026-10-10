@@ -458,6 +458,7 @@ impl TabBarContext {
                 .enumerate()
                 .map(|(index, tab)| TabInfo {
                     index,
+                    number: crate::numbering::window_number(index, None),
                     title: tab.title.clone(),
                     active: tab.active,
                     has_activity: matches!(
@@ -473,9 +474,22 @@ impl TabBarContext {
     }
 }
 
+impl TabBarContext {
+    /// Number the tabs from `base_index` (tmux `base-index`) instead of 0.
+    pub fn with_base_index(mut self, base_index: Option<u32>) -> Self {
+        for tab in &mut self.tabs {
+            tab.number = crate::numbering::window_number(tab.index, base_index);
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabInfo {
     pub index: usize,
+    /// The tab's number as shown to users: `index` plus the configured base
+    /// index. Window targets such as `embers select-window -t work:2` use it.
+    pub number: u64,
     pub title: String,
     pub active: bool,
     pub has_activity: bool,

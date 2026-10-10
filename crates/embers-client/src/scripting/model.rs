@@ -30,6 +30,11 @@ pub enum Action {
         tabs_node_id: Option<NodeId>,
         index: usize,
     },
+    /// tmux `select-window -t :N`: select the root tab numbered `number`,
+    /// counting from the configured base index.
+    SelectWindow {
+        number: u64,
+    },
     NextTab {
         tabs_node_id: Option<NodeId>,
     },

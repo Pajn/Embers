@@ -24,6 +24,8 @@ pub fn require_pty() -> bool {
 pub fn cli_command(server: &TestServer) -> assert_cmd::Command {
     let mut command = cargo_bin("embers");
     command.arg("--socket").arg(server.socket_path());
+    // Tests choose window numbering explicitly.
+    command.env_remove(embers_client::BASE_INDEX_ENV_VAR);
     command
 }
 

@@ -779,10 +779,25 @@ mod documented_ref_api {
         tab.title.clone()
     }
 
-    /// Return the zero-based tab index.
+    /// Return the zero-based tab index, as `action.select_tab` takes it.
     #[rhai_fn(name = "index")]
     pub fn tab_index(tab: &mut TabInfo) -> i64 {
         i64::try_from(tab.index).unwrap_or(i64::MAX)
+    }
+
+    /// Return the tab's window number: its index plus the base index set with
+    /// `set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+    /// the numbers match CLI targets such as `select-window -t work:2` and
+    /// `action.select_window`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = `${tab.number()}:${tab.title()}`;
+    /// ```
+    #[rhai_fn(name = "number")]
+    pub fn tab_number(tab: &mut TabInfo) -> i64 {
+        i64::try_from(tab.number).unwrap_or(i64::MAX)
     }
 
     /// Return whether the tab is active.
@@ -1154,6 +1169,29 @@ mod documented_action_api {
             Ok(Action::SelectTab {
                 tabs_node_id: Some(parse_node_id(tabs_node_id)?),
                 index: parse_index(index, "tab index")?,
+            })
+        })
+    }
+
+    /// Select a window (a root tab of the current session) by its number, which
+    /// counts from the base index set with `set_base_index` (0 when unset), like
+    /// tmux `select-window -t :N`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>1", action.select_window(1));
+    /// ```
+    #[rhai_fn(return_raw, name = "select_window")]
+    pub fn select_window(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        number: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SelectWindow {
+                number: u64::try_from(number)
+                    .map_err(|_| super::runtime_error("window number must be zero or greater"))?,
             })
         })
     }
