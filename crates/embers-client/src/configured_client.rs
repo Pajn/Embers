@@ -1568,8 +1568,7 @@ where
         let copy_modes = [COPY_MODE, SELECT_MODE];
         if copy_modes.contains(&mode.as_str()) {
             if let Some((session_id, viewport)) = session_id.zip(viewport)
-                && let Ok(presentation) =
-                    PresentationModel::project(self.client.state(), session_id, viewport)
+                && let Ok(presentation) = self.project(session_id, viewport)
                 && let Some(leaf) = presentation.focused_leaf()
             {
                 self.ensure_copy_cursor(leaf.node_id);
@@ -2651,13 +2650,23 @@ where
         }
     }
 
+    /// Project `session_id` the way this client draws it, with the root tab
+    /// bar where the config puts it.
+    fn project(&self, session_id: SessionId, viewport: Size) -> Result<PresentationModel> {
+        PresentationModel::project_with(
+            self.client.state(),
+            session_id,
+            viewport,
+            self.config.active_script().loaded_config().tab_bar_position,
+        )
+    }
+
     async fn prepare_presentation(
         &mut self,
         session_id: SessionId,
         viewport: Size,
     ) -> Result<PresentationModel> {
-        let mut presentation =
-            PresentationModel::project(self.client.state(), session_id, viewport)?;
+        let mut presentation = self.project(session_id, viewport)?;
         let invalidated = presentation
             .leaves
             .iter()
@@ -2673,7 +2682,7 @@ where
             self.client.refresh_buffer_snapshot(buffer_id).await?;
         }
         if !self.client.state().invalidated_buffers.is_empty() {
-            presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+            presentation = self.project(session_id, viewport)?;
         }
         self.refresh_local_viewports(&presentation).await?;
         Ok(presentation)
@@ -2686,8 +2695,7 @@ where
         event: Option<EventInfo>,
     ) -> Context {
         let context = if let Some((session_id, viewport)) = session_id.zip(viewport)
-            && let Ok(presentation) =
-                PresentationModel::project(self.client.state(), session_id, viewport)
+            && let Ok(presentation) = self.project(session_id, viewport)
         {
             Context::from_state_with_mode(
                 self.client.state(),
@@ -3128,7 +3136,7 @@ where
     /// from the CLI can be spawned at the size this client will draw them.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
         self.report_viewport(session_id, viewport).await;
-        let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+        let presentation = self.project(session_id, viewport)?;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
             let result = self
                 .client

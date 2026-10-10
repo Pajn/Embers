@@ -438,7 +438,7 @@ const EMBERS_DOC_SEARCH =
         if (yes) {
             loadSearchScript(
                 window.path_to_searchindex_js ||
-                path_to_root + 'searchindex-91493e2b.js',
+                path_to_root + 'searchindex-2fe4a907.js',
                 'mdbook-search-index');
             search_wrap.classList.remove('hidden');
             searchicon.setAttribute('aria-expanded', 'true');

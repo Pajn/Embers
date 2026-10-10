@@ -16,6 +16,25 @@ pub enum NavigationDirection {
     Down,
 }
 
+/// Where the session's root tab bar (its window list) is drawn, like tmux's
+/// `status-position`. Nested tab bars always sit at the top of their area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBarPosition {
+    #[default]
+    Top,
+    Bottom,
+}
+
+impl TabBarPosition {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabItem {
     pub title: String,
@@ -118,7 +137,20 @@ pub struct PresentationModel {
 }
 
 impl PresentationModel {
+    /// Project with the root tab bar at the top.
     pub fn project(state: &ClientState, session_id: SessionId, viewport: Size) -> Result<Self> {
+        Self::project_with(state, session_id, viewport, TabBarPosition::Top)
+    }
+
+    /// Project with the root tab bar at `tab_bar`. The bar takes one row
+    /// either way, so panes have the same sizes wherever it is; only their
+    /// positions differ.
+    pub fn project_with(
+        state: &ClientState,
+        session_id: SessionId,
+        viewport: Size,
+        tab_bar: TabBarPosition,
+    ) -> Result<Self> {
         let session = state
             .sessions
             .get(&session_id)
@@ -134,6 +166,7 @@ impl PresentationModel {
             projection: &mut projection,
             activity_by_node: BTreeMap::new(),
             buffer_count_by_node: BTreeMap::new(),
+            tab_bar,
         };
         if let Some(zoomed_node_id) = session
             .zoomed_node_id
@@ -293,6 +326,8 @@ struct Projector<'a> {
     projection: &'a mut Projection,
     activity_by_node: BTreeMap<NodeId, ActivityState>,
     buffer_count_by_node: BTreeMap<NodeId, usize>,
+    /// Where the root tab bar goes.
+    tab_bar: TabBarPosition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -365,12 +400,30 @@ impl Projector<'_> {
                     ))
                 })?;
 
-                let bar_rect = Rect {
-                    origin: rect.origin,
-                    size: Size {
-                        width: rect.size.width,
-                        height: 1,
-                    },
+                let at_bottom =
+                    is_root && floating_id.is_none() && self.tab_bar == TabBarPosition::Bottom;
+                let (bar_rect, content_rect) = if at_bottom {
+                    let content_rect = inset_bottom(rect, 1);
+                    let bar_rect = Rect {
+                        origin: Point {
+                            x: rect.origin.x,
+                            y: rect.origin.y + i32::from(content_rect.size.height),
+                        },
+                        size: Size {
+                            width: rect.size.width,
+                            height: 1,
+                        },
+                    };
+                    (bar_rect, content_rect)
+                } else {
+                    let bar_rect = Rect {
+                        origin: rect.origin,
+                        size: Size {
+                            width: rect.size.width,
+                            height: 1,
+                        },
+                    };
+                    (bar_rect, inset_top(rect, 1))
                 };
                 let mut tab_items = Vec::with_capacity(tabs.tabs.len());
                 for (index, tab) in tabs.tabs.iter().enumerate() {
@@ -406,7 +459,7 @@ impl Projector<'_> {
                 child_tabs_path.push(node.id);
                 self.project_node(
                     active_child.child_id,
-                    inset_top(rect, 1),
+                    content_rect,
                     floating_id,
                     false,
                     child_tabs_path,
@@ -810,6 +863,16 @@ fn divider_rect_for(
                 height: rect.size.height,
             },
         }),
+    }
+}
+
+fn inset_bottom(rect: Rect, amount: u16) -> Rect {
+    Rect {
+        origin: rect.origin,
+        size: Size {
+            width: rect.size.width,
+            height: rect.size.height.saturating_sub(amount),
+        },
     }
 }
 

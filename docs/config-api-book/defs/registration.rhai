@@ -894,6 +894,21 @@ fn set_pane_border_color(theme: ThemeApi, color: string) -> ();
 /// # rhai-autodocs:index:20
 fn set_formatter(tabbar: TabbarApi, callback: Fn) -> ();
 
+/// Put the session's tab bar, its list of windows, at the `"top"` (the
+/// default) or `"bottom"` of the screen, like tmux's `status-position`.
+/// At the bottom it sits just above the status line, where the command
+/// prompt and messages appear. Tab bars of nested tabs stay at the top of
+/// their own area.
+///
+/// # Example
+///
+/// ```rhai
+/// tabbar.set_position("bottom");
+/// ```
+///
+/// # rhai-autodocs:index:20
+fn set_position(tabbar: TabbarApi, value: string) -> ();
+
 fn bind(mode: string, notation: string, action: Action) -> ();
 
 /// Bind a key notation to an [`Action`], a string action name, or an array of actions.

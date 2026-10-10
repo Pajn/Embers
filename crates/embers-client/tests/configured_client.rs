@@ -595,6 +595,70 @@ async fn configured_render_uses_scripted_tab_bars() {
 }
 
 #[tokio::test]
+async fn tab_bar_at_the_bottom_moves_drawing_and_mouse_targets() {
+    let viewport = Size {
+        width: 80,
+        height: 20,
+    };
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .mouse_reporting = true;
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(r#"tabbar.set_position("bottom");"#);
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state.clone();
+
+    // The root tab bar is the last row of the grid; panes start at the top.
+    let grid = configured
+        .render_session(SESSION_ID, viewport)
+        .await
+        .unwrap();
+    let lines = grid.lines();
+    assert!(lines[19].contains("workspace"), "{lines:#?}");
+    assert!(!lines[0].contains("workspace"), "{lines:#?}");
+
+    // A click is hit-tested against the drawn layout: the focused pane's
+    // first content row is one row higher than with the bar on top.
+    let top = PresentationModel::project(&state, SESSION_ID, viewport).unwrap();
+    let focused = top.focused_leaf().unwrap().clone();
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            viewport,
+            MouseEvent {
+                row: focused.rect.origin.y as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[<0;1;1M".to_vec(),
+        })
+    );
+}
+
+#[tokio::test]
 async fn reload_updates_live_bindings() {
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("config.rhai");

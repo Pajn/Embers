@@ -289,8 +289,6 @@ for mode in ["copy", "select"] {
 // the pane it shows: "nvim <dir>" for Neovim, "$ <dir>" for a shell, else the
 // pane title or program, cut to 24 characters. The right side shows the
 // focused pane's directory.
-//
-// Not available: the tab bar is always at the top (status-position bottom).
 theme.set_palette(#{
     base: "#303446",
     surface: "#51576d",
@@ -378,3 +376,4 @@ fn format_tabs(ctx) {
 }
 
 tabbar.set_formatter(format_tabs);
+tabbar.set_position("bottom");   // status-position bottom

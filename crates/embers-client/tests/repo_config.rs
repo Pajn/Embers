@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use embers_client::{
     Action, BufferSpawnSpec, ChooserScope, ClientState, Context, FloatingAnchor,
     FloatingGeometrySpec, FloatingSize, KeyToken, NavigationDirection, PaneBorderColors,
-    PresentationModel, ScriptEngine, TabBarContext, TerminalColor, TreeSpec,
+    PresentationModel, ScriptEngine, TabBarContext, TabBarPosition, TerminalColor, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
     input::parse_key_sequence,
 };
@@ -24,6 +24,8 @@ fn example_config_loads_with_a_c_a_leader_and_settings() {
     assert_eq!(loaded.base_index, Some(1));
     assert!(loaded.clipboard);
     assert!(loaded.has_tab_bar_formatter());
+    // status-position bottom
+    assert_eq!(loaded.tab_bar_position, TabBarPosition::Bottom);
     // pane-active-border-style fg=magenta, pane-border-style fg=brightblack
     assert_eq!(
         loaded.theme.pane_borders,

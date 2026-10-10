@@ -20,6 +20,7 @@ use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
 use crate::host_terminal::TerminalFeatures;
+use crate::presentation::TabBarPosition;
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
@@ -259,6 +260,7 @@ struct RegistrationState {
     named_actions: BTreeMap<String, ScriptFunctionRef>,
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
+    tab_bar_position: TabBarPosition,
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
@@ -367,6 +369,7 @@ impl RegistrationState {
             named_actions: self.named_actions,
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
+            tab_bar_position: self.tab_bar_position,
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
@@ -488,6 +491,20 @@ impl TabbarApi {
             "tab bar formatter",
             position,
         )?);
+        Ok(())
+    }
+
+    fn set_position(&self, position: Position, value: &str) -> ScriptResult<()> {
+        let Some(tab_bar) = TabBarPosition::parse(value) else {
+            return Err(runtime_error(
+                format!("tab bar position must be \"top\" or \"bottom\", not \"{value}\""),
+                position,
+            ));
+        };
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .tab_bar_position = tab_bar;
         Ok(())
     }
 }
@@ -1013,6 +1030,28 @@ mod tabbar_registration_api {
         callback: FnPtr,
     ) -> RhaiResultOf<()> {
         tabbar.set_formatter(ctx.call_position(), callback)
+    }
+
+    /// Put the session's tab bar, its list of windows, at the `"top"` (the
+    /// default) or `"bottom"` of the screen, like tmux's `status-position`.
+    /// At the bottom it sits just above the status line, where the command
+    /// prompt and messages appear. Tab bars of nested tabs stay at the top of
+    /// their own area.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// tabbar.set_position("bottom");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:20
+    #[rhai_fn(return_raw, name = "set_position")]
+    pub fn set_position(
+        ctx: NativeCallContext,
+        tabbar: TabbarApi,
+        value: &str,
+    ) -> RhaiResultOf<()> {
+        tabbar.set_position(ctx.call_position(), value)
     }
 }
 

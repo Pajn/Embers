@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::grid::TerminalColor;
 use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
+use crate::presentation::TabBarPosition;
 
 use super::model::Action;
 
@@ -241,6 +242,8 @@ pub struct LoadedConfig {
     pub named_actions: BTreeMap<String, ScriptFunctionRef>,
     pub event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     pub tab_bar_formatter: Option<ScriptFunctionRef>,
+    /// Where the root tab bar is drawn (`tabbar.set_position`).
+    pub tab_bar_position: TabBarPosition,
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
@@ -289,6 +292,7 @@ impl fmt::Debug for LoadedConfig {
             .field("named_actions", &self.named_actions)
             .field("event_handlers", &self.event_handlers)
             .field("tab_bar_formatter", &self.tab_bar_formatter)
+            .field("tab_bar_position", &self.tab_bar_position)
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
