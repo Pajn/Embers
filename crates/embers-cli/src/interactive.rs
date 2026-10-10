@@ -70,6 +70,11 @@ pub async fn run(
             }
 
             if let Some(active_session_id) = session_id {
+                // Every layout, session or outer-terminal size change marks the
+                // frame dirty, so this keeps each pane's PTY at its drawn size.
+                configured
+                    .sync_pty_sizes(active_session_id, viewport)
+                    .await?;
                 let grid = configured
                     .render_session(active_session_id, viewport)
                     .await?;

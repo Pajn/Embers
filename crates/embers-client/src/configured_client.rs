@@ -23,6 +23,7 @@ use crate::input::{
     SELECT_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
+use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
@@ -72,6 +73,7 @@ pub struct ConfiguredClient<T> {
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
+    pty_sizes: PtySizeSync,
     search_prompt: Option<SearchPrompt>,
     hints_node: Option<NodeId>,
     terminal_output: VecDeque<Vec<u8>>,
@@ -95,6 +97,7 @@ where
             active_session_id: None,
             previous_session_id: None,
             viewport: None,
+            pty_sizes: PtySizeSync::default(),
             search_prompt: None,
             hints_node: None,
             terminal_output: VecDeque::new(),
@@ -191,6 +194,7 @@ where
         key: KeyEvent,
     ) -> Result<()> {
         self.drain_background_notifications();
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
@@ -281,6 +285,7 @@ where
         viewport: Size,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         if self.input_state.current_mode() == SEARCH_MODE {
             return self.handle_search_paste(session_id, viewport, bytes).await;
@@ -315,6 +320,7 @@ where
         viewport: Size,
         event: MouseEvent,
     ) -> Result<()> {
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let point = Point {
@@ -385,6 +391,9 @@ where
         viewport: Size,
         focused: bool,
     ) -> Result<()> {
+        if focused {
+            self.pty_sizes.note_user_activity();
+        }
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let buffer_id = self.resolve_buffer_id(None, &presentation)?;
@@ -2117,6 +2126,32 @@ where
                 && view_state.search_state.is_none()
                 && view_state.selection_state.is_none()
                 && actions.iter().all(action_requires_local_context))
+    }
+
+    /// Resize the PTYs of the session's visible buffers to the content areas
+    /// `render_session` draws for them at `viewport`, sending a request only for
+    /// buffers whose size changed (see `PtySizeSync` for the multi-client
+    /// policy). The server answers with `RenderInvalidated`, which triggers the
+    /// redraw at the new size. A failed resize (e.g. the buffer exited
+    /// meanwhile) only leaves that PTY at its old size, so it is logged rather
+    /// than returned.
+    pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+        for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
+            let result = self
+                .client
+                .request_message(ClientMessage::Input(InputRequest::Resize {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    cols: size.cols,
+                    rows: size.rows,
+                }))
+                .await;
+            if let Err(error) = result {
+                warn!("failed to resize buffer {buffer_id}: {error}");
+            }
+        }
+        Ok(())
     }
 
     async fn refresh_local_viewports(&mut self, presentation: &PresentationModel) -> Result<()> {

@@ -6,6 +6,7 @@ pub mod grid;
 pub mod hints;
 pub mod input;
 pub mod presentation;
+mod pty_sizes;
 pub mod renderer;
 pub mod scripting;
 pub mod socket_transport;

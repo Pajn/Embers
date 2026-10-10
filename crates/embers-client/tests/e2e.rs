@@ -1779,3 +1779,214 @@ async fn session_switch_actions_move_between_sessions() {
 
     server.shutdown().await.expect("server shuts down");
 }
+
+/// `(leaf, buffer)` pairs of `session_name`, ordered by leaf node id
+/// (creation order).
+async fn leaf_buffers(
+    connection: &mut TestConnection,
+    session_name: &str,
+) -> Vec<(NodeId, BufferId)> {
+    let snapshot = session_snapshot_by_name(connection, session_name).await;
+    let mut leaves = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.buffer_view
+                .as_ref()
+                .map(|view| (node.id, view.buffer_id))
+        })
+        .collect::<Vec<_>>();
+    leaves.sort();
+    leaves
+}
+
+/// Ask the shell in `buffer_id` for its PTY size and wait for the `rows cols`
+/// answer, so the assertion covers the real PTY rather than server bookkeeping.
+async fn assert_stty_size(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    cols: u16,
+    rows: u16,
+) {
+    assert_eq!(
+        buffer_record(connection, buffer_id).await.pty_size,
+        embers_core::PtySize::new(cols, rows),
+        "server-side pty size of buffer {buffer_id}"
+    );
+    connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id,
+            bytes: b"stty size\n".to_vec(),
+        }))
+        .await
+        .expect("send stty succeeds");
+    connection
+        .wait_for_capture_contains(buffer_id, &format!("{rows} {cols}"), Duration::from_secs(3))
+        .await
+        .expect("shell reports the resized pty");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_pty_size_follows_the_drawn_pane_size() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let initial = Size {
+        width: 101,
+        height: 31,
+    };
+
+    // First attach: the root tab bar takes one row and the pane title another,
+    // so a 101x31 viewport leaves 101x29 for the shell.
+    configured
+        .sync_pty_sizes(alpha, initial)
+        .await
+        .expect("sync");
+    let leaves = leaf_buffers(&mut connection, "alpha").await;
+    assert_eq!(leaves.len(), 1);
+    assert_stty_size(&mut connection, leaves[0].1, 101, 29).await;
+
+    // A vertical split shares the width, minus one divider column.
+    run_cli(&server, &["split-window", "--", "/bin/sh"]);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after split");
+    configured
+        .sync_pty_sizes(alpha, initial)
+        .await
+        .expect("sync after split");
+    let leaves = leaf_buffers(&mut connection, "alpha").await;
+    assert_eq!(leaves.len(), 2);
+    assert_stty_size(&mut connection, leaves[0].1, 50, 29).await;
+    assert_stty_size(&mut connection, leaves[1].1, 50, 29).await;
+
+    // Resizing the outer terminal resizes every visible pane.
+    let resized = Size {
+        width: 121,
+        height: 41,
+    };
+    configured
+        .sync_pty_sizes(alpha, resized)
+        .await
+        .expect("sync after outer resize");
+    assert_stty_size(&mut connection, leaves[0].1, 60, 39).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+
+    // A zoomed pane fills the whole viewport (no tab bar); the hidden pane
+    // keeps its last size.
+    connection
+        .request(&ClientMessage::Node(NodeRequest::Zoom {
+            request_id: new_request_id(),
+            node_id: leaves[0].0,
+        }))
+        .await
+        .expect("zoom succeeds");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after zoom");
+    configured
+        .sync_pty_sizes(alpha, resized)
+        .await
+        .expect("sync after zoom");
+    assert_stty_size(&mut connection, leaves[0].1, 121, 40).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn most_recently_active_client_owns_the_pane_pty_size() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let mut clients = Vec::new();
+    let mut tempdirs = Vec::new();
+    for _ in 0..2 {
+        let client = MuxClient::connect(server.socket_path())
+            .await
+            .expect("client connects");
+        let (config, tempdir) = session_switch_config();
+        let mut configured = ConfiguredClient::new(client, config);
+        configured
+            .client_mut()
+            .resync_all_sessions()
+            .await
+            .expect("resync");
+        clients.push(configured);
+        tempdirs.push(tempdir);
+    }
+    let alpha = session_id_by_name(clients[0].client(), "alpha");
+    let large = Size {
+        width: 101,
+        height: 31,
+    };
+    let small = Size {
+        width: 81,
+        height: 21,
+    };
+    let buffer_id = leaf_buffers(&mut connection, "alpha").await[0].1;
+
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+
+    // A client attaching later takes over with its own size.
+    clients[1].sync_pty_sizes(alpha, small).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+
+    // Redrawing an idle client at an unchanged size does not fight back, even
+    // once it has seen the other client's size.
+    clients[0]
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+
+    // Typing in the first client makes it the active one again. Ctrl-U then
+    // clears the typed character so the shell reads a clean `stty size`.
+    clients[0]
+        .handle_key(alpha, large, KeyEvent::Char('z'))
+        .await
+        .expect("key passes through");
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id,
+            bytes: b"\x15".to_vec(),
+        }))
+        .await
+        .expect("clear typed key");
+    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+
+    server.shutdown().await.expect("server shuts down");
+}

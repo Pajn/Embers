@@ -56,6 +56,17 @@ A "move" is a composite operation:
 
 Moving tabs, leaves, or floating roots must never reset PTY state because the runtime stays with the `Buffer`, not the `BufferView`.
 
+## PTY sizing
+
+The server applies sizes; attached clients choose them. Before each frame the live client resizes
+every visible PTY buffer to the content area it draws for that leaf (the leaf rect minus its title
+row, after splits, tab bars, floating borders and zoom) through `InputRequest::Resize`, and only
+when that size changed.
+
+When several clients show the same buffer, the most recently active client wins: a client resizes a
+buffer when its own wanted size changes (attach, layout change, outer-terminal resize) or after
+local input, never merely because another client resized it. Hidden buffers keep their last size.
+
 ## Detached buffer policy
 
 Detached PTY buffers keep the last assigned `pty_size` until another explicit resize arrives.

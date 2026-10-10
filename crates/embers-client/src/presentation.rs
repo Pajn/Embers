@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Point, Rect, Result,
-    SessionId, Size, SplitDirection,
+    ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Point, PtySize, Rect,
+    Result, SessionId, Size, SplitDirection,
 };
 use embers_protocol::{FloatingRecord, NodeRecordKind, SessionRecord};
 
@@ -45,6 +45,16 @@ pub struct LeafFrame {
     pub focused: bool,
     pub floating_id: Option<FloatingId>,
     pub tabs_path: Vec<NodeId>,
+}
+
+impl LeafFrame {
+    /// The PTY size matching the terminal content the renderer draws for this
+    /// leaf: its full width, minus the title row it draws on top. `None` when
+    /// the leaf is too small to show any terminal rows.
+    pub fn pty_size(&self) -> Option<PtySize> {
+        let rows = self.rect.size.height.saturating_sub(1);
+        (self.rect.size.width > 0 && rows > 0).then(|| PtySize::new(self.rect.size.width, rows))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

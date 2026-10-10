@@ -19,6 +19,7 @@ behavior.
 | Activity, bell, and hidden-buffer metadata | `crates/embers-client/tests/e2e.rs` and `crates/embers-server/tests/buffer_lifecycle.rs` | Hidden and detached buffers keep activity, bell, and continuity metadata coherent. |
 | Render invalidation and snapshot freshness | `crates/embers-client/tests/configured_client.rs` and `crates/embers-client/tests/e2e.rs` | Confirms the client renders from refreshed authoritative snapshots, not stale cache. |
 | Full-screen and alternate-screen behavior | `crates/embers-client/tests/e2e.rs` | Verifies enter/exit semantics, hidden fullscreen buffers, and primary-screen restoration. |
+| PTY size follows the drawn pane | `crates/embers-client/tests/e2e.rs` and `crates/embers-client/src/pty_sizes.rs` | Attach, split, outer resize and zoom reach the real PTY; resizes are deduplicated and the most recently active client wins. |
 
 ## Real PTY end-to-end workflows
 
