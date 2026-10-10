@@ -14,7 +14,9 @@ Any PTY output that advances a buffer snapshot marks that buffer as `Activity`. 
 
 ## What counts as a bell
 
-If the terminal backend observes a bell during an output update, the durable `Buffer` record's stored state is set to `Bell` instead of plain `Activity`. `Bell` wins over ordinary activity for that buffer until the state is cleared by focus or replaced by a later update, which lets client and automation layers distinguish attention-worthy output from normal background chatter.
+If the terminal backend observes a bell during an output update, the durable `Buffer` record's stored state is set to `Bell` instead of plain `Activity`. `Bell` wins over ordinary activity for that buffer until the state is cleared by focus, which lets client and automation layers distinguish attention-worthy output from normal background chatter.
+
+The runtime keeper only remembers the activity of the latest output it read, and the server learns it by polling, so output right after a bell would otherwise hide the bell from the next poll. The keeper therefore also counts the output chunks that rang the bell, and the server marks the buffer `Bell` whenever that count has advanced since it last looked, whether the poll or a capture brings the news. A bell is recorded once: after focus clears it, the same bell does not come back.
 
 ## Hidden and detached buffers
 

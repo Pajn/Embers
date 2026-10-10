@@ -79,6 +79,10 @@ pub struct BufferRuntimeUpdate {
     /// (`value` is `None` once the pane's own process is in the foreground
     /// again); `None` when it is unchanged.
     pub foreground_command: Option<Option<Vec<String>>>,
+    /// The runtime's [`BufferRuntimeStatus::bell_sequence`]. The server marks
+    /// the buffer `Bell` whenever this advances, so a bell is not lost when
+    /// later output replaced `activity` before it was reported.
+    pub bell_sequence: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +98,10 @@ pub struct BufferRuntimeStatus {
     /// Count of OSC 52 clipboard writes the keeper has seen. The poller fetches
     /// the latest write whenever this advances.
     pub clipboard_sequence: u64,
+    /// Count of output chunks that rang the bell since the runtime started.
+    /// `activity` only describes the latest chunk, so this is what tells a
+    /// reader that a bell rang since it last looked.
+    pub bell_sequence: u64,
     /// Command line of the job in the PTY's foreground when that is not the
     /// pane's own process, for example a program a shell is running.
     pub foreground_command: Option<Vec<String>>,
@@ -224,6 +232,10 @@ struct KeeperStatus {
     // Defaulted for keepers that predate foreground command reporting.
     #[serde(default)]
     foreground_command: Option<Vec<String>>,
+    // Defaulted for keepers that predate bell counting; they report 0, so
+    // only their latest activity is seen.
+    #[serde(default)]
+    bell_sequence: u64,
 }
 
 /// The latest OSC 52 clipboard write a keeper has seen. The payload is held
@@ -300,6 +312,8 @@ struct KeeperRuntime {
     pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
     activity: Mutex<ActivityState>,
+    /// Output chunks that rang the bell; see [`BufferRuntimeStatus::bell_sequence`].
+    bell_sequence: AtomicU64,
     clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
     pid: Option<u32>,
@@ -653,6 +667,7 @@ impl KeeperConnection {
                 cwd: status.cwd,
                 clipboard_sequence: status.clipboard_sequence,
                 foreground_command: status.foreground_command,
+                bell_sequence: status.bell_sequence,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
@@ -1180,6 +1195,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
         activity: Mutex::new(ActivityState::Idle),
+        bell_sequence: AtomicU64::new(0),
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         pid,
@@ -1364,6 +1380,7 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
+        let bell_sequence = self.bell_sequence.load(Ordering::Relaxed);
         let clipboard_sequence = self
             .clipboard
             .lock()
@@ -1410,6 +1427,7 @@ impl KeeperRuntime {
             cwd,
             clipboard_sequence,
             foreground_command,
+            bell_sequence,
         })
     }
 
@@ -1586,6 +1604,11 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                 {
                     pipe.write(bytes);
                 }
+                // Count bells before the sequence advances, so a status read
+                // that sees the new sequence also sees the bell.
+                if activity == ActivityState::Bell {
+                    runtime.bell_sequence.fetch_add(1, Ordering::Relaxed);
+                }
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
@@ -1709,59 +1732,56 @@ fn validate_pipe_command(command: &[String]) -> Result<()> {
 fn notify_pipe_removed(
     callbacks: &BufferRuntimeCallbacks,
     buffer_id: BufferId,
-    last_sequence: &mut u64,
-    activity: ActivityState,
-    last_pipe: &mut Option<BufferRuntimePipeStatus>,
+    last: &mut BufferRuntimeStatus,
     saw_exit: bool,
 ) {
-    if last_pipe.is_none() && saw_exit {
+    if last.pipe.is_none() && saw_exit {
         return;
     }
-    *last_sequence = last_sequence.saturating_add(1);
+    last.sequence = last.sequence.saturating_add(1);
     (callbacks.on_output)(
         buffer_id,
         BufferRuntimeUpdate {
-            sequence: *last_sequence,
-            activity,
+            sequence: last.sequence,
+            activity: last.activity,
             title: None,
             pipe: Some(None),
             cwd: None,
             foreground_command: None,
+            bell_sequence: last.bell_sequence,
         },
     );
-    *last_pipe = None;
+    last.pipe = None;
 }
 
-/// Compute the update to emit when a freshly polled status differs from the
-/// last one reported to the callbacks, or `None` when nothing changed. Only the
-/// fields that actually changed are populated, so a cwd-only change — which does
-/// not advance `sequence` — is still emitted and distinguishable from no change.
+/// Compute the update to emit when a freshly polled status differs from
+/// `last`, the status last reported to the callbacks, or `None` when nothing
+/// changed. Only the fields that actually changed are populated, so a cwd-only
+/// change — which does not advance `sequence` — is still emitted and
+/// distinguishable from no change.
 fn status_update_delta(
     status: &BufferRuntimeStatus,
-    last_sequence: u64,
-    last_title: &Option<String>,
-    last_activity: ActivityState,
-    last_pipe: &Option<BufferRuntimePipeStatus>,
-    last_cwd: &Option<PathBuf>,
-    last_foreground: &Option<Vec<String>>,
+    last: &BufferRuntimeStatus,
 ) -> Option<BufferRuntimeUpdate> {
-    let changed = status.sequence != last_sequence
-        || status.title != *last_title
-        || status.activity != last_activity
-        || status.pipe != *last_pipe
-        || status.cwd != *last_cwd
-        || status.foreground_command != *last_foreground;
+    let changed = status.sequence != last.sequence
+        || status.bell_sequence != last.bell_sequence
+        || status.title != last.title
+        || status.activity != last.activity
+        || status.pipe != last.pipe
+        || status.cwd != last.cwd
+        || status.foreground_command != last.foreground_command;
     if !changed {
         return None;
     }
     Some(BufferRuntimeUpdate {
         sequence: status.sequence,
         activity: status.activity,
-        title: (status.title != *last_title).then(|| status.title.clone()),
-        pipe: (status.pipe != *last_pipe).then(|| status.pipe.clone()),
-        cwd: (status.cwd != *last_cwd).then(|| status.cwd.clone()),
-        foreground_command: (status.foreground_command != *last_foreground)
+        title: (status.title != last.title).then(|| status.title.clone()),
+        pipe: (status.pipe != last.pipe).then(|| status.pipe.clone()),
+        cwd: (status.cwd != last.cwd).then(|| status.cwd.clone()),
+        foreground_command: (status.foreground_command != last.foreground_command)
             .then(|| status.foreground_command.clone()),
+        bell_sequence: status.bell_sequence,
     })
 }
 
@@ -1773,20 +1793,17 @@ fn spawn_status_poller(
     thread::Builder::new()
         .name(format!("buffer-{}-poller", inner.buffer_id))
         .spawn(move || {
-            let mut last_sequence = initial.sequence;
-            let mut last_title = initial.title.clone();
-            let mut last_activity = initial.activity;
-            let mut last_pipe = initial.pipe.clone();
             // Seed from the attach-time status so a reattaching server does not
             // replay a clipboard write that was already delivered (or dropped).
             let mut last_clipboard = initial.clipboard_sequence;
-            // Seed as unknown (not `initial.cwd`) so the first poll always reports
-            // the current directory: an OSC 7 report or pid resolution may already
-            // be present at attach, and the buffer record must still learn it.
-            let mut last_cwd: Option<PathBuf> = None;
-            // The attaching server applies `initial` itself, foreground included.
-            let mut last_foreground = initial.foreground_command.clone();
             let mut saw_exit = !initial.running;
+            // The attaching server applies `initial` itself, foreground and bell
+            // count included. Seed cwd as unknown (not `initial.cwd`) so the
+            // first poll always reports the current directory: an OSC 7 report
+            // or pid resolution may already be present at attach, and the
+            // buffer record must still learn it.
+            let mut last = initial;
+            last.cwd = None;
 
             while !inner.stop.load(Ordering::Relaxed) {
                 let status = {
@@ -1805,14 +1822,7 @@ fn spawn_status_poller(
                         Ok(status) => status,
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
-                            notify_pipe_removed(
-                                &callbacks,
-                                inner.buffer_id,
-                                &mut last_sequence,
-                                last_activity,
-                                &mut last_pipe,
-                                saw_exit,
-                            );
+                            notify_pipe_removed(&callbacks, inner.buffer_id, &mut last, saw_exit);
                             (callbacks.on_exit)(inner.buffer_id, None);
                             break;
                         }
@@ -1827,22 +1837,9 @@ fn spawn_status_poller(
                     (callbacks.on_clipboard)(inner.buffer_id, clipboard.write);
                 }
 
-                if let Some(update) = status_update_delta(
-                    &status,
-                    last_sequence,
-                    &last_title,
-                    last_activity,
-                    &last_pipe,
-                    &last_cwd,
-                    &last_foreground,
-                ) {
+                if let Some(update) = status_update_delta(&status, &last) {
                     (callbacks.on_output)(inner.buffer_id, update);
-                    last_sequence = status.sequence;
-                    last_title = status.title.clone();
-                    last_activity = status.activity;
-                    last_pipe = status.pipe.clone();
-                    last_cwd = status.cwd.clone();
-                    last_foreground = status.foreground_command.clone();
+                    last = status.clone();
                 }
 
                 if !saw_exit && !status.running {
@@ -2514,8 +2511,23 @@ mod tests {
             pipe: None,
             cwd: cwd.map(std::path::PathBuf::from),
             clipboard_sequence: 0,
+            bell_sequence: 0,
             foreground_command: None,
         }
+    }
+
+    /// The status last reported for a shell buffer titled "shell".
+    fn last_status(
+        sequence: u64,
+        activity: ActivityState,
+        cwd: Option<std::path::PathBuf>,
+        bell_sequence: u64,
+    ) -> BufferRuntimeStatus {
+        let mut status = status_with_cwd(sequence, None);
+        status.activity = activity;
+        status.cwd = cwd;
+        status.bell_sequence = bell_sequence;
+        status
     }
 
     #[test]
@@ -2524,12 +2536,12 @@ mod tests {
         let status = status_with_cwd(7, Some("/new"));
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/old")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/old")),
+                0,
+            ),
         )
         .expect("cwd change should emit an update even at the same sequence");
         assert_eq!(update.sequence, 7);
@@ -2545,12 +2557,12 @@ mod tests {
         let status = status_with_cwd(7, None);
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/old")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/old")),
+                0,
+            ),
         )
         .expect("cwd clear should emit an update even at the same sequence");
         assert_eq!(update.cwd, Some(None));
@@ -2561,14 +2573,27 @@ mod tests {
         let status = status_with_cwd(7, Some("/same"));
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/same")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/same")),
+                0,
+            ),
         );
         assert!(update.is_none());
+    }
+
+    #[test]
+    fn status_update_delta_carries_a_bell_that_later_output_overwrote() {
+        // The bell rang, then more output arrived before the poll, so the
+        // latest activity is plain output; the bell count still advanced.
+        let mut status = status_with_cwd(8, None);
+        status.activity = ActivityState::Activity;
+        status.bell_sequence = 1;
+        let update =
+            status_update_delta(&status, &last_status(8, ActivityState::Activity, None, 0))
+                .expect("a new bell should emit an update");
+        assert_eq!(update.bell_sequence, 1);
     }
 
     #[test]
@@ -2577,12 +2602,12 @@ mod tests {
         status.foreground_command = Some(vec!["vim".to_owned(), "notes.txt".to_owned()]);
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/same")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/same")),
+                0,
+            ),
         )
         .expect("a new foreground job should emit an update");
         assert_eq!(
@@ -2803,6 +2828,7 @@ mod tests {
                 pipe: None,
                 cwd: None,
                 clipboard_sequence: 0,
+                bell_sequence: 0,
                 foreground_command: None,
             },
         )
@@ -2868,6 +2894,7 @@ mod tests {
                 }),
                 cwd: None,
                 clipboard_sequence: 0,
+                bell_sequence: 0,
                 foreground_command: None,
             },
         )

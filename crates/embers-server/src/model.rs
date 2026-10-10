@@ -95,6 +95,11 @@ pub struct Buffer {
     /// [`ServerState::dispose_exited_buffers`](crate::ServerState::dispose_exited_buffers)).
     /// Not persisted: restored buffers start out as never shown.
     pub ever_attached: bool,
+    /// The bell count of the buffer's runtime as last applied, so a bell is
+    /// recorded once even when later output replaced the runtime's activity
+    /// before it was reported. Not persisted: each runtime counts from its
+    /// own start, and attaching one sets this from its status.
+    pub runtime_bell_sequence: u64,
 }
 
 /// Buffer option that keeps an exited buffer in its view instead of closing
@@ -134,6 +139,7 @@ impl Buffer {
             pipe: None,
             created_at: Timestamp::now(),
             ever_attached: false,
+            runtime_bell_sequence: 0,
         }
     }
 
@@ -183,12 +189,14 @@ impl fmt::Debug for Buffer {
             .field("pipe", &self.pipe)
             .field("created_at", &self.created_at)
             .field("ever_attached", &self.ever_attached)
+            .field("runtime_bell_sequence", &self.runtime_bell_sequence)
             .finish()
     }
 }
 
-// `ever_attached` is left out: it is bookkeeping that is not persisted, so a
-// saved and restored buffer still compares equal to the original.
+// `ever_attached` and `runtime_bell_sequence` are left out: they are
+// bookkeeping that is not persisted, so a saved and restored buffer still
+// compares equal to the original.
 impl PartialEq for Buffer {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id

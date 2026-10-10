@@ -3187,6 +3187,14 @@ impl Runtime {
             {
                 let sequence_advanced = update.sequence > buffer.last_snapshot_seq;
                 let sequence_current = update.sequence >= buffer.last_snapshot_seq;
+                // A bell counts even when its output's sequence was already
+                // applied (a capture syncs the status too) and later output
+                // replaced the runtime's activity before this update.
+                if update.bell_sequence > buffer.runtime_bell_sequence {
+                    buffer.runtime_bell_sequence = update.bell_sequence;
+                    buffer.activity = embers_core::ActivityState::Bell;
+                    render_invalidated = true;
+                }
                 if sequence_advanced {
                     buffer.last_snapshot_seq = update.sequence;
                     let next_activity = max_activity(buffer.activity, update.activity);
@@ -3461,6 +3469,7 @@ impl Runtime {
                 pipe: Some(status.pipe.clone()),
                 cwd: Some(status.cwd.clone()),
                 foreground_command: Some(status.foreground_command.clone()),
+                bell_sequence: status.bell_sequence,
             },
         )
         .await;
@@ -4066,6 +4075,9 @@ fn apply_runtime_status(
 ) {
     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
         buffer.last_snapshot_seq = status.sequence;
+        // A newly attached runtime counts bells from its own start; its
+        // current activity below already says whether one is pending.
+        buffer.runtime_bell_sequence = status.bell_sequence;
         buffer.pipe = status.pipe.as_ref().map(model_pipe_from_runtime);
         buffer.foreground_command = status.foreground_command.clone();
     }
@@ -4771,6 +4783,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4797,6 +4810,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4864,6 +4878,7 @@ mod tests {
                     })),
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4925,6 +4940,7 @@ mod tests {
                     })),
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4980,6 +4996,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4993,6 +5010,58 @@ mod tests {
             .clone();
         assert_eq!(buffer.last_snapshot_seq, 6);
         assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_keeps_a_bell_that_later_output_overwrote() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            state.create_buffer("shell", vec!["/bin/sh".to_owned()], None)
+        };
+        let update = |sequence, bell_sequence| BufferRuntimeUpdate {
+            sequence,
+            activity: ActivityState::Activity,
+            title: None,
+            pipe: None,
+            cwd: None,
+            foreground_command: None,
+            bell_sequence,
+        };
+        let activity = || async {
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists")
+                .activity
+        };
+
+        // A capture synced output after the bell before the poller reported
+        // it: the sequence is already applied, and the runtime's activity no
+        // longer says Bell, but its bell count advanced.
+        runtime.record_buffer_update(buffer_id, update(2, 0)).await;
+        assert_eq!(activity().await, ActivityState::Activity);
+        runtime.record_buffer_update(buffer_id, update(2, 1)).await;
+        assert_eq!(activity().await, ActivityState::Bell);
+
+        // Once focus clears it, the same bell is not applied again.
+        runtime
+            .state
+            .lock()
+            .await
+            .set_buffer_activity(buffer_id, ActivityState::Idle)
+            .expect("clear activity");
+        runtime.record_buffer_update(buffer_id, update(2, 1)).await;
+        assert_eq!(activity().await, ActivityState::Idle);
     }
 
     #[tokio::test]
@@ -5037,6 +5106,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: Some(Some(vec!["nvim".to_owned()])),
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -5095,6 +5165,7 @@ mod tests {
                     pipe: None,
                     cwd: Some(None),
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -5119,6 +5190,7 @@ mod tests {
                     pipe: None,
                     cwd: Some(Some(PathBuf::from("/tmp/work"))),
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;

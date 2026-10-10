@@ -885,6 +885,43 @@ async fn buffer_record_reports_the_job_a_shell_runs() {
     server.shutdown().await.expect("shutdown server");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bell_is_reported_even_when_more_output_follows_before_a_poll() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    // The bell and the output after it arrive in separate reads, well within
+    // one status poll of each other.
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-c",
+            "sleep 0.3; printf '\\a'; sleep 0.002; printf 'after-''bell\\n'; sleep 30",
+        ],
+    )
+    .await;
+    let _ = wait_for_capture_contains(&mut connection, buffer.id, "after-bell").await;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let activity = get_buffer(&mut connection, buffer.id).await.activity;
+        if activity == embers_core::ActivityState::Bell {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the bell was lost: buffer activity is {activity:?}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    server.shutdown().await.expect("shutdown server");
+}
+
 fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }
