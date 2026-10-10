@@ -12,6 +12,13 @@ pub struct PingRequest {
     pub payload: String,
 }
 
+/// Stop the server and end every buffer's program and runtime keeper, unlike
+/// a clean shutdown, which leaves keepers running for the next server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillServerRequest {
+    pub request_id: RequestId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PingResponse {
     pub request_id: RequestId,
@@ -630,12 +637,14 @@ pub enum ClientMessage {
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     Client(ClientRequest),
+    KillServer(KillServerRequest),
 }
 
 impl ClientMessage {
     pub fn request_id(&self) -> RequestId {
         match self {
             Self::Ping(request) => request.request_id,
+            Self::KillServer(request) => request.request_id,
             Self::Session(request) => request.request_id(),
             Self::Buffer(request) => request.request_id(),
             Self::Node(request) => request.request_id(),

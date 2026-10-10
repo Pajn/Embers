@@ -145,8 +145,12 @@ socket in the server's runtime directory.
 - spawning a buffer waits until its keeper reports, on its stdout, that its socket is listening
   and its child is running, or why it failed to start; the server only connects after that
   report, so it never sees a socket that exists but does not accept connections yet
-- a clean server shutdown leaves keepers running, so a restarted server can reattach through
-  their sockets and restore `Running` buffers
+- a clean server shutdown (a signal to the server process) leaves keepers running, so a restarted
+  server can reattach through their sockets and restore `Running` buffers
+- `kill-server` (`ClientMessage::KillServer`) instead tells every keeper to stop its child
+  (SIGHUP, then SIGKILL) and exit, stops the server and deletes the saved workspace, so a server
+  started afterwards begins empty, as after tmux's `kill-server`. The command returns once the
+  server no longer accepts connections, and never starts a server.
 - a keeper keeps serving captures after its child exits while a server stays attached to it
 - once no server is attached, a keeper whose child has exited has nothing left to reattach to
   and exits; a restarted server keeps the buffer record as `Exited`
@@ -174,7 +178,7 @@ made before it fires. Output and activity alone never trigger a save. A write wh
 the previous one is skipped. Each write goes to a temp file next to the workspace file, is fsynced,
 renamed over it, and the directory is fsynced, so a crash leaves either the previous file or the new
 one. A crash or SIGKILL of the server therefore loses at most the changes of the last batch. A clean
-shutdown writes the final state once more.
+shutdown writes the final state once more; `kill-server` deletes the workspace file instead.
 
 ## Restore after keepers are gone
 

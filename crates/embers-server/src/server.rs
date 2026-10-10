@@ -147,6 +147,7 @@ impl Server {
         set_socket_permissions(&self.config.socket_path)?;
         let shutdown_signal = runtime.shutdown.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let mut stop_requested = runtime.shutdown.subscribe();
 
         let join = tokio::spawn(async move {
             let _cleanup = SocketCleanup::new(socket_path.clone());
@@ -156,6 +157,11 @@ impl Server {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
                         debug!("server shutdown requested");
+                        break;
+                    }
+                    // A client asked the server to stop (kill-server).
+                    () = wait_for_shutdown(&mut stop_requested) => {
+                        debug!("server stop requested by a client");
                         break;
                     }
                     result = listener.accept() => {
@@ -233,8 +239,18 @@ impl Server {
             if let Err(error) = workspace_saver.await {
                 error!(%error, "workspace saver panicked");
             }
-            runtime.shutdown_runtimes().await;
+            let kill = runtime.kill_on_shutdown.load(Ordering::Acquire);
+            runtime.shutdown_runtimes(kill).await;
             runtime.quiesce_state_tasks().await;
+            if kill {
+                // Every program is gone, so there is nothing for a restarted
+                // server to restore.
+                return match std::fs::remove_file(&runtime.workspace_path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                };
+            }
             if let Err(error) = runtime.persist_workspace().await {
                 error!(%error, "failed to persist workspace during shutdown");
                 return Err(error);
@@ -262,6 +278,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Resolves once the server has been asked to stop, whether through
+    /// [`Self::shutdown`] or by a client (`kill-server`). The caller still
+    /// calls [`Self::shutdown`] to wait for it to finish.
+    pub async fn stopped(&self) {
+        let mut stopped = self.shutdown_signal.subscribe();
+        wait_for_shutdown(&mut stopped).await;
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -382,6 +406,9 @@ struct Runtime {
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
     shutdown: ShutdownSignal,
+    /// Set by `kill-server`: shutting down then ends every buffer's program and
+    /// keeper and discards the workspace instead of leaving them to restore.
+    kill_on_shutdown: AtomicBool,
     connection_tasks: TaskCounter,
     state_tasks: TaskCounter,
 }
@@ -477,6 +504,7 @@ impl Runtime {
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
             shutdown: ShutdownSignal::new(),
+            kill_on_shutdown: AtomicBool::new(false),
             connection_tasks: TaskCounter::default(),
             state_tasks: TaskCounter::default(),
         }
@@ -764,6 +792,17 @@ impl Runtime {
                 Vec::new(),
                 None,
             ),
+            // The connection triggers the stop once this response is sent.
+            ClientMessage::KillServer(request) => {
+                self.kill_on_shutdown.store(true, Ordering::Release);
+                (
+                    ServerResponse::Ok(OkResponse {
+                        request_id: request.request_id,
+                    }),
+                    Vec::new(),
+                    None,
+                )
+            }
             // These can attach or detach buffers, which can make an exited
             // buffer due for cleanup (a dead pane closed, a buffer whose command
             // exited before it was first shown now attached).
@@ -3321,7 +3360,10 @@ impl Runtime {
         Ok(())
     }
 
-    async fn shutdown_runtimes(&self) {
+    /// Detach from every buffer runtime. With `kill` (kill-server) each keeper
+    /// is also told to end its program and exit; otherwise keepers keep
+    /// running so a restarted server can reattach.
+    async fn shutdown_runtimes(&self, kill: bool) {
         let runtimes: Vec<_> = {
             let runtimes = self.buffer_runtimes.lock().await;
             let mut shutdown_intents = self
@@ -3336,6 +3378,20 @@ impl Runtime {
                 })
                 .collect()
         };
+        if kill {
+            // Keepers stop concurrently: each may wait out a grace period for a
+            // program that ignores SIGHUP.
+            let mut terminations = tokio::task::JoinSet::new();
+            for runtime in &runtimes {
+                let runtime = runtime.clone();
+                terminations.spawn(async move {
+                    if let Err(error) = runtime.terminate().await {
+                        debug!(%error, "failed to terminate buffer runtime");
+                    }
+                });
+            }
+            while terminations.join_next().await.is_some() {}
+        }
         for runtime in runtimes {
             if let Err(error) = runtime.join_threads().await {
                 debug!(%error, "failed to join buffer runtime threads during shutdown");
@@ -3658,6 +3714,7 @@ async fn handle_connection(
         };
 
         let request_id = request.request_id();
+        let kill_server = matches!(request, ClientMessage::KillServer(_));
         let (response, events, deferred_shutdown) = runtime
             .dispatch_request(connection_id, &outbound, request)
             .instrument(request_span("handle_request", request_id))
@@ -3684,6 +3741,12 @@ async fn handle_connection(
         // Handle self-detach: trigger shutdown after response is sent
         if let Some(shutdown) = deferred_shutdown {
             let _ = shutdown.send(());
+            return Ok(ConnectionExit::SelfDetached);
+        }
+        // Stop the server only once the kill-server reply is queued, and let
+        // the writer flush it rather than abort it with the connection.
+        if kill_server {
+            runtime.shutdown.trigger();
             return Ok(ConnectionExit::SelfDetached);
         }
     }

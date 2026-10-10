@@ -239,3 +239,91 @@ async fn kill_popup_ends_the_popup_program() {
     assert!(process_alive(before[0].1));
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_server_stops_the_server_and_every_program() {
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    run_cli(&server, ["new-session", "alpha"]);
+    new_window(&server, "work");
+    split(&server);
+    let killed = session_processes(&mut connection, "alpha").await;
+    assert_eq!(killed.len(), 2);
+    drop(connection);
+
+    run_cli(&server, ["kill-server"]);
+
+    // The command returns once the server has stopped listening.
+    assert!(
+        TestConnection::connect(server.socket_path()).await.is_err(),
+        "server still accepts connections after kill-server"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for &(_, pid) in &killed {
+        while process_alive(pid) {
+            assert!(Instant::now() < deadline, "pid {pid} survived kill-server");
+            sleep(Duration::from_millis(25)).await;
+        }
+    }
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_server_ends_a_detached_server_process() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let socket = tempdir.path().join("mux.sock");
+    let cli = |args: &[&str]| {
+        let output = embers_test_support::cargo_bin("embers")
+            .arg("--socket")
+            .arg(&socket)
+            .args(args)
+            .output()
+            .expect("cli runs");
+        assert!(
+            output.status.success(),
+            "embers {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    // Starts a detached `__serve` process for the socket.
+    cli(&["new-session", "alpha"]);
+    let server_pid = std::fs::read_to_string(socket.with_extension("pid"))
+        .expect("server writes its pid file")
+        .trim()
+        .parse::<u32>()
+        .expect("pid file holds a pid");
+
+    cli(&["kill-server"]);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_alive(server_pid) {
+        if Instant::now() >= deadline {
+            let _ = std::process::Command::new("kill")
+                .arg(server_pid.to_string())
+                .status();
+            panic!("server process {server_pid} survived kill-server");
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[test]
+fn kill_server_without_a_server_fails_without_starting_one() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let socket = tempdir.path().join("mux.sock");
+    let output = embers_test_support::cargo_bin("embers")
+        .arg("--socket")
+        .arg(&socket)
+        .arg("kill-server")
+        .output()
+        .expect("cli runs");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no embers server"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!socket.exists(), "kill-server must not start a server");
+}

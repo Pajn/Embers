@@ -177,6 +177,9 @@ enum KeeperRequest {
     StopPipe,
     StopPipeAfterExit,
     Kill,
+    /// Stop the child (SIGHUP, then SIGKILL) and exit, for kill-server. An
+    /// older keeper rejects it; the server then falls back to `Kill`.
+    Shutdown,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -474,6 +477,21 @@ impl BufferRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
+    /// Tell the keeper to end its program and exit (kill-server). Unlike
+    /// [`Self::kill`], the keeper does not stay to serve captures.
+    pub async fn terminate(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.shutdown()
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
     pub async fn resize(&self, size: PtySize) -> Result<()> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -674,6 +692,19 @@ impl KeeperConnection {
                 "unexpected runtime keeper kill response: {other_kind}",
                 other_kind = keeper_response_kind(&other)
             ))),
+        }
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        match self.request(KeeperRequest::Shutdown) {
+            Ok(KeeperResponse::Ok) => Ok(()),
+            Ok(other) => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper shutdown response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+            // A keeper that predates `Shutdown` rejects it; ending its child is
+            // enough, since it exits once its child has and no server is left.
+            Err(_) => self.kill(),
         }
     }
 
@@ -1077,7 +1108,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     // handler holds a lock across a blocking write. The only senders live in the
     // shared runtime; the thread ends once the last runtime reference is dropped.
     let (write_tx, write_rx) = sync_channel(KEEPER_WRITE_QUEUE_CAPACITY);
-    let writer_join = thread::Builder::new()
+    let _writer = thread::Builder::new()
         .name(format!("keeper-writer-{}", cli.socket_path.display()))
         .spawn(move || keeper_writer_loop(writer, write_rx))
         .map_err(|error| MuxError::internal(error.to_string()))?;
@@ -1096,7 +1127,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     });
 
     let reader_runtime = runtime.clone();
-    let reader_join = thread::Builder::new()
+    let _reader = thread::Builder::new()
         .name(format!("keeper-reader-{}", cli.socket_path.display()))
         .spawn(move || keeper_read_loop(reader_runtime, reader))
         .map_err(|error| MuxError::internal(error.to_string()))?;
@@ -1115,8 +1146,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     // can connect at any time.
     readiness.report(Ok(()));
     let mut served_client = false;
-    let mut terminate = false;
-    while !terminate {
+    loop {
         if !wait_for_keeper_client(&listener, KEEPER_SOCKET_CHECK_INTERVAL)? {
             // Waiting for a first client avoids racing the spawning server's
             // initial connect when the child exits immediately.
@@ -1135,24 +1165,25 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
                 socket_path = %cli.socket_path.display(),
                 "runtime keeper socket removed or replaced; stopping unreachable runtime"
             );
-            stop_unreachable_runtime(&runtime, wait_join);
+            stop_runtime_child(&runtime, wait_join);
             return Ok(());
         }
-        // On both early returns above the reader thread is left to finish on
-        // its own: it only ends once every holder of the PTY slave has closed
-        // it, which a surviving grandchild may never do.
+        // On every return from this loop the reader and writer threads are
+        // left to finish on their own: the reader only ends once every holder
+        // of the PTY slave has closed it, which a surviving grandchild may
+        // never do.
         let (mut stream, _) = listener.accept()?;
         served_client = true;
-        terminate = handle_keeper_client(runtime.clone(), &mut stream)?;
+        if handle_keeper_client(runtime.clone(), &mut stream)? {
+            // The server asked this keeper to shut down (kill-server).
+            debug!(
+                socket_path = %cli.socket_path.display(),
+                "runtime keeper shutdown requested; stopping runtime"
+            );
+            stop_runtime_child(&runtime, wait_join);
+            return Ok(());
+        }
     }
-
-    let _ = reader_join.join();
-    let _ = wait_join.join();
-    // Drop the last runtime reference so the write channel disconnects and the
-    // writer thread finishes draining before we join it.
-    drop(runtime);
-    let _ = writer_join.join();
-    Ok(())
 }
 
 fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) -> Result<bool> {
@@ -1232,6 +1263,7 @@ fn handle_keeper_request(
             runtime.kill()?;
             Ok((KeeperResponse::Ok, false))
         }
+        KeeperRequest::Shutdown => Ok((KeeperResponse::Ok, true)),
     }
 }
 
@@ -1551,9 +1583,10 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
     Some((metadata.dev(), metadata.ino()))
 }
 
-/// Stop the child of a keeper that no server can reach any more: SIGHUP like a
-/// regular kill, then SIGKILL if the child ignores it, and wait for it to exit.
-fn stop_unreachable_runtime(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
+/// Stop the child of a keeper that is about to exit, because no server can
+/// reach it any more or the server asked it to shut down: SIGHUP like a regular
+/// kill, then SIGKILL if the child ignores it, and wait for it to exit.
+fn stop_runtime_child(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
     let _ = runtime.kill();
     let deadline = Instant::now() + KEEPER_ORPHAN_KILL_GRACE;
     while !wait_join.is_finished() && Instant::now() < deadline {

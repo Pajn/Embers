@@ -27,9 +27,9 @@ use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
     BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason,
     BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest,
-    FloatingRecord, FloatingRequest, FloatingResponse, NodeBreakDestination, NodeJoinPlacement,
-    NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord, SessionRequest,
-    SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
+    FloatingRecord, FloatingRequest, FloatingResponse, KillServerRequest, NodeBreakDestination,
+    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -117,6 +117,11 @@ pub enum Command {
         #[arg(default_value = "phase0")]
         payload: String,
     },
+    /// Stop the server and end every program it runs. Unlike stopping the
+    /// server with a signal, nothing is left for a restarted server to
+    /// reattach to or restore.
+    #[command(name = "kill-server")]
+    KillServer,
     #[command(name = "new-session")]
     NewSession { name: String },
     #[command(name = "list-sessions")]
@@ -466,6 +471,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     "unexpected response to ping request: {other:?}"
                 ))),
             }
+        }
+        Command::KillServer => {
+            connection
+                .request(ClientMessage::KillServer(KillServerRequest {
+                    request_id: new_request_id(),
+                }))
+                .await?;
+            Ok(String::new())
         }
         Command::NewSession { name } => {
             let response = connection
@@ -1324,6 +1337,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     automation::run(socket, target, all_sessions).await
                 }
                 Some(Command::Serve) => run_server(socket, &log_filter).await,
+                Some(Command::KillServer) => kill_server(&socket).await,
                 Some(command) => {
                     ensure_server_process(&socket, &log_filter).await?;
                     let output = execute(&socket, command).await?;
@@ -1498,8 +1512,39 @@ async fn run_server(socket_path: PathBuf, log_filter: &str) -> Result<()> {
         .is_some_and(|parent| parent == default_runtime_dir().as_path());
     let _pid = ServerPidFile::create(&pid_path(&socket_path), secure_parent)?;
     let handle = Server::new(ServerConfig::new(socket_path)).start().await?;
-    wait_for_shutdown_signal().await?;
+    // Stop on a signal, or when a client stops the server (kill-server).
+    tokio::select! {
+        result = wait_for_shutdown_signal() => result?,
+        () = handle.stopped() => {}
+    }
     handle.shutdown().await
+}
+
+/// How long `kill-server` waits for the server to stop listening.
+const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ask the server on `socket_path` to stop and end every program it runs, then
+/// wait until it no longer accepts connections, so a following command does
+/// not reach the old server. Never starts a server.
+async fn kill_server(socket_path: &Path) -> Result<()> {
+    if !server_is_available(socket_path).await {
+        return Err(MuxError::not_found(format!(
+            "no embers server is listening on {}",
+            socket_path.display()
+        )));
+    }
+    execute(socket_path, Command::KillServer).await?;
+    let deadline = tokio::time::Instant::now() + KILL_SERVER_TIMEOUT;
+    while server_is_available(socket_path).await {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MuxError::timeout(format!(
+                "embers server on {} did not stop",
+                socket_path.display()
+            )));
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 /// Routes panics in the detached server through `tracing` (chained after the

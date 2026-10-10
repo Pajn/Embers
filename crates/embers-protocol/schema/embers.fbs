@@ -11,6 +11,8 @@ enum MessageKind : ubyte {
   SubscribeRequest = 7,
   UnsubscribeRequest = 8,
   ClientRequest = 9,
+  // Carries no table: the envelope's request_id is the whole request.
+  KillServerRequest = 10,
 
   PingResponse = 20,
   OkResponse = 21,

@@ -14,6 +14,9 @@ fn client_message_families_round_trip() {
             request_id: RequestId(1),
             payload: "hello".to_owned(),
         }),
+        ClientMessage::KillServer(KillServerRequest {
+            request_id: RequestId(1),
+        }),
         ClientMessage::Session(SessionRequest::Create {
             request_id: RequestId(2),
             name: "main".to_owned(),

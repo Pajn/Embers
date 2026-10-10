@@ -747,6 +747,14 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
         ClientMessage::Subscribe(req) => encode_subscribe_request(&mut builder, req),
         ClientMessage::Unsubscribe(req) => encode_unsubscribe_request(&mut builder, req),
         ClientMessage::Client(req) => encode_client_request(&mut builder, req)?,
+        ClientMessage::KillServer(req) => fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: req.request_id.into(),
+                kind: fb::MessageKind::KillServerRequest,
+                ..Default::default()
+            },
+        ),
     };
 
     builder.finish(envelope, Some("EMBR"));
@@ -4048,6 +4056,9 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                 _ => return Err(ProtocolError::InvalidMessage("unknown input op")),
             };
             Ok(ClientMessage::Input(input_request))
+        }
+        fb::MessageKind::KillServerRequest => {
+            Ok(ClientMessage::KillServer(KillServerRequest { request_id }))
         }
         fb::MessageKind::SubscribeRequest => {
             let req = required(envelope.subscribe_request(), "subscribe_request")?;

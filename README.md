@@ -87,6 +87,7 @@ Useful subcommand groups include:
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
+- `server`: `kill-server` (stop the server and every program it runs)
 
 As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
 programs they show; pass `--detach` to keep them running as detached buffers
