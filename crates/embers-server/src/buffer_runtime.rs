@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, MuxError, PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
+    ActivityState, BufferId, ClipboardWrite, Hyperlink, MuxError, PtySize, Result, SnapshotLine,
+    StyledRun, TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -31,7 +32,7 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
-use crate::{AlacrittyTerminalBackend, RawByteRouter, TerminalBackend};
+use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
 
 /// How long spawning a buffer waits for its runtime keeper to report that it
 /// is ready (socket listening, child running) or that it failed to start.
@@ -90,6 +91,9 @@ pub struct BufferRuntimeStatus {
     pub exit_code: Option<i32>,
     pub pipe: Option<BufferRuntimePipeStatus>,
     pub cwd: Option<PathBuf>,
+    /// Count of OSC 52 clipboard writes the keeper has seen. The poller fetches
+    /// the latest write whenever this advances.
+    pub clipboard_sequence: u64,
     /// Command line of the job in the PTY's foreground when that is not the
     /// pane's own process, for example a program a shell is running.
     pub foreground_command: Option<Vec<String>>,
@@ -135,6 +139,8 @@ struct RuntimeThreads {
 pub struct BufferRuntimeCallbacks {
     pub on_output: Arc<dyn Fn(BufferId, BufferRuntimeUpdate) + Send + Sync>,
     pub on_exit: Arc<dyn Fn(BufferId, Option<i32>) + Send + Sync>,
+    /// A program in the buffer wrote to the clipboard with OSC 52.
+    pub on_clipboard: Arc<dyn Fn(BufferId, ClipboardWrite) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -180,11 +186,16 @@ enum KeeperRequest {
     /// Stop the child (SIGHUP, then SIGKILL) and exit, for kill-server. An
     /// older keeper rejects it; the server then falls back to `Kill`.
     Shutdown,
+    /// Fetch the latest OSC 52 clipboard write. Only sent once a status reply
+    /// reports a `clipboard_sequence`, which keepers without clipboard
+    /// forwarding never do.
+    Clipboard,
 }
 
 #[derive(Serialize, Deserialize)]
 enum KeeperResponse {
     Status(KeeperStatus),
+    Clipboard(Option<KeeperClipboard>),
     Snapshot(KeeperSnapshot),
     VisibleSnapshot(TerminalSnapshot),
     ScrollbackSlice(KeeperScrollbackSlice),
@@ -206,9 +217,22 @@ struct KeeperStatus {
     // predates live-cwd reporting.
     #[serde(default)]
     cwd: Option<PathBuf>,
+    // Defaulted for the same reason: an older keeper reports 0 and is never
+    // asked for clipboard writes.
+    #[serde(default)]
+    clipboard_sequence: u64,
     // Defaulted for keepers that predate foreground command reporting.
     #[serde(default)]
     foreground_command: Option<Vec<String>>,
+}
+
+/// The latest OSC 52 clipboard write a keeper has seen. The payload is held
+/// (not queued) and fetched separately from status, so status polls stay small
+/// and a burst of writes costs one transfer of the last one.
+#[derive(Clone, Serialize, Deserialize)]
+struct KeeperClipboard {
+    sequence: u64,
+    write: ClipboardWrite,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -240,18 +264,25 @@ pub struct KeeperScrollbackSlice {
     /// styling, and a short/empty inner vec means that line is plain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub styles: Vec<Vec<StyledRun>>,
+    /// Parallel per-line hyperlink tables referenced by `styles`, kept separate
+    /// for the same compatibility reason. Empty when no line carries a link.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Vec<Hyperlink>>,
 }
 
 impl KeeperScrollbackSlice {
-    /// Zip `lines` and `styles` back into styled snapshot lines. A missing or
-    /// short `styles` entry yields a plain line, so old keepers degrade to text.
+    /// Zip `lines`, `styles` and `links` back into styled snapshot lines. A
+    /// missing or short `styles`/`links` entry yields a plain or link-free line,
+    /// so old keepers degrade to text.
     pub fn into_snapshot_lines(self) -> Vec<SnapshotLine> {
         let mut styles = self.styles.into_iter();
+        let mut links = self.links.into_iter();
         self.lines
             .into_iter()
             .map(|text| SnapshotLine {
                 text,
                 runs: styles.next().unwrap_or_default(),
+                links: links.next().unwrap_or_default(),
             })
             .collect()
     }
@@ -269,6 +300,7 @@ struct KeeperRuntime {
     pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
     activity: Mutex<ActivityState>,
+    clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
     pid: Option<u32>,
     /// The last foreground process group leader and its command line, so the
@@ -619,10 +651,21 @@ impl KeeperConnection {
                 exit_code: status.exit_code,
                 pipe: status.pipe,
                 cwd: status.cwd,
+                clipboard_sequence: status.clipboard_sequence,
                 foreground_command: status.foreground_command,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    fn clipboard(&mut self) -> Result<Option<KeeperClipboard>> {
+        match self.request(KeeperRequest::Clipboard)? {
+            KeeperResponse::Clipboard(clipboard) => Ok(clipboard),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper clipboard response: {other_kind}",
                 other_kind = keeper_response_kind(&other)
             ))),
         }
@@ -758,10 +801,11 @@ impl KeeperSurface {
         }
     }
 
-    /// Ingest PTY output and return the resulting activity plus any terminal
-    /// replies the emulator generated (device-attribute / cursor-position / mode
-    /// queries). The caller writes the replies back to the PTY master.
-    fn route_output(&mut self, bytes: &[u8]) -> (ActivityState, Vec<u8>) {
+    /// Ingest PTY output and return the resulting activity, any terminal replies
+    /// the emulator generated (device-attribute / cursor-position / mode
+    /// queries), and any clipboard write. The caller writes the replies back to
+    /// the PTY master.
+    fn route_output(&mut self, bytes: &[u8]) -> BackendEvents {
         self.router.route_output(self.backend.as_mut(), bytes);
         self.backend.take_events()
     }
@@ -785,20 +829,34 @@ impl KeeperSurface {
             .capture_scrollback_slice(start_line, line_count);
         let mut lines = Vec::with_capacity(slice.lines.len());
         let mut styles = Vec::with_capacity(slice.lines.len());
+        let mut links = Vec::with_capacity(slice.lines.len());
         for line in slice.lines {
             lines.push(line.text);
             styles.push(line.runs);
+            links.push(line.links);
         }
 
         // Styles are best-effort: a large `line_count` could produce a styled
         // payload big enough to blow the keeper JSON (16 MiB) or client frame
         // (8 MiB) caps. If the estimated styling exceeds the budget, ship plain
-        // text — the text always survives.
+        // text — the text always survives. Link tables count at their URI and
+        // id length, since one long URI can outweigh many runs.
         let run_count: usize = styles.iter().map(Vec::len).sum();
-        if run_count.saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES) > MAX_STYLE_PAYLOAD_BYTES
+        let link_bytes: usize = links
+            .iter()
+            .flatten()
+            .map(|link| link.uri.len() + link.id.as_ref().map_or(0, String::len))
+            .sum();
+        if run_count
+            .saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES)
+            .saturating_add(link_bytes)
+            > MAX_STYLE_PAYLOAD_BYTES
             || styles.iter().all(Vec::is_empty)
         {
             styles.clear();
+        }
+        if styles.is_empty() || links.iter().all(Vec::is_empty) {
+            links.clear();
         }
 
         KeeperScrollbackSlice {
@@ -806,6 +864,7 @@ impl KeeperSurface {
             total_lines: slice.total_lines,
             lines,
             styles,
+            links,
         }
     }
 }
@@ -1121,6 +1180,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
         activity: Mutex::new(ActivityState::Idle),
+        clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         pid,
         foreground: Mutex::new(None),
@@ -1264,6 +1324,16 @@ fn handle_keeper_request(
             Ok((KeeperResponse::Ok, false))
         }
         KeeperRequest::Shutdown => Ok((KeeperResponse::Ok, true)),
+        KeeperRequest::Clipboard => Ok((
+            KeeperResponse::Clipboard(
+                runtime
+                    .clipboard
+                    .lock()
+                    .map_err(|_| MuxError::internal("runtime keeper clipboard lock poisoned"))?
+                    .clone(),
+            ),
+            false,
+        )),
     }
 }
 
@@ -1294,6 +1364,12 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
+        let clipboard_sequence = self
+            .clipboard
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper clipboard lock poisoned"))?
+            .as_ref()
+            .map_or(0, |clipboard| clipboard.sequence);
         let title = surface.backend.metadata().title.clone();
         let reported_cwd = surface.router.reported_cwd();
         drop(surface);
@@ -1332,6 +1408,7 @@ impl KeeperRuntime {
             exit_code: exit_code.flatten(),
             pipe,
             cwd,
+            clipboard_sequence,
             foreground_command,
         })
     }
@@ -1506,7 +1583,11 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     Err(_) => break,
                 };
                 let bytes = &buffer[..read];
-                let (activity, replies) = surface.route_output(bytes);
+                let BackendEvents {
+                    activity,
+                    replies,
+                    clipboard,
+                } = surface.route_output(bytes);
                 if let Ok(mut pipe) = runtime.pipe.lock()
                     && let Some(pipe) = pipe.as_mut()
                 {
@@ -1515,6 +1596,12 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
+                }
+                if let Some(write) = clipboard
+                    && let Ok(mut latest) = runtime.clipboard.lock()
+                {
+                    let sequence = latest.as_ref().map_or(0, |held| held.sequence) + 1;
+                    *latest = Some(KeeperClipboard { sequence, write });
                 }
                 // Release the surface lock before handing off the replies.
                 drop(surface);
@@ -1697,6 +1784,9 @@ fn spawn_status_poller(
             let mut last_title = initial.title.clone();
             let mut last_activity = initial.activity;
             let mut last_pipe = initial.pipe.clone();
+            // Seed from the attach-time status so a reattaching server does not
+            // replay a clipboard write that was already delivered (or dropped).
+            let mut last_clipboard = initial.clipboard_sequence;
             // Seed as unknown (not `initial.cwd`) so the first poll always reports
             // the current directory: an OSC 7 report or pid resolution may already
             // be present at attach, and the buffer record must still learn it.
@@ -1711,7 +1801,14 @@ fn spawn_status_poller(
                         Ok(connection) => connection,
                         Err(_) => break,
                     };
-                    match connection.status() {
+                    match connection.status().and_then(|status| {
+                        let clipboard = if status.clipboard_sequence > last_clipboard {
+                            connection.clipboard()?
+                        } else {
+                            None
+                        };
+                        Ok((status, clipboard))
+                    }) {
                         Ok(status) => status,
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
@@ -1728,6 +1825,14 @@ fn spawn_status_poller(
                         }
                     }
                 };
+
+                let (status, clipboard) = status;
+                if let Some(clipboard) = clipboard
+                    && clipboard.sequence > last_clipboard
+                {
+                    last_clipboard = clipboard.sequence;
+                    (callbacks.on_clipboard)(inner.buffer_id, clipboard.write);
+                }
 
                 if let Some(update) = status_update_delta(
                     &status,
@@ -2188,6 +2293,7 @@ fn read_message<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Result
 fn keeper_response_kind(response: &KeeperResponse) -> &'static str {
     match response {
         KeeperResponse::Status(_) => "status",
+        KeeperResponse::Clipboard(_) => "clipboard",
         KeeperResponse::Snapshot(_) => "snapshot",
         KeeperResponse::VisibleSnapshot(_) => "visible_snapshot",
         KeeperResponse::ScrollbackSlice(_) => "scrollback_slice",
@@ -2307,6 +2413,23 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    #[test]
+    fn scrollback_slice_carries_hyperlinks_through_keeper_json() {
+        let mut surface = super::KeeperSurface::new(embers_core::PtySize::new(20, 2));
+        let _ = surface.route_output(b"\x1b]8;id=x;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+
+        let slice = surface.capture_scrollback_slice(0, 1);
+        let json = serde_json::to_string(&slice).expect("serialize slice");
+        let decoded: super::KeeperScrollbackSlice =
+            serde_json::from_str(&json).expect("deserialize slice");
+        let lines = decoded.into_snapshot_lines();
+
+        assert_eq!(lines[0].text, "link");
+        let link = lines[0].link(&lines[0].runs[0]).expect("run is linked");
+        assert_eq!(link.uri, "https://example.com");
+        assert_eq!(link.id.as_deref(), Some("x"));
+    }
+
     fn status_with_cwd(sequence: u64, cwd: Option<&str>) -> BufferRuntimeStatus {
         BufferRuntimeStatus {
             pid: None,
@@ -2317,6 +2440,7 @@ mod tests {
             exit_code: None,
             pipe: None,
             cwd: cwd.map(std::path::PathBuf::from),
+            clipboard_sequence: 0,
             foreground_command: None,
         }
     }
@@ -2527,6 +2651,7 @@ mod tests {
                         .send((buffer_id, exit_code))
                         .expect("send exit notification");
                 }),
+                on_clipboard: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2537,6 +2662,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 cwd: None,
+                clipboard_sequence: 0,
                 foreground_command: None,
             },
         )
@@ -2584,6 +2710,7 @@ mod tests {
                         .send((buffer_id, exit_code))
                         .expect("send exit notification");
                 }),
+                on_clipboard: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2600,6 +2727,7 @@ mod tests {
                     stop_reason: None,
                 }),
                 cwd: None,
+                clipboard_sequence: 0,
                 foreground_command: None,
             },
         )

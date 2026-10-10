@@ -61,6 +61,7 @@ impl Harness {
                     command,
                     cwd: None,
                     env: Default::default(),
+                    size: None,
                 })
             })
             .await

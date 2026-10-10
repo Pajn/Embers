@@ -8,16 +8,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    BufferId, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine, WireError,
-    request_span,
+    BufferId, ClipboardWrite, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine,
+    WireError, request_span,
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
     BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
-    ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ErrorResponse,
-    FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent, FrameType,
-    InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
+    ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
+    ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent,
+    FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
     RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
     SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
@@ -578,10 +578,13 @@ impl Runtime {
     fn buffer_runtime_callbacks(self: &Arc<Self>) -> BufferRuntimeCallbacks {
         let output_handle = tokio::runtime::Handle::current();
         let exit_handle = output_handle.clone();
+        let clipboard_handle = output_handle.clone();
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
+        let clipboard_runtime = self.clone();
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
+        let clipboard_tasks = self.state_tasks.clone();
 
         BufferRuntimeCallbacks {
             on_output: Arc::new(move |buffer_id, update| {
@@ -598,6 +601,14 @@ impl Runtime {
                 std::mem::drop(exit_handle.spawn(async move {
                     let _task = task;
                     runtime.record_buffer_exit(buffer_id, exit_code).await;
+                }));
+            }),
+            on_clipboard: Arc::new(move |buffer_id, write| {
+                let runtime = clipboard_runtime.clone();
+                let task = clipboard_tasks.enter();
+                std::mem::drop(clipboard_handle.spawn(async move {
+                    let _task = task;
+                    runtime.forward_clipboard(buffer_id, write).await;
                 }));
             }),
         }
@@ -1148,6 +1159,20 @@ impl Runtime {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            // No event: the viewport only seeds the size of panes created
+            // later, and other clients draw at their own size anyway. Without
+            // one the workspace is not saved on its own, so ask for that here.
+            SessionRequest::SetViewport {
+                request_id,
+                session_id,
+                viewport,
+            } => match state.set_session_viewport(session_id, viewport) {
+                Ok(()) => {
+                    self.mark_workspace_dirty();
+                    (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+                }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
             SessionRequest::SetRootTabSynchronizePanes {
                 request_id,
                 session_id,
@@ -1181,6 +1206,7 @@ impl Runtime {
                 command,
                 cwd,
                 env,
+                size,
             } => {
                 if command.is_empty() {
                     return (
@@ -1209,12 +1235,21 @@ impl Runtime {
                             Vec::new(),
                         );
                     }
-                    state.create_buffer_with_env(
+                    let buffer_id = state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
                         cwd.map(Into::into),
                         env,
-                    )
+                    );
+                    // Start the command at the size it will be drawn at, so it
+                    // never sees the default size first.
+                    if let Some(size) = size
+                        && let Err(error) = state.set_buffer_size(buffer_id, size)
+                    {
+                        let _ = state.remove_buffer(buffer_id);
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                    buffer_id
                 };
 
                 if let Err(error) = self.spawn_buffer_runtime(buffer_id).await {
@@ -3212,6 +3247,67 @@ impl Runtime {
         }
     }
 
+    /// Send an OSC 52 clipboard write from `buffer_id` to every client whose
+    /// current session contains the buffer, whether or not its pane is on
+    /// screen, the way tmux sends it to every client attached to the pane's
+    /// session. Each of those clients is a terminal the user may be looking at;
+    /// clients on other sessions are not. A write from a detached buffer, or
+    /// one whose session no client is showing, is dropped.
+    async fn forward_clipboard(&self, buffer_id: BufferId, write: ClipboardWrite) {
+        let session_id = {
+            let state = self.state.lock().await;
+            let Ok(buffer) = state.buffer(buffer_id) else {
+                return;
+            };
+            let BufferAttachment::Attached(node_id) = buffer.attachment else {
+                debug!(%buffer_id, "dropping clipboard write from a detached buffer");
+                return;
+            };
+            match state.node(node_id) {
+                Ok(node) => node.session_id(),
+                Err(_) => return,
+            }
+        };
+        let client_ids: BTreeSet<u64> = self
+            .clients
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, client)| client.current_session_id == Some(session_id))
+            .map(|(&client_id, _)| client_id)
+            .collect();
+        if client_ids.is_empty() {
+            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
+            return;
+        }
+
+        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id,
+            selection: write.selection,
+            text: write.text,
+        }));
+        // Events reach a client through its subscriptions; send through one per
+        // client so a client with several subscriptions still copies once.
+        let mut delivered = BTreeSet::new();
+        let subscriptions = self.subscriptions.lock().await;
+        for subscription in subscriptions.values() {
+            if !client_ids.contains(&subscription.connection_id)
+                || !delivered.insert(subscription.connection_id)
+            {
+                continue;
+            }
+            // Best effort, unlike `broadcast`: a client too slow to take one
+            // clipboard write misses it but stays attached.
+            if let Err(error) = subscription.sender.try_send(event.clone()) {
+                debug!(
+                    connection_id = subscription.connection_id,
+                    %error,
+                    "dropping clipboard write for client"
+                );
+            }
+        }
+    }
+
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
         let should_interrupt = self.take_buffer_shutdown_intent(buffer_id);
         if should_interrupt {
@@ -4221,6 +4317,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_viewport_is_kept_and_seeds_new_sessions() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let create = |request_id, name: &str| SessionRequest::Create {
+            request_id: RequestId(request_id),
+            name: name.to_owned(),
+        };
+        let session_viewport = |response| match response {
+            ServerResponse::SessionSnapshot(response) => response.snapshot.session.viewport,
+            other => panic!("expected session snapshot, got {other:?}"),
+        };
+
+        let (response, _) = runtime.dispatch_session(create(1, "alpha")).await;
+        assert_eq!(session_viewport(response), None);
+        let alpha = runtime
+            .state
+            .lock()
+            .await
+            .sessions
+            .keys()
+            .copied()
+            .next()
+            .expect("session");
+        let viewport = embers_core::Size {
+            width: 120,
+            height: 40,
+        };
+        let (response, events) = runtime
+            .dispatch_session(SessionRequest::SetViewport {
+                request_id: RequestId(2),
+                session_id: alpha,
+                viewport,
+            })
+            .await;
+        assert!(matches!(response, ServerResponse::Ok(_)));
+        assert!(events.is_empty());
+        let (response, _) = runtime
+            .dispatch_session(SessionRequest::Get {
+                request_id: RequestId(3),
+                session_id: alpha,
+            })
+            .await;
+        assert_eq!(session_viewport(response), Some(viewport));
+
+        // A session no client has drawn yet starts with the last viewport.
+        let (response, _) = runtime.dispatch_session(create(4, "beta")).await;
+        assert_eq!(session_viewport(response), Some(viewport));
+    }
+
+    #[tokio::test]
     async fn create_buffer_is_rejected_when_buffer_limit_reached() {
         let runtime = Arc::new(Runtime::new(
             ServerState::new(),
@@ -4251,6 +4403,7 @@ mod tests {
                     command: vec!["/bin/sh".to_owned()],
                     cwd: None,
                     env: BTreeMap::new(),
+                    size: None,
                 },
             )
             .await;
@@ -4484,6 +4637,83 @@ mod tests {
 
         assert!(matches!(error, MuxError::Conflict(_)), "got {error:?}");
         assert_eq!(runtime.state.lock().await.buffers.len(), buffer_count);
+    }
+
+    #[tokio::test]
+    async fn clipboard_writes_reach_only_clients_showing_the_buffer_session() {
+        let mut state = ServerState::new();
+        let alpha = state.create_session("alpha");
+        let beta = state.create_session("beta");
+        let leaf = create_leaf(&mut state, alpha, "nvim");
+        state
+            .add_root_tab(alpha, "main", leaf)
+            .expect("attach leaf");
+        let attached = match state.node(leaf).expect("leaf exists") {
+            crate::Node::BufferView(view) => view.buffer_id,
+            other => panic!("expected buffer view, got {other:?}"),
+        };
+        let detached = state.create_buffer("detached", vec!["/bin/sh".to_owned()], None);
+        let runtime = Runtime::new(
+            state,
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+
+        // Client 1 shows alpha through two subscriptions, client 2 shows beta,
+        // client 3 is connected but on no session.
+        let mut receivers = BTreeMap::new();
+        for (connection_id, session) in [(1, Some(alpha)), (2, Some(beta)), (3, None)] {
+            runtime.clients.lock().await.insert(
+                connection_id,
+                super::ClientConnection {
+                    current_session_id: session,
+                    shutdown: None,
+                    stopped: None,
+                },
+            );
+        }
+        for (subscription_id, connection_id, session_id) in [
+            (1, 1, None),
+            (2, 1, Some(alpha)),
+            (3, 2, None),
+            (4, 3, None),
+        ] {
+            let (sender, receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
+            receivers.insert(subscription_id, receiver);
+            runtime.subscriptions.lock().await.insert(
+                subscription_id,
+                Subscription {
+                    connection_id,
+                    session_id,
+                    sender,
+                },
+            );
+        }
+
+        let write = |text: &str| embers_core::ClipboardWrite {
+            selection: embers_core::ClipboardSelection::Clipboard,
+            text: text.to_owned(),
+        };
+        runtime.forward_clipboard(attached, write("yank")).await;
+        runtime.forward_clipboard(detached, write("lost")).await;
+
+        let mut received = Vec::new();
+        for (subscription_id, receiver) in &mut receivers {
+            while let Ok(envelope) = receiver.try_recv() {
+                match envelope {
+                    ServerEnvelope::Event(ServerEvent::Clipboard(event)) => {
+                        received.push((*subscription_id, event.buffer_id, event.text));
+                    }
+                    other => panic!("unexpected envelope {other:?}"),
+                }
+            }
+        }
+        // Exactly one copy, to the client on alpha; nothing from the detached
+        // buffer; nothing for the clients elsewhere.
+        assert_eq!(received, vec![(1, attached, "yank".to_owned())]);
     }
 
     #[tokio::test]

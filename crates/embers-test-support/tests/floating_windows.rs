@@ -47,6 +47,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), "cat".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         }))
         .await
         .expect("create buffer request succeeds");

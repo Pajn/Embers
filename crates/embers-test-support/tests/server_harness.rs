@@ -60,6 +60,7 @@ async fn running_buffer_pid(connection: &mut TestConnection) -> u32 {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         }))
         .await
         .expect("create buffer request succeeds");

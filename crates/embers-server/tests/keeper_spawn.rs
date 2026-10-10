@@ -18,6 +18,7 @@ fn create_request(request_id: u64, command: &[&str]) -> ClientMessage {
         command: command.iter().map(|part| (*part).to_owned()).collect(),
         cwd: None,
         env: Default::default(),
+        size: None,
     })
 }
 

@@ -1,9 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, CursorShape, CursorState, ErrorCode, FloatGeometry,
-    FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection, StyledRun,
-    TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorShape, CursorState, ErrorCode,
+    FloatGeometry, FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, Size,
+    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -155,6 +155,29 @@ fn validate_optional_node_id(
     Ok(())
 }
 
+/// Sizes travel as a `cols`/`rows` pair of `ushort`s that are both zero when
+/// the size is absent, so a present size must be non-zero in both directions.
+fn validate_cells(cols: u16, rows: u16, field: &'static str) -> Result<(), ProtocolError> {
+    if cols == 0 || rows == 0 {
+        return Err(ProtocolError::InvalidMessageOwned(format!(
+            "{field} must be non-zero in both directions"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_optional_cells(
+    cols: u16,
+    rows: u16,
+    field: &'static str,
+) -> Result<Option<(u16, u16)>, ProtocolError> {
+    if cols == 0 && rows == 0 {
+        return Ok(None);
+    }
+    validate_cells(cols, rows, field)?;
+    Ok(Some((cols, rows)))
+}
+
 fn validate_optional_floating_id(
     floating_id: Option<FloatingId>,
     field: &'static str,
@@ -234,12 +257,23 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
         | SessionRequest::SetRootTabSynchronizePanes { session_id, .. } => {
             validate_required_session_id(*session_id, "session_request.session_id")
         }
+        SessionRequest::SetViewport {
+            session_id,
+            viewport,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "session_request.session_id")?;
+            validate_cells(viewport.width, viewport.height, "session_request.viewport")
+        }
     }
 }
 
 fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
     match req {
-        BufferRequest::Create { .. } => Ok(()),
+        BufferRequest::Create { size, .. } => match size {
+            Some(size) => validate_cells(size.cols, size.rows, "buffer_request.pty_size"),
+            None => Ok(()),
+        },
         BufferRequest::List { session_id, .. } => {
             validate_optional_session_id(*session_id, "buffer_request.session_id")
         }
@@ -507,11 +541,17 @@ fn encode_styled_lines<'a>(
         .map(|(index, line)| {
             let runs: Vec<fb::StyledRunWire> = line.runs.iter().map(encode_styled_run).collect();
             let runs = builder.create_vector(&runs);
+            let underline_colors =
+                encode_underline_colors(&line.runs).map(|colors| builder.create_vector(&colors));
+            let (links, run_links) = encode_line_links(builder, line);
             fb::StyledLine::create(
                 builder,
                 &fb::StyledLineArgs {
                     line_index: u32::try_from(index).unwrap_or(u32::MAX),
                     runs: Some(runs),
+                    underline_colors,
+                    links,
+                    run_links,
                 },
             )
         })
@@ -537,6 +577,52 @@ fn encode_styled_run(run: &StyledRun) -> fb::StyledRunWire {
     )
 }
 
+type HyperlinksOffset<'a> = flatbuffers::WIPOffset<
+    flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::HyperlinkWire<'a>>>,
+>;
+type RunLinksOffset<'a> = flatbuffers::WIPOffset<flatbuffers::Vector<'a, u16>>;
+
+/// A line's hyperlink table plus the per-run link indexes, or `(None, None)`
+/// when no run is linked.
+fn encode_line_links<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    line: &SnapshotLine,
+) -> (Option<HyperlinksOffset<'a>>, Option<RunLinksOffset<'a>>) {
+    if line.links.is_empty() || line.runs.iter().all(|run| run.link == 0) {
+        return (None, None);
+    }
+    let links: Vec<_> = line
+        .links
+        .iter()
+        .map(|link| {
+            let id = link.id.as_deref().map(|id| builder.create_string(id));
+            let uri = builder.create_string(&link.uri);
+            fb::HyperlinkWire::create(builder, &fb::HyperlinkWireArgs { id, uri: Some(uri) })
+        })
+        .collect();
+    let links = builder.create_vector(&links);
+    let run_links: Vec<u16> = line.runs.iter().map(|run| run.link).collect();
+    (Some(links), Some(builder.create_vector(&run_links)))
+}
+
+/// Sparse underline colors for a line's runs: one entry per run whose underline
+/// color is not the default, or `None` when no run sets one.
+fn encode_underline_colors(runs: &[StyledRun]) -> Option<Vec<fb::RunColorWire>> {
+    if runs.iter().all(|run| run.underline_color.is_default()) {
+        return None;
+    }
+    Some(
+        runs.iter()
+            .enumerate()
+            .filter(|(_, run)| !run.underline_color.is_default())
+            .map(|(index, run)| {
+                let (kind, r, g, b) = encode_term_color(run.underline_color);
+                fb::RunColorWire::new(u32::try_from(index).unwrap_or(u32::MAX), kind, r, g, b)
+            })
+            .collect(),
+    )
+}
+
 /// `(kind, r, g, b)` where kind is 0=default, 1=indexed (index in `r`), 2=rgb.
 fn encode_term_color(color: TermColor) -> (u8, u8, u8, u8) {
     match color {
@@ -557,14 +643,24 @@ fn decode_styled_lines(
     texts: Vec<String>,
     styles: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::StyledLine<'_>>>>,
 ) -> Vec<SnapshotLine> {
-    let mut per_line: Vec<Vec<StyledRun>> = vec![Vec::new(); texts.len()];
+    let mut per_line: Vec<(Vec<StyledRun>, Vec<Hyperlink>)> =
+        vec![(Vec::new(), Vec::new()); texts.len()];
     if let Some(styles) = styles {
         for entry in styles.iter() {
             let index = entry.line_index() as usize;
             if index < per_line.len()
                 && let Some(runs) = entry.runs()
             {
-                per_line[index] = runs.iter().map(decode_styled_run).collect();
+                let mut decoded: Vec<StyledRun> = runs.iter().map(decode_styled_run).collect();
+                // Out-of-range run indexes are ignored rather than failing the line.
+                for color in entry.underline_colors().into_iter().flatten() {
+                    if let Some(run) = decoded.get_mut(color.run_index() as usize) {
+                        run.underline_color =
+                            decode_term_color(color.kind(), color.r(), color.g(), color.b());
+                    }
+                }
+                let links = decode_line_links(&entry, &mut decoded);
+                per_line[index] = (decoded, links);
             }
         }
     }
@@ -572,13 +668,36 @@ fn decode_styled_lines(
     texts
         .into_iter()
         .zip(per_line)
-        .map(|(text, runs)| {
+        .map(|(text, (runs, links))| {
             let covered: u64 = runs.iter().map(|run| u64::from(run.len)).sum();
             if runs.is_empty() || covered == text.len() as u64 {
-                SnapshotLine { text, runs }
+                SnapshotLine { text, runs, links }
             } else {
                 SnapshotLine::plain(text)
             }
+        })
+        .collect()
+}
+
+/// Decode a line's hyperlink table onto its already-decoded runs. A `run_links`
+/// vector that does not match `runs` in length is ignored, leaving the line
+/// unlinked; an index past the table stays on the run and resolves to nothing
+/// through [`SnapshotLine::link`].
+fn decode_line_links(entry: &fb::StyledLine<'_>, runs: &mut [StyledRun]) -> Vec<Hyperlink> {
+    let (Some(links), Some(run_links)) = (entry.links(), entry.run_links()) else {
+        return Vec::new();
+    };
+    if run_links.len() != runs.len() {
+        return Vec::new();
+    }
+    for (run, link) in runs.iter_mut().zip(run_links.iter()) {
+        run.link = link;
+    }
+    links
+        .iter()
+        .map(|link| Hyperlink {
+            id: link.id().map(str::to_owned),
+            uri: link.uri().unwrap_or_default().to_owned(),
         })
         .collect()
 }
@@ -589,6 +708,8 @@ fn decode_styled_run(run: &fb::StyledRunWire) -> StyledRun {
         fg: decode_term_color(run.fg_kind(), run.fg_r(), run.fg_g(), run.fg_b()),
         bg: decode_term_color(run.bg_kind(), run.bg_r(), run.bg_g(), run.bg_b()),
         attrs: CellAttrs(run.attrs()),
+        underline_color: TermColor::Default,
+        link: 0,
     }
 }
 
@@ -949,6 +1070,20 @@ fn encode_session_request<'a>(
             false,
             *index,
         ),
+        SessionRequest::SetViewport { session_id, .. } => (
+            fb::SessionOp::SetViewport,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
+    };
+    let (viewport_cols, viewport_rows) = match req {
+        SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
+        _ => (0, 0),
     };
     let synchronize_panes = match req {
         SessionRequest::SetRootTabSynchronizePanes { mode, .. } => match mode {
@@ -973,6 +1108,8 @@ fn encode_session_request<'a>(
             force,
             index,
             synchronize_panes,
+            viewport_cols,
+            viewport_rows,
         },
     );
 
@@ -1325,6 +1462,12 @@ fn encode_buffer_request<'a>(
     let user_option_key = user_option_key_str.map(|s| builder.create_string(s));
     let user_option_value = user_option_value_str.map(|s| builder.create_string(s));
 
+    let (pty_cols, pty_rows) = match req {
+        BufferRequest::Create {
+            size: Some(size), ..
+        } => (size.cols, size.rows),
+        _ => (0, 0),
+    };
     let buffer_req = fb::BufferRequest::create(
         builder,
         &fb::BufferRequestArgs {
@@ -1346,6 +1489,8 @@ fn encode_buffer_request<'a>(
             env_values,
             user_option_key,
             user_option_value,
+            pty_cols,
+            pty_rows,
         },
     );
 
@@ -1444,7 +1589,13 @@ fn validate_session_record(record: &SessionRecord) -> Result<(), ProtocolError> 
         record.focused_floating_id,
         "session_record.focused_floating_id",
     )?;
-    validate_optional_node_id(record.zoomed_node_id, "session_record.zoomed_node_id")
+    validate_optional_node_id(record.zoomed_node_id, "session_record.zoomed_node_id")?;
+    match record.viewport {
+        Some(viewport) => {
+            validate_cells(viewport.width, viewport.height, "session_record.viewport")
+        }
+        None => Ok(()),
+    }
 }
 
 fn validate_buffer_record(record: &BufferRecord) -> Result<(), ProtocolError> {
@@ -1611,6 +1762,9 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         }
         ServerEvent::RenderInvalidated(event) => {
             validate_required_buffer_id(event.buffer_id, "render_invalidated_event.buffer_id")
+        }
+        ServerEvent::Clipboard(event) => {
+            validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
         }
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
@@ -3179,6 +3333,29 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::Clipboard(e) => {
+            let text = builder.create_string(&e.text);
+            let event = fb::ClipboardEvent::create(
+                builder,
+                &fb::ClipboardEventArgs {
+                    buffer_id: e.buffer_id.into(),
+                    selection: match e.selection {
+                        ClipboardSelection::Clipboard => fb::ClipboardSelectionWire::Clipboard,
+                        ClipboardSelection::Primary => fb::ClipboardSelectionWire::Primary,
+                    },
+                    text: Some(text),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::ClipboardEvent,
+                    clipboard_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -3221,6 +3398,8 @@ fn encode_session_record<'a>(
             focused_leaf_id: record.focused_leaf_id.map(|n| n.into()).unwrap_or(0),
             focused_floating_id: record.focused_floating_id.map(|f| f.into()).unwrap_or(0),
             zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
+            viewport_cols: record.viewport.map_or(0, |viewport| viewport.width),
+            viewport_rows: record.viewport.map_or(0, |viewport| viewport.height),
         },
     )
 }
@@ -3607,6 +3786,24 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         },
                     }
                 }
+                fb::SessionOp::SetViewport => {
+                    validate_cells(
+                        req.viewport_cols(),
+                        req.viewport_rows(),
+                        "session_request.viewport",
+                    )?;
+                    SessionRequest::SetViewport {
+                        request_id,
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "session_request.session_id",
+                        )?,
+                        viewport: Size {
+                            width: req.viewport_cols(),
+                            height: req.viewport_rows(),
+                        },
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };
             Ok(ClientMessage::Session(session_request))
@@ -3619,12 +3816,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     let command_vec: Vec<String> = command.iter().map(|s| s.to_owned()).collect();
                     let env =
                         decode_string_map(req.env_keys(), req.env_values(), "buffer_request.env")?;
+                    let size = decode_optional_cells(
+                        req.pty_cols(),
+                        req.pty_rows(),
+                        "buffer_request.pty_size",
+                    )?
+                    .map(|(cols, rows)| PtySize::new(cols, rows));
                     BufferRequest::Create {
                         request_id,
                         title: req.title().map(|t| t.to_owned()),
                         command: command_vec,
                         cwd: req.cwd().map(|c| c.to_owned()),
                         env,
+                        size,
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -4497,6 +4701,26 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::ClipboardEvent => {
+            let event = required(envelope.clipboard_event(), "clipboard_event")?;
+            let selection = match event.selection() {
+                fb::ClipboardSelectionWire::Clipboard => ClipboardSelection::Clipboard,
+                fb::ClipboardSelectionWire::Primary => ClipboardSelection::Primary,
+                other => {
+                    return Err(ProtocolError::InvalidMessageOwned(format!(
+                        "unknown clipboard selection {}",
+                        other.0
+                    )));
+                }
+            };
+            Ok(ServerEnvelope::Event(ServerEvent::Clipboard(
+                ClipboardEvent {
+                    buffer_id: BufferId(event.buffer_id()),
+                    selection,
+                    text: event.text().unwrap_or_default().to_owned(),
+                },
+            )))
+        }
         fb::MessageKind::ClientChangedEvent => {
             let event = required(envelope.client_changed_event(), "client_changed_event")?;
             let client = required(event.client(), "client_changed_event.client")?;
@@ -4545,6 +4769,12 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
         } else {
             Some(NodeId(record.zoomed_node_id()))
         },
+        viewport: decode_optional_cells(
+            record.viewport_cols(),
+            record.viewport_rows(),
+            "session_record.viewport",
+        )?
+        .map(|(width, height)| Size { width, height }),
     })
 }
 
@@ -5807,6 +6037,7 @@ mod tests {
                     focused_leaf_id: None,
                     focused_floating_id: None,
                     zoomed_node_id: Some(NodeId(0)),
+                    viewport: None,
                 }],
             }),
         ))
@@ -6438,14 +6669,19 @@ mod tests {
                         fg: TermColor::Indexed(1),
                         bg: TermColor::Default,
                         attrs: CellAttrs(CellAttrs::BOLD),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     },
                     StyledRun {
                         len: 1,
                         fg: TermColor::Rgb { r: 9, g: 8, b: 7 },
                         bg: TermColor::Indexed(4),
                         attrs: CellAttrs::empty(),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     },
                 ],
+                links: Vec::new(),
             },
             SnapshotLine::plain("plain"),
         ]);
@@ -6463,7 +6699,10 @@ mod tests {
                 fg: TermColor::Indexed(3),
                 bg: TermColor::Default,
                 attrs: CellAttrs::empty(),
+                underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         };
         let envelope = styled_visible(vec![
             SnapshotLine::plain("first"),
@@ -6483,6 +6722,134 @@ mod tests {
     }
 
     #[test]
+    fn hyperlinks_round_trip_and_stay_off_link_free_lines() {
+        let linked = SnapshotLine {
+            text: "go here".to_owned(),
+            runs: vec![
+                StyledRun {
+                    len: 3,
+                    link: 2,
+                    ..StyledRun::default()
+                },
+                StyledRun {
+                    len: 4,
+                    link: 1,
+                    ..StyledRun::default()
+                },
+            ],
+            links: vec![
+                embers_core::Hyperlink {
+                    id: Some("x".to_owned()),
+                    uri: "https://example.com/x".to_owned(),
+                },
+                embers_core::Hyperlink {
+                    id: None,
+                    uri: "file:///tmp/a;b".to_owned(),
+                },
+            ],
+        };
+        let colored = SnapshotLine {
+            text: "red".to_owned(),
+            runs: vec![StyledRun {
+                len: 3,
+                fg: TermColor::Indexed(1),
+                ..StyledRun::default()
+            }],
+            links: Vec::new(),
+        };
+        let envelope = styled_visible(vec![linked, colored]);
+        assert_eq!(round_trip(&envelope), envelope);
+
+        let bytes = encode_server_envelope(&envelope).expect("encode succeeds");
+        let decoded = flatbuffers::root::<fb::Envelope>(&bytes).expect("valid envelope");
+        let styles = decoded
+            .visible_snapshot_response()
+            .and_then(|resp| resp.styles())
+            .expect("styles present");
+        assert_eq!(styles.get(0).links().map(|links| links.len()), Some(2));
+        assert!(styles.get(1).links().is_none());
+        assert!(styles.get(1).run_links().is_none());
+    }
+
+    #[test]
+    fn decode_drops_links_that_do_not_match_runs() {
+        // A link index past the table resolves to nothing rather than failing.
+        let envelope = styled_visible(vec![SnapshotLine {
+            text: "ab".to_owned(),
+            runs: vec![StyledRun {
+                len: 2,
+                link: 5,
+                ..StyledRun::default()
+            }],
+            links: vec![embers_core::Hyperlink {
+                id: None,
+                uri: "https://example.com".to_owned(),
+            }],
+        }]);
+        let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = round_trip(&envelope)
+        else {
+            panic!("expected visible snapshot");
+        };
+        assert_eq!(resp.lines[0].text, "ab");
+        assert_eq!(resp.lines[0].link(&resp.lines[0].runs[0]), None);
+    }
+
+    #[test]
+    fn underline_style_and_color_round_trip_sparsely() {
+        let curly_red = StyledRun {
+            len: 2,
+            fg: TermColor::Default,
+            bg: TermColor::Default,
+            attrs: CellAttrs(CellAttrs::CURLY_UNDERLINE),
+            underline_color: TermColor::Rgb { r: 255, g: 0, b: 0 },
+            link: 0,
+        };
+        let dotted = StyledRun {
+            len: 1,
+            fg: TermColor::Indexed(2),
+            bg: TermColor::Default,
+            attrs: CellAttrs(CellAttrs::DOTTED_UNDERLINE),
+            underline_color: TermColor::Default,
+            link: 0,
+        };
+        let indexed = StyledRun {
+            len: 1,
+            fg: TermColor::Default,
+            bg: TermColor::Default,
+            attrs: CellAttrs(CellAttrs::DASHED_UNDERLINE),
+            underline_color: TermColor::Indexed(12),
+            link: 0,
+        };
+        let envelope = styled_visible(vec![
+            SnapshotLine {
+                text: "abcd".to_owned(),
+                runs: vec![curly_red, dotted, indexed],
+                links: Vec::new(),
+            },
+            SnapshotLine {
+                text: "x".to_owned(),
+                runs: vec![dotted],
+                links: Vec::new(),
+            },
+        ]);
+        assert_eq!(round_trip(&envelope), envelope);
+
+        // Only runs with an explicit underline color are encoded, and lines
+        // without any carry no underline-color vector at all.
+        let bytes = encode_server_envelope(&envelope).expect("encode succeeds");
+        let decoded = flatbuffers::root::<fb::Envelope>(&bytes).expect("valid envelope");
+        let styles = decoded
+            .visible_snapshot_response()
+            .and_then(|resp| resp.styles())
+            .expect("styles present");
+        let colors = styles.get(0).underline_colors().expect("colors present");
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors.get(0).run_index(), 0);
+        assert_eq!(colors.get(1).run_index(), 2);
+        assert!(styles.get(1).underline_colors().is_none());
+    }
+
+    #[test]
     fn decode_drops_runs_when_lengths_do_not_cover_text() {
         // A run claiming more bytes than the text holds is dropped on decode; the
         // text always survives.
@@ -6493,7 +6860,10 @@ mod tests {
                 fg: TermColor::Indexed(2),
                 bg: TermColor::Default,
                 attrs: CellAttrs::empty(),
+                underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         }]);
         let decoded = round_trip(&envelope);
         if let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = decoded {

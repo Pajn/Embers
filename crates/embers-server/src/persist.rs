@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result,
-    SessionId, SplitDirection, Timestamp,
+    SessionId, Size, SplitDirection, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,10 @@ pub struct PersistedSession {
     pub focused_floating: Option<u64>,
     #[serde(default)]
     pub zoomed_node: Option<u64>,
+    /// The viewport a client last drew the session in, so panes created
+    /// after a restart, before a client attaches, still start at that size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<Size>,
     pub created_at_ms: u64,
 }
 
@@ -345,6 +349,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         focused_leaf: session.focused_leaf.map(|id| id.0),
         focused_floating: session.focused_floating.map(|id| id.0),
         zoomed_node: session.zoomed_node.map(|id| id.0),
+        viewport: session.viewport,
         created_at_ms: timestamp_to_millis(session.created_at),
     }
 }
@@ -358,6 +363,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_leaf: session.focused_leaf.map(NodeId),
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
+        viewport: session.viewport,
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
 }
@@ -688,6 +694,31 @@ mod tests {
     }
 
     #[test]
+    fn session_viewport_round_trips_through_persistence() {
+        let tempdir = tempdir().expect("tempdir");
+        let workspace_path = tempdir.path().join("workspace.json");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("main");
+        let viewport = Size {
+            width: 120,
+            height: 40,
+        };
+        state
+            .set_session_viewport(session_id, viewport)
+            .expect("viewport is set");
+
+        save_workspace(&workspace_path, &state).expect("workspace saves");
+        let restored = load_workspace(&workspace_path)
+            .expect("workspace loads")
+            .expect("workspace exists");
+
+        assert_eq!(
+            restored.session(session_id).expect("session").viewport,
+            Some(viewport)
+        );
+    }
+
+    #[test]
     fn load_current_workspace_migrates_unversioned_workspace() {
         let workspace = PersistedWorkspace {
             format_version: None,
@@ -863,6 +894,7 @@ mod tests {
                 focused_leaf: Some(10),
                 focused_floating: None,
                 zoomed_node: None,
+                viewport: None,
                 created_at_ms: 1234,
             }],
             buffers: Vec::new(),

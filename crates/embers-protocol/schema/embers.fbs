@@ -43,6 +43,7 @@ enum MessageKind : ubyte {
   SessionRenamedEvent = 48,
   ClientChangedEvent = 49,
   BufferPipeChangedEvent = 50,
+  ClipboardEvent = 51,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -68,6 +69,7 @@ enum SessionOp : ubyte {
   CloseRootTab = 7,
   Rename = 8,
   SetRootTabSynchronizePanes = 9,
+  SetViewport = 10,
 }
 
 enum SynchronizePanesModeWire : ubyte {
@@ -204,6 +206,11 @@ enum NodeRecordKindWire : ubyte {
   Tabs = 2,
 }
 
+enum ClipboardSelectionWire : ubyte {
+  Clipboard = 0,
+  Primary = 1,
+}
+
 enum CursorShapeWire : ubyte {
   Block = 0,
   Underline = 1,
@@ -224,6 +231,8 @@ table SessionRequest {
   force:bool = false (id: 6);
   index:uint = 0 (id: 7);
   synchronize_panes:SynchronizePanesModeWire = Toggle (id: 8);
+  viewport_cols:ushort = 0 (id: 9);
+  viewport_rows:ushort = 0 (id: 10);
 }
 
 table BufferRequest {
@@ -245,6 +254,8 @@ table BufferRequest {
   history_placement:BufferHistoryPlacementWire = Tab (id: 15);
   user_option_key:string (id: 16);
   user_option_value:string (id: 17);
+  pty_cols:ushort = 0 (id: 18);
+  pty_rows:ushort = 0 (id: 19);
 }
 
 table NodeRequest {
@@ -328,6 +339,8 @@ table SessionRecord {
   focused_leaf_id:ulong = 0 (id: 4);
   focused_floating_id:ulong = 0 (id: 5);
   zoomed_node_id:ulong = 0 (id: 6);
+  viewport_cols:ushort = 0 (id: 7);
+  viewport_rows:ushort = 0 (id: 8);
 }
 
 table BufferRecord {
@@ -503,12 +516,35 @@ struct StyledRunWire {
   attrs:ushort;
 }
 
+// Underline color (SGR 58) for one run of a StyledLine, by index into its
+// `runs`. Kept out of StyledRunWire because almost every run underlines in
+// its foreground color; only runs with an explicit color pay for one of these.
+// Color kind as in StyledRunWire (0 = default, 1 = indexed, 2 = rgb).
+struct RunColorWire {
+  run_index:uint;
+  kind:ubyte; r:ubyte; g:ubyte; b:ubyte;
+}
+
+// An OSC 8 hyperlink. `id` is absent when the program gave none.
+table HyperlinkWire {
+  id:string;
+  uri:string;
+}
+
 // One styled line in a sparse `styles` array: `line_index` is the position in
 // the parallel `lines` array this styling applies to. Only lines that actually
 // carry styling are emitted, so mostly-plain buffers stay compact.
 table StyledLine {
   line_index:uint;
   runs:[StyledRunWire];
+  // Appended: sparse per-run underline colors. Absent when every run's
+  // underline follows its foreground.
+  underline_colors:[RunColorWire];
+  // Appended: the line's hyperlink table and, parallel to `runs`, each run's
+  // link (0 = none, n = links[n - 1]). Both absent when no run is linked, so
+  // only lines that carry links pay for them.
+  links:[HyperlinkWire];
+  run_links:[ushort];
 }
 
 table SnapshotResponse {
@@ -594,6 +630,14 @@ table RenderInvalidatedEvent {
   buffer_id:ulong;
 }
 
+// An OSC 52 clipboard write from a program in `buffer_id`, sent only to the
+// clients currently showing that buffer's session. `text` is decoded.
+table ClipboardEvent {
+  buffer_id:ulong;
+  selection:ClipboardSelectionWire = Clipboard;
+  text:string;
+}
+
 table SessionRenamedEvent {
   session_id:ulong;
   name:string;
@@ -646,6 +690,7 @@ table Envelope {
   buffer_location_response:BufferLocationResponse (id: 36);
   buffer_with_location_response:BufferWithLocationResponse (id: 37);
   buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
+  clipboard_event:ClipboardEvent (id: 39);
 }
 
 root_type Envelope;

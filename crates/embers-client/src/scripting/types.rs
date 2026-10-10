@@ -111,6 +111,9 @@ pub struct MouseSettings {
     pub wheel_scroll: bool,
     pub wheel_forward: bool,
     pub drag_resize: bool,
+    /// Drag to select and copy, double-click for a word, triple-click for a
+    /// line, in panes that have not requested mouse reporting.
+    pub select: bool,
 }
 
 impl MouseSettings {
@@ -120,6 +123,7 @@ impl MouseSettings {
             || self.wheel_scroll
             || self.wheel_forward
             || self.drag_resize
+            || self.select
     }
 }
 
@@ -145,6 +149,9 @@ pub struct LoadedConfig {
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
+    /// Forward OSC 52 clipboard writes from programs in panes to the host
+    /// terminal (`set_clipboard`). On by default.
+    pub clipboard: bool,
 }
 
 impl LoadedConfig {
@@ -180,6 +187,7 @@ impl fmt::Debug for LoadedConfig {
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
+            .field("clipboard", &self.clipboard)
             .finish()
     }
 }

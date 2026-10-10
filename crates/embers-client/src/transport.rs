@@ -6,4 +6,6 @@ use embers_protocol::{ClientMessage, ServerEvent, ServerResponse};
 pub trait Transport: Send + Sync {
     async fn request(&self, message: ClientMessage) -> Result<ServerResponse>;
     async fn next_event(&self) -> Result<ServerEvent>;
+    /// The next event if one has already arrived, without waiting for one.
+    async fn ready_event(&self) -> Result<Option<ServerEvent>>;
 }

@@ -1,9 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, CursorPosition, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection,
-    StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, Size,
+    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -56,6 +56,14 @@ fn client_message_families_round_trip() {
             session_id: SessionId(10),
             index: 2,
         }),
+        ClientMessage::Session(SessionRequest::SetViewport {
+            request_id: RequestId(90),
+            session_id: SessionId(10),
+            viewport: Size {
+                width: 120,
+                height: 40,
+            },
+        }),
         ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
             request_id: RequestId(9),
             session_id: SessionId(10),
@@ -80,6 +88,15 @@ fn client_message_families_round_trip() {
             command: vec!["bash".to_owned(), "-lc".to_owned(), "pwd".to_owned()],
             cwd: Some("/tmp".to_owned()),
             env: std::collections::BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
+            size: None,
+        }),
+        ClientMessage::Buffer(BufferRequest::Create {
+            request_id: RequestId(91),
+            title: None,
+            command: vec!["sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: Some(PtySize::new(100, 30)),
         }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
@@ -377,6 +394,29 @@ fn client_message_families_round_trip() {
 }
 
 #[test]
+fn sizes_must_be_non_zero_in_both_directions() {
+    let create = ClientMessage::Buffer(BufferRequest::Create {
+        request_id: RequestId(1),
+        title: None,
+        command: vec!["sh".to_owned()],
+        cwd: None,
+        env: Default::default(),
+        size: Some(PtySize::new(80, 0)),
+    });
+    encode_client_message(&create).expect_err("zero-row pty size is rejected");
+
+    let set_viewport = ClientMessage::Session(SessionRequest::SetViewport {
+        request_id: RequestId(2),
+        session_id: SessionId(1),
+        viewport: Size {
+            width: 0,
+            height: 24,
+        },
+    });
+    encode_client_message(&set_viewport).expect_err("zero-width viewport is rejected");
+}
+
+#[test]
 fn server_envelope_families_round_trip() {
     let snapshot = sample_snapshot();
     let snapshot_without_zoom = sample_snapshot_without_zoom();
@@ -507,7 +547,10 @@ fn server_envelope_families_round_trip() {
                         fg: TermColor::Indexed(1),
                         bg: TermColor::Default,
                         attrs: CellAttrs(CellAttrs::BOLD),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     }],
+                    links: Vec::new(),
                 },
                 SnapshotLine::plain("beta"),
                 SnapshotLine::plain(""),
@@ -543,7 +586,10 @@ fn server_envelope_families_round_trip() {
                         },
                         bg: TermColor::Indexed(4),
                         attrs: CellAttrs(CellAttrs::UNDERLINE),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     }],
+                    links: Vec::new(),
                 },
                 SnapshotLine::plain("delta"),
             ],
@@ -579,6 +625,16 @@ fn server_envelope_families_round_trip() {
         ServerEnvelope::Event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
             buffer_id: BufferId(11),
         })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Clipboard,
+            text: "yanked\nline".to_owned(),
+        })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Primary,
+            text: String::new(),
+        })),
     ];
 
     for envelope in envelopes {
@@ -598,6 +654,10 @@ fn sample_snapshot() -> SessionSnapshot {
             focused_leaf_id: Some(NodeId(21)),
             focused_floating_id: Some(FloatingId(30)),
             zoomed_node_id: Some(NodeId(24)),
+            viewport: Some(Size {
+                width: 120,
+                height: 40,
+            }),
         },
         nodes: vec![
             NodeRecord {

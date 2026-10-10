@@ -75,6 +75,33 @@ as before. The built-in config turns this on.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_select </h2>
+
+```rust,ignore
+fn set_select(mouse: MouseApi, value: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_select" id="link-set_select-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_select', 'Description')">
+Description
+</button>
+</div>
+
+<div group="set_select" id="set_select-Description" class="tabcontent"  style="display: block;" >
+Toggle mouse selection in panes that have not requested mouse reporting:
+dragging enters copy mode with a selection and copies it on release,
+a double click copies a word and a triple click copies a line (tmux's
+defaults with `mouse on`). Panes running programs that requested the
+mouse keep receiving these events instead.
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_wheel_forward </h2>
 
 ```rust,ignore

@@ -296,6 +296,7 @@ async fn concurrent_input_from_multiple_clients_reaches_shared_buffer() {
             ],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await

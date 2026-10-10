@@ -12,6 +12,7 @@ use rhai::{
     Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, NativeCallContext, Position, Scope,
 };
 
+use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::parse_key_sequence;
 use crate::presentation::NavigationDirection;
 
@@ -153,6 +154,10 @@ fn validate_live_actions(actions: &[Action]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn copy_motion(motion: CopyMotion) -> Action {
+    Action::CopyMotion { motion }
 }
 
 pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
@@ -947,12 +952,12 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, Dynamic, ImmutableString, Map, NativeCallContext,
-        NavigationDirection, TreeSpec, parse_action_array, parse_buffer_history_placement,
-        parse_buffer_history_scope, parse_buffer_id, parse_bytes, parse_floating_id,
-        parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
-        parse_node_break_destination, parse_node_id, parse_node_join_placement, parse_notify_level,
-        parse_split_direction, resize_pane, with_call_position,
+        Action, ActionApi, Array, CopyMotion, Dynamic, ImmutableString, JumpKind, Map,
+        NativeCallContext, NavigationDirection, TreeSpec, copy_motion, parse_action_array,
+        parse_buffer_history_placement, parse_buffer_history_scope, parse_buffer_id, parse_bytes,
+        parse_floating_id, parse_floating_options, parse_floating_spec, parse_index,
+        parse_key_sequence, parse_node_break_destination, parse_node_id, parse_node_join_placement,
+        parse_notify_level, parse_split_direction, resize_pane, with_call_position,
     };
     use embers_protocol::SynchronizePanesMode;
 
@@ -1938,10 +1943,18 @@ mod documented_action_api {
         Action::FollowOutput
     }
 
-    /// Enter incremental search mode.
+    /// Enter incremental search mode, searching forward (`/`).
     #[rhai_fn(name = "enter_search_mode")]
     pub fn enter_search_mode(_: &mut ActionApi) -> Action {
         Action::EnterSearchMode
+    }
+
+    /// Enter incremental search mode, searching backward (`?`). After a backward
+    /// search `search_next` moves to earlier matches and `search_prev` to later
+    /// ones, as in vim.
+    #[rhai_fn(name = "enter_search_backward")]
+    pub fn enter_search_backward(_: &mut ActionApi) -> Action {
+        Action::EnterSearchBackward
     }
 
     /// Cancel the active search.
@@ -1969,7 +1982,204 @@ mod documented_action_api {
         Action::SearchPrev
     }
 
-    /// Enter character selection mode.
+    /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
+    /// following output and a cursor appears at the program's cursor; copy-mode
+    /// motions move it. Does nothing on the alternate screen.
+    #[rhai_fn(name = "enter_copy_mode")]
+    pub fn enter_copy_mode(_: &mut ActionApi) -> Action {
+        Action::EnterCopyMode
+    }
+
+    /// Leave copy mode: drop the cursor and any selection, follow output again,
+    /// and return to `normal` mode (tmux `cancel`).
+    #[rhai_fn(name = "exit_copy_mode")]
+    pub fn exit_copy_mode(_: &mut ActionApi) -> Action {
+        Action::ExitCopyMode
+    }
+
+    /// Move the copy-mode cursor left (`h`).
+    #[rhai_fn(name = "copy_cursor_left")]
+    pub fn copy_cursor_left(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Left)
+    }
+
+    /// Move the copy-mode cursor right (`l`).
+    #[rhai_fn(name = "copy_cursor_right")]
+    pub fn copy_cursor_right(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Right)
+    }
+
+    /// Move the copy-mode cursor up (`k`).
+    #[rhai_fn(name = "copy_cursor_up")]
+    pub fn copy_cursor_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Up)
+    }
+
+    /// Move the copy-mode cursor down (`j`).
+    #[rhai_fn(name = "copy_cursor_down")]
+    pub fn copy_cursor_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Down)
+    }
+
+    /// Move to the start of the next word (`w`). Whitespace separates words, and
+    /// a run of ASCII punctuation other than `_` is a word of its own.
+    #[rhai_fn(name = "copy_next_word")]
+    pub fn copy_next_word(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextWord)
+    }
+
+    /// Move to the start of the previous word (`b`).
+    #[rhai_fn(name = "copy_previous_word")]
+    pub fn copy_previous_word(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PreviousWord)
+    }
+
+    /// Move to the end of the next word (`e`).
+    #[rhai_fn(name = "copy_next_word_end")]
+    pub fn copy_next_word_end(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextWordEnd)
+    }
+
+    /// Move to the start of the next whitespace-separated word (`W`).
+    #[rhai_fn(name = "copy_next_space")]
+    pub fn copy_next_space(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextSpace)
+    }
+
+    /// Move to the start of the previous whitespace-separated word (`B`).
+    #[rhai_fn(name = "copy_previous_space")]
+    pub fn copy_previous_space(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PreviousSpace)
+    }
+
+    /// Move to the end of the next whitespace-separated word (`E`).
+    #[rhai_fn(name = "copy_next_space_end")]
+    pub fn copy_next_space_end(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextSpaceEnd)
+    }
+
+    /// Move to the first column of the line (`0`).
+    #[rhai_fn(name = "copy_start_of_line")]
+    pub fn copy_start_of_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::StartOfLine)
+    }
+
+    /// Move to the first non-blank character of the line (`^`).
+    #[rhai_fn(name = "copy_back_to_indentation")]
+    pub fn copy_back_to_indentation(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::BackToIndentation)
+    }
+
+    /// Move to the last character of the line (`$`).
+    #[rhai_fn(name = "copy_end_of_line")]
+    pub fn copy_end_of_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::EndOfLine)
+    }
+
+    /// Move to the first line of history (`gg`).
+    #[rhai_fn(name = "copy_history_top")]
+    pub fn copy_history_top(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HistoryTop)
+    }
+
+    /// Move to the last line of the buffer (`G`).
+    #[rhai_fn(name = "copy_history_bottom")]
+    pub fn copy_history_bottom(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HistoryBottom)
+    }
+
+    /// Move to the top row of the view (`H`).
+    #[rhai_fn(name = "copy_top_line")]
+    pub fn copy_top_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::TopLine)
+    }
+
+    /// Move to the middle row of the view (`M`).
+    #[rhai_fn(name = "copy_middle_line")]
+    pub fn copy_middle_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::MiddleLine)
+    }
+
+    /// Move to the bottom row of the view (`L`).
+    #[rhai_fn(name = "copy_bottom_line")]
+    pub fn copy_bottom_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::BottomLine)
+    }
+
+    /// Scroll the view and move the cursor up half a page (`C-u`).
+    #[rhai_fn(name = "copy_halfpage_up")]
+    pub fn copy_halfpage_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HalfPageUp)
+    }
+
+    /// Scroll the view and move the cursor down half a page (`C-d`).
+    #[rhai_fn(name = "copy_halfpage_down")]
+    pub fn copy_halfpage_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HalfPageDown)
+    }
+
+    /// Scroll the view and move the cursor up a page (`C-b`).
+    #[rhai_fn(name = "copy_page_up")]
+    pub fn copy_page_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PageUp)
+    }
+
+    /// Scroll the view and move the cursor down a page (`C-f`).
+    #[rhai_fn(name = "copy_page_down")]
+    pub fn copy_page_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PageDown)
+    }
+
+    /// Wait for a character and move onto its next occurrence on the line (`f`).
+    #[rhai_fn(name = "copy_jump_forward")]
+    pub fn copy_jump_forward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::Forward,
+        }
+    }
+
+    /// Wait for a character and move onto its previous occurrence on the line
+    /// (`F`).
+    #[rhai_fn(name = "copy_jump_backward")]
+    pub fn copy_jump_backward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::Backward,
+        }
+    }
+
+    /// Wait for a character and move just before its next occurrence on the
+    /// line (`t`).
+    #[rhai_fn(name = "copy_jump_to_forward")]
+    pub fn copy_jump_to_forward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::ToForward,
+        }
+    }
+
+    /// Wait for a character and move just after its previous occurrence on the
+    /// line (`T`).
+    #[rhai_fn(name = "copy_jump_to_backward")]
+    pub fn copy_jump_to_backward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::ToBackward,
+        }
+    }
+
+    /// Repeat the last character jump (`;`).
+    #[rhai_fn(name = "copy_jump_again")]
+    pub fn copy_jump_again(_: &mut ActionApi) -> Action {
+        Action::CopyJumpAgain
+    }
+
+    /// Repeat the last character jump in the opposite direction (`,`).
+    #[rhai_fn(name = "copy_jump_reverse")]
+    pub fn copy_jump_reverse(_: &mut ActionApi) -> Action {
+        Action::CopyJumpReverse
+    }
+
+    /// Start a character selection at the copy-mode cursor, entering copy mode
+    /// first if needed. With a character selection already active this clears
+    /// it; with another kind active it switches to character selection.
     #[rhai_fn(name = "enter_select_char")]
     pub fn enter_select_char(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1977,7 +2187,8 @@ mod documented_action_api {
         }
     }
 
-    /// Enter line selection mode.
+    /// Start a line selection at the copy-mode cursor. Toggles like
+    /// `enter_select_char`.
     #[rhai_fn(name = "enter_select_line")]
     pub fn enter_select_line(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1985,7 +2196,8 @@ mod documented_action_api {
         }
     }
 
-    /// Enter block selection mode.
+    /// Start a block (rectangle) selection at the copy-mode cursor. Toggles
+    /// like `enter_select_char`.
     #[rhai_fn(name = "enter_select_block")]
     pub fn enter_select_block(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1993,7 +2205,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection left.
+    /// Move the copy-mode cursor left. Same as `copy_cursor_left`.
     #[rhai_fn(name = "select_move_left")]
     pub fn select_move_left(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -2001,7 +2213,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection right.
+    /// Move the copy-mode cursor right. Same as `copy_cursor_right`.
     #[rhai_fn(name = "select_move_right")]
     pub fn select_move_right(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -2009,7 +2221,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection up.
+    /// Move the copy-mode cursor up. Same as `copy_cursor_up`.
     #[rhai_fn(name = "select_move_up")]
     pub fn select_move_up(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -2017,7 +2229,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection down.
+    /// Move the copy-mode cursor down. Same as `copy_cursor_down`.
     #[rhai_fn(name = "select_move_down")]
     pub fn select_move_down(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -2025,19 +2237,28 @@ mod documented_action_api {
         }
     }
 
-    /// Copy the current selection into the clipboard.
+    /// Swap the selection's ends, so motions move the other end (`o`).
+    #[rhai_fn(name = "select_other_end")]
+    pub fn select_other_end(_: &mut ActionApi) -> Action {
+        Action::SelectOtherEnd
+    }
+
+    /// Copy the current selection into the clipboard (OSC 52) and leave copy
+    /// mode. Without a selection it only leaves copy mode.
     #[rhai_fn(name = "yank_selection")]
     pub fn yank_selection(_: &mut ActionApi) -> Action {
         Action::CopySelection
     }
 
-    /// Copy the current selection into the clipboard.
+    /// Copy the current selection into the clipboard (OSC 52) and leave copy
+    /// mode. Same as `yank_selection`.
     #[rhai_fn(name = "copy_selection")]
     pub fn copy_selection(_: &mut ActionApi) -> Action {
         Action::CopySelection
     }
 
-    /// Cancel the current selection.
+    /// Clear the current selection and return to copy mode with the cursor
+    /// where the selection ended.
     #[rhai_fn(name = "cancel_selection")]
     pub fn cancel_selection(_: &mut ActionApi) -> Action {
         Action::CancelSelection

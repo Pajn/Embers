@@ -114,6 +114,46 @@ Attach a callback to an emitted event such as `buffer_bell`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_clipboard </h2>
+
+```rust,ignore
+fn set_clipboard(enabled: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_clipboard" id="link-set_clipboard-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_clipboard', 'Description')">
+Description
+</button>
+<button group="set_clipboard" id="link-set_clipboard-Example"  class="tablinks"
+    onclick="openTab(event, 'set_clipboard', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_clipboard" id="set_clipboard-Description" class="tabcontent"  style="display: block;" >
+Choose whether programs in panes may set the system clipboard.
+
+When on (the default), an OSC 52 clipboard write from a program in a
+pane, such as a Neovim yank over SSH, is passed on to the terminal
+running the Embers client, which puts it on the system clipboard. This
+matches tmux's `set-clipboard on`. When off, those writes are dropped.
+Programs can never read the clipboard through Embers: OSC 52 queries are
+always ignored.
+</div>
+<div group="set_clipboard" id="set_clipboard-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_clipboard(false);
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_leader </h2>
 
 ```rust,ignore

@@ -100,6 +100,7 @@ async fn keepers_outlive_shutdown_but_exit_once_their_socket_is_removed() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -163,6 +164,7 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -267,6 +269,7 @@ async fn kill_server_ends_programs_and_keepers_and_forgets_the_workspace() {
             ],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await
@@ -373,6 +376,7 @@ async fn exited_keepers_are_reaped_while_the_server_runs() {
             command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 1".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
         },
     )
     .await

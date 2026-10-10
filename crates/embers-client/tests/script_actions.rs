@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use embers_client::copy_mode::{CopyMotion, JumpKind};
 use embers_client::{
     Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec,
     FloatingSize, FloatingSpec, KeyToken, NavigationDirection, NotifyLevel, PresentationModel,
@@ -366,6 +367,49 @@ fn action_arrays_preserve_order_and_unit_is_noop() {
         ]
     );
     assert!(engine.run_named_action("noop", context).unwrap().is_empty());
+}
+
+#[test]
+fn copy_mode_helpers_build_copy_mode_actions() {
+    let engine = load_engine(
+        r#"
+            fn copy_actions(ctx) {
+                [
+                    action.enter_copy_mode(),
+                    action.copy_next_word(),
+                    action.copy_halfpage_up(),
+                    action.copy_jump_to_backward(),
+                    action.copy_jump_reverse(),
+                    action.select_other_end(),
+                    action.enter_search_backward(),
+                    action.exit_copy_mode(),
+                ]
+            }
+            define_action("copy-actions", copy_actions);
+        "#,
+    );
+
+    assert_eq!(
+        engine
+            .run_named_action("copy-actions", demo_context())
+            .unwrap(),
+        vec![
+            Action::EnterCopyMode,
+            Action::CopyMotion {
+                motion: CopyMotion::NextWord,
+            },
+            Action::CopyMotion {
+                motion: CopyMotion::HalfPageUp,
+            },
+            Action::CopyJump {
+                kind: JumpKind::ToBackward,
+            },
+            Action::CopyJumpReverse,
+            Action::SelectOtherEnd,
+            Action::EnterSearchBackward,
+            Action::ExitCopyMode,
+        ]
+    );
 }
 
 #[test]

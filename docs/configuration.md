@@ -131,3 +131,60 @@ limits can be tuned together to fit a deployment.
 # Tighter limits for a constrained host
 EMBERS_MAX_BUFFERS=256 EMBERS_MAX_SCROLLBACK_LINES=2000 embers
 ```
+
+## Clipboard (OSC 52)
+
+Programs in panes can set the system clipboard with OSC 52, the way they would
+in a terminal without a multiplexer. A Neovim yank on a remote host over SSH,
+for example, reaches the clipboard of the machine running the Embers client.
+This is the equivalent of tmux's `set-clipboard on`, and it is on by default.
+
+- **Who receives a write.** The server sends it to every client whose current
+  session contains the pane's buffer, including panes on hidden tabs and in
+  floating windows, much as tmux sends it to every client attached to the
+  pane's session. Each such client is a terminal the user may be looking at.
+  Clients on other sessions do not get it, and a write from a detached buffer,
+  or one whose session no client is showing, is dropped.
+- **What the client does.** It re-emits the write to its host terminal as
+  `OSC 52 ; c ; <base64> BEL` (or `p` for the primary selection). The host
+  terminal must allow OSC 52 writes.
+- **Turning it off.** Put `set_clipboard(false);` in the config file. The
+  client then drops the writes it receives.
+- **Reads are never answered.** An OSC 52 query (`OSC 52 ; c ; ?`) is ignored
+  without a reply, so a program in a pane cannot read the clipboard through
+  Embers. There is no option to allow it.
+- **Size.** Writes larger than 4 MiB of text are dropped.
+
+A program inside Embers only uses OSC 52 if it believes the terminal supports
+it; see [Terminal capabilities](#terminal-capabilities).
+
+## Terminal capabilities
+
+Programs in panes see `TERM=xterm-256color` and `COLORTERM=truecolor` unless
+the buffer's environment sets them. Embers ships no terminfo entry of its own,
+and `xterm-256color` exists on every system, including remote hosts reached
+over SSH. That entry does not list the extended capabilities Embers supports:
+`Smulx` (underline styles), `Setulc` (underline color) and `Ms` (OSC 52). So
+that programs can still find them, Embers answers the two queries they use to
+ask the terminal directly:
+
+- **DECRQSS for SGR** (`DCS $ q m ST`) reports the current graphic rendition,
+  including `4:n` underline styles and the `58` underline color. Neovim sets a
+  curly underline and asks this; if the answer keeps `4:3` it uses curly
+  underlines and underline colors (diagnostics, spelling) even though the
+  terminfo entry lacks `Smulx`. Without the answer it falls back to plain
+  underlines in the text color. Other settings get the "invalid request"
+  reply.
+- **XTGETTCAP** (`DCS + q <hex names> ST`) answers `Ms`, `Smulx` and
+  `Setulc`, and reports any other name as unknown. Neovim asks for `Ms` and,
+  when the answer is OSC 52 and no other clipboard tool is available (as on a
+  typical remote host), uses OSC 52 for its `+` and `*` registers.
+
+Programs that read capabilities only from terminfo still see plain
+`xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
+that lists the capabilities and that is installed where the program runs.
+
+Embers always renders underline styles, underline colors and OSC 8 hyperlinks
+to the host terminal with the standard sequences (see
+[the render-source contract](render-source-contract.md)), so the host terminal
+must support them; Ghostty, kitty, WezTerm, foot and VTE-based terminals do.

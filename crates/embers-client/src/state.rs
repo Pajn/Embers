@@ -72,6 +72,10 @@ pub struct BufferViewState {
     pub search_state: Option<SearchState>,
     pub selection_state: Option<SelectionState>,
     pub hints_state: Option<HintsState>,
+    /// The copy-mode cursor, set while this view is in copy mode. While a
+    /// selection is active its free end (`selection_state.cursor`) moves with
+    /// this cursor.
+    pub copy_cursor: Option<SelectionPoint>,
 }
 
 impl Default for BufferViewState {
@@ -87,6 +91,7 @@ impl Default for BufferViewState {
             search_state: None,
             selection_state: None,
             hints_state: None,
+            copy_cursor: None,
         }
     }
 }
@@ -254,7 +259,7 @@ impl ClientState {
             ServerEvent::RenderInvalidated(event) => {
                 self.invalidated_buffers.insert(event.buffer_id);
             }
-            ServerEvent::ClientChanged(_) => {}
+            ServerEvent::ClientChanged(_) | ServerEvent::Clipboard(_) => {}
         }
     }
 
@@ -424,6 +429,7 @@ impl ClientState {
                         search_state: None,
                         selection_state: None,
                         hints_state: None,
+                        copy_cursor: None,
                     };
                 }
                 None => {
@@ -440,6 +446,7 @@ impl ClientState {
                             search_state: None,
                             selection_state: None,
                             hints_state: None,
+                            copy_cursor: None,
                         },
                     );
                 }

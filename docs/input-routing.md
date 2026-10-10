@@ -35,5 +35,9 @@ plan-facing entry point for the same behavior.
   - copy-mode passthrough suppression
   - scripted `send_keys` / `send_bytes`
   - reload clearing pending prefixes
+- `crates/embers-client/tests/copy_mode.rs`
+  - copy-mode motions, counts, jumps, selection and search direction
+  - copy-mode bindings from config
+  - mouse drag/double-click selection and forwarding to mouse-reporting programs
 
 For the full policy text, see `docs/input-routing-policy.md`.

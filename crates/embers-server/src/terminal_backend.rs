@@ -4,15 +4,19 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::{Cell, Flags, LineLength};
-use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage, TermMode};
+use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink as AlacrittyHyperlink, LineLength};
+use alacritty_terminal::term::{
+    ClipboardType, Config, LineDamageBounds, Osc52, Term, TermDamage, TermMode,
+};
 use alacritty_terminal::vte::ansi::{
     self, Color as AnsiColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use embers_core::{
-    ActivityState, CellAttrs, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine,
-    StyledRun, TermColor, TerminalModes, TerminalSnapshot,
+    ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
+    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, PtySize, SnapshotLine, StyledRun, TermColor,
+    TerminalModes, TerminalSnapshot,
 };
+use tracing::debug;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BackendMetadata {
@@ -32,6 +36,18 @@ pub struct BackendScrollbackSlice {
     pub start_line: u64,
     pub total_lines: u64,
     pub lines: Vec<SnapshotLine>,
+}
+
+/// One-shot signals drained from the backend after ingesting output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendEvents {
+    pub activity: ActivityState,
+    /// Replies to terminal queries, to be written back to the PTY master. Empty
+    /// when there is nothing pending.
+    pub replies: Vec<u8>,
+    /// The most recent OSC 52 clipboard write since the last drain. Writes in
+    /// one batch replace each other, as they would on a real clipboard.
+    pub clipboard: Option<ClipboardWrite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,19 +74,37 @@ pub trait TerminalBackend: Send {
     fn capture_scrollback(&self) -> Vec<String>;
     fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> BackendScrollbackSlice;
     fn metadata(&self) -> BackendMetadata;
-    /// Drain, under a single lock acquisition, the pending activity state and any
+    /// Drain, under a single lock acquisition, the pending activity state, any
     /// terminal replies the emulator generated while ingesting bytes
-    /// (device-attribute, cursor-position, and mode queries). The replies are
-    /// written back to the PTY master; the returned `Vec` is empty when there is
-    /// nothing pending. Combining the two drains keeps the read hot path to one
-    /// lock acquisition against the client-thread readers of the same state.
-    fn take_events(&mut self) -> (ActivityState, Vec<u8>);
+    /// (device-attribute, cursor-position, and mode queries), and the latest
+    /// OSC 52 clipboard write. The replies are written back to the PTY master.
+    /// Combining the drains keeps the read hot path to one lock acquisition
+    /// against the client-thread readers of the same state.
+    fn take_events(&mut self) -> BackendEvents;
     fn take_damage(&mut self) -> BackendDamage;
+    /// Answer a terminal query the emulator itself does not handle. The reply is
+    /// queued with the emulator's own replies (drained by
+    /// [`TerminalBackend::take_events`]) so replies keep their order. The router
+    /// calls this right after ingesting the query's final byte, so the reply
+    /// reflects the state at that point in the stream.
+    fn answer_query(&mut self, query: &TerminalQuery);
+}
+
+/// A DCS query intercepted by [`RawByteRouter`] for the backend to answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalQuery {
+    /// DECRQSS (`DCS $ q <setting> ST`): report a setting's current value.
+    /// Holds the setting, for example `m` for SGR.
+    RequestSetting(Vec<u8>),
+    /// XTGETTCAP (`DCS + q <hex name>;... ST`): look up terminfo capabilities.
+    /// Holds the raw payload of hex-encoded names separated by `;`.
+    Termcap(Vec<u8>),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RawByteRouter {
     osc7: Osc7Scanner,
+    queries: DcsQueryScanner,
 }
 
 impl RawByteRouter {
@@ -87,9 +121,23 @@ impl RawByteRouter {
     /// Output is forwarded directly into the backend (alacritty drops OSC 7), while a
     /// side scanner sniffs OSC 7 `file://host/path` working-directory reports so the
     /// keeper can report the shell's live cwd the way tmux does.
+    ///
+    /// A second scanner picks out the DCS queries alacritty leaves unanswered
+    /// (DECRQSS and XTGETTCAP). Output is split after each one so the backend
+    /// answers it with the state as of that byte.
     pub fn route_output(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
         self.osc7.feed(bytes);
-        backend.ingest_bytes(bytes);
+        let mut start = 0;
+        for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(query) = self.queries.step(byte) {
+                backend.ingest_bytes(&bytes[start..=index]);
+                backend.answer_query(&query);
+                start = index + 1;
+            }
+        }
+        if start < bytes.len() {
+            backend.ingest_bytes(&bytes[start..]);
+        }
     }
 
     /// The most recent working directory reported by the inner shell via OSC 7, if any.
@@ -213,6 +261,226 @@ impl Osc7Scanner {
     }
 }
 
+/// Streaming scanner for the DCS queries the router answers on the emulator's
+/// behalf: DECRQSS (`ESC P $ q <setting> ESC \`) and XTGETTCAP
+/// (`ESC P + q <hex names> ESC \`). Like [`Osc7Scanner`] it keeps state across
+/// read chunks; any other DCS (sixel, tmux passthrough, ...) is skipped without
+/// buffering.
+#[derive(Clone, Debug, Default)]
+struct DcsQueryScanner {
+    state: DcsState,
+    kind: u8,
+    buf: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DcsState {
+    #[default]
+    Ground,
+    /// Saw ESC; expecting `P` to enter a DCS.
+    Escape,
+    /// Saw `ESC P`; expecting the `$` or `+` intermediate.
+    Entry,
+    /// Saw the intermediate; expecting the `q` final byte.
+    Final,
+    /// Inside a recognised query; buffering its payload.
+    Collect,
+    /// Inside a recognised query and saw ESC; `\` terminates it.
+    CollectEscape,
+    /// Inside some other DCS; discarding until the terminator.
+    Skip,
+    /// Inside a skipped DCS and saw ESC.
+    SkipEscape,
+}
+
+/// Upper bound on a buffered query payload. Real queries are a few bytes; the
+/// cap bounds memory if one is never terminated.
+const DCS_QUERY_MAX_PAYLOAD: usize = 256;
+
+impl DcsQueryScanner {
+    /// Advance by one byte, returning a query when `byte` completes one.
+    fn step(&mut self, byte: u8) -> Option<TerminalQuery> {
+        const ESC: u8 = 0x1b;
+        const CAN: u8 = 0x18;
+        const SUB: u8 = 0x1a;
+        // CAN and SUB abort any control string.
+        if matches!(byte, CAN | SUB) {
+            self.state = DcsState::Ground;
+            return None;
+        }
+        match self.state {
+            DcsState::Ground => {
+                if byte == ESC {
+                    self.state = DcsState::Escape;
+                }
+            }
+            DcsState::Escape => {
+                self.state = match byte {
+                    b'P' => DcsState::Entry,
+                    ESC => DcsState::Escape,
+                    _ => DcsState::Ground,
+                };
+            }
+            DcsState::Entry => match byte {
+                b'$' | b'+' => {
+                    self.kind = byte;
+                    self.state = DcsState::Final;
+                }
+                ESC => self.state = DcsState::SkipEscape,
+                _ => self.state = DcsState::Skip,
+            },
+            DcsState::Final => match byte {
+                b'q' => {
+                    self.buf.clear();
+                    self.state = DcsState::Collect;
+                }
+                ESC => self.state = DcsState::SkipEscape,
+                _ => self.state = DcsState::Skip,
+            },
+            DcsState::Collect => match byte {
+                ESC => self.state = DcsState::CollectEscape,
+                _ if self.buf.len() >= DCS_QUERY_MAX_PAYLOAD => self.state = DcsState::Skip,
+                _ => self.buf.push(byte),
+            },
+            DcsState::CollectEscape => {
+                if byte == b'\\' {
+                    self.state = DcsState::Ground;
+                    let payload = std::mem::take(&mut self.buf);
+                    return Some(if self.kind == b'$' {
+                        TerminalQuery::RequestSetting(payload)
+                    } else {
+                        TerminalQuery::Termcap(payload)
+                    });
+                }
+                // ESC followed by anything else cancels the string; that ESC
+                // may itself start the next sequence.
+                self.state = if byte == ESC {
+                    DcsState::Escape
+                } else {
+                    DcsState::Ground
+                };
+            }
+            DcsState::Skip => {
+                if byte == ESC {
+                    self.state = DcsState::SkipEscape;
+                }
+            }
+            DcsState::SkipEscape => {
+                self.state = match byte {
+                    b'\\' => DcsState::Ground,
+                    ESC => DcsState::SkipEscape,
+                    _ => DcsState::Skip,
+                };
+            }
+        }
+        None
+    }
+}
+
+/// Terminfo capabilities Embers reports through XTGETTCAP, as the decoded
+/// strings a terminal would send. `Ms` tells programs such as Neovim that
+/// OSC 52 clipboard writes work; `Smulx` and `Setulc` that underline styles
+/// and colors do.
+const TERMCAP_ANSWERS: &[(&str, &str)] = &[
+    ("Ms", "\x1b]52;%p1%s;%p2%s\x07"),
+    ("Smulx", "\x1b[4:%p1%dm"),
+    (
+        "Setulc",
+        "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+    ),
+];
+
+fn hex_encode(bytes: &[u8], out: &mut String) {
+    use std::fmt::Write as _;
+    for byte in bytes {
+        let _ = write!(out, "{byte:02X}");
+    }
+}
+
+fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    hex.chunks(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
+}
+
+/// XTGETTCAP reply: one `DCS 1 + r name=value ST` per known name and
+/// `DCS 0 + r name ST` per unknown one, in request order.
+fn termcap_reply(payload: &[u8]) -> String {
+    let mut reply = String::new();
+    for hex_name in payload.split(|&byte| byte == b';') {
+        let decoded = hex_decode(hex_name).unwrap_or_default();
+        let value = TERMCAP_ANSWERS
+            .iter()
+            .find(|(known, _)| known.as_bytes() == decoded.as_slice())
+            .map(|(_, value)| *value);
+        // Echo the name back as hex, normalized to upper case.
+        let mut name = String::new();
+        hex_encode(&decoded, &mut name);
+        match value {
+            Some(value) => {
+                reply.push_str("\x1bP1+r");
+                reply.push_str(&name);
+                reply.push('=');
+                hex_encode(value.as_bytes(), &mut reply);
+            }
+            None => {
+                reply.push_str("\x1bP0+r");
+                reply.push_str(&name);
+            }
+        }
+        reply.push_str("\x1b\\");
+    }
+    reply
+}
+
+/// The SGR parameters (without `CSI` and `m`) that recreate `template`'s pen,
+/// for a DECRQSS reply. Always starts with `0` so the report is absolute.
+fn sgr_report(template: &Cell) -> String {
+    use std::fmt::Write as _;
+    let mut params = String::from("0");
+    let flags = template.flags;
+    for (flag, code) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::UNDERLINE, "4"),
+        (Flags::DOUBLE_UNDERLINE, "4:2"),
+        (Flags::UNDERCURL, "4:3"),
+        (Flags::DOTTED_UNDERLINE, "4:4"),
+        (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
+        if flags.contains(flag) {
+            params.push(';');
+            params.push_str(code);
+        }
+    }
+    for (color, base) in [
+        (Some(template.fg), 38),
+        (Some(template.bg), 48),
+        (template.underline_color(), 58),
+    ] {
+        match color.map(map_color) {
+            None | Some(TermColor::Default) => {}
+            Some(TermColor::Indexed(index)) => {
+                let _ = write!(params, ";{base}:5:{index}");
+            }
+            Some(TermColor::Rgb { r, g, b }) => {
+                let _ = write!(params, ";{base}:2::{r}:{g}:{b}");
+            }
+        }
+    }
+    params
+}
+
 /// Percent-decode a byte slice (`%XX` escapes) as used by `file://` URIs.
 fn percent_decode(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
@@ -273,6 +541,7 @@ struct BackendEventState {
     title: Option<String>,
     bell_pending: bool,
     pty_write: Vec<u8>,
+    clipboard: Option<ClipboardWrite>,
 }
 
 impl BackendEventProxy {
@@ -296,6 +565,22 @@ impl EventListener for BackendEventProxy {
             Event::ResetTitle => state.title = None,
             Event::Bell => state.bell_pending = true,
             Event::PtyWrite(text) => state.pty_write.extend_from_slice(text.as_bytes()),
+            // OSC 52 stores. Loads (clipboard queries) never get here: the
+            // emulator runs with `Osc52::OnlyCopy`, so it drops them unanswered.
+            Event::ClipboardStore(clipboard, text) => {
+                if text.len() > MAX_CLIPBOARD_WRITE_BYTES {
+                    debug!(
+                        bytes = text.len(),
+                        "dropping oversized OSC 52 clipboard write"
+                    );
+                    return;
+                }
+                let selection = match clipboard {
+                    ClipboardType::Clipboard => ClipboardSelection::Clipboard,
+                    ClipboardType::Selection => ClipboardSelection::Primary,
+                };
+                state.clipboard = Some(ClipboardWrite { selection, text });
+            }
             _ => {}
         }
     }
@@ -336,6 +621,10 @@ impl AlacrittyTerminalBackend {
             // Enable the kitty keyboard protocol so inner apps (e.g. nvim) can
             // push/pop/query disambiguation flags; the reply rides Event::PtyWrite.
             kitty_keyboard: true,
+            // Accept OSC 52 clipboard writes (forwarded to attached clients) but
+            // deny reads: answering one would hand whatever is on the clipboard
+            // to any program that asks, including one on a remote host.
+            osc52: Osc52::OnlyCopy,
             ..Config::default()
         };
 
@@ -423,6 +712,7 @@ impl AlacrittyTerminalBackend {
         let mut text = String::new();
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut styled = false;
+        let mut links = LineLinks::default();
 
         for column in 0..content_len {
             let cell = &row[Column(column)];
@@ -434,6 +724,8 @@ impl AlacrittyTerminalBackend {
             let fg = map_color(cell.fg);
             let bg = map_color(cell.bg);
             let attrs = map_attrs(flags);
+            let underline_color = cell.underline_color().map_or(TermColor::Default, map_color);
+            let link = links.index_of(cell.hyperlink());
 
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
@@ -441,12 +733,23 @@ impl AlacrittyTerminalBackend {
             emit_cell_text(cell, &mut text);
             let byte_len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
 
-            if fg != TermColor::Default || bg != TermColor::Default || attrs != CellAttrs::empty() {
+            if fg != TermColor::Default
+                || bg != TermColor::Default
+                || attrs != CellAttrs::empty()
+                || underline_color != TermColor::Default
+                || link != 0
+            {
                 styled = true;
             }
 
             match runs.last_mut() {
-                Some(last) if last.fg == fg && last.bg == bg && last.attrs == attrs => {
+                Some(last)
+                    if last.fg == fg
+                        && last.bg == bg
+                        && last.attrs == attrs
+                        && last.underline_color == underline_color
+                        && last.link == link =>
+                {
                     last.len += byte_len;
                 }
                 _ => runs.push(StyledRun {
@@ -454,6 +757,8 @@ impl AlacrittyTerminalBackend {
                     fg,
                     bg,
                     attrs,
+                    underline_color,
+                    link,
                 }),
             }
         }
@@ -464,7 +769,11 @@ impl AlacrittyTerminalBackend {
             runs.clear();
         }
 
-        SnapshotLine { text, runs }
+        SnapshotLine {
+            text,
+            runs,
+            links: links.table,
+        }
     }
 
     fn cursor_state(&self) -> Option<CursorState> {
@@ -609,7 +918,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         }
     }
 
-    fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
+    fn take_events(&mut self) -> BackendEvents {
         // Recover from a poisoned lock rather than crashing: the event state is
         // plain data, and dropping replies here would leave inner apps waiting on
         // query timeouts.
@@ -622,7 +931,31 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         } else {
             ActivityState::Activity
         };
-        (activity, std::mem::take(&mut state.pty_write))
+        BackendEvents {
+            activity,
+            replies: std::mem::take(&mut state.pty_write),
+            clipboard: state.clipboard.take(),
+        }
+    }
+
+    fn answer_query(&mut self, query: &TerminalQuery) {
+        let reply = match query {
+            // DECRQSS for SGR. Neovim sets `4:3` and asks this to learn whether
+            // the terminal keeps curly underlines before it uses them (and
+            // underline colors) under a TERM without `Smulx`.
+            TerminalQuery::RequestSetting(setting) if setting == b"m" => {
+                let pen = sgr_report(&self.term.grid().cursor.template);
+                format!("\x1bP1$r{pen}m\x1b\\")
+            }
+            // Any other setting: the "invalid request" reply.
+            TerminalQuery::RequestSetting(_) => "\x1bP0$r\x1b\\".to_owned(),
+            TerminalQuery::Termcap(payload) => termcap_reply(payload),
+        };
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pty_write
+            .extend_from_slice(reply.as_bytes());
     }
 
     fn take_damage(&mut self) -> BackendDamage {
@@ -639,6 +972,45 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         };
         self.term.reset_damage();
         damage
+    }
+}
+
+/// Per-line hyperlink table built during the row walk.
+#[derive(Default)]
+struct LineLinks {
+    table: Vec<Hyperlink>,
+    /// The emulator link most recently resolved and its index, so the cells of
+    /// one link (the common case) skip the table search.
+    last: Option<(AlacrittyHyperlink, u16)>,
+}
+
+impl LineLinks {
+    /// 1-based index of `link` in this line's table (`0` for no link), adding
+    /// it on first sight.
+    fn index_of(&mut self, link: Option<AlacrittyHyperlink>) -> u16 {
+        let Some(link) = link else {
+            return 0;
+        };
+        if let Some((last, index)) = &self.last
+            && *last == link
+        {
+            return *index;
+        }
+        let mapped = Hyperlink {
+            id: Some(link.id().to_owned()),
+            uri: link.uri().to_owned(),
+        };
+        let index = match self.table.iter().position(|known| *known == mapped) {
+            Some(position) => position + 1,
+            None => {
+                self.table.push(mapped);
+                self.table.len()
+            }
+        };
+        // A row holds at most `u16::MAX` cells, so the index always fits.
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        self.last = Some((link, index));
+        index
     }
 }
 
@@ -741,13 +1113,18 @@ fn map_attrs(flags: Flags) -> CellAttrs {
     if flags.contains(Flags::ITALIC) {
         attrs.insert(CellAttrs::ITALIC);
     }
-    if flags.intersects(
-        Flags::UNDERLINE | Flags::UNDERCURL | Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE,
-    ) {
-        attrs.insert(CellAttrs::UNDERLINE);
-    }
-    if flags.contains(Flags::DOUBLE_UNDERLINE) {
-        attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
+    // The emulator keeps at most one underline flag set per cell (SGR 4:n
+    // replaces the previous style), so each maps onto its own exclusive flag.
+    for (flag, attr) in [
+        (Flags::UNDERLINE, CellAttrs::UNDERLINE),
+        (Flags::DOUBLE_UNDERLINE, CellAttrs::DOUBLE_UNDERLINE),
+        (Flags::UNDERCURL, CellAttrs::CURLY_UNDERLINE),
+        (Flags::DOTTED_UNDERLINE, CellAttrs::DOTTED_UNDERLINE),
+        (Flags::DASHED_UNDERLINE, CellAttrs::DASHED_UNDERLINE),
+    ] {
+        if flags.contains(flag) {
+            attrs.insert(attr);
+        }
     }
     if flags.contains(Flags::INVERSE) {
         attrs.insert(CellAttrs::INVERSE);
@@ -766,12 +1143,13 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AlacrittyTerminalBackend, BackendDamage, BackendMetadata, BackendScrollbackSlice,
-        RawByteRouter, TerminalBackend,
+        AlacrittyTerminalBackend, BackendDamage, BackendEvents, BackendMetadata,
+        BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalQuery,
     };
     use crate::config::DEFAULT_MAX_SCROLLBACK_LINES;
     use embers_core::{
-        ActivityState, CellAttrs, CursorShape, PtySize, SnapshotLine, TermColor, TerminalSnapshot,
+        ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorShape, PtySize,
+        SnapshotLine, TermColor, TerminalSnapshot,
     };
 
     fn backend(size: PtySize) -> AlacrittyTerminalBackend {
@@ -781,6 +1159,8 @@ mod tests {
     #[derive(Default)]
     struct StubBackend {
         ingested: Vec<u8>,
+        /// Each query with how many bytes had been ingested when it was asked.
+        queries: Vec<(usize, TerminalQuery)>,
     }
 
     impl TerminalBackend for StubBackend {
@@ -827,8 +1207,16 @@ mod tests {
             BackendMetadata::default()
         }
 
-        fn take_events(&mut self) -> (ActivityState, Vec<u8>) {
-            (ActivityState::Activity, Vec::new())
+        fn take_events(&mut self) -> BackendEvents {
+            BackendEvents {
+                activity: ActivityState::Activity,
+                replies: Vec::new(),
+                clipboard: None,
+            }
+        }
+
+        fn answer_query(&mut self, query: &TerminalQuery) {
+            self.queries.push((self.ingested.len(), query.clone()));
         }
 
         fn take_damage(&mut self) -> BackendDamage {
@@ -910,6 +1298,96 @@ mod tests {
 
         let line = first_line(&backend, size);
         assert_eq!(line.runs[0].fg, TermColor::Indexed(9));
+    }
+
+    #[test]
+    fn underline_styles_keep_their_shape() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        // Single, double, curly, dotted, dashed: one cell each.
+        backend.ingest_bytes(b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "abcde");
+        let attrs: Vec<_> = line.runs.iter().map(|run| run.attrs).collect();
+        assert_eq!(
+            attrs,
+            vec![
+                CellAttrs(CellAttrs::UNDERLINE),
+                CellAttrs(CellAttrs::DOUBLE_UNDERLINE),
+                CellAttrs(CellAttrs::CURLY_UNDERLINE),
+                CellAttrs(CellAttrs::DOTTED_UNDERLINE),
+                CellAttrs(CellAttrs::DASHED_UNDERLINE),
+            ]
+        );
+    }
+
+    #[test]
+    fn underline_color_is_carried_semantically() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        // Curly underline in true-color red, then an indexed underline color,
+        // then SGR 59 resets the underline color back to the foreground.
+        backend.ingest_bytes(b"\x1b[4:3;58:2::255:0:0mab\x1b[58:5:12mc\x1b[59md\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "abcd");
+        assert_eq!(line.runs.len(), 3);
+        assert_eq!(line.runs[0].len, 2);
+        assert!(line.runs[0].attrs.contains(CellAttrs::CURLY_UNDERLINE));
+        assert_eq!(
+            line.runs[0].underline_color,
+            TermColor::Rgb { r: 255, g: 0, b: 0 }
+        );
+        assert_eq!(line.runs[1].underline_color, TermColor::Indexed(12));
+        assert_eq!(line.runs[2].underline_color, TermColor::Default);
+        assert!(line.runs[2].attrs.contains(CellAttrs::CURLY_UNDERLINE));
+    }
+
+    #[test]
+    fn osc8_hyperlinks_become_per_line_link_table() {
+        let size = PtySize::new(20, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(
+            b"\x1b]8;id=a;https://a.example\x1b\\one\x1b]8;;\x1b\\ \
+              \x1b]8;;https://b.example\x07two\x1b]8;;\x07 \
+              \x1b]8;id=a;https://a.example\x1b\\three\x1b]8;;\x1b\\",
+        );
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "one two three");
+        assert_eq!(line.links.len(), 2, "a repeated link is listed once");
+        assert_eq!(line.links[0].id.as_deref(), Some("a"));
+        assert_eq!(line.links[0].uri, "https://a.example");
+        assert_eq!(line.links[1].uri, "https://b.example");
+
+        let spans: Vec<_> = line.runs.iter().map(|run| (run.len, run.link)).collect();
+        assert_eq!(spans, vec![(3, 1), (1, 0), (3, 2), (1, 0), (5, 1)]);
+        assert_eq!(
+            line.link(&line.runs[4]).map(|link| link.uri.as_str()),
+            Some("https://a.example")
+        );
+        // Linked text with otherwise default styling is still a styled line.
+        assert!(line.runs.iter().all(|run| run.attrs == CellAttrs::empty()));
+    }
+
+    #[test]
+    fn plain_lines_carry_no_link_table() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b[31mred\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert!(line.links.is_empty());
+        assert!(line.runs.iter().all(|run| run.link == 0));
     }
 
     #[test]
@@ -1184,11 +1662,11 @@ mod tests {
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_events().0, ActivityState::Bell);
+        assert_eq!(backend.take_events().activity, ActivityState::Bell);
 
         let metadata = backend.metadata();
         assert_eq!(metadata.title.as_deref(), Some("embers"));
-        assert_eq!(backend.take_events().0, ActivityState::Activity);
+        assert_eq!(backend.take_events().activity, ActivityState::Activity);
     }
 
     #[test]
@@ -1198,13 +1676,13 @@ mod tests {
 
         backend.ingest_bytes(b"\x1b[c");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         assert!(text.starts_with("\x1b[?"), "reply: {text:?}");
         assert!(text.ends_with('c'), "reply: {text:?}");
 
         // Drained: a second call returns nothing.
-        assert!(backend.take_events().1.is_empty());
+        assert!(backend.take_events().replies.is_empty());
     }
 
     #[test]
@@ -1214,7 +1692,7 @@ mod tests {
 
         backend.ingest_bytes(b"ab\x1b[6n");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         // Cursor sits after "ab" on row 1: CPR is ESC [ <row> ; <col> R.
         assert_eq!(text, "\x1b[1;3R", "reply: {text:?}");
@@ -1227,7 +1705,7 @@ mod tests {
 
         backend.ingest_bytes(b"\x1b[?2004h\x1b[?2004$p");
 
-        let reply = backend.take_events().1;
+        let reply = backend.take_events().replies;
         let text = String::from_utf8(reply).expect("reply is utf8");
         assert!(text.starts_with("\x1b[?2004;"), "reply: {text:?}");
         assert!(text.ends_with("$y"), "reply: {text:?}");
@@ -1244,9 +1722,126 @@ mod tests {
         assert_eq!(metadata.title.as_deref(), Some("embers"));
 
         // A single drain returns both the bell activity and the accumulated reply.
-        let (activity, reply) = backend.take_events();
-        assert_eq!(activity, ActivityState::Bell);
-        assert!(!reply.is_empty(), "device-attributes reply should survive");
+        let events = backend.take_events();
+        assert_eq!(events.activity, ActivityState::Bell);
+        assert!(
+            !events.replies.is_empty(),
+            "device-attributes reply should survive"
+        );
+    }
+
+    #[test]
+    fn osc52_store_surfaces_as_a_clipboard_write() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        // "hi" in base64, to the clipboard; then "yo" to the primary selection,
+        // which replaces it within one drain.
+        backend.ingest_bytes(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(
+            backend.take_events().clipboard,
+            Some(ClipboardWrite {
+                selection: ClipboardSelection::Clipboard,
+                text: "hi".to_owned(),
+            })
+        );
+        assert_eq!(backend.take_events().clipboard, None, "drained");
+
+        backend.ingest_bytes(b"\x1b]52;c;aGk=\x1b\\\x1b]52;p;eW8=\x1b\\");
+        assert_eq!(
+            backend.take_events().clipboard,
+            Some(ClipboardWrite {
+                selection: ClipboardSelection::Primary,
+                text: "yo".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn router_splits_output_after_each_dcs_query() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // A DECRQSS split across chunks, then an XTGETTCAP, then a sixel DCS
+        // (not a query) and trailing text.
+        router.route_output(&mut backend, b"a\x1b[4:3m\x1bP$");
+        router.route_output(&mut backend, b"qm\x1b\\b\x1bP+q4D73;5463\x1b\\");
+        router.route_output(&mut backend, b"\x1bPq#0;2;0;0;0\x1b\\c");
+
+        assert_eq!(
+            backend.queries,
+            vec![
+                (
+                    b"a\x1b[4:3m\x1bP$qm\x1b\\".len(),
+                    TerminalQuery::RequestSetting(b"m".to_vec())
+                ),
+                (
+                    b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\".len(),
+                    TerminalQuery::Termcap(b"4D73;5463".to_vec())
+                ),
+            ]
+        );
+        // Every byte still reaches the backend, in order.
+        assert!(backend.ingested.ends_with(b"\x1b\\c"));
+        assert_eq!(
+            backend.ingested.len(),
+            b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\\x1bPq#0;2;0;0;0\x1b\\c".len()
+        );
+    }
+
+    #[test]
+    fn decrqss_sgr_reports_the_current_pen() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut router = RawByteRouter::default();
+        let _ = backend.take_damage();
+
+        // Neovim's undercurl probe: set a curly underline, then ask for SGR.
+        router.route_output(&mut backend, b"\x1b[0m\x1b[4:3m\x1bP$qm\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(reply, "\x1bP1$r0;4:3m\x1b\\");
+
+        router.route_output(
+            &mut backend,
+            b"\x1b[0;1;38;5;208;58:2::255:0:0m\x1bP$qm\x1b\\\x1b[0m\x1bP$qm\x1b\\",
+        );
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(
+            reply,
+            "\x1bP1$r0;1;38:5:208;58:2::255:0:0m\x1b\\\x1bP1$r0m\x1b\\"
+        );
+
+        // Settings other than SGR get the "invalid request" reply.
+        router.route_output(&mut backend, b"\x1bP$qr\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(reply, "\x1bP0$r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_advertises_clipboard_and_underline_capabilities() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut router = RawByteRouter::default();
+        let _ = backend.take_damage();
+
+        // "Ms" (as Neovim sends it) and an unknown "TN".
+        router.route_output(&mut backend, b"\x1bP+q4D73;544e\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        let mut expected_ms = String::from("\x1bP1+r4D73=");
+        for byte in b"\x1b]52;%p1%s;%p2%s\x07" {
+            expected_ms.push_str(&format!("{byte:02X}"));
+        }
+        expected_ms.push_str("\x1b\\");
+        assert_eq!(reply, format!("{expected_ms}\x1bP0+r544E\x1b\\"));
+    }
+
+    #[test]
+    fn osc52_query_is_denied_without_a_reply() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b]52;c;?\x07");
+
+        let events = backend.take_events();
+        assert_eq!(events.clipboard, None);
+        assert!(events.replies.is_empty(), "replies: {:?}", events.replies);
     }
 
     #[test]
