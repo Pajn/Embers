@@ -54,6 +54,21 @@ enum NodeOwnerSnapshot {
     },
 }
 
+/// What [`ServerState::dispose_exited_buffers`] cleaned up.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DisposedBuffers {
+    /// Buffers whose records were removed.
+    pub removed_buffers: Vec<BufferId>,
+    /// Sessions in which a view was closed.
+    pub changed_sessions: BTreeSet<SessionId>,
+}
+
+impl DisposedBuffers {
+    pub fn is_empty(&self) -> bool {
+        self.removed_buffers.is_empty() && self.changed_sessions.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerState {
     pub sessions: BTreeMap<SessionId, Session>,
@@ -476,6 +491,58 @@ impl ServerState {
         self.buffers
             .remove(&buffer_id)
             .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))
+    }
+
+    /// Clean up PTY buffers whose command has exited, like tmux with
+    /// `remain-on-exit off`:
+    ///
+    /// - an attached exited buffer has its view closed and its record removed,
+    ///   unless it [remains on exit](Buffer::remains_on_exit), in which case it
+    ///   stays in its view until that view is closed
+    /// - a detached exited buffer has its record removed, unless it has never
+    ///   been attached: buffers are created detached and attached by a later
+    ///   request, and one whose command exits in between is kept until it is
+    ///   shown
+    ///
+    /// Run after every change that can exit, attach or detach a buffer.
+    pub fn dispose_exited_buffers(&mut self) -> DisposedBuffers {
+        let mut disposed = DisposedBuffers::default();
+        let exited = self
+            .buffers
+            .values()
+            .filter(|buffer| {
+                matches!(buffer.kind, BufferKind::Pty)
+                    && matches!(buffer.state, BufferState::Exited(_))
+            })
+            .map(|buffer| {
+                (
+                    buffer.id,
+                    buffer.attachment.clone(),
+                    buffer.ever_attached,
+                    buffer.remains_on_exit(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (buffer_id, attachment, ever_attached, remains_on_exit) in exited {
+            match attachment {
+                BufferAttachment::Attached(_) if remains_on_exit => continue,
+                BufferAttachment::Attached(view_id) => {
+                    let Ok(session_id) = self.node_session_id(view_id) else {
+                        continue;
+                    };
+                    if self.close_node(view_id).is_err() {
+                        continue;
+                    }
+                    disposed.changed_sessions.insert(session_id);
+                }
+                BufferAttachment::Detached if !ever_attached => continue,
+                BufferAttachment::Detached => {}
+            }
+            if self.remove_buffer(buffer_id).is_ok() {
+                disposed.removed_buffers.push(buffer_id);
+            }
+        }
+        disposed
     }
 
     pub fn mark_buffer_running(&mut self, buffer_id: BufferId, pid: Option<u32>) -> Result<()> {
@@ -1381,7 +1448,14 @@ impl ServerState {
             }
         }
 
-        self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Attached(node_id);
+        self.set_buffer_attached(buffer_id, node_id)?;
+        Ok(())
+    }
+
+    fn set_buffer_attached(&mut self, buffer_id: BufferId, view_id: NodeId) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        buffer.attachment = BufferAttachment::Attached(view_id);
+        buffer.ever_attached = true;
         Ok(())
     }
 
@@ -1715,7 +1789,7 @@ impl ServerState {
                 }
                 return Err(error);
             }
-            self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Attached(new_view);
+            self.set_buffer_attached(buffer_id, new_view)?;
         }
         self.normalize_zoomed_node(target_session)?;
         Ok(())

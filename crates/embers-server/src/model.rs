@@ -89,7 +89,18 @@ pub struct Buffer {
     pub kind: BufferKind,
     pub pipe: Option<BufferPipe>,
     pub created_at: Timestamp,
+    /// Whether the buffer has been shown in a view since it was created. A
+    /// buffer is created detached and attached by a later request, so an exit
+    /// before its first attachment does not remove it (see
+    /// [`ServerState::dispose_exited_buffers`](crate::ServerState::dispose_exited_buffers)).
+    /// Not persisted: restored buffers start out as never shown.
+    pub ever_attached: bool,
 }
+
+/// Buffer option that keeps an exited buffer in its view instead of closing
+/// the view, like tmux's `remain-on-exit`: `on` always, `failed` only when the
+/// command did not exit with status 0. Any other value, or none, means off.
+pub const REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
 
 impl Buffer {
     pub(crate) fn new(
@@ -116,6 +127,24 @@ impl Buffer {
             kind: BufferKind::Pty,
             pipe: None,
             created_at: Timestamp::now(),
+            ever_attached: false,
+        }
+    }
+
+    /// Whether this buffer stays in its view after its command exits, per its
+    /// [`REMAIN_ON_EXIT_OPTION`].
+    pub fn remains_on_exit(&self) -> bool {
+        match self
+            .user_options
+            .get(REMAIN_ON_EXIT_OPTION)
+            .map(String::as_str)
+        {
+            Some("on") => true,
+            Some("failed") => match &self.state {
+                BufferState::Exited(exited) => exited.exit_code != Some(0),
+                _ => true,
+            },
+            _ => false,
         }
     }
 
@@ -147,10 +176,13 @@ impl fmt::Debug for Buffer {
             .field("kind", &self.kind)
             .field("pipe", &self.pipe)
             .field("created_at", &self.created_at)
+            .field("ever_attached", &self.ever_attached)
             .finish()
     }
 }
 
+// `ever_attached` is left out: it is bookkeeping that is not persisted, so a
+// saved and restored buffer still compares equal to the original.
 impl PartialEq for Buffer {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id

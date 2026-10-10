@@ -38,9 +38,50 @@ Killing a buffer targets the runtime, not the view tree.
 
 - the PTY child is terminated
 - the buffer transitions to `Exited`
-- if the buffer was still attached, it remains `Attached(NodeId)` until that view is later closed or replaced
-- capture remains available from the terminal backend snapshot state
-- the buffer record may later be cleaned up once it is detached
+- from there the buffer is cleaned up like any buffer whose command exited (see below)
+
+## Kill commands
+
+The protocol keeps the two operations apart: closing a view (`NodeRequest::Close`,
+`SessionRequest::CloseRootTab`, `SessionRequest::Close`, `FloatingRequest::Close`) only detaches
+buffers, and `BufferRequest::Kill` only ends a buffer's program. The user-facing kill commands
+combine them, the way tmux users expect `kill-pane` to end the program in the pane:
+
+- `kill-pane`, `kill-window`, `kill-session` and `kill-popup` close the view, then kill every
+  buffer it showed that is still detached and running. A buffer that something attached again in
+  between is shown elsewhere and keeps running. The killed buffers exit and are then removed.
+- `--detach` on any of them only closes the view, so its buffers keep running detached and can be
+  listed and attached again (`list-buffers --detached`, `attach-buffer`).
+
+The config API offers the same choice: `action.kill_view()` / `action.kill_node(id)` and
+`action.kill_floating()` / `action.kill_floating_id(id)` close and kill, while
+`action.close_view()`, `action.close_node(id)`, `action.close_floating()` and
+`action.close_floating_id(id)` only detach. `action.kill_buffer()` kills a buffer's program and
+leaves its view to close when the buffer exits.
+
+## When a buffer's command exits
+
+An exited buffer is cleaned up the way tmux closes a pane whose program exits (`remain-on-exit
+off`):
+
+- an attached buffer has its view closed and its record removed
+- a detached buffer has its record removed
+- once a buffer record is removed, its runtime handle is released and its keeper exits
+
+Captures keep working for as long as the record exists, so a buffer that should stay readable
+after its command exits has to be kept:
+
+- the `remain-on-exit` buffer option (`embers buffer set-option -t <pane> remain-on-exit on`)
+  keeps an attached exited buffer in its view as a dead pane, still capturable; `failed` keeps it
+  only when the command did not exit with status 0. Closing the dead pane's view removes the
+  record. The option does not keep a detached buffer.
+- a buffer that exits before it has ever been attached is kept: buffers are created detached and
+  attached by a later request, so a command that ends at once must not take its record with it.
+  Once attached it is cleaned up like any other exited buffer, so its pane closes right away
+  unless `remain-on-exit` is set.
+
+Cleanup runs when a buffer exits and after every request that can attach or detach a buffer.
+Helper buffers (history views) have no command and are not affected.
 
 ## Attachment and move semantics
 
@@ -112,15 +153,27 @@ The intended transition graph is:
 - `Running -> Exited` when the child process terminates normally or is explicitly killed
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
 - `Interrupted -> Running` when restore starts a fresh process for that buffer (see below)
-- `Exited -> cleaned up` when a detached exited buffer is removed from server state
+- `Exited -> cleaned up` when the exited buffer's record is removed from server state: at exit
+  (closing its view if it has one), or later when the view of a `remain-on-exit` dead pane closes
+  or a buffer that exited before it was first shown gets attached
 
 ## Keeper process lifetime
 
 Each PTY runs inside a runtime keeper process that owns the PTY and serves captures over a
 socket in the server's runtime directory.
 
-- a clean server shutdown leaves keepers running, so a restarted server can reattach through
-  their sockets and restore `Running` buffers
+- spawning a buffer waits until its keeper reports, on its stdout, that its socket is listening
+  and its child is running, or why it failed to start; the server only connects after that
+  report, so it never sees a socket that exists but does not accept connections yet
+- the server reaps every keeper process it spawned once that keeper exits, so keepers that exit
+  while the server runs do not linger as zombies; keepers that outlive the server are reparented
+  and reaped by the system
+- a clean server shutdown (a signal to the server process) leaves keepers running, so a restarted
+  server can reattach through their sockets and restore `Running` buffers
+- `kill-server` (`ClientMessage::KillServer`) instead tells every keeper to stop its child
+  (SIGHUP, then SIGKILL) and exit, stops the server and deletes the saved workspace, so a server
+  started afterwards begins empty, as after tmux's `kill-server`. The command returns once the
+  server no longer accepts connections, and never starts a server.
 - a keeper keeps serving captures after its child exits while a server stays attached to it
 - once no server is attached, a keeper whose child has exited has nothing left to reattach to
   and exits; a restarted server keeps the buffer record as `Exited`
@@ -148,7 +201,7 @@ made before it fires. Output and activity alone never trigger a save. A write wh
 the previous one is skipped. Each write goes to a temp file next to the workspace file, is fsynced,
 renamed over it, and the directory is fsynced, so a crash leaves either the previous file or the new
 one. A crash or SIGKILL of the server therefore loses at most the changes of the last batch. A clean
-shutdown writes the final state once more.
+shutdown writes the final state once more; `kill-server` deletes the workspace file instead.
 
 ## Restore after keepers are gone
 

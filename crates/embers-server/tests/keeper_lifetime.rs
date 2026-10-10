@@ -3,7 +3,8 @@
 
 use embers_core::{RequestId, init_test_tracing};
 use embers_protocol::{
-    BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ProtocolClient, ServerResponse,
+    BufferRecordState, BufferRequest, BufferResponse, ClientMessage, KillServerRequest,
+    ProtocolClient, ServerResponse,
 };
 use embers_server::{Server, ServerConfig};
 use tempfile::tempdir;
@@ -237,4 +238,189 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
     .buffer;
     assert_eq!(restored.state, BufferRecordState::Exited);
     handle.shutdown().await.expect("shutdown restarted server");
+}
+
+/// Unlike a clean shutdown, `kill-server` ends every buffer's program and
+/// keeper and leaves nothing for a restarted server to restore.
+#[tokio::test]
+async fn kill_server_ends_programs_and_keepers_and_forgets_the_workspace() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let workspace_path = config.workspace_path.clone();
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(401),
+            title: Some("doomed".to_owned()),
+            // Ignores SIGHUP, so the keeper has to escalate to SIGKILL.
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "trap '' HUP; while :; do sleep 1; done".to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(402), buffer.id).await;
+    let shell_pid = running.pid.expect("running buffer reports its pid");
+    let keeper_pid = parent_pid(shell_pid).filter(|&pid| pid != std::process::id());
+
+    match client
+        .request(&ClientMessage::KillServer(KillServerRequest {
+            request_id: RequestId(403),
+        }))
+        .await
+        .expect("kill-server request succeeds")
+    {
+        ServerResponse::Ok(_) => {}
+        other => panic!("expected ok response, got {other:?}"),
+    }
+    tokio::time::timeout(Duration::from_secs(10), handle.stopped())
+        .await
+        .expect("server stops after kill-server");
+    drop(client);
+    handle.shutdown().await.expect("server finishes stopping");
+
+    assert!(
+        wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
+        "shell {shell_pid} still running after kill-server"
+    );
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after kill-server"
+        );
+    }
+    assert!(
+        !workspace_path.exists(),
+        "kill-server leaves no workspace to restore"
+    );
+
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    match client
+        .request(&ClientMessage::Buffer(BufferRequest::List {
+            request_id: RequestId(404),
+            session_id: None,
+            attached_only: false,
+            detached_only: false,
+        }))
+        .await
+        .expect("list buffers")
+    {
+        ServerResponse::Buffers(response) => assert!(response.buffers.is_empty()),
+        other => panic!("expected buffers response, got {other:?}"),
+    }
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+}
+
+/// Whether `pid` still has a process table entry, zombie or not.
+fn process_listed(pid: u32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+}
+
+/// A keeper that exits while the server that spawned it keeps running must be
+/// reaped, not left behind as a zombie.
+#[tokio::test]
+async fn exited_keepers_are_reaped_while_the_server_runs() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let handle = Server::new(ServerConfig::new(socket_path.clone()))
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let session_id = match client
+        .request(&ClientMessage::Session(
+            embers_protocol::SessionRequest::Create {
+                request_id: RequestId(501),
+                name: "main".to_owned(),
+            },
+        ))
+        .await
+        .expect("create session")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot.session.id,
+        other => panic!("expected session snapshot, got {other:?}"),
+    };
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(502),
+            title: Some("short".to_owned()),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 1".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(503), buffer.id).await;
+    let shell_pid = running.pid.expect("running buffer reports its pid");
+    let Some(keeper_pid) = parent_pid(shell_pid).filter(|&pid| pid != std::process::id()) else {
+        // An in-process keeper thread has no process to reap.
+        drop(client);
+        handle.shutdown().await.expect("shutdown server");
+        return;
+    };
+    // Shown in a pane, so its exit closes the pane and releases the keeper.
+    match client
+        .request(&ClientMessage::Session(
+            embers_protocol::SessionRequest::AddRootTab {
+                request_id: RequestId(504),
+                session_id,
+                title: "short".to_owned(),
+                buffer_id: Some(buffer.id),
+                child_node_id: None,
+            },
+        ))
+        .await
+        .expect("add root tab")
+    {
+        ServerResponse::SessionSnapshot(_) => {}
+        other => panic!("expected session snapshot, got {other:?}"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_listed(keeper_pid) {
+        assert!(
+            Instant::now() < deadline,
+            "keeper {keeper_pid} was not reaped (zombie: {})",
+            !process_alive(keeper_pid)
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
 }

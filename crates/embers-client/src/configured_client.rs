@@ -8,13 +8,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, FloatGeometry, MuxError, NodeId, Point, PtySize,
-    Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, FloatGeometry, FloatingId, MuxError, NodeId,
+    Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
-    BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
-    ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent, ServerResponse,
-    SessionRequest,
+    BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
+    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent,
+    ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
@@ -1196,25 +1196,25 @@ where
             Action::CloseFloating {
                 floating_id: Some(floating_id),
             } => {
-                self.client
-                    .request_message(ClientMessage::Floating(FloatingRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        floating_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await?;
+                self.close_floating(floating_id, false).await?;
+                Ok(None)
+            }
+            Action::KillFloating {
+                floating_id: Some(floating_id),
+            } => {
+                self.close_floating(floating_id, true).await?;
                 Ok(None)
             }
             Action::CloseView {
                 node_id: Some(node_id),
             } => {
-                self.client
-                    .request_message(ClientMessage::Node(NodeRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        node_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await?;
+                self.close_view(node_id, false).await?;
+                Ok(None)
+            }
+            Action::KillView {
+                node_id: Some(node_id),
+            } => {
+                self.close_view(node_id, true).await?;
                 Ok(None)
             }
             Action::KillBuffer {
@@ -1422,6 +1422,83 @@ where
             self.clear_copy_views().await?;
         }
         Ok(actions)
+    }
+
+    /// Close a view. With `kill`, also end the programs of the buffers it
+    /// showed; otherwise they keep running, detached.
+    async fn close_view(&mut self, node_id: NodeId, kill: bool) -> Result<()> {
+        let shown = buffer_ids_in_subtree(self.client.state().nodes.values(), node_id);
+        self.client
+            .request_message(ClientMessage::Node(NodeRequest::Close {
+                request_id: self.client.next_request_id(),
+                node_id,
+            }))
+            .await?;
+        if kill {
+            self.kill_detached_buffers(shown).await?;
+        }
+        self.client.resync_all_sessions().await
+    }
+
+    /// Close a floating window. With `kill`, also end the programs of the
+    /// buffers it showed; otherwise they keep running, detached.
+    async fn close_floating(&mut self, floating_id: FloatingId, kill: bool) -> Result<()> {
+        let shown = self
+            .client
+            .state()
+            .floating
+            .get(&floating_id)
+            .map(|floating| {
+                buffer_ids_in_subtree(self.client.state().nodes.values(), floating.root_node_id)
+            })
+            .unwrap_or_default();
+        self.client
+            .request_message(ClientMessage::Floating(FloatingRequest::Close {
+                request_id: self.client.next_request_id(),
+                floating_id,
+            }))
+            .await?;
+        if kill {
+            self.kill_detached_buffers(shown).await?;
+        }
+        self.client.resync_all_sessions().await
+    }
+
+    /// End the programs of buffers whose views were just closed. Each is
+    /// detached by then; one that is attached again by the time it is checked
+    /// is shown somewhere else and keeps running, and one whose program already
+    /// ended needs nothing.
+    async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
+        for buffer_id in buffer_ids {
+            let buffer = match self
+                .client
+                .request_message(ClientMessage::Buffer(BufferRequest::Get {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                }))
+                .await
+            {
+                Ok(ServerResponse::Buffer(response)) => response.buffer,
+                Ok(_) | Err(MuxError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if buffer.attachment_node_id.is_some() || buffer.state != BufferRecordState::Running {
+                continue;
+            }
+            match self
+                .client
+                .request_message(ClientMessage::Buffer(BufferRequest::Kill {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    force: false,
+                }))
+                .await
+            {
+                Ok(_) | Err(MuxError::NotFound(_) | MuxError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn execute_action(
@@ -1764,28 +1841,20 @@ where
                 .await
             }
             Action::CloseFloating { floating_id } => {
-                let floating_id = floating_id
-                    .or_else(|| presentation.focused_floating_id())
-                    .ok_or_else(|| MuxError::invalid_input("no floating window is focused"))?;
-                self.client
-                    .request_message(ClientMessage::Floating(FloatingRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        floating_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await
+                let floating_id = focused_floating_target(floating_id, presentation)?;
+                self.close_floating(floating_id, false).await
+            }
+            Action::KillFloating { floating_id } => {
+                let floating_id = focused_floating_target(floating_id, presentation)?;
+                self.close_floating(floating_id, true).await
             }
             Action::CloseView { node_id } => {
-                let node_id = node_id
-                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
-                    .ok_or_else(|| MuxError::invalid_input("no focused node to close"))?;
-                self.client
-                    .request_message(ClientMessage::Node(NodeRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        node_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await
+                let node_id = focused_view_target(node_id, presentation)?;
+                self.close_view(node_id, false).await
+            }
+            Action::KillView { node_id } => {
+                let node_id = focused_view_target(node_id, presentation)?;
+                self.close_view(node_id, true).await
             }
             Action::InsertTabAfter {
                 tabs_node_id,
@@ -4517,6 +4586,28 @@ fn action_is_local_terminal_action(action: &Action) -> bool {
         | Action::CancelSelection => true,
         _ => false,
     }
+}
+
+/// The floating window a close or kill action targets: the given one, or the
+/// focused one.
+fn focused_floating_target(
+    floating_id: Option<FloatingId>,
+    presentation: &PresentationModel,
+) -> Result<FloatingId> {
+    floating_id
+        .or_else(|| presentation.focused_floating_id())
+        .ok_or_else(|| MuxError::invalid_input("no floating window is focused"))
+}
+
+/// The view a close or kill action targets: the given node, or the focused
+/// leaf.
+fn focused_view_target(
+    node_id: Option<NodeId>,
+    presentation: &PresentationModel,
+) -> Result<NodeId> {
+    node_id
+        .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+        .ok_or_else(|| MuxError::invalid_input("no focused node to close"))
 }
 
 fn action_requires_local_context(action: &Action) -> bool {

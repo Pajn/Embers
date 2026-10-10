@@ -80,6 +80,14 @@ pub enum Action {
     CloseView {
         node_id: Option<NodeId>,
     },
+    /// Close a floating window and end the programs of the buffers it shows.
+    KillFloating {
+        floating_id: Option<FloatingId>,
+    },
+    /// Close a view and end the programs of the buffers it shows.
+    KillView {
+        node_id: Option<NodeId>,
+    },
     KillBuffer {
         buffer_id: Option<BufferId>,
     },

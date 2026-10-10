@@ -92,6 +92,24 @@ async fn create_buffer_with_command(
     }
 }
 
+/// Keep `buffer_id` in its pane after its command exits (`remain-on-exit on`),
+/// so a test can still render the output of a command that has finished.
+async fn remain_on_exit(connection: &mut TestConnection, buffer_id: BufferId) {
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id,
+            key: "remain-on-exit".to_owned(),
+            value: Some("on".to_owned()),
+        }))
+        .await
+        .expect("set remain-on-exit succeeds");
+    assert!(
+        matches!(response, ServerResponse::Buffer(_)),
+        "expected buffer response, got {response:?}"
+    );
+}
+
 async fn session_snapshot_by_name(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::List {
@@ -1066,6 +1084,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "3.0"),
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1137,6 +1156,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         ),
     )
     .await;
+    remain_on_exit(&mut connection, hidden_buffer.id).await;
     let fixture = create_hidden_tab_fixture_with_buffer(&mut connection, hidden_buffer).await;
 
     wait_for_visible_snapshot(
@@ -1210,6 +1230,7 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         ],
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1265,6 +1286,8 @@ async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
         vec!["/bin/sh".to_owned(), "-lc".to_owned(), script.to_owned()],
     )
     .await;
+    // The script may finish before the pane is rendered.
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),

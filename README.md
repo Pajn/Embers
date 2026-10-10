@@ -101,6 +101,12 @@ Useful subcommand groups include:
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
 - `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
+- `server`: `kill-server` (stop the server and every program it runs)
+
+As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
+programs they show; pass `--detach` to keep them running as detached buffers
+instead. A pane closes when its program exits, unless its buffer has
+`remain-on-exit` set (`embers buffer set-option remain-on-exit on`).
 
 ## Logging
 

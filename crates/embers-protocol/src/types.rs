@@ -12,6 +12,13 @@ pub struct PingRequest {
     pub payload: String,
 }
 
+/// Stop the server and end every buffer's program and runtime keeper, unlike
+/// a clean shutdown, which leaves keepers running for the next server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillServerRequest {
+    pub request_id: RequestId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PingResponse {
     pub request_id: RequestId,
@@ -673,12 +680,14 @@ pub enum ClientMessage {
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     Client(ClientRequest),
+    KillServer(KillServerRequest),
 }
 
 impl ClientMessage {
     pub fn request_id(&self) -> RequestId {
         match self {
             Self::Ping(request) => request.request_id,
+            Self::KillServer(request) => request.request_id,
             Self::Session(request) => request.request_id(),
             Self::Buffer(request) => request.request_id(),
             Self::Node(request) => request.request_id(),
@@ -851,6 +860,39 @@ pub struct SessionSnapshot {
     pub nodes: Vec<NodeRecord>,
     pub buffers: Vec<BufferRecord>,
     pub floating: Vec<FloatingRecord>,
+}
+
+/// Buffers shown in the subtree of `nodes` rooted at `root`, including `root`
+/// itself when it is a buffer view, in node order.
+pub fn buffer_ids_in_subtree<'a>(
+    nodes: impl IntoIterator<Item = &'a NodeRecord>,
+    root: NodeId,
+) -> Vec<BufferId> {
+    let nodes = nodes.into_iter().collect::<Vec<_>>();
+    let parents = nodes
+        .iter()
+        .map(|node| (node.id, node.parent_id))
+        .collect::<BTreeMap<_, _>>();
+    let in_subtree = |mut node_id: NodeId| {
+        // Bounded by the node count, so a malformed parent cycle cannot hang.
+        for _ in 0..=parents.len() {
+            if node_id == root {
+                return true;
+            }
+            match parents.get(&node_id).copied().flatten() {
+                Some(parent) => node_id = parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let view = node.buffer_view.as_ref()?;
+            in_subtree(node.id).then_some(view.buffer_id)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
