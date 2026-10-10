@@ -1,12 +1,12 @@
 //! Runtime keepers deliberately outlive the server so a restart can reattach,
 //! but must exit once nothing can ever reattach to them.
 
-use embers_core::{RequestId, init_test_tracing};
+use embers_core::{BufferId, ErrorCode, NodeId, RequestId, SplitDirection, init_test_tracing};
 use embers_protocol::{
     BufferRecordState, BufferRequest, BufferResponse, ClientMessage, KillServerRequest,
-    ProtocolClient, ServerResponse,
+    NodeRequest, ProtocolClient, ServerResponse, SessionRequest,
 };
-use embers_server::{Server, ServerConfig};
+use embers_server::{REMAIN_ON_EXIT_OPTION, Server, ServerConfig};
 use tempfile::tempdir;
 use tokio::time::{Duration, Instant, sleep};
 
@@ -441,4 +441,234 @@ async fn exited_keepers_are_reaped_while_the_server_runs() {
 
     drop(client);
     handle.shutdown().await.expect("shutdown server");
+}
+
+/// Shows a command that exits 3 once `release` exists in a pane split off
+/// `shell_view`, optionally with `remain-on-exit` set. Returns the buffer, its
+/// view and the command's pid.
+async fn split_releasable_pane(
+    client: &mut ProtocolClient,
+    shell_view: NodeId,
+    release: &std::path::Path,
+    remain_on_exit: Option<&str>,
+    request_id: u64,
+) -> (BufferId, NodeId, u32) {
+    let buffer = request_buffer(
+        client,
+        BufferRequest::Create {
+            request_id: RequestId(request_id),
+            title: Some("finishes".to_owned()),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                r#"while [ ! -e "$1" ]; do sleep 0.05; done; exit 3"#.to_owned(),
+                "sh".to_owned(),
+                release.to_str().expect("utf-8 temp path").to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    if let Some(value) = remain_on_exit {
+        request_buffer(
+            client,
+            BufferRequest::SetUserOption {
+                request_id: RequestId(request_id + 1),
+                buffer_id: buffer.id,
+                key: REMAIN_ON_EXIT_OPTION.to_owned(),
+                value: Some(value.to_owned()),
+            },
+        )
+        .await;
+    }
+    let view_id = match client
+        .request(&ClientMessage::Node(NodeRequest::Split {
+            request_id: RequestId(request_id + 2),
+            leaf_node_id: shell_view,
+            direction: SplitDirection::Vertical,
+            new_buffer_id: buffer.id,
+        }))
+        .await
+        .expect("split request succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| {
+                node.buffer_view
+                    .as_ref()
+                    .is_some_and(|view| view.buffer_id == buffer.id)
+            })
+            .map(|node| node.id)
+            .expect("split pane shows the buffer"),
+        other => panic!("expected session snapshot, got {other:?}"),
+    };
+    let running = wait_for_running_buffer(client, RequestId(request_id + 3), buffer.id).await;
+    let pid = running.pid.expect("running buffer reports its pid");
+    (buffer.id, view_id, pid)
+}
+
+/// A pane whose command exits while no server is up must not come back to
+/// life on restart: its keeper waits for the next server to read the exit, so
+/// the pane closes like any other exited pane, or stays as a dead pane with
+/// `remain-on-exit`, instead of being restored as interrupted.
+#[tokio::test]
+async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_the_exit() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let release = tempdir.path().join("release");
+    let config = ServerConfig::new(socket_path.clone());
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let session_id = match client
+        .request(&ClientMessage::Session(SessionRequest::Create {
+            request_id: RequestId(401),
+            name: "main".to_owned(),
+        }))
+        .await
+        .expect("create session")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot.session.id,
+        other => panic!("expected session snapshot, got {other:?}"),
+    };
+    // A long-running pane keeps the session alive once the others close.
+    let shell = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(402),
+            title: Some("shell".to_owned()),
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 60".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let shell_view = match client
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: RequestId(403),
+            session_id,
+            title: "main".to_owned(),
+            buffer_id: Some(shell.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add root tab")
+    {
+        ServerResponse::SessionSnapshot(response) => response
+            .snapshot
+            .session
+            .focused_leaf_id
+            .expect("focused leaf"),
+        other => panic!("expected session snapshot, got {other:?}"),
+    };
+
+    // The commands exit with a known code once the test creates `release`, so
+    // they are still running at shutdown and exit only while no server is up.
+    let (closing_buffer, closing_view, closing_pid) =
+        split_releasable_pane(&mut client, shell_view, &release, None, 410).await;
+    let (kept_buffer, kept_view, kept_pid) =
+        split_releasable_pane(&mut client, shell_view, &release, Some("on"), 420).await;
+    let keeper_pids = [closing_pid, kept_pid]
+        .map(|pid| parent_pid(pid).filter(|&keeper| keeper != std::process::id()));
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    std::fs::write(&release, b"").expect("release the commands");
+    for pid in [closing_pid, kept_pid] {
+        assert!(
+            wait_for_process_exit(pid, Duration::from_secs(10)).await,
+            "command {pid} still running after it was released"
+        );
+    }
+    // Restore runs a pane's shell command again, so withdraw the release: a
+    // resurrected command would now keep running instead of exiting 3.
+    std::fs::remove_file(&release).expect("withdraw the release");
+
+    // No server has seen the exits yet, so the keepers must stay reachable for
+    // the next one. Give them several socket-check intervals to (wrongly) leave.
+    sleep(Duration::from_millis(1500)).await;
+    for keeper_pid in keeper_pids.into_iter().flatten() {
+        assert!(
+            process_alive(keeper_pid),
+            "keeper {keeper_pid} exited before any server saw its child exit"
+        );
+    }
+
+    // The restarted server reattaches and learns how the commands ended
+    // rather than treating the panes as interrupted and restoring them.
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+
+    let closing = client
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: RequestId(430),
+            buffer_id: closing_buffer,
+        }))
+        .await
+        .expect("get request round-trips");
+    assert!(
+        matches!(&closing, ServerResponse::Error(error) if error.error.code == ErrorCode::NotFound),
+        "the exited pane's buffer should be removed, got {closing:?}"
+    );
+    let kept = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(431),
+            buffer_id: kept_buffer,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(kept.state, BufferRecordState::Exited);
+    assert_eq!(kept.exit_code, Some(3));
+    assert_eq!(kept.attachment_node_id, Some(kept_view));
+    let snapshot = match client
+        .request(&ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(432),
+            session_id,
+        }))
+        .await
+        .expect("get session")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot, got {other:?}"),
+    };
+    assert!(
+        !snapshot.nodes.iter().any(|node| node.id == closing_view),
+        "the exited pane's view should be closed"
+    );
+    assert!(
+        snapshot.nodes.iter().any(|node| node.id == kept_view),
+        "the remain-on-exit pane should stay as a dead pane"
+    );
+
+    // Now that a server has seen the exits, the keepers leave once their
+    // panes are gone or the server is.
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+    for keeper_pid in keeper_pids.into_iter().flatten() {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after a server saw its child exit"
+        );
+    }
 }

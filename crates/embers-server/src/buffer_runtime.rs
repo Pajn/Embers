@@ -421,6 +421,10 @@ struct KeeperRuntime {
     bell_sequence: AtomicU64,
     clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
+    /// Set once a status reply saying the child is no longer running has been
+    /// written to a client. Until then no server has learned how the child
+    /// ended, so the keeper must stay reachable for the next one to reattach.
+    exit_reported: AtomicBool,
     pid: Option<u32>,
     /// The last foreground process group leader and its command line, so the
     /// command line is only looked up when the foreground job changes.
@@ -1336,6 +1340,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         bell_sequence: AtomicU64::new(0),
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
+        exit_reported: AtomicBool::new(false),
         pid,
         foreground: Mutex::new(None),
     });
@@ -1352,22 +1357,22 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         .map_err(|error| MuxError::internal(error.to_string()))?;
     // Keepers intentionally outlive the server so a restarted server can
     // reattach through the socket. While no server is attached, the keeper
-    // exits once there is nothing left to reattach to: its child has exited
-    // (the attached server has already read the final state), or its socket was
-    // removed or replaced so no server can ever reach it again. In the latter
-    // case it stops the child instead of leaving it running unreachable.
+    // exits once there is nothing left to reattach to: its child has exited and
+    // a server has been sent a status reporting that, or its socket was removed
+    // or replaced so no server can ever reach it again. In the latter case it
+    // stops the child instead of leaving it running unreachable. A child that
+    // exits while no server is attached keeps the keeper alive until a server
+    // reattaches and reads the exit, so a restart sees the pane as exited
+    // rather than interrupted.
     // The socket is listening and the child is running: from here on a server
     // can connect at any time.
     readiness.report(Ok(()));
-    let mut served_client = false;
     loop {
         if !wait_for_keeper_client(&listener, KEEPER_SOCKET_CHECK_INTERVAL)? {
-            // Waiting for a first client avoids racing the spawning server's
-            // initial connect when the child exits immediately.
-            if served_client && runtime.ensure_running().is_err() {
+            if runtime.exit_reported.load(Ordering::Acquire) {
                 debug!(
                     socket_path = %cli.socket_path.display(),
-                    "runtime keeper child exited and no server is attached; exiting"
+                    "runtime keeper child exit was reported and no server is attached; exiting"
                 );
                 let _ = wait_join.join();
                 return Ok(());
@@ -1387,7 +1392,6 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         // of the PTY slave has closed it, which a surviving grandchild may
         // never do.
         let (mut stream, _) = listener.accept()?;
-        served_client = true;
         if handle_keeper_client(runtime.clone(), &mut stream)? {
             // The server asked this keeper to shut down (kill-server).
             debug!(
@@ -1429,6 +1433,11 @@ fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) ->
         };
         if write_message(stream, &response).is_err() {
             return Ok(false);
+        }
+        // Status is the only reply servers learn the child's exit from, so
+        // record the exit as reported only once such a reply was written.
+        if matches!(&response, KeeperResponse::Status(status) if !status.running) {
+            runtime.exit_reported.store(true, Ordering::Release);
         }
         if terminate {
             return Ok(true);

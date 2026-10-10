@@ -111,11 +111,13 @@ async fn dropping_harness_server_stops_its_runtime_keepers() {
     drop(connection);
     drop(server);
 
-    assert!(
-        wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
-        "shell {shell_pid} still running after the harness server was dropped"
-    );
+    // Dropping the harness only stops an out-of-process keeper: an in-process
+    // one lives on a thread of this test process, which the drop does not end.
     if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
+            "shell {shell_pid} still running after the harness server was dropped"
+        );
         assert!(
             wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
             "keeper {keeper_pid} still running after the harness server was dropped"
