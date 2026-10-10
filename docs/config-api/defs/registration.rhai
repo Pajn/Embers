@@ -423,13 +423,26 @@ fn follow_output(_: ActionApi) -> Action;
 /// Insert a tab after a specific tabs node.
 fn insert_tab_after(_: ActionApi, tabs_node_id: int, title: string, tree: TreeSpec) -> Action;
 
-/// Insert a tab after the current tab in the focused tabs node.
+/// Insert a tab after the active tab of the innermost tabs that hold the
+/// focus, and select it. When the focus is inside nested tabs, the new tab
+/// is a nested tab there, not a window; use `new_window` for tmux's
+/// `new-window`. In a session with a single window, whose root is not
+/// tabbed, the new tab becomes a second window after that one.
+///
+/// # Example
+///
+/// ```rhai
+/// action.insert_tab_after_current("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+/// ```
 fn insert_tab_after_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Insert a tab before a specific tabs node.
 fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeSpec) -> Action;
 
-/// Insert a tab before the current tab.
+/// Insert a tab before the active tab of the innermost tabs that hold the
+/// focus, and select it. Like `insert_tab_after_current`, this makes a
+/// nested tab when the focus is in nested tabs, and a second window, before
+/// the only one, in a session with a single window.
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Attach a buffer at the current node.
@@ -513,8 +526,7 @@ fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 
 /// Add a window to the current session, after its last window, and
 /// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
-/// new tab is always a window, even when the focus is in nested tabs or
-/// the session has a single window.
+/// new tab is always a window, even when the focus is in nested tabs.
 ///
 /// # Example
 ///

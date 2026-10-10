@@ -1620,10 +1620,24 @@ fn insert_tab_after_current(_: ActionApi, title: String, tree: TreeSpec) -> Acti
     onclick="openTab(event, 'insert_tab_after_current', 'Description')">
 Description
 </button>
+<button group="insert_tab_after_current" id="link-insert_tab_after_current-Example"  class="tablinks"
+    onclick="openTab(event, 'insert_tab_after_current', 'Example')">
+Example
+</button>
 </div>
 
 <div group="insert_tab_after_current" id="insert_tab_after_current-Description" class="tabcontent"  style="display: block;" >
-Insert a tab after the current tab in the focused tabs node.
+Insert a tab after the active tab of the innermost tabs that hold the
+focus, and select it. When the focus is inside nested tabs, the new tab
+is a nested tab there, not a window; use `new_window` for tmux's
+`new-window`. In a session with a single window, whose root is not
+tabbed, the new tab becomes a second window after that one.
+</div>
+<div group="insert_tab_after_current" id="insert_tab_after_current-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.insert_tab_after_current("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+```
 </div>
 
 </div>
@@ -1667,7 +1681,10 @@ Description
 </div>
 
 <div group="insert_tab_before_current" id="insert_tab_before_current-Description" class="tabcontent"  style="display: block;" >
-Insert a tab before the current tab.
+Insert a tab before the active tab of the innermost tabs that hold the
+focus, and select it. Like `insert_tab_after_current`, this makes a
+nested tab when the focus is in nested tabs, and a second window, before
+the only one, in a session with a single window.
 </div>
 
 </div>
@@ -2086,8 +2103,7 @@ Example
 <div group="new_window" id="new_window-Description" class="tabcontent"  style="display: block;" >
 Add a window to the current session, after its last window, and
 select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
-new tab is always a window, even when the focus is in nested tabs or
-the session has a single window.
+new tab is always a window, even when the focus is in nested tabs.
 </div>
 <div group="new_window" id="new_window-Example" class="tabcontent"  style="display: none;" >
 

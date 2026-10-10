@@ -1659,7 +1659,17 @@ mod documented_action_api {
         })
     }
 
-    /// Insert a tab after the current tab in the focused tabs node.
+    /// Insert a tab after the active tab of the innermost tabs that hold the
+    /// focus, and select it. When the focus is inside nested tabs, the new tab
+    /// is a nested tab there, not a window; use `new_window` for tmux's
+    /// `new-window`. In a session with a single window, whose root is not
+    /// tabbed, the new tab becomes a second window after that one.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.insert_tab_after_current("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+    /// ```
     #[rhai_fn(name = "insert_tab_after_current")]
     pub fn insert_tab_after_current(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
         Action::InsertTabAfter {
@@ -1671,8 +1681,7 @@ mod documented_action_api {
 
     /// Add a window to the current session, after its last window, and
     /// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
-    /// new tab is always a window, even when the focus is in nested tabs or
-    /// the session has a single window.
+    /// new tab is always a window, even when the focus is in nested tabs.
     ///
     /// # Example
     ///
@@ -1705,7 +1714,10 @@ mod documented_action_api {
         })
     }
 
-    /// Insert a tab before the current tab.
+    /// Insert a tab before the active tab of the innermost tabs that hold the
+    /// focus, and select it. Like `insert_tab_after_current`, this makes a
+    /// nested tab when the focus is in nested tabs, and a second window, before
+    /// the only one, in a session with a single window.
     #[rhai_fn(name = "insert_tab_before_current")]
     pub fn insert_tab_before_current(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
         Action::InsertTabBefore {

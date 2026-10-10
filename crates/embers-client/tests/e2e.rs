@@ -1789,6 +1789,97 @@ async fn oversized_tmux_passthrough_is_dropped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inserting_a_tab_next_to_the_only_window_adds_a_window() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(
+        &server,
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "one",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        r#"
+            bind("normal", "a", action.insert_tab_after_current("after", tree.buffer_spawn(["/bin/sh"])));
+            bind("normal", "b", action.insert_tab_before_current("before", tree.buffer_spawn(["/bin/sh"])));
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+    let windows = || {
+        stdout(&run_cli(
+            &server,
+            &["--base-index", "0", "list-windows", "-t", "alpha"],
+        ))
+        .trim()
+        .to_owned()
+    };
+
+    // With one window the session's root is not tabbed, so there are no
+    // focused tabs; the new tab becomes a second window after it...
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("insert after");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows(), "0\t0\tone\n1\t1\tafter");
+
+    // ...or before it.
+    run_cli(
+        &server,
+        &["--base-index", "0", "kill-window", "-t", "alpha:1"],
+    );
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('b'))
+        .await
+        .expect("insert before");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows(), "0\t1\tbefore\n1\t0\tone");
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_reports_its_base_index_to_the_server() {
     use embers_client::ConfiguredClient;
 
