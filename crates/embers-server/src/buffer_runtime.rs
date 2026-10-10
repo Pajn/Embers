@@ -2731,6 +2731,13 @@ mod tests {
             let _ = super::run_runtime_keeper(cli);
             let _ = done_tx.send(());
         });
+        // The keeper binds its socket before it listens, so a connect in
+        // between is refused; wait until it accepts connections.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(&socket_path).is_err() {
+            assert!(Instant::now() < deadline, "keeper never started listening");
+            thread::sleep(Duration::from_millis(10));
+        }
         (socket_path, done_rx)
     }
 
