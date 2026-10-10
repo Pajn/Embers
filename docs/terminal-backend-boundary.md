@@ -23,7 +23,7 @@ For live PTY buffers, that pipeline runs inside the runtime keeper (`KeeperSurfa
 Today it is intentionally minimal:
 
 - input routing is passthrough
-- output routing forwards bytes directly to the backend
+- output routing forwards bytes directly to the backend, with two side scanners: one sniffs OSC 7 working-directory reports, and one picks out the DCS queries alacritty leaves unanswered (DECRQSS and XTGETTCAP). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
 
 That seam exists so future work can add:
 
@@ -53,6 +53,11 @@ Backends must be able to:
 - produce full capture / scrollback slices
 - surface metadata
 - surface one-shot activity and damage signals
+- surface OSC 52 clipboard writes
+
+## Clipboard writes
+
+The emulator runs with OSC 52 set to copy-only: stores raise a clipboard event and queries are dropped without a reply. `take_events` drains the latest store with the activity state and query replies. The keeper keeps only the most recent write, numbered, and reports the number in its status reply; when the number advances the server's status poller fetches the write with a separate `Clipboard` request, so status polls stay small and keepers that predate clipboard forwarding are never asked. The server then sends a `ClipboardEvent` straight to the clients whose current session contains the buffer, rather than broadcasting it, and each client re-emits it to its host terminal as OSC 52 unless `set_clipboard(false)` is configured. See [Clipboard (OSC 52)](configuration.md#clipboard-osc-52).
 
 ## Metadata outside the backend
 

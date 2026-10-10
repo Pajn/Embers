@@ -22,6 +22,7 @@ pub fn session_record(session: &Session) -> SessionRecord {
         focused_leaf_id: session.focused_leaf,
         focused_floating_id: session.focused_floating,
         zoomed_node_id: session.zoomed_node,
+        viewport: session.viewport,
     }
 }
 
@@ -173,6 +174,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
                     .map(|tab| TabRecord {
                         title: tab.title.clone(),
                         child_id: tab.child,
+                        synchronize_panes: tab.synchronize_panes,
                     })
                     .collect(),
             }),

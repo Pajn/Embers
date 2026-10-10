@@ -1924,6 +1924,114 @@ Replace a specific node by id with a new tree.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_down </h2>
+
+```rust,ignore
+fn resize_down(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_down" id="link-resize_down-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_down', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_down" id="resize_down-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` rows down (tmux `resize-pane -D`).
+See `resize_left` for which divider moves.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_left </h2>
+
+```rust,ignore
+fn resize_left(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_left" id="link-resize_left-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_left', 'Description')">
+Description
+</button>
+<button group="resize_left" id="link-resize_left-Example"  class="tablinks"
+    onclick="openTab(event, 'resize_left', 'Example')">
+Example
+</button>
+</div>
+
+<div group="resize_left" id="resize_left-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` cells left (tmux `resize-pane -L`).
+
+The nearest split with panes side by side is resized: the divider to the right of the
+pane moves left, shrinking the pane, or, when the pane is the split's rightmost child,
+the divider to its left moves left, growing it. Panes keep at least one column of
+content, and the action does nothing when there is no such split or the divider cannot
+move. While a pane is zoomed only splits inside the zoomed view can be resized.
+</div>
+<div group="resize_left" id="resize_left-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<M-h>", action.resize_left(3));
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_right </h2>
+
+```rust,ignore
+fn resize_right(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_right" id="link-resize_right-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_right', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_right" id="resize_right-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` cells right (tmux `resize-pane -R`).
+See `resize_left` for which divider moves.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_up </h2>
+
+```rust,ignore
+fn resize_up(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_up" id="link-resize_up-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_up', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_up" id="resize_up-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
+See `resize_left` for which divider moves; panes keep their title row and at least
+one row of content.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> reveal_buffer </h2>
 
 ```rust,ignore
@@ -2455,6 +2563,36 @@ Send a key notation sequence to the focused buffer.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_synchronize_panes </h2>
+
+```rust,ignore
+fn set_synchronize_panes(_: ActionApi, enabled: bool) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_synchronize_panes" id="link-set_synchronize_panes-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_synchronize_panes', 'Description')">
+Description
+</button>
+</div>
+
+<div group="set_synchronize_panes" id="set_synchronize_panes-Description" class="tabcontent"  style="display: block;" >
+Turn tmux-style `synchronize-panes` on or off for the active window.
+
+The setting belongs to the window (a root tab) and is shared by every client. While it
+is on, keys, pastes and `send_keys_current`/`send_bytes_current` input aimed at the
+focused pane go to every pane the window shows, each encoded for that pane. Panes in
+hidden nested tabs or hidden by zoom, panes in other windows, and popups are left out,
+and input typed into a focused popup is never copied. Mouse and focus events, input
+sent to a specific buffer id, and `embers send-keys` are not synchronized. Tab bars can
+show the state through `TabInfo.synchronize_panes()`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> split_with </h2>
 
 ```rust,ignore
@@ -2553,6 +2691,74 @@ Toggle a named input mode.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> toggle_synchronize_panes </h2>
+
+```rust,ignore
+fn toggle_synchronize_panes(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="toggle_synchronize_panes" id="link-toggle_synchronize_panes-Description"  class="tablinks active"
+    onclick="openTab(event, 'toggle_synchronize_panes', 'Description')">
+Description
+</button>
+<button group="toggle_synchronize_panes" id="link-toggle_synchronize_panes-Example"  class="tablinks"
+    onclick="openTab(event, 'toggle_synchronize_panes', 'Example')">
+Example
+</button>
+</div>
+
+<div group="toggle_synchronize_panes" id="toggle_synchronize_panes-Description" class="tabcontent"  style="display: block;" >
+Toggle tmux-style `synchronize-panes` for the active window.
+
+While it is on, input typed into a pane of the window is also sent to every other pane
+the window currently shows. Popups and other windows never take part. See
+`set_synchronize_panes` for details.
+</div>
+<div group="toggle_synchronize_panes" id="toggle_synchronize_panes-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>S", action.toggle_synchronize_panes());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> toggle_zoom_current_node </h2>
+
+```rust,ignore
+fn toggle_zoom_current_node(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="toggle_zoom_current_node" id="link-toggle_zoom_current_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'toggle_zoom_current_node', 'Description')">
+Description
+</button>
+<button group="toggle_zoom_current_node" id="link-toggle_zoom_current_node-Example"  class="tablinks"
+    onclick="openTab(event, 'toggle_zoom_current_node', 'Example')">
+Example
+</button>
+</div>
+
+<div group="toggle_zoom_current_node" id="toggle_zoom_current_node-Description" class="tabcontent"  style="display: block;" >
+Toggle zoom for the focused node (tmux `resize-pane -Z`).
+</div>
+<div group="toggle_zoom_current_node" id="toggle_zoom_current_node-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>z", action.toggle_zoom_current_node());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> toggle_zoom_node </h2>
 
 ```rust,ignore
@@ -2569,8 +2775,6 @@ Description
 
 <div group="toggle_zoom_node" id="toggle_zoom_node-Description" class="tabcontent"  style="display: block;" >
 Toggle zoom for the specified node id.
-There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
-focused node and `toggle_zoom_node` when you already know the target id.
 </div>
 
 </div>

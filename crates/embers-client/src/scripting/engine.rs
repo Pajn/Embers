@@ -259,6 +259,7 @@ struct RegistrationState {
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
+    clipboard: Option<bool>,
 }
 
 impl RegistrationState {
@@ -362,6 +363,7 @@ impl RegistrationState {
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
+            clipboard: self.clipboard.unwrap_or(true),
         })
     }
 }
@@ -552,6 +554,15 @@ impl MouseApi {
             .expect("registration lock")
             .mouse
             .wheel_forward = value;
+        Ok(())
+    }
+
+    fn set_drag_resize(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .drag_resize = value;
         Ok(())
     }
 
@@ -763,6 +774,31 @@ mod registration_globals {
             )?);
         Ok(())
     }
+
+    /// Choose whether programs in panes may set the system clipboard.
+    ///
+    /// When on (the default), an OSC 52 clipboard write from a program in a
+    /// pane, such as a Neovim yank over SSH, is passed on to the terminal
+    /// running the Embers client, which puts it on the system clipboard. This
+    /// matches tmux's `set-clipboard on`. When off, those writes are dropped.
+    /// Programs can never read the clipboard through Embers: OSC 52 queries are
+    /// always ignored.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_clipboard(false);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:8
+    #[rhai_fn(return_raw, global, name = "set_clipboard")]
+    pub fn set_clipboard(ctx: NativeCallContext, enabled: bool) -> RhaiResultOf<()> {
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .clipboard = Some(enabled);
+        Ok(())
+    }
 }
 
 #[export_module]
@@ -847,13 +883,28 @@ mod mouse_registration_api {
         mouse.set_wheel_forward(ctx.call_position(), value)
     }
 
+    /// Toggle resizing splits by dragging their dividers with the left button.
+    ///
+    /// Only drags that start on a divider are claimed; clicks and drags inside panes behave
+    /// as before. The built-in config turns this on.
+    ///
+    /// # rhai-autodocs:index:26
+    #[rhai_fn(return_raw, name = "set_drag_resize")]
+    pub fn set_drag_resize(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_drag_resize(ctx.call_position(), value)
+    }
+
     /// Toggle mouse selection in panes that have not requested mouse reporting:
     /// dragging enters copy mode with a selection and copies it on release,
     /// a double click copies a word and a triple click copies a line (tmux's
     /// defaults with `mouse on`). Panes running programs that requested the
     /// mouse keep receiving these events instead.
     ///
-    /// # rhai-autodocs:index:26
+    /// # rhai-autodocs:index:27
     #[rhai_fn(return_raw, name = "set_select")]
     pub fn set_select(ctx: NativeCallContext, mouse: MouseApi, value: bool) -> RhaiResultOf<()> {
         mouse.set_select(ctx.call_position(), value)
@@ -875,7 +926,7 @@ mod hints_registration_api {
     /// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
     /// ```
     ///
-    /// # rhai-autodocs:index:27
+    /// # rhai-autodocs:index:28
     #[rhai_fn(return_raw, name = "set_patterns")]
     pub fn set_patterns(
         ctx: NativeCallContext,

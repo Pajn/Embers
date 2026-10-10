@@ -11,6 +11,7 @@ pub const BUILTIN_CONFIG_SOURCE: &str = r#"mouse.set_click_focus(true);
 mouse.set_click_forward(true);
 mouse.set_wheel_scroll(true);
 mouse.set_wheel_forward(true);
+mouse.set_drag_resize(true);
 mouse.set_select(true);
 
 bind("normal", "<PageUp>", action.scroll_page_up());

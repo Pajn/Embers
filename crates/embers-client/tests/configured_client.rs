@@ -183,6 +183,7 @@ fn second_session_state() -> embers_client::ClientState {
             focused_leaf_id: Some(SECOND_ROOT_ID),
             focused_floating_id: None,
             zoomed_node_id: None,
+            viewport: None,
         },
     );
     state.nodes.insert(
@@ -1239,6 +1240,58 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
 
     assert!(matches!(event, ServerEvent::RenderInvalidated(_)));
     assert_eq!(configured.notifications(), ["other"]);
+    assert_eq!(
+        transport.requests(),
+        vec![
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+                request_id: RequestId(1),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+            ClientMessage::Buffer(embers_protocol::BufferRequest::CaptureVisible {
+                request_id: RequestId(2),
+                buffer_id: SECOND_BUFFER_ID,
+            }),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn ready_events_are_handled_as_one_batch_with_one_refresh_per_buffer() {
+    let state = second_session_state();
+    let transport = FakeTransport::default();
+    let invalidated = ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    });
+    let focus = ServerEvent::FocusChanged(FocusChangedEvent {
+        session_id: SECOND_SESSION_ID,
+        focused_leaf_id: Some(SECOND_ROOT_ID),
+        focused_floating_id: None,
+    });
+    transport.push_event(invalidated.clone());
+    transport.push_event(focus.clone());
+    transport.push_event(invalidated.clone());
+    transport.push_event(invalidated.clone());
+    transport.push_response(ServerResponse::Buffer(buffer_response_from_state(
+        &state,
+        SECOND_BUFFER_ID,
+        RequestId(1),
+    )));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, SECOND_BUFFER_ID, RequestId(2)),
+    ));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    let events = configured
+        .process_ready_events_timeout(std::time::Duration::from_millis(10))
+        .await
+        .unwrap();
+
+    // The focus change behind the output events is handled in the same batch,
+    // and the buffer is refreshed once for all three invalidations.
+    assert_eq!(events, vec![focus, invalidated]);
     assert_eq!(
         transport.requests(),
         vec![

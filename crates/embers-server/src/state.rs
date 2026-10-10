@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, IdAllocator, MuxError, NodeId, PtySize,
-    Result, SessionId, SplitDirection, Timestamp,
+    Result, SessionId, Size, SplitDirection, Timestamp,
 };
 use embers_protocol::NodeJoinPlacement;
 
@@ -59,6 +59,9 @@ pub struct ServerState {
     pub buffers: BTreeMap<BufferId, Buffer>,
     pub nodes: BTreeMap<NodeId, Node>,
     pub floating: BTreeMap<FloatingId, FloatingWindow>,
+    /// The viewport most recently reported for any session, which new
+    /// sessions start with.
+    last_viewport: Option<Size>,
     session_ids: IdAllocator<SessionId>,
     buffer_ids: IdAllocator<BufferId>,
     node_ids: IdAllocator<NodeId>,
@@ -78,6 +81,7 @@ impl ServerState {
             buffers: BTreeMap::new(),
             nodes: BTreeMap::new(),
             floating: BTreeMap::new(),
+            last_viewport: None,
             session_ids: IdAllocator::new(1),
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
@@ -165,6 +169,7 @@ impl ServerState {
             buffers,
             nodes,
             floating,
+            last_viewport: None,
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
             buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
@@ -308,6 +313,37 @@ impl ServerState {
         self.rename_tab(root_tabs, index, title)
     }
 
+    /// Set tmux `synchronize-panes` for the window at `index`: `Some` sets it,
+    /// `None` flips it. Returns the new value. Like `rename_root_tab`, a
+    /// session whose root is a single untabbed window gets a root tabs node.
+    pub fn set_root_tab_synchronize_panes(
+        &mut self,
+        session_id: SessionId,
+        index: usize,
+        enabled: Option<bool>,
+    ) -> Result<bool> {
+        let root_tabs = if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            root_tabs
+        } else {
+            if index != 0 {
+                return Err(MuxError::not_found(format!(
+                    "tab index {index} is out of range for session {session_id}"
+                )));
+            }
+            self.ensure_root_tabs_container(session_id)?
+        };
+        let Node::Tabs(tabs) = self.node_mut(root_tabs)? else {
+            return Err(MuxError::invalid_input("node is not a tabs container"));
+        };
+        let tab = tabs.tabs.get_mut(index).ok_or_else(|| {
+            MuxError::not_found(format!(
+                "tab index {index} is out of range for session {session_id}"
+            ))
+        })?;
+        tab.synchronize_panes = enabled.unwrap_or(!tab.synchronize_panes);
+        Ok(tab.synchronize_panes)
+    }
+
     pub fn close_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
         if let Some(root_tabs) = self.root_tabs_node(session_id)? {
             return self.close_tab(root_tabs, index);
@@ -367,10 +403,17 @@ impl ServerState {
                 focused_leaf: None,
                 focused_floating: None,
                 zoomed_node: None,
+                viewport: self.last_viewport,
                 created_at: Timestamp::now(),
             },
         );
         session_id
+    }
+
+    pub fn set_session_viewport(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        self.session_mut(session_id)?.viewport = Some(viewport);
+        self.last_viewport = Some(viewport);
+        Ok(())
     }
 
     pub fn create_buffer(

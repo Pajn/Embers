@@ -11,6 +11,8 @@ mod pty_sizes;
 pub mod renderer;
 pub mod scripting;
 pub mod socket_transport;
+pub mod spawn_size;
+pub mod split_resize;
 pub mod state;
 pub mod testing;
 pub mod transport;
@@ -23,15 +25,17 @@ pub use config::{
 };
 pub use configured_client::ConfiguredClient;
 pub use controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
-pub use grid::{BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor};
+pub use grid::{
+    BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor, UnderlineStyle,
+};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
     KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, SEARCH_MODE,
     SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
 };
 pub use presentation::{
-    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, TabItem,
-    TabsFrame,
+    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,
+    TabItem, TabsFrame,
 };
 pub use renderer::Renderer;
 pub use scripting::{
@@ -42,6 +46,8 @@ pub use scripting::{
     TabSpec, TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
+pub use spawn_size::{PanePlacement, spawn_pty_size};
+pub use split_resize::{SplitResize, drawn_viewport};
 pub use state::{
     BufferViewState, ClientState, HintMatch, HintsState, SearchMatch, SearchState, SelectionKind,
     SelectionPoint, SelectionState,

@@ -49,6 +49,10 @@ impl Transport for FakeTransport {
             .pop_front()
             .ok_or_else(|| MuxError::transport("fake transport has no queued event"))
     }
+
+    async fn ready_event(&self) -> Result<Option<ServerEvent>> {
+        Ok(self.events.lock().expect("events lock").pop_front())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +117,10 @@ impl Transport for ScriptedTransport {
             .expect("events lock")
             .pop_front()
             .ok_or_else(|| MuxError::transport("scripted transport has no queued event"))
+    }
+
+    async fn ready_event(&self) -> Result<Option<ServerEvent>> {
+        Ok(self.events.lock().expect("events lock").pop_front())
     }
 }
 

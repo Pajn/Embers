@@ -23,6 +23,8 @@ pub struct TabItem {
     pub active: bool,
     pub activity: ActivityState,
     pub buffer_count: usize,
+    /// tmux `synchronize-panes` is on for the window this tab holds.
+    pub synchronize_panes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +64,23 @@ pub struct DividerFrame {
     pub direction: SplitDirection,
     pub rect: Rect,
     pub floating_id: Option<FloatingId>,
+    /// The split this divider belongs to.
+    pub split_node_id: NodeId,
+    /// The divider sits between child `index` and child `index + 1`.
+    pub index: usize,
+}
+
+/// A projected split: the cells each child was drawn with along the split
+/// axis, and how far each child can shrink before its content disappears.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitFrame {
+    pub node_id: NodeId,
+    pub direction: SplitDirection,
+    pub rect: Rect,
+    pub child_ids: Vec<NodeId>,
+    pub lengths: Vec<u16>,
+    pub min_lengths: Vec<u16>,
+    pub floating_id: Option<FloatingId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +100,7 @@ pub struct PresentationModel {
     pub tab_bars: Vec<TabsFrame>,
     pub leaves: Vec<LeafFrame>,
     pub dividers: Vec<DividerFrame>,
+    pub splits: Vec<SplitFrame>,
     pub floating: Vec<FloatingFrame>,
 }
 
@@ -135,6 +155,7 @@ impl PresentationModel {
             tab_bars: projection.tab_bars,
             leaves: projection.leaves,
             dividers: projection.dividers,
+            splits: projection.splits,
             floating: projection.floating,
         })
     }
@@ -249,6 +270,7 @@ struct Projection {
     tab_bars: Vec<TabsFrame>,
     leaves: Vec<LeafFrame>,
     dividers: Vec<DividerFrame>,
+    splits: Vec<SplitFrame>,
     floating: Vec<FloatingFrame>,
 }
 
@@ -353,6 +375,7 @@ impl Projector<'_> {
                             tab.child_id,
                             &mut self.buffer_count_by_node,
                         ),
+                        synchronize_panes: tab.synchronize_panes,
                     });
                 }
 
@@ -385,6 +408,22 @@ impl Projector<'_> {
 
                 let child_rects =
                     split_rects(rect, split.direction, &split.sizes, split.child_ids.len());
+                self.projection.splits.push(SplitFrame {
+                    node_id: node.id,
+                    direction: split.direction,
+                    rect,
+                    child_ids: split.child_ids.clone(),
+                    lengths: child_rects
+                        .iter()
+                        .map(|child| axis_length(*child, split.direction))
+                        .collect(),
+                    min_lengths: split
+                        .child_ids
+                        .iter()
+                        .map(|child_id| min_extent(self.state, *child_id, split.direction))
+                        .collect(),
+                    floating_id,
+                });
                 for (index, child_id) in split.child_ids.iter().enumerate() {
                     self.project_node(
                         *child_id,
@@ -404,6 +443,8 @@ impl Projector<'_> {
                             direction: split.direction,
                             rect: divider_rect,
                             floating_id,
+                            split_node_id: node.id,
+                            index,
                         });
                     }
                 }
@@ -527,6 +568,59 @@ fn activity_rank(activity: ActivityState) -> u8 {
         ActivityState::Idle => 0,
         ActivityState::Activity => 1,
         ActivityState::Bell => 2,
+    }
+}
+
+fn axis_length(rect: Rect, direction: SplitDirection) -> u16 {
+    match direction {
+        SplitDirection::Horizontal => rect.size.height,
+        SplitDirection::Vertical => rect.size.width,
+    }
+}
+
+/// The smallest extent `node_id` can be drawn at along `direction`'s axis
+/// while every visible pane keeps at least one cell of content: a pane needs
+/// its title row plus one row, a tab bar adds a row, and nested splits along
+/// the same axis add their dividers.
+pub(crate) fn min_extent(state: &ClientState, node_id: NodeId, direction: SplitDirection) -> u16 {
+    let Some(node) = state.nodes.get(&node_id) else {
+        return 1;
+    };
+    match node.kind {
+        NodeRecordKind::BufferView => match direction {
+            SplitDirection::Horizontal => 2,
+            SplitDirection::Vertical => 1,
+        },
+        NodeRecordKind::Tabs => {
+            let bar = match direction {
+                SplitDirection::Horizontal => 1,
+                SplitDirection::Vertical => 0,
+            };
+            let child = node.tabs.as_ref().and_then(|tabs| {
+                let active = usize::try_from(tabs.active).ok()?;
+                tabs.tabs.get(active).map(|tab| tab.child_id)
+            });
+            bar + child.map_or(1, |child_id| min_extent(state, child_id, direction))
+        }
+        NodeRecordKind::Split => {
+            let Some(split) = node
+                .split
+                .as_ref()
+                .filter(|split| !split.child_ids.is_empty())
+            else {
+                return 1;
+            };
+            let mins = split
+                .child_ids
+                .iter()
+                .map(|child_id| min_extent(state, *child_id, direction));
+            if split.direction == direction {
+                let dividers = u16::try_from(split.child_ids.len() - 1).unwrap_or(u16::MAX);
+                mins.fold(dividers, u16::saturating_add)
+            } else {
+                mins.max().unwrap_or(1)
+            }
+        }
     }
 }
 
@@ -700,6 +794,7 @@ mod zoom_tests {
                 focused_leaf_id: Some(NodeId(3)),
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(3)),
+                viewport: None,
             },
         );
         state.nodes.insert(
@@ -791,6 +886,7 @@ mod zoom_tests {
                 focused_leaf_id: Some(NodeId(3)),
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(99)),
+                viewport: None,
             },
         );
         state.nodes.insert(
@@ -884,6 +980,7 @@ mod zoom_tests {
                 focused_leaf_id: Some(NodeId(3)),
                 focused_floating_id: Some(FloatingId(30)),
                 zoomed_node_id: Some(NodeId(3)),
+                viewport: None,
             },
         );
         for (node_id, buffer_id, focused, zoomed) in [
@@ -974,6 +1071,7 @@ mod zoom_tests {
                 focused_leaf_id: Some(NodeId(12)),
                 focused_floating_id: Some(FloatingId(30)),
                 zoomed_node_id: Some(NodeId(12)),
+                viewport: None,
             },
         );
         state.nodes.insert(
@@ -1124,6 +1222,7 @@ mod zoom_tests {
                 focused_leaf_id: Some(NodeId(2)),
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(1)),
+                viewport: None,
             },
         );
         state.nodes.insert(
@@ -1140,6 +1239,7 @@ mod zoom_tests {
                     tabs: vec![TabRecord {
                         title: "main".to_owned(),
                         child_id: NodeId(2),
+                        synchronize_panes: false,
                     }],
                 }),
             },

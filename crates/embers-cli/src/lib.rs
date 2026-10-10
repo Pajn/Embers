@@ -16,9 +16,13 @@ use std::process::{Command as ProcessCommand, Stdio};
 
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
+use embers_client::{
+    ClientState, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
+    drawn_viewport, spawn_pty_size,
+};
 use embers_core::{
-    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, Result, SessionId, SplitDirection,
-    new_request_id,
+    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
+    SplitDirection, new_request_id,
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
@@ -26,7 +30,7 @@ use embers_protocol::{
     BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord, FloatingRequest,
     FloatingResponse, NodeBreakDestination, NodeJoinPlacement, NodeRequest, PingRequest,
     ProtocolClient, ServerResponse, SessionRecord, SessionRequest, SessionSnapshot,
-    SnapshotResponse,
+    SnapshotResponse, SynchronizePanesMode,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -220,12 +224,35 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: String,
     },
+    /// Resize a pane like tmux: `-L/-R/-U/-D [N]` moves its border N cells
+    /// (default 1), `-Z` toggles zoom, and `--sizes` sets the parent split's
+    /// weights directly.
     #[command(name = "resize-pane")]
     ResizePane {
         #[arg(short = 't', long = "target")]
-        target: String,
-        #[arg(long, value_delimiter = ',')]
+        target: Option<String>,
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["direction", "zoom"])]
         sizes: Vec<u16>,
+        #[arg(short = 'L', group = "direction")]
+        left: bool,
+        #[arg(short = 'R', group = "direction")]
+        right: bool,
+        #[arg(short = 'U', group = "direction")]
+        up: bool,
+        #[arg(short = 'D', group = "direction")]
+        down: bool,
+        #[arg(short = 'Z', conflicts_with = "direction")]
+        zoom: bool,
+        #[arg(requires = "direction")]
+        adjustment: Option<u16>,
+    },
+    /// Turn tmux-style synchronize-panes on or off for a window, or toggle it
+    /// when no state is given. Prints the resulting state.
+    #[command(name = "synchronize-panes")]
+    SynchronizePanes {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        state: Option<SwitchArg>,
     },
     #[command(name = "send-keys")]
     SendKeys {
@@ -360,6 +387,12 @@ pub enum NodeCommand {
         node_id: u64,
         sibling_id: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum SwitchArg {
+    On,
+    Off,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -879,8 +912,10 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
+            let snapshot = connection.session_snapshot(session.id).await?;
+            let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, None)
+                .create_buffer(Some(window_title.clone()), command, None, size)
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -937,6 +972,28 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .await?;
             Ok(String::new())
         }
+        Command::SynchronizePanes { target, state } => {
+            let window = connection.resolve_window(target.as_deref()).await?;
+            let response = connection
+                .request(ClientMessage::Session(
+                    SessionRequest::SetRootTabSynchronizePanes {
+                        request_id: new_request_id(),
+                        session_id: window.snapshot.session.id,
+                        index: window.index,
+                        mode: match state {
+                            None => SynchronizePanesMode::Toggle,
+                            Some(SwitchArg::On) => SynchronizePanesMode::On,
+                            Some(SwitchArg::Off) => SynchronizePanesMode::Off,
+                        },
+                    },
+                ))
+                .await?;
+            let snapshot = expect_session_snapshot(response, "synchronize-panes")?;
+            let enabled = root_tabs(&snapshot)?
+                .and_then(|(_, tabs)| protocol_tab(tabs, window.index))
+                .is_some_and(|tab| tab.synchronize_panes);
+            Ok(if enabled { "on" } else { "off" }.to_owned())
+        }
         Command::KillWindow { target } => {
             let window = connection.resolve_window(target.as_deref()).await?;
             connection
@@ -956,14 +1013,21 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
             let command = buffer_command(command);
-            let buffer = connection
-                .create_buffer(Some(default_title(&command, "pane")), command, None)
-                .await?;
             let direction = if horizontal {
                 SplitDirection::Horizontal
             } else {
                 SplitDirection::Vertical
             };
+            let size = spawn_size(
+                &pane.snapshot,
+                PanePlacement::Split {
+                    leaf_id: pane.leaf_id,
+                    direction,
+                },
+            );
+            let buffer = connection
+                .create_buffer(Some(default_title(&command, "pane")), command, None, size)
+                .await?;
             let response = connection
                 .request(ClientMessage::Node(NodeRequest::Split {
                     request_id: new_request_id(),
@@ -1007,13 +1071,54 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .await?;
             Ok(String::new())
         }
-        Command::ResizePane { target, sizes } => {
-            if sizes.is_empty() {
+        Command::ResizePane {
+            target,
+            sizes,
+            left,
+            right,
+            up,
+            down,
+            zoom,
+            adjustment,
+        } => {
+            let direction = [
+                (left, NavigationDirection::Left),
+                (right, NavigationDirection::Right),
+                (up, NavigationDirection::Up),
+                (down, NavigationDirection::Down),
+            ]
+            .into_iter()
+            .find_map(|(set, direction)| set.then_some(direction));
+            if direction.is_none() && !zoom && sizes.is_empty() {
                 return Err(MuxError::invalid_input(
-                    "resize-pane requires at least one size value",
+                    "resize-pane requires -L/-R/-U/-D, -Z, or --sizes",
                 ));
             }
-            let pane = connection.resolve_pane(Some(&target)).await?;
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            if zoom {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::ToggleZoom {
+                        request_id: new_request_id(),
+                        node_id: pane.leaf_id,
+                    }))
+                    .await?;
+                expect_ok(response, "resize-pane -Z")?;
+                return Ok(String::new());
+            }
+            if let Some(direction) = direction {
+                if let Some(resize) =
+                    plan_directional_resize(&pane, direction, adjustment.unwrap_or(1))?
+                {
+                    connection
+                        .request(ClientMessage::Node(NodeRequest::Resize {
+                            request_id: new_request_id(),
+                            node_id: resize.split_node_id,
+                            sizes: resize.sizes,
+                        }))
+                        .await?;
+                }
+                return Ok(String::new());
+            }
             let leaf = node_record(&pane.snapshot, pane.leaf_id)?;
             let parent_id = leaf
                 .parent_id
@@ -1091,8 +1196,11 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let popup_title = title.unwrap_or_else(|| default_title(&command, "popup"));
+            let geometry = FloatGeometry::new(x, y, width, height);
+            let snapshot = connection.session_snapshot(session.id).await?;
+            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, None)
+                .create_buffer(Some(popup_title.clone()), command, None, size)
                 .await?;
             let response = connection
                 .request(ClientMessage::Floating(FloatingRequest::Create {
@@ -1100,7 +1208,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     session_id: session.id,
                     root_node_id: None,
                     buffer_id: Some(buffer.buffer.id),
-                    geometry: FloatGeometry::new(x, y, width, height),
+                    geometry,
                     title: Some(popup_title),
                     focus: true,
                     close_on_empty: true,
@@ -1621,6 +1729,7 @@ impl CliConnection {
         title: Option<String>,
         command: Vec<String>,
         cwd: Option<String>,
+        size: Option<PtySize>,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -1629,6 +1738,7 @@ impl CliConnection {
                 command,
                 cwd,
                 env: Default::default(),
+                size,
             }))
             .await?
         {
@@ -2159,6 +2269,24 @@ fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
     }
 }
 
+/// Plan tmux `resize-pane -L/-R/-U/-D` for `pane`. The CLI has no viewport,
+/// so the layout is projected at the size the session was last drawn at, which
+/// the attached client's pane PTY sizes record.
+fn plan_directional_resize(
+    pane: &ResolvedPane,
+    direction: NavigationDirection,
+    cells: u16,
+) -> Result<Option<SplitResize>> {
+    let session_id = pane.snapshot.session.id;
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(pane.snapshot.clone());
+    let viewport = drawn_viewport(&state, session_id).ok_or_else(|| {
+        MuxError::invalid_input("cannot determine the size the session is drawn at")
+    })?;
+    let presentation = PresentationModel::project(&state, session_id, viewport)?;
+    Ok(presentation.resize_leaf(&state, pane.leaf_id, direction, cells))
+}
+
 fn root_tabs(
     snapshot: &SessionSnapshot,
 ) -> Result<Option<(&embers_protocol::NodeRecord, &embers_protocol::TabsRecord)>> {
@@ -2512,6 +2640,16 @@ fn parse_floating_id(raw: &str) -> Result<FloatingId> {
     })
 }
 
+/// The size a pane created at `placement` in `snapshot`'s session will be
+/// drawn at, from the viewport an attached client last reported for the
+/// session. `None` (the server default) when no client ever drew it.
+fn spawn_size(snapshot: &SessionSnapshot, placement: PanePlacement) -> Option<PtySize> {
+    let viewport = snapshot.session.viewport?;
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(snapshot.clone());
+    spawn_pty_size(&state, snapshot.session.id, viewport, placement)
+}
+
 fn buffer_command(command: Vec<String>) -> Vec<String> {
     if command.is_empty() {
         vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())]
@@ -2650,14 +2788,17 @@ mod tests {
                 TabRecord {
                     title: "one".to_owned(),
                     child_id: NodeId(1),
+                    synchronize_panes: false,
                 },
                 TabRecord {
                     title: "two".to_owned(),
                     child_id: NodeId(2),
+                    synchronize_panes: false,
                 },
                 TabRecord {
                     title: "three".to_owned(),
                     child_id: NodeId(3),
+                    synchronize_panes: false,
                 },
             ],
         };

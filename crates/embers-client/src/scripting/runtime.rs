@@ -809,6 +809,19 @@ mod documented_ref_api {
         i64::try_from(tab.buffer_count).unwrap_or(i64::MAX)
     }
 
+    /// Return whether `synchronize-panes` is on for the window this tab holds, so a formatter
+    /// can flag it. Always `false` for nested tabs.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = if tab.synchronize_panes() { tab.title() + " [sync]" } else { tab.title() };
+    /// ```
+    #[rhai_fn(name = "synchronize_panes")]
+    pub fn tab_synchronize_panes(tab: &mut TabInfo) -> bool {
+        tab.synchronize_panes
+    }
+
     /// Return the formatter viewport width in cells.
     #[rhai_fn(name = "viewport_width")]
     pub fn bar_viewport_width(bar: &mut TabBarContext) -> i64 {
@@ -944,8 +957,9 @@ mod documented_action_api {
         parse_buffer_history_placement, parse_buffer_history_scope, parse_buffer_id, parse_bytes,
         parse_floating_id, parse_floating_options, parse_floating_spec, parse_index,
         parse_key_sequence, parse_node_break_destination, parse_node_id, parse_node_join_placement,
-        parse_notify_level, parse_split_direction, with_call_position,
+        parse_notify_level, parse_split_direction, resize_pane, with_call_position,
     };
+    use embers_protocol::SynchronizePanesMode;
 
     /// Build a no-op action.
     #[rhai_fn(name = "noop")]
@@ -1454,9 +1468,19 @@ mod documented_action_api {
         Action::UnzoomNode { session_id: None }
     }
 
+    /// Toggle zoom for the focused node (tmux `resize-pane -Z`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>z", action.toggle_zoom_current_node());
+    /// ```
+    #[rhai_fn(name = "toggle_zoom_current_node")]
+    pub fn toggle_zoom_current_node(_: &mut ActionApi) -> Action {
+        Action::ToggleZoomNode { node_id: None }
+    }
+
     /// Toggle zoom for the specified node id.
-    /// There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
-    /// focused node and `toggle_zoom_node` when you already know the target id.
     #[rhai_fn(return_raw, name = "toggle_zoom_node")]
     pub fn toggle_zoom_node(
         ctx: NativeCallContext,
@@ -1468,6 +1492,100 @@ mod documented_action_api {
                 node_id: Some(parse_node_id(node_id)?),
             })
         })
+    }
+
+    /// Move the focused pane's border `cells` cells left (tmux `resize-pane -L`).
+    ///
+    /// The nearest split with panes side by side is resized: the divider to the right of the
+    /// pane moves left, shrinking the pane, or, when the pane is the split's rightmost child,
+    /// the divider to its left moves left, growing it. Panes keep at least one column of
+    /// content, and the action does nothing when there is no such split or the divider cannot
+    /// move. While a pane is zoomed only splits inside the zoomed view can be resized.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<M-h>", action.resize_left(3));
+    /// ```
+    #[rhai_fn(return_raw, name = "resize_left")]
+    pub fn resize_left(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Left, cells)
+    }
+
+    /// Move the focused pane's border `cells` cells right (tmux `resize-pane -R`).
+    /// See `resize_left` for which divider moves.
+    #[rhai_fn(return_raw, name = "resize_right")]
+    pub fn resize_right(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Right, cells)
+    }
+
+    /// Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
+    /// See `resize_left` for which divider moves; panes keep their title row and at least
+    /// one row of content.
+    #[rhai_fn(return_raw, name = "resize_up")]
+    pub fn resize_up(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Up, cells)
+    }
+
+    /// Move the focused pane's border `cells` rows down (tmux `resize-pane -D`).
+    /// See `resize_left` for which divider moves.
+    #[rhai_fn(return_raw, name = "resize_down")]
+    pub fn resize_down(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Down, cells)
+    }
+
+    /// Toggle tmux-style `synchronize-panes` for the active window.
+    ///
+    /// While it is on, input typed into a pane of the window is also sent to every other pane
+    /// the window currently shows. Popups and other windows never take part. See
+    /// `set_synchronize_panes` for details.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>S", action.toggle_synchronize_panes());
+    /// ```
+    #[rhai_fn(name = "toggle_synchronize_panes")]
+    pub fn toggle_synchronize_panes(_: &mut ActionApi) -> Action {
+        Action::SetSynchronizePanes {
+            mode: SynchronizePanesMode::Toggle,
+        }
+    }
+
+    /// Turn tmux-style `synchronize-panes` on or off for the active window.
+    ///
+    /// The setting belongs to the window (a root tab) and is shared by every client. While it
+    /// is on, keys, pastes and `send_keys_current`/`send_bytes_current` input aimed at the
+    /// focused pane go to every pane the window shows, each encoded for that pane. Panes in
+    /// hidden nested tabs or hidden by zoom, panes in other windows, and popups are left out,
+    /// and input typed into a focused popup is never copied. Mouse and focus events, input
+    /// sent to a specific buffer id, and `embers send-keys` are not synchronized. Tab bars can
+    /// show the state through `TabInfo.synchronize_panes()`.
+    #[rhai_fn(name = "set_synchronize_panes")]
+    pub fn set_synchronize_panes(_: &mut ActionApi, enabled: bool) -> Action {
+        Action::SetSynchronizePanes {
+            mode: if enabled {
+                SynchronizePanesMode::On
+            } else {
+                SynchronizePanesMode::Off
+            },
+        }
     }
 
     /// Swap the current node with a sibling.
@@ -3008,6 +3126,19 @@ fn which(name: &str) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+fn resize_pane(
+    ctx: NativeCallContext<'_>,
+    direction: NavigationDirection,
+    cells: i64,
+) -> RhaiResultOf<Action> {
+    with_call_position(ctx, || {
+        Ok(Action::ResizePane {
+            direction,
+            cells: parse_amount(cells, "resize cells")?,
+        })
+    })
 }
 
 fn with_call_position<T>(
