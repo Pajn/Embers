@@ -142,6 +142,8 @@ pub struct ConfiguredClient<T> {
     /// The viewport last reported to the server, so it is only sent again
     /// when it changes.
     reported_viewport: Option<(SessionId, Size)>,
+    /// The base index last reported to the server, and for which session.
+    reported_base_index: Option<(SessionId, Option<u32>)>,
     search_prompt: Option<SearchPrompt>,
     command_prompt: Option<CommandPrompt>,
     /// An open `confirm-before` question, shown in the status line.
@@ -190,6 +192,7 @@ where
             viewport: None,
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
+            reported_base_index: None,
             search_prompt: None,
             command_prompt: None,
             confirm: None,
@@ -3187,6 +3190,7 @@ where
     /// from the CLI can be spawned at the size this client will draw them.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
         self.report_viewport(session_id, viewport).await;
+        self.report_base_index(session_id).await;
         let presentation = self.project(session_id, viewport)?;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
             let result = self
@@ -3204,6 +3208,38 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Tell the server the base index this client numbers windows from, so
+    /// `embers` commands run without `--base-index` or `EMBERS_BASE_INDEX`
+    /// number them the same way. Sent when it differs from what the server
+    /// has for the session.
+    async fn report_base_index(&mut self, session_id: SessionId) {
+        let base_index = self.base_index();
+        let known = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.base_index);
+        if self.reported_base_index == Some((session_id, base_index))
+            || known.is_none_or(|known| known == base_index)
+        {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Session(SessionRequest::SetBaseIndex {
+                request_id: self.client.next_request_id(),
+                session_id,
+                base_index,
+            }))
+            .await;
+        match result {
+            Ok(_) => self.reported_base_index = Some((session_id, base_index)),
+            // Only CLI window numbers depend on it; retried on the next sync.
+            Err(error) => warn!("failed to report base index of session {session_id}: {error}"),
+        }
     }
 
     async fn report_viewport(&mut self, session_id: SessionId, viewport: Size) {

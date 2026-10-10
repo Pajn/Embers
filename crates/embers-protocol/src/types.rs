@@ -86,6 +86,14 @@ pub enum SessionRequest {
         session_id: SessionId,
         viewport: Size,
     },
+    /// Records the window base index (tmux `base-index`) of the client that
+    /// shows the session, so the CLI numbers windows the way that client
+    /// does. `None` means the client sets none.
+    SetBaseIndex {
+        request_id: RequestId,
+        session_id: SessionId,
+        base_index: Option<u32>,
+    },
     /// tmux `set-environment`: set `name` to `value`, or unset it when `value`
     /// is `None`, in a session's environment, or in the global environment when
     /// `session_id` is `None`. New buffers created for a session get the global
@@ -125,6 +133,7 @@ impl SessionRequest {
             | Self::CloseRootTab { request_id, .. }
             | Self::SetRootTabSynchronizePanes { request_id, .. }
             | Self::SetViewport { request_id, .. }
+            | Self::SetBaseIndex { request_id, .. }
             | Self::SetEnvironment { request_id, .. }
             | Self::ShowEnvironment { request_id, .. } => *request_id,
         }
@@ -727,6 +736,9 @@ pub struct SessionRecord {
     /// The area the session was last drawn in by an attached client; see
     /// `SessionRequest::SetViewport`.
     pub viewport: Option<Size>,
+    /// The window base index of the client that last showed the session;
+    /// see `SessionRequest::SetBaseIndex`.
+    pub base_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -189,10 +189,11 @@ closing one renumbers the windows after it, like tmux with
 `renumber-windows on`.
 
 This setting covers the client and the commands it runs from the command
-prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
-instead; set that variable where the server and your shells start to use
-the same numbering everywhere. Without this call the client uses
-`EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+prompt. The client also reports it to the server for the session it
+shows, and the `embers` CLI numbers that session's windows from it
+unless `EMBERS_BASE_INDEX` or `--base-index` overrides it. Without this
+call the client uses `EMBERS_BASE_INDEX` when it is set, and numbers
+windows from 0 otherwise.
 </div>
 <div group="set_base_index" id="set_base_index-Example" class="tabcontent"  style="display: none;" >
 

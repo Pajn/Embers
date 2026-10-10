@@ -916,6 +916,7 @@ mod zoom_tests {
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(3)),
                 viewport: None,
+                base_index: None,
             },
         );
         state.nodes.insert(
@@ -1009,6 +1010,7 @@ mod zoom_tests {
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(99)),
                 viewport: None,
+                base_index: None,
             },
         );
         state.nodes.insert(
@@ -1104,6 +1106,7 @@ mod zoom_tests {
                 focused_floating_id: Some(FloatingId(30)),
                 zoomed_node_id: Some(NodeId(3)),
                 viewport: None,
+                base_index: None,
             },
         );
         for (node_id, buffer_id, focused, zoomed) in [
@@ -1196,6 +1199,7 @@ mod zoom_tests {
                 focused_floating_id: Some(FloatingId(30)),
                 zoomed_node_id: Some(NodeId(12)),
                 viewport: None,
+                base_index: None,
             },
         );
         state.nodes.insert(
@@ -1349,6 +1353,7 @@ mod zoom_tests {
                 focused_floating_id: None,
                 zoomed_node_id: Some(NodeId(1)),
                 viewport: None,
+                base_index: None,
             },
         );
         state.nodes.insert(

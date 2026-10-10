@@ -184,6 +184,7 @@ fn second_session_state() -> embers_client::ClientState {
             focused_floating_id: None,
             zoomed_node_id: None,
             viewport: None,
+            base_index: None,
         },
     );
     state.nodes.insert(

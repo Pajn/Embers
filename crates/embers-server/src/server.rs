@@ -1259,6 +1259,18 @@ impl Runtime {
                 }
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            // No event either: clients number windows from their own config.
+            SessionRequest::SetBaseIndex {
+                request_id,
+                session_id,
+                base_index,
+            } => match state.set_session_base_index(session_id, base_index) {
+                Ok(()) => {
+                    self.mark_workspace_dirty();
+                    (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+                }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
             SessionRequest::SetRootTabSynchronizePanes {
                 request_id,
                 session_id,

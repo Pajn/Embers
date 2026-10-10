@@ -19,7 +19,7 @@ config API (key bindings, modes, actions, themes, tab bars, hooks) see
 | `EMBERS_RESTORE` | on | server | Set to `0`, `off`, `false` or `no` to leave panes whose keeper is gone `Interrupted` instead of restoring them. |
 | `EMBERS_REMAIN_ON_EXIT` | `off` | server | Default of the `remain-on-exit` pane option for panes that do not set it: `on` keeps a pane whose program exited as a dead pane, `failed` only when it exited with a nonzero status. A pane's own option wins. |
 | `EMBERS_RESTORE_COMMANDS` | `vi vim nvim emacs man less more tail top htop irssi weechat mutt` | server | Programs run again when a pane is restored, separated by commas or spaces. Replaces the default; set but empty, no program is run again. |
-| `EMBERS_BASE_INDEX` | unset | client + CLI | Number of the first window, like tmux `base-index`. Overridden by `--base-index` on the CLI and by `set_base_index` in the Rhai config. See [`commands.md`](commands.md#window-numbering). |
+| `EMBERS_BASE_INDEX` | unset | client + CLI | Number of the first window, like tmux `base-index`. The client uses it when its Rhai config does not call `set_base_index`; the CLI uses it instead of the base index the client reported to the server, and `--base-index` overrides it. See [`commands.md`](commands.md#window-numbering). |
 
 A limit set to `0`, empty, or an unparseable value is ignored, so the default
 applies.

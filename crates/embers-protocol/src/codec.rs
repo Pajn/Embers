@@ -255,7 +255,8 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
         | SessionRequest::SelectRootTab { session_id, .. }
         | SessionRequest::RenameRootTab { session_id, .. }
         | SessionRequest::CloseRootTab { session_id, .. }
-        | SessionRequest::SetRootTabSynchronizePanes { session_id, .. } => {
+        | SessionRequest::SetRootTabSynchronizePanes { session_id, .. }
+        | SessionRequest::SetBaseIndex { session_id, .. } => {
             validate_required_session_id(*session_id, "session_request.session_id")
         }
         SessionRequest::SetViewport {
@@ -1134,6 +1135,16 @@ fn encode_session_request<'a>(
             false,
             0,
         ),
+        SessionRequest::SetBaseIndex { session_id, .. } => (
+            fb::SessionOp::SetBaseIndex,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
         SessionRequest::SetEnvironment {
             session_id, name, ..
         } => (
@@ -1160,6 +1171,10 @@ fn encode_session_request<'a>(
     let (viewport_cols, viewport_rows) = match req {
         SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
         _ => (0, 0),
+    };
+    let base_index = match req {
+        SessionRequest::SetBaseIndex { base_index, .. } => *base_index,
+        _ => None,
     };
     let synchronize_panes = match req {
         SessionRequest::SetRootTabSynchronizePanes { mode, .. } => match mode {
@@ -1193,6 +1208,8 @@ fn encode_session_request<'a>(
             viewport_cols,
             viewport_rows,
             env_value,
+            base_index: base_index.unwrap_or(0),
+            has_base_index: base_index.is_some(),
         },
     );
 
@@ -3588,6 +3605,8 @@ fn encode_session_record<'a>(
             zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
             viewport_cols: record.viewport.map_or(0, |viewport| viewport.width),
             viewport_rows: record.viewport.map_or(0, |viewport| viewport.height),
+            base_index: record.base_index.unwrap_or(0),
+            has_base_index: record.base_index.is_some(),
         },
     )
 }
@@ -3980,6 +3999,14 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         },
                     }
                 }
+                fb::SessionOp::SetBaseIndex => SessionRequest::SetBaseIndex {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
+                    base_index: req.has_base_index().then(|| req.base_index()),
+                },
                 fb::SessionOp::SetViewport => {
                     validate_cells(
                         req.viewport_cols(),
@@ -5059,6 +5086,7 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
             "session_record.viewport",
         )?
         .map(|(width, height)| Size { width, height }),
+        base_index: record.has_base_index().then(|| record.base_index()),
     })
 }
 
@@ -6341,6 +6369,7 @@ mod tests {
                     focused_floating_id: None,
                     zoomed_node_id: Some(NodeId(0)),
                     viewport: None,
+                    base_index: None,
                 }],
             }),
         ))

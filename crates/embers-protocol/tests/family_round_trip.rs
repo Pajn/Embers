@@ -64,6 +64,16 @@ fn client_message_families_round_trip() {
                 height: 40,
             },
         }),
+        ClientMessage::Session(SessionRequest::SetBaseIndex {
+            request_id: RequestId(91),
+            session_id: SessionId(10),
+            base_index: Some(0),
+        }),
+        ClientMessage::Session(SessionRequest::SetBaseIndex {
+            request_id: RequestId(92),
+            session_id: SessionId(10),
+            base_index: None,
+        }),
         ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
             request_id: RequestId(9),
             session_id: SessionId(10),
@@ -742,6 +752,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 width: 120,
                 height: 40,
             }),
+            base_index: Some(1),
         },
         nodes: vec![
             NodeRecord {

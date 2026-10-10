@@ -1061,14 +1061,15 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
-            let number = window_number(index as usize, connection.base_index);
+            let number = window_number(index as usize, connection.base_index_for(&snapshot));
             Ok(format!("{number}\t{title}"))
         }
         Command::ListWindows { target } => {
             let snapshot = connection
                 .resolve_session_snapshot(target.as_deref())
                 .await?;
-            Ok(format_windows(&snapshot, connection.base_index)?)
+            let base_index = connection.base_index_for(&snapshot);
+            Ok(format_windows(&snapshot, base_index)?)
         }
         Command::SelectWindow { target } => {
             let window = connection.resolve_window(Some(&target)).await?;
@@ -1411,16 +1412,13 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 _ => connection.resolve_pane(target.as_deref()).await?,
             };
             let session_id = pane.snapshot.session.id;
+            let base_index = connection.base_index_for(&pane.snapshot);
             let mut state = ClientState::default();
             state.apply_session_snapshot(pane.snapshot);
-            let text = FormatContext::from_state(
-                &state,
-                session_id,
-                Some(pane.leaf_id),
-                connection.base_index,
-            )
-            .map(|context| expand_format(&template, &context))
-            .unwrap_or(template);
+            let text =
+                FormatContext::from_state(&state, session_id, Some(pane.leaf_id), base_index)
+                    .map(|context| expand_format(&template, &context))
+                    .unwrap_or(template);
             if print {
                 return Ok(text);
             }
@@ -2030,8 +2028,10 @@ fn interactive_command_name(command: &Command) -> Option<&'static str> {
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
-    /// Window base index (tmux `base-index`); `None` keeps the legacy
-    /// numbering described in [`embers_client::numbering`].
+    /// Window base index (tmux `base-index`) from `--base-index` or
+    /// `EMBERS_BASE_INDEX`. `None` uses the one the session's client reported
+    /// to the server, if any, else the legacy numbering described in
+    /// [`embers_client::numbering`].
     base_index: Option<u32>,
     /// The session commands without a session target apply to, when set by
     /// the command prompt; otherwise such commands need the only session.
@@ -2070,6 +2070,13 @@ impl CliConnection {
             default_client: None,
             pane_buffer: None,
         })
+    }
+
+    /// The base index windows of `snapshot`'s session are numbered from:
+    /// `--base-index` or `EMBERS_BASE_INDEX` when given, else the one the
+    /// client showing the session reported to the server.
+    fn base_index_for(&self, snapshot: &SessionSnapshot) -> Option<u32> {
+        self.base_index.or(snapshot.session.base_index)
     }
 
     fn client_id_or_default(&self, client_id: Option<u64>) -> Result<NonZeroU64> {
@@ -2339,9 +2346,10 @@ impl CliConnection {
         let snapshot = self
             .resolve_session_snapshot(session_target.as_deref())
             .await?;
+        let base_index = self.base_index_for(&snapshot);
         let (index, child_id) = {
             if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref(), self.base_index)?;
+                let index = resolve_window_index(root_tabs, selector.as_deref(), base_index)?;
                 let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
                     MuxError::not_found(format!(
                         "window index {index} is not present in session {}",
@@ -2351,8 +2359,7 @@ impl CliConnection {
                 (index, tab.child_id)
             } else {
                 let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index =
-                    resolve_single_window_index(&title, selector.as_deref(), self.base_index)?;
+                let index = resolve_single_window_index(&title, selector.as_deref(), base_index)?;
                 (index, snapshot.session.root_node_id)
             }
         };

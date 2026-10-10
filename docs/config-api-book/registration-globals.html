@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ed2e3ce3.js";
+            window.path_to_searchindex_js = "searchindex-9c4b0fab.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -341,10 +341,11 @@ Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
 closing one renumbers the windows after it, like tmux with
 <code>renumber-windows on</code>.</p>
 <p>This setting covers the client and the commands it runs from the command
-prompt. The <code>embers</code> CLI reads <code>EMBERS_BASE_INDEX</code> (or <code>--base-index</code>)
-instead; set that variable where the server and your shells start to use
-the same numbering everywhere. Without this call the client uses
-<code>EMBERS_BASE_INDEX</code> when it is set, and numbers windows from 0 otherwise.</p>
+prompt. The client also reports it to the server for the session it
+shows, and the <code>embers</code> CLI numbers that session’s windows from it
+unless <code>EMBERS_BASE_INDEX</code> or <code>--base-index</code> overrides it. Without this
+call the client uses <code>EMBERS_BASE_INDEX</code> when it is set, and numbers
+windows from 0 otherwise.</p>
 </div>
 
 <div group="set_base_index" id="set_base_index-Example" class="tabcontent" style="display: none;">

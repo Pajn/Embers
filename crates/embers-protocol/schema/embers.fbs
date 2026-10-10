@@ -75,6 +75,7 @@ enum SessionOp : ubyte {
   SetViewport = 10,
   SetEnvironment = 11,
   ShowEnvironment = 12,
+  SetBaseIndex = 13,
 }
 
 enum SynchronizePanesModeWire : ubyte {
@@ -242,6 +243,9 @@ table SessionRequest {
   viewport_rows:ushort = 0 (id: 10);
   // SetEnvironment: the value to set; absent unsets `name`.
   env_value:string (id: 11);
+  // SetBaseIndex: the number of the first window, when has_base_index.
+  base_index:uint = 0 (id: 12);
+  has_base_index:bool = false (id: 13);
 }
 
 table BufferRequest {
@@ -353,6 +357,8 @@ table SessionRecord {
   zoomed_node_id:ulong = 0 (id: 6);
   viewport_cols:ushort = 0 (id: 7);
   viewport_rows:ushort = 0 (id: 8);
+  base_index:uint = 0 (id: 9);
+  has_base_index:bool = false (id: 10);
 }
 
 table BufferRecord {

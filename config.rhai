@@ -31,9 +31,9 @@ set_detach_on_destroy("off");        // detach-on-destroy off
 // ---------------------------------------------------------------------------
 // Numbering
 // ---------------------------------------------------------------------------
-// base-index 1. Export EMBERS_BASE_INDEX=1 too, so `embers` commands run in
-// shells agree. Windows are always renumbered (renumber-windows on). Panes are
-// addressed by id, so there is no pane-base-index.
+// base-index 1. The client reports it to the server, so `embers` commands run
+// in shells agree. Windows are always renumbered (renumber-windows on). Panes
+// are addressed by id, so there is no pane-base-index.
 set_base_index(1);
 
 // ---------------------------------------------------------------------------

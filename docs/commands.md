@@ -64,13 +64,17 @@ setting for leaving gaps.
 
 | Where | Setting | Applies to |
 | --- | --- | --- |
-| Rhai config | `set_base_index(1);` | the interactive client: tab bar numbers, `action.select_window`, commands run from the command prompt |
-| Environment | `EMBERS_BASE_INDEX=1` | the `embers` CLI, and the client when its config does not call `set_base_index` |
+| Rhai config | `set_base_index(1);` | the interactive client: tab bar numbers, `action.select_window`, commands run from the command prompt; and through the server, the `embers` CLI |
+| Environment | `EMBERS_BASE_INDEX=1` | the client when its config does not call `set_base_index`, and the CLI, overriding what the server reports |
 | Command line | `embers --base-index 1 ...` | one CLI invocation; overrides `EMBERS_BASE_INDEX` |
 
-The CLI does not read the Rhai config, so to number windows from 1 everywhere,
-export `EMBERS_BASE_INDEX=1` where your shells and the server start. Panes
-inherit the server's environment, so `embers` commands run inside panes then
+The server is the source of truth for the CLI. An attached client reports its
+base index (from its config, else `EMBERS_BASE_INDEX`) to the server for the
+session it shows, and the server keeps it with the session, saved with the
+workspace. Sessions created afterwards start with the last base index
+reported. The CLI numbers a session's windows from that base index unless
+`--base-index` or `EMBERS_BASE_INDEX` gives one, so `set_base_index(1)` in the
+config is enough for `embers select-window -t 1` in a pane, or in any shell, to
 agree with the client. The client also passes its base index to `run_shell`
 children.
 
@@ -85,6 +89,7 @@ including `0`, makes every number mean exactly one window.
 ### Examples
 
 ```sh
+# With set_base_index(1) in the config of the client showing "work", or:
 export EMBERS_BASE_INDEX=1
 embers new-window -t work --title logs   # prints "2	logs" in a session with one window
 embers list-windows -t work              # number, active flag, title

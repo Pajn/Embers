@@ -52,6 +52,10 @@ pub struct PersistedSession {
     /// after a restart, before a client attaches, still start at that size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Size>,
+    /// The base index of the client that last showed the session, so the
+    /// CLI numbers windows the same way after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_index: Option<u32>,
     pub created_at_ms: u64,
 }
 
@@ -354,6 +358,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         focused_floating: session.focused_floating.map(|id| id.0),
         zoomed_node: session.zoomed_node.map(|id| id.0),
         viewport: session.viewport,
+        base_index: session.base_index,
         created_at_ms: timestamp_to_millis(session.created_at),
     }
 }
@@ -368,6 +373,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
         viewport: session.viewport,
+        base_index: session.base_index,
         focus_history: Vec::new(),
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
@@ -716,6 +722,9 @@ mod tests {
         state
             .set_session_viewport(session_id, viewport)
             .expect("viewport is set");
+        state
+            .set_session_base_index(session_id, Some(1))
+            .expect("base index is set");
 
         save_workspace(&workspace_path, &state).expect("workspace saves");
         let restored = load_workspace(&workspace_path)
@@ -725,6 +734,10 @@ mod tests {
         assert_eq!(
             restored.session(session_id).expect("session").viewport,
             Some(viewport)
+        );
+        assert_eq!(
+            restored.session(session_id).expect("session").base_index,
+            Some(1)
         );
     }
 
@@ -905,6 +918,7 @@ mod tests {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: None,
+                base_index: None,
                 created_at_ms: 1234,
             }],
             buffers: Vec::new(),

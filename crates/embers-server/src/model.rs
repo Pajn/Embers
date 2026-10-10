@@ -19,6 +19,9 @@ pub struct Session {
     /// The area an attached client last drew this session in. Panes created
     /// without a client use it to start at their drawn size.
     pub viewport: Option<Size>,
+    /// The window base index of the client that last showed this session
+    /// (tmux `base-index`), so the CLI numbers windows as that client does.
+    pub base_index: Option<u32>,
     /// Panes focused before the current one, oldest first, without repeats.
     /// The newest one in the focused pane's window is that window's last pane
     /// (tmux `select-pane -l`). Kept in memory only; entries for closed panes

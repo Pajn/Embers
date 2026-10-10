@@ -81,6 +81,9 @@ pub struct ServerState {
     /// The viewport most recently reported for any session, which new
     /// sessions start with.
     last_viewport: Option<Size>,
+    /// The base index last reported for any session, which new sessions
+    /// start with.
+    last_base_index: Option<u32>,
     /// Whether exited buffers that do not set the `remain-on-exit` option
     /// stay in their views; the server sets it from its config.
     pub remain_on_exit: RemainOnExit,
@@ -105,6 +108,7 @@ impl ServerState {
             floating: BTreeMap::new(),
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_base_index: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(1),
             buffer_ids: IdAllocator::new(1),
@@ -195,6 +199,7 @@ impl ServerState {
             floating,
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_base_index: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
             buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
@@ -430,11 +435,22 @@ impl ServerState {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: self.last_viewport,
+                base_index: self.last_base_index,
                 focus_history: Vec::new(),
                 created_at: Timestamp::now(),
             },
         );
         session_id
+    }
+
+    pub fn set_session_base_index(
+        &mut self,
+        session_id: SessionId,
+        base_index: Option<u32>,
+    ) -> Result<()> {
+        self.session_mut(session_id)?.base_index = base_index;
+        self.last_base_index = base_index;
+        Ok(())
     }
 
     pub fn set_session_viewport(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {

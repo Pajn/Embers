@@ -1788,6 +1788,57 @@ async fn oversized_tmux_passthrough_is_dropped() {
     assert!(contains_subslice(&output.frame_output, b"\x1b]9;done\x07"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_reports_its_base_index_to_the_server() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tempdir.path().join("config.rhai"), "set_base_index(1);").expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let base_index = |snapshot: SessionSnapshot| snapshot.session.base_index;
+    assert_eq!(
+        base_index(session_snapshot_by_name(&mut connection, "alpha").await),
+        None
+    );
+
+    // Drawing the session reports the base index along with the viewport.
+    configured
+        .sync_pty_sizes(
+            alpha,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .await
+        .expect("sync");
+    assert_eq!(
+        base_index(session_snapshot_by_name(&mut connection, "alpha").await),
+        Some(1)
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
