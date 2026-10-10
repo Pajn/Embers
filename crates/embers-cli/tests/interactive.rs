@@ -682,7 +682,7 @@ async fn embers_without_subcommand_starts_server_and_client() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("1\tmain"));
 
     harness.write_all("\x11").expect("quit client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
 
     // spawned.drop() will clean up the orphaned __serve process
 }
@@ -733,7 +733,7 @@ async fn attach_subcommand_connects_to_running_server() {
     );
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -794,7 +794,9 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
         .expect("switch-client retargets the live client");
 
     run_cli(&server, ["detach-client", &client_id.to_string()]);
-    harness.wait().expect("client exits after detach");
+    harness
+        .wait_timeout(IO_TIMEOUT)
+        .expect("client exits after detach");
 
     server.shutdown().await.expect("shutdown server");
 }
@@ -879,7 +881,7 @@ async fn client_exits_when_its_session_is_destroyed_by_default() {
 
     let (_spawned, mut harness, _config) = exit_last_pane_of_attached_session(&server, "").await;
     harness
-        .wait()
+        .wait_timeout(IO_TIMEOUT)
         .expect("the client exits once its session is destroyed");
     let sessions = stdout(&run_cli(&server, ["list-sessions"]));
     assert!(sessions.contains("ops") && !sessions.contains("main"));
@@ -955,7 +957,7 @@ async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
         .expect("buffer reveal retargets the live client");
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -978,7 +980,7 @@ async fn page_up_enters_local_scrollback() {
     page_up_until_visible(&mut harness, "line-1");
 
     harness.write_all("\x11").expect("quit client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
 
     // spawned.drop() will clean up the orphaned __serve process
 }
@@ -1010,7 +1012,7 @@ async fn local_selection_yank_emits_osc52_clipboard_sequence() {
     assert!(output.contains("]52;c;"));
 
     harness.write_all("\x11").expect("quit client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
 
     // spawned.drop() will clean up the orphaned __serve process
 }
@@ -1086,7 +1088,7 @@ async fn scripted_input_bindings_reach_the_live_terminal_in_pty() {
         .expect("scripted output reaches focused buffer");
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1185,7 +1187,7 @@ async fn config_reload_updates_live_bindings_without_breaking_terminal_io() {
     );
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1354,7 +1356,7 @@ async fn live_pty_client_preserves_buffers_across_layout_and_attachment_changes(
         .expect("reattached buffer output renders in attached client");
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1424,7 +1426,7 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
         .expect("revealed hidden buffer shows accumulated output");
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1505,7 +1507,7 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
     assert!(!restored.alternate_screen);
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1578,7 +1580,7 @@ async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_curs
     );
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
 
@@ -1630,7 +1632,7 @@ async fn styled_output_on_host(answers: &'static [HostAnswer]) -> String {
             .expect("styled text renders"),
     );
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
     output
 }
@@ -1777,6 +1779,6 @@ async fn command_prompt_picker_and_display_message_work_in_a_live_client() {
         .expect("display-message reaches the status line");
 
     harness.write_all("\x11").expect("quit attached client");
-    harness.wait().expect("client exits");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }

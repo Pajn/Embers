@@ -234,6 +234,31 @@ impl PtyHarness {
         }
         Ok(())
     }
+
+    /// Wait for the child to exit, failing after `timeout` instead of
+    /// hanging when it does not. The child is killed when the harness drops.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            let exited = self
+                .child
+                .try_wait()
+                .map_err(|error| MuxError::pty(error.to_string()))?;
+            if exited.is_some() {
+                break;
+            }
+            if start.elapsed() >= timeout {
+                return Err(MuxError::timeout(format!(
+                    "timed out after {timeout:?} waiting for the PTY child to exit"
+                )));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(join) = self.reader_join.take() {
+            let _ = join.join();
+        }
+        Ok(())
+    }
 }
 
 impl Drop for PtyHarness {
