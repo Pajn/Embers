@@ -15,7 +15,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,8 +33,17 @@ use tracing::{debug, error};
 
 use crate::{AlacrittyTerminalBackend, RawByteRouter, TerminalBackend};
 
-const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
-const CONNECT_RETRY_ATTEMPTS: usize = 1200;
+/// How long spawning a buffer waits for its runtime keeper to report that it
+/// is ready (socket listening, child running) or that it failed to start.
+const KEEPER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Line a keeper process writes to its stdout once it is ready to serve.
+const KEEPER_READY_LINE: &str = "ready";
+/// Prefix of the line a keeper process writes to its stdout when it fails to
+/// start; the rest of the line is the error.
+const KEEPER_ERROR_PREFIX: &str = "error: ";
+/// Upper bound on the readiness report, so a misbehaving keeper cannot make the
+/// server buffer unbounded output.
+const KEEPER_READY_LINE_MAX: usize = 4096;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const KEEPER_PIPE_WRITE_QUEUE_CAPACITY: usize = 64;
@@ -917,7 +926,64 @@ const KEEPER_PTY_MAX_RETRIES: usize = 3;
 /// Delay between PTY allocation retries
 const KEEPER_PTY_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// Run a runtime keeper process. Reports on stdout, as a single line, once the
+/// keeper is ready to serve or why it failed to start; the spawning server
+/// waits for that line (see [`wait_for_keeper_ready`]).
 pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
+    let mut readiness = KeeperReadiness::Stdout { reported: false };
+    let result = serve_runtime_keeper(cli, &mut readiness);
+    if let Err(error) = &result {
+        readiness.report(Err(error.to_string()));
+    }
+    result
+}
+
+/// Where a keeper reports whether it started. A keeper process reports on its
+/// stdout; an in-process keeper thread reports over a channel.
+enum KeeperReadiness {
+    Stdout { reported: bool },
+    Channel(Option<SyncSender<std::result::Result<(), String>>>),
+}
+
+impl KeeperReadiness {
+    /// Report the start result. Only the first report counts.
+    fn report(&mut self, result: std::result::Result<(), String>) {
+        match self {
+            Self::Stdout { reported } => {
+                if std::mem::replace(reported, true) {
+                    return;
+                }
+                let line = match result {
+                    Ok(()) => format!("{KEEPER_READY_LINE}\n"),
+                    Err(error) => format!("{KEEPER_ERROR_PREFIX}{}\n", error.replace('\n', " ")),
+                };
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(line.as_bytes());
+                let _ = stdout.flush();
+                drop(stdout);
+                release_stdout();
+            }
+            Self::Channel(sender) => {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+            }
+        }
+    }
+}
+
+/// Point stdout at `/dev/null` once readiness is reported, so the keeper does
+/// not hold the server's end of the readiness pipe open for its whole life.
+fn release_stdout() {
+    if let Ok(null) = fs::OpenOptions::new().write(true).open("/dev/null") {
+        // SAFETY: plain fd duplication onto stdout; `null` stays open for the call.
+        unsafe {
+            libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO);
+        }
+    }
+}
+
+fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) -> Result<()> {
     let Some(program) = cli.command.first() else {
         return Err(MuxError::invalid_input(
             "runtime keeper command must not be empty",
@@ -1030,6 +1096,9 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     // (the attached server has already read the final state), or its socket was
     // removed or replaced so no server can ever reach it again. In the latter
     // case it stops the child instead of leaving it running unreachable.
+    // The socket is listening and the child is running: from here on a server
+    // can connect at any time.
+    readiness.report(Ok(()));
     let mut served_client = false;
     let mut terminate = false;
     while !terminate {
@@ -1651,23 +1720,85 @@ fn resolve_pid_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// Connect to a keeper's socket. Callers only connect once the keeper is known
+/// to be listening (a freshly spawned keeper has reported readiness; a restored
+/// one was already serving), so a failure is final rather than retried.
 fn connect_to_keeper(socket_path: &Path) -> Result<UnixStream> {
-    for _ in 0..CONNECT_RETRY_ATTEMPTS {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => return Ok(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                thread::sleep(CONNECT_RETRY_DELAY);
+    Ok(UnixStream::connect(socket_path)?)
+}
+
+/// Wait for a freshly spawned keeper to report on `pipe` (its stdout) that it
+/// is ready, or why it failed to start.
+///
+/// The keeper's socket file appears at `bind`, before the keeper listens on
+/// it, and a connect in between is refused; the keeper also still has to open
+/// a PTY and start the child, either of which can fail. Waiting for the
+/// keeper's own report covers both instead of guessing from connect errors.
+fn wait_for_keeper_ready<P: Read + AsRawFd>(mut pipe: P, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut line = Vec::new();
+    let mut chunk = [0_u8; 256];
+    while !line.contains(&b'\n') {
+        if line.len() > KEEPER_READY_LINE_MAX {
+            return Err(MuxError::protocol(
+                "runtime keeper readiness report is too long",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MuxError::timeout(
+                "timed out waiting for the runtime keeper to start",
+            ));
+        }
+        // Not readable yet (timed out or interrupted): re-check the deadline.
+        if !wait_readable(pipe.as_raw_fd(), remaining)? {
+            continue;
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => {
+                return Err(MuxError::pty("runtime keeper exited before it was ready"));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                return Err(error.into());
-            }
+            Ok(read) => line.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Err(MuxError::timeout(format!(
-        "timed out connecting to runtime keeper {}",
-        socket_path.display()
-    )))
+    let end = line
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(line.len());
+    let report = String::from_utf8_lossy(&line[..end]);
+    if report == KEEPER_READY_LINE {
+        return Ok(());
+    }
+    match report.strip_prefix(KEEPER_ERROR_PREFIX) {
+        Some(error) => Err(MuxError::pty(format!(
+            "runtime keeper failed to start: {error}"
+        ))),
+        None => Err(MuxError::protocol(format!(
+            "unexpected runtime keeper readiness report {report:?}"
+        ))),
+    }
+}
+
+/// Wait up to `timeout` for `fd` to become readable (or reach end of file).
+fn wait_readable(fd: libc::c_int, timeout: Duration) -> Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `poll_fd` is a valid pollfd for an fd the caller keeps open.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error.into());
+    }
+    Ok(ready > 0)
 }
 
 fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
@@ -1694,21 +1825,44 @@ fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         keeper.arg("--");
         keeper.args(&cli.command);
         keeper.stdin(Stdio::null());
-        keeper.stdout(Stdio::null());
+        keeper.stdout(Stdio::piped());
         keeper.stderr(Stdio::null());
-        keeper.spawn()?;
-        return Ok(());
+        let mut child = keeper.spawn()?;
+        let ready = match child.stdout.take() {
+            Some(stdout) => wait_for_keeper_ready(stdout, KEEPER_READY_TIMEOUT),
+            None => Err(MuxError::internal("runtime keeper stdout was not piped")),
+        };
+        if ready.is_err() {
+            // A keeper that reported a failure exits by itself; one that never
+            // reported is stuck, so make sure it goes away either way.
+            let _ = child.kill();
+        }
+        return ready;
     }
 
+    let (ready_tx, ready_rx) = sync_channel(1);
     thread::Builder::new()
         .name(format!("runtime-keeper-{}", cli.socket_path.display()))
         .spawn(move || {
-            if let Err(error) = run_runtime_keeper(cli) {
+            let mut readiness = KeeperReadiness::Channel(Some(ready_tx));
+            if let Err(error) = serve_runtime_keeper(cli, &mut readiness) {
                 error!(%error, "runtime keeper thread failed");
+                readiness.report(Err(error.to_string()));
             }
         })
         .map_err(|error| MuxError::internal(error.to_string()))?;
-    Ok(())
+    match ready_rx.recv_timeout(KEEPER_READY_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(MuxError::pty(format!(
+            "runtime keeper failed to start: {error}"
+        ))),
+        Err(RecvTimeoutError::Timeout) => Err(MuxError::timeout(
+            "timed out waiting for the runtime keeper to start",
+        )),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(MuxError::pty("runtime keeper exited before it was ready"))
+        }
+    }
 }
 
 fn resolve_runtime_keeper_executable() -> Option<PathBuf> {
@@ -1914,8 +2068,57 @@ mod tests {
         BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
         BufferRuntimePipeStopReason, BufferRuntimeStatus, KEEPER_PIPE_WRITE_QUEUE_CAPACITY,
         KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
-        spawn_status_poller, status_update_delta,
+        spawn_status_poller, status_update_delta, wait_for_keeper_ready,
     };
+
+    #[test]
+    fn keeper_readiness_accepts_ready_report_split_across_reads() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let sender = thread::spawn(move || {
+            writer.write_all(b"rea").expect("write first half");
+            thread::sleep(Duration::from_millis(20));
+            writer.write_all(b"dy\n").expect("write second half");
+            writer
+        });
+        wait_for_keeper_ready(reader, Duration::from_secs(5)).expect("keeper reported ready");
+        drop(sender.join());
+    }
+
+    #[test]
+    fn keeper_readiness_surfaces_reported_start_error() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        writer
+            .write_all(b"error: no such program /missing\n")
+            .expect("write error report");
+        let error = wait_for_keeper_ready(reader, Duration::from_secs(5))
+            .expect_err("start error is reported");
+        assert!(
+            error.to_string().contains("no such program /missing"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keeper_readiness_fails_when_keeper_exits_without_reporting() {
+        let (reader, writer) = UnixStream::pair().expect("socket pair");
+        drop(writer);
+        let error = wait_for_keeper_ready(reader, Duration::from_secs(5))
+            .expect_err("silent exit is an error");
+        assert!(
+            error.to_string().contains("exited before it was ready"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keeper_readiness_times_out_on_a_silent_keeper() {
+        let (reader, _writer) = UnixStream::pair().expect("socket pair");
+        let started = Instant::now();
+        let error = wait_for_keeper_ready(reader, Duration::from_millis(100))
+            .expect_err("silent keeper times out");
+        assert!(matches!(error, MuxError::Timeout(_)), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     fn status_with_cwd(sequence: u64, cwd: Option<&str>) -> BufferRuntimeStatus {
         BufferRuntimeStatus {

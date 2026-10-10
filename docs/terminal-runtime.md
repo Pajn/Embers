@@ -98,6 +98,9 @@ The intended transition graph is:
 Each PTY runs inside a runtime keeper process that owns the PTY and serves captures over a
 socket in the server's runtime directory.
 
+- spawning a buffer waits until its keeper reports, on its stdout, that its socket is listening
+  and its child is running, or why it failed to start; the server only connects after that
+  report, so it never sees a socket that exists but does not accept connections yet
 - a clean server shutdown leaves keepers running, so a restarted server can reattach through
   their sockets and restore `Running` buffers
 - a keeper keeps serving captures after its child exits while a server stays attached to it
