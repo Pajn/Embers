@@ -333,9 +333,10 @@ fn example_config_smart_splits_move_and_resize_other_panes() {
             "{name}"
         );
     }
+    // tmux `select-pane -l`.
     assert_eq!(
         run(&engine, "smart-last-pane", &demo_state()),
-        vec![Action::Noop]
+        vec![Action::LastPane]
     );
 }
 

@@ -114,6 +114,22 @@ zero-based index.
 Panes are addressed by id (`list-panes` prints them, and `-t <id>` selects
 one), not by a per-window index, so there is no `pane-base-index`.
 
+## Last pane
+
+`select-pane -l` focuses the pane that was focused before the current one in
+the current window, like tmux; running it again goes back. Each window has its
+own last pane, so switching windows and back does not change it. When the last
+pane has been closed, the one focused before it takes its place; with none left
+the command fails (`no last pane`). The server keeps this history in memory, so
+it starts empty after a server restart. A focused popup has no last pane.
+
+From the Rhai config, `action.last_pane()` does the same and does nothing when
+there is no last pane:
+
+```rhai
+bind("normal", "<leader>;", action.last_pane());
+```
+
 ## Environment
 
 Like tmux, Embers keeps a global environment and one per session. A pane

@@ -249,9 +249,8 @@ fn smart_resize_down(ctx) { if is_vim_pane(ctx) { action.send_keys_current("<M-j
 fn smart_resize_up(ctx) { if is_vim_pane(ctx) { action.send_keys_current("<M-k>") } else { action.resize_up(3) } }
 fn smart_resize_right(ctx) { if is_vim_pane(ctx) { action.send_keys_current("<M-l>") } else { action.resize_right(3) } }
 
-// C-\ goes to the previous pane in tmux; Embers has no last-pane action yet,
-// so outside Neovim the key does nothing (rather than SIGQUIT the shell's job).
-fn smart_last_pane(ctx) { if is_vim_pane(ctx) { action.send_keys_current("<C-\\>") } else { action.noop() } }
+// C-\ goes back to the previously focused pane (select-pane -l).
+fn smart_last_pane(ctx) { if is_vim_pane(ctx) { action.send_keys_current("<C-\\>") } else { action.last_pane() } }
 
 define_action("smart-nav-left", smart_nav_left);
 define_action("smart-nav-down", smart_nav_down);

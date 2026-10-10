@@ -368,6 +368,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
         viewport: session.viewport,
+        focus_history: Vec::new(),
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
 }

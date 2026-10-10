@@ -456,6 +456,12 @@ pub enum NodeRequest {
         session_id: SessionId,
         node_id: NodeId,
     },
+    /// Focus the pane focused before the current one in the session's
+    /// focused window (tmux `select-pane -l`).
+    FocusLast {
+        request_id: RequestId,
+        session_id: SessionId,
+    },
     Close {
         request_id: RequestId,
         node_id: NodeId,
@@ -523,6 +529,7 @@ impl NodeRequest {
             | Self::AddTab { request_id, .. }
             | Self::SelectTab { request_id, .. }
             | Self::Focus { request_id, .. }
+            | Self::FocusLast { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
             | Self::Resize { request_id, .. }

@@ -1454,6 +1454,21 @@ mod documented_action_api {
         }
     }
 
+    /// Focus the pane that was focused before the current one in the current
+    /// window, like tmux `select-pane -l`. Repeating it goes back and forth
+    /// between two panes. Panes that were closed are skipped; with no other
+    /// pane to go back to it does nothing.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>;", action.last_pane());
+    /// ```
+    #[rhai_fn(name = "last_pane")]
+    pub fn last_pane(_: &mut ActionApi) -> Action {
+        Action::LastPane
+    }
+
     /// Select a tab by index in a specific tabs node.
     #[rhai_fn(return_raw, name = "select_tab")]
     pub fn select_tab(

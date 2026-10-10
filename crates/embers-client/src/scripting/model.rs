@@ -27,6 +27,9 @@ pub enum Action {
     FocusDirection {
         direction: NavigationDirection,
     },
+    /// tmux `select-pane -l`: focus the pane focused before the current one
+    /// in the current window.
+    LastPane,
     SelectTab {
         tabs_node_id: Option<NodeId>,
         index: usize,

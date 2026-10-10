@@ -2086,6 +2086,32 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            embers_protocol::NodeRequest::FocusLast {
+                request_id,
+                session_id,
+            } => {
+                if let Err(error) = state.focus_last_pane(session_id) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+
+                match session_snapshot(&state, session_id) {
+                    Ok(snapshot) => {
+                        let mut events =
+                            vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+                        if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                            events.push(ServerEvent::FocusChanged(focus_event));
+                        }
+                        (
+                            ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                                request_id,
+                                snapshot,
+                            }),
+                            events,
+                        )
+                    }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
             embers_protocol::NodeRequest::Close {
                 request_id,
                 node_id,

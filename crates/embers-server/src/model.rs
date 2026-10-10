@@ -19,6 +19,11 @@ pub struct Session {
     /// The area an attached client last drew this session in. Panes created
     /// without a client use it to start at their drawn size.
     pub viewport: Option<Size>,
+    /// Panes focused before the current one, oldest first, without repeats.
+    /// The newest one in the focused pane's window is that window's last pane
+    /// (tmux `select-pane -l`). Kept in memory only; entries for closed panes
+    /// are skipped when read and pruned when the list grows.
+    pub focus_history: Vec<NodeId>,
     pub created_at: Timestamp,
 }
 

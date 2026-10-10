@@ -259,10 +259,14 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
+    /// Focus a pane, or with `-l` the pane focused before the current one in
+    /// the session's current window (tmux `select-pane -l`).
     #[command(name = "select-pane")]
     SelectPane {
-        #[arg(short = 't', long = "target")]
-        target: String,
+        #[arg(short = 't', long = "target", required_unless_present = "last")]
+        target: Option<String>,
+        #[arg(short = 'l', long = "last", conflicts_with = "target")]
+        last: bool,
     },
     /// Resize a pane like tmux: `-L/-R/-U/-D [N]` moves its border N cells
     /// (default 1), `-Z` toggles zoom, and `--sizes` sets the parent split's
@@ -1187,7 +1191,20 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let leaf_ids = visible_leaf_ids(&window.snapshot, window.child_id)?;
             Ok(format_panes(&window.snapshot, &leaf_ids)?)
         }
-        Command::SelectPane { target } => {
+        Command::SelectPane { target: None, .. } => {
+            let session = connection.resolve_session_record(None).await?;
+            connection
+                .request(ClientMessage::Node(NodeRequest::FocusLast {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::SelectPane {
+            target: Some(target),
+            ..
+        } => {
             let pane = connection.resolve_pane(Some(&target)).await?;
             connection
                 .request(ClientMessage::Node(NodeRequest::Focus {

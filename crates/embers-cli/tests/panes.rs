@@ -195,6 +195,19 @@ async fn pane_commands_round_trip_through_cli() {
             .any(|line| line.starts_with(&format!("{other_pane_id}\t")) && line.contains("\t1\t"))
     );
 
+    // select-pane -l goes back to the pane focused before, and toggles.
+    let focused_pane = |server: &TestServer| {
+        stdout(&run_cli(server, ["list-panes"]))
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .find(|columns| columns.get(2) == Some(&"1"))
+            .and_then(|columns| columns[0].parse::<u64>().ok())
+    };
+    run_cli(&server, ["select-pane", "-l"]);
+    assert_eq!(focused_pane(&server), Some(new_pane_id));
+    run_cli(&server, ["select-pane", "-l"]);
+    assert_eq!(focused_pane(&server), Some(other_pane_id));
+
     run_cli(
         &server,
         [

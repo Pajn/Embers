@@ -1800,6 +1800,41 @@ tmux's `kill-pane`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> last_pane </h2>
+
+```rust,ignore
+fn last_pane(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="last_pane" id="link-last_pane-Description"  class="tablinks active"
+    onclick="openTab(event, 'last_pane', 'Description')">
+Description
+</button>
+<button group="last_pane" id="link-last_pane-Example"  class="tablinks"
+    onclick="openTab(event, 'last_pane', 'Example')">
+Example
+</button>
+</div>
+
+<div group="last_pane" id="last_pane-Description" class="tabcontent"  style="display: block;" >
+Focus the pane that was focused before the current one in the current
+window, like tmux `select-pane -l`. Repeating it goes back and forth
+between two panes. Panes that were closed are skipped; with no other
+pane to go back to it does nothing.
+</div>
+<div group="last_pane" id="last_pane-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>;", action.last_pane());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> last_session </h2>
 
 ```rust,ignore

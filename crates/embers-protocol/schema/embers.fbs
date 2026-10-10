@@ -123,6 +123,7 @@ enum NodeOp : ubyte {
   JoinBufferAtNode = 18,
   MoveNodeBefore = 19,
   MoveNodeAfter = 20,
+  FocusLast = 21,
 }
 
 enum FloatingOp : ubyte {

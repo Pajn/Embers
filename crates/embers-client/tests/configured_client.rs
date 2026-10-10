@@ -313,6 +313,61 @@ async fn configured_keybinding_executes_live_focus_action() {
 }
 
 #[tokio::test]
+async fn last_pane_action_asks_the_server_for_the_previous_pane() {
+    let transport = ScriptedTransport::default();
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::FocusLast {
+            request_id: RequestId(1),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(1),
+        }),
+    );
+    let focused_state = root_focus_state();
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(2),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(2),
+            snapshot: session_snapshot_from_state(&focused_state, SESSION_ID),
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    *client.state_mut() = demo_state();
+    let (config, _tempdir) =
+        manager_from_source(r#"bind("normal", "<C-\\>", action.last_pane());"#);
+    let mut configured = ConfiguredClient::new(client, config);
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('\\'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        configured
+            .client()
+            .state()
+            .sessions
+            .get(&SESSION_ID)
+            .and_then(|session| session.focused_leaf_id),
+        Some(LEFT_LEAF_ID)
+    );
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
 async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
     let transport = FakeTransport::default();
     let state = demo_state();

@@ -1670,6 +1670,7 @@ where
                 };
                 self.focus_node(session_id, node_id).await
             }
+            Action::LastPane => self.focus_last_pane(session_id).await,
             Action::ScrollLineUp => {
                 let leaf = self.focused_leaf(presentation)?;
                 self.scroll_view_by(leaf.node_id, -1).await
@@ -4661,6 +4662,38 @@ where
         let parameter = selection.osc52_parameter();
         self.terminal_output
             .push_back(format!("\x1b]52;{parameter};{encoded}\x07").into_bytes());
+    }
+
+    /// Focus the pane focused before the current one in the session's
+    /// focused window (tmux `select-pane -l`). The server keeps the focus
+    /// history; with no last pane this does nothing.
+    async fn focus_last_pane(&mut self, session_id: SessionId) -> Result<()> {
+        let previous_buffer = self.focused_buffer_for_session(session_id);
+        match self
+            .client
+            .request_message(ClientMessage::Node(NodeRequest::FocusLast {
+                request_id: self.client.next_request_id(),
+                session_id,
+            }))
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        self.client.resync_session(session_id).await?;
+
+        let new_buffer = self.focused_buffer_for_session(session_id);
+        if new_buffer != previous_buffer {
+            for (buffer_id, focused) in [(previous_buffer, false), (new_buffer, true)] {
+                if let Some(buffer_id) = buffer_id
+                    && self.maybe_send_focus_sequence(buffer_id, focused).await?
+                {
+                    self.client.refresh_buffer_snapshot(buffer_id).await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {

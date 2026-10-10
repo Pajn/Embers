@@ -430,6 +430,7 @@ impl ServerState {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: self.last_viewport,
+                focus_history: Vec::new(),
                 created_at: Timestamp::now(),
             },
         );
@@ -1846,8 +1847,14 @@ impl ServerState {
         self.ensure_leaf_belongs_to(leaf_id, session_id)?;
         self.ensure_leaf_is_focusable(session_id, leaf_id)?;
         let buffer_id = self.buffer_view_buffer_id(leaf_id)?;
+        let previous_leaf = self.session(session_id)?.focused_leaf;
         self.clear_session_focus(session_id)?;
         self.set_leaf_focus(leaf_id, true)?;
+        if let Some(previous_leaf) = previous_leaf
+            && previous_leaf != leaf_id
+        {
+            self.remember_focus(session_id, previous_leaf)?;
+        }
 
         let floating_owner = self.floating_id_for_node(leaf_id)?;
         {
@@ -1886,6 +1893,69 @@ impl ServerState {
         self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
 
         Ok(())
+    }
+
+    /// The pane focused before the current one in the focused pane's window,
+    /// like tmux's last pane: the newest pane in the session's focus history
+    /// that still exists and is in that window. `None` when the focus is in
+    /// a popup or no other pane of the window was focused.
+    pub fn last_pane(&self, session_id: SessionId) -> Result<Option<NodeId>> {
+        let session = self.session(session_id)?;
+        let Some(focused) = session.focused_leaf else {
+            return Ok(None);
+        };
+        let Some(window) = self.window_of_leaf(session_id, focused)? else {
+            return Ok(None);
+        };
+        for &candidate in session.focus_history.iter().rev() {
+            if candidate == focused
+                || !matches!(self.nodes.get(&candidate), Some(Node::BufferView(_)))
+            {
+                continue;
+            }
+            if self.window_of_leaf(session_id, candidate)? == Some(window) {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Focus the window's last pane (tmux `select-pane -l`).
+    pub fn focus_last_pane(&mut self, session_id: SessionId) -> Result<()> {
+        let Some(leaf_id) = self.last_pane(session_id)? else {
+            return Err(MuxError::not_found("no last pane"));
+        };
+        self.focus_leaf(session_id, leaf_id)
+    }
+
+    /// Most entries kept in a session's focus history.
+    const FOCUS_HISTORY_LIMIT: usize = 64;
+
+    fn remember_focus(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
+        let mut history = std::mem::take(&mut self.session_mut(session_id)?.focus_history);
+        history.retain(|&entry| entry != leaf_id && self.nodes.contains_key(&entry));
+        history.push(leaf_id);
+        if history.len() > Self::FOCUS_HISTORY_LIMIT {
+            history.drain(..history.len() - Self::FOCUS_HISTORY_LIMIT);
+        }
+        self.session_mut(session_id)?.focus_history = history;
+        Ok(())
+    }
+
+    /// The window a leaf of the session's layout is in: the root tab holding
+    /// it, or the root itself when the session has one window. `None` for a
+    /// leaf in a popup or outside the session.
+    fn window_of_leaf(&self, session_id: SessionId, leaf_id: NodeId) -> Result<Option<NodeId>> {
+        let root = self.session(session_id)?.root_node;
+        let root_is_tabs = matches!(self.node(root)?, Node::Tabs(_));
+        let mut current = leaf_id;
+        loop {
+            match self.node_parent(current)? {
+                Some(parent) if parent == root && root_is_tabs => return Ok(Some(current)),
+                Some(parent) => current = parent,
+                None => return Ok((current == root).then_some(root)),
+            }
+        }
     }
 
     pub fn switch_tab(&mut self, tabs_id: NodeId, index: usize) -> Result<()> {

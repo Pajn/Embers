@@ -1103,6 +1103,77 @@ fn root_tabs_are_preserved_when_last_tab_closes() {
     state.validate().expect("state should validate");
 }
 
+#[test]
+fn last_pane_returns_to_the_previously_focused_pane_of_the_window() {
+    let mut state = ServerState::new();
+    let (session_id, _, first) = seed_single_leaf_session(&mut state, "alpha");
+    let second_buffer = new_buffer(&mut state, "beta");
+    state
+        .split_leaf_with_new_buffer(first, SplitDirection::Vertical, second_buffer)
+        .expect("split root leaf");
+    let second = attached_view(&state, second_buffer);
+    let focused = |state: &ServerState| state.session(session_id).expect("session").focused_leaf;
+
+    // Splitting focused the new pane; the old one is the last pane.
+    assert_eq!(state.last_pane(session_id).expect("last pane"), Some(first));
+    state.focus_last_pane(session_id).expect("select last pane");
+    assert_eq!(focused(&state), Some(first));
+    // Going back again toggles, as `select-pane -l` does in tmux.
+    state.focus_last_pane(session_id).expect("select last pane");
+    assert_eq!(focused(&state), Some(second));
+
+    // Each window has its own last pane.
+    let (_, other_window) = new_leaf(&mut state, session_id, "other");
+    state
+        .add_root_tab(session_id, "other", other_window)
+        .expect("add second window");
+    state
+        .focus_leaf(session_id, other_window)
+        .expect("focus second window");
+    assert_eq!(state.last_pane(session_id).expect("last pane"), None);
+    assert!(state.focus_last_pane(session_id).is_err());
+    assert_eq!(focused(&state), Some(other_window));
+    state
+        .focus_leaf(session_id, second)
+        .expect("focus first window");
+    assert_eq!(state.last_pane(session_id).expect("last pane"), Some(first));
+    state.validate().expect("state should validate");
+}
+
+#[test]
+fn last_pane_skips_panes_that_were_closed() {
+    let mut state = ServerState::new();
+    let (session_id, _, first) = seed_single_leaf_session(&mut state, "alpha");
+    let second_buffer = new_buffer(&mut state, "beta");
+    state
+        .split_leaf_with_new_buffer(first, SplitDirection::Vertical, second_buffer)
+        .expect("split first pane");
+    let second = attached_view(&state, second_buffer);
+    let third_buffer = new_buffer(&mut state, "gamma");
+    state
+        .split_leaf_with_new_buffer(second, SplitDirection::Horizontal, third_buffer)
+        .expect("split second pane");
+    let third = attached_view(&state, third_buffer);
+    assert_eq!(
+        state.session(session_id).expect("session").focused_leaf,
+        Some(third)
+    );
+    assert_eq!(
+        state.last_pane(session_id).expect("last pane"),
+        Some(second)
+    );
+
+    // The last pane is gone: fall back to the one focused before it.
+    state.close_node(second).expect("close the last pane");
+    assert_eq!(state.last_pane(session_id).expect("last pane"), Some(first));
+
+    // None left to go back to.
+    state.close_node(first).expect("close the other pane");
+    assert_eq!(state.last_pane(session_id).expect("last pane"), None);
+    assert!(state.focus_last_pane(session_id).is_err());
+    state.validate().expect("state should validate");
+}
+
 proptest! {
     #[test]
     fn random_mutation_sequences_preserve_invariants(

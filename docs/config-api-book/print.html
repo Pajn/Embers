@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8d0129b0.js";
+            window.path_to_searchindex_js = "searchindex-3c28c966.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -2306,6 +2306,38 @@ Description
 <div group="kill_view" id="kill_view-Description" class="tabcontent" style="display: block;">
 Close the currently focused view and end its buffer's program, like
 tmux's `kill-pane`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> last_pane </h2>
+
+<pre><code class="language-rust ignore">fn last_pane(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="last_pane" id="link-last_pane-Description" class="tablinks active" onclick="openTab(event, &#39;last_pane&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="last_pane" id="link-last_pane-Example" class="tablinks" onclick="openTab(event, &#39;last_pane&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="last_pane" id="last_pane-Description" class="tabcontent" style="display: block;">
+Focus the pane that was focused before the current one in the current
+window, like tmux `select-pane -l`. Repeating it goes back and forth
+between two panes. Panes that were closed are skipped; with no other
+pane to go back to it does nothing.
+</div>
+
+<div group="last_pane" id="last_pane-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;;", action.last_pane());
+</code></pre>
 </div>
 
 </div>
@@ -6143,6 +6175,38 @@ Description
 <div group="kill_view" id="kill_view-Description-1" class="tabcontent" style="display: block;">
 Close the currently focused view and end its buffer's program, like
 tmux's `kill-pane`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> last_pane </h2>
+
+<pre><code class="language-rust ignore">fn last_pane(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="last_pane" id="link-last_pane-Description-1" class="tablinks active" onclick="openTab(event, &#39;last_pane&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="last_pane" id="link-last_pane-Example-1" class="tablinks" onclick="openTab(event, &#39;last_pane&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="last_pane" id="last_pane-Description-1" class="tabcontent" style="display: block;">
+Focus the pane that was focused before the current one in the current
+window, like tmux `select-pane -l`. Repeating it goes back and forth
+between two panes. Panes that were closed are skipped; with no other
+pane to go back to it does nothing.
+</div>
+
+<div group="last_pane" id="last_pane-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;;", action.last_pane());
+</code></pre>
 </div>
 
 </div>

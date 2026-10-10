@@ -330,7 +330,9 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
 
 fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
     match req {
-        NodeRequest::GetTree { session_id, .. } | NodeRequest::Unzoom { session_id, .. } => {
+        NodeRequest::GetTree { session_id, .. }
+        | NodeRequest::Unzoom { session_id, .. }
+        | NodeRequest::FocusLast { session_id, .. } => {
             validate_required_session_id(*session_id, "node_request.session_id")
         }
         NodeRequest::Split {
@@ -2420,6 +2422,30 @@ fn encode_node_request<'a>(
             0,
             0,
         ),
+        NodeRequest::FocusLast { session_id, .. } => (
+            fb::NodeOp::FocusLast,
+            (*session_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
         NodeRequest::ToggleZoom { node_id, .. } => (
             fb::NodeOp::ToggleZoom,
             0,
@@ -4314,6 +4340,13 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                 },
                 fb::NodeOp::Unzoom => NodeRequest::Unzoom {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                },
+                fb::NodeOp::FocusLast => NodeRequest::FocusLast {
                     request_id,
                     session_id: decode_required_session_id(
                         req.session_id(),

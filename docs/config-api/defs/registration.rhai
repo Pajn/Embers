@@ -448,6 +448,18 @@ fn kill_node(_: ActionApi, node_id: int) -> Action;
 /// tmux's `kill-pane`.
 fn kill_view(_: ActionApi) -> Action;
 
+/// Focus the pane that was focused before the current one in the current
+/// window, like tmux `select-pane -l`. Repeating it goes back and forth
+/// between two panes. Panes that were closed are skipped; with no other
+/// pane to go back to it does nothing.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>;", action.last_pane());
+/// ```
+fn last_pane(_: ActionApi) -> Action;
+
 /// Switch back to the previously active session (tmux `switch-client -l`).
 fn last_session(_: ActionApi) -> Action;
 

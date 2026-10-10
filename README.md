@@ -102,7 +102,7 @@ Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`, `set-environment`, `show-environment`
 - `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`, `synchronize-panes`
-- `pane`: `split-window`, `list-panes`, `select-pane`, `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
+- `pane`: `split-window`, `list-panes`, `select-pane` (`-t`, or `-l` for the last pane), `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
