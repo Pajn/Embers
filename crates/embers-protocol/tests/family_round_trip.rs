@@ -711,6 +711,7 @@ fn server_envelope_families_round_trip() {
             message: String::new(),
             duration_ms: 0,
         })),
+        ServerEnvelope::Event(ServerEvent::ServerShutdown),
         ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
             buffer_id: BufferId(11),
             writes: vec![

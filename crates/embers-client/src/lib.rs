@@ -38,7 +38,7 @@ pub use grid::{
 };
 pub use host_terminal::{
     HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies, TerminalFeatures,
-    detect_host_capabilities,
+    detect_host_capabilities, is_attach_query_reply,
 };
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,

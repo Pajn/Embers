@@ -77,8 +77,11 @@ pub struct PersistedBuffer {
     pub state: PersistedBufferState,
     pub attachment: PersistedBufferAttachment,
     pub pty_size: PtySize,
+    /// Saved, but a change to it alone does not call for a save (see
+    /// [`same_saved_state`]). Output sequence numbers are not saved at all:
+    /// they only mean something to the keeper that produced them, and are
+    /// taken from the keeper again when one is attached.
     pub activity: PersistedActivityState,
-    pub last_snapshot_seq: u64,
     #[serde(default)]
     pub kind: PersistedBufferKind,
     pub created_at_ms: u64,
@@ -212,9 +215,47 @@ pub fn save_workspace(path: &Path, state: &ServerState) -> Result<()> {
 }
 
 /// Serialize `state` into the bytes [`write_workspace`] stores.
+#[cfg(test)]
 pub fn encode_workspace(state: &ServerState) -> Result<Vec<u8>> {
-    serde_json::to_vec_pretty(&state.to_persisted())
-        .map_err(|error| MuxError::internal(error.to_string()))
+    encode_persisted_workspace(&state.to_persisted())
+}
+
+/// Serialize `workspace` into the bytes [`write_workspace`] stores.
+pub fn encode_persisted_workspace(workspace: &PersistedWorkspace) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(workspace).map_err(|error| MuxError::internal(error.to_string()))
+}
+
+/// Whether `a` and `b` save the same workspace apart from buffer activity,
+/// which changes with every bit of output and is not worth a write of its
+/// own; it is saved along with the next change that is.
+pub fn same_saved_state(a: &PersistedWorkspace, b: &PersistedWorkspace) -> bool {
+    // Destructured so a new field cannot be left out of the comparison.
+    let PersistedWorkspace {
+        format_version,
+        sessions,
+        buffers,
+        nodes,
+        floating,
+        next_session_id,
+        next_buffer_id,
+        next_node_id,
+        next_floating_id,
+    } = a;
+    *format_version == b.format_version
+        && *sessions == b.sessions
+        && *nodes == b.nodes
+        && *floating == b.floating
+        && *next_session_id == b.next_session_id
+        && *next_buffer_id == b.next_buffer_id
+        && *next_node_id == b.next_node_id
+        && *next_floating_id == b.next_floating_id
+        && buffers.len() == b.buffers.len()
+        && buffers.iter().zip(&b.buffers).all(|(a, b)| {
+            PersistedBuffer {
+                activity: b.activity,
+                ..a.clone()
+            } == *b
+        })
 }
 
 /// Atomically replace the workspace file at `path` with `bytes`: write a temp
@@ -393,7 +434,6 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         attachment: persisted_buffer_attachment(&buffer.attachment),
         pty_size: buffer.pty_size,
         activity: persisted_activity(buffer.activity),
-        last_snapshot_seq: buffer.last_snapshot_seq,
         kind: persisted_buffer_kind(&buffer.kind),
         created_at_ms: timestamp_to_millis(buffer.created_at),
     }
@@ -414,7 +454,6 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
     restored.attachment = restored_buffer_attachment(buffer.attachment);
     restored.pty_size = buffer.pty_size;
     restored.activity = restored_activity(buffer.activity);
-    restored.last_snapshot_seq = buffer.last_snapshot_seq;
     restored.kind = restored_buffer_kind(buffer.kind);
     restored.created_at = timestamp_from_millis(buffer.created_at_ms)?;
     // Created by an earlier server: whatever request created it is long
@@ -707,6 +746,29 @@ mod tests {
             serde_json::from_slice(&fs::read(&workspace_path).expect("workspace bytes"))
                 .expect("workspace json");
         assert_eq!(persisted.format_version, Some(CURRENT_FORMAT_VERSION));
+    }
+
+    #[test]
+    fn only_changes_worth_saving_count_as_changes() {
+        let mut state = ServerState::new();
+        let _ = state.create_session("main");
+        let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+        let saved = state.to_persisted();
+
+        // Output: a new sequence number and activity.
+        let buffer = state.buffers.get_mut(&buffer_id).expect("buffer");
+        buffer.last_snapshot_seq += 100;
+        buffer.activity = ActivityState::Bell;
+        assert!(same_saved_state(&saved, &state.to_persisted()));
+        let encoded = String::from_utf8(encode_workspace(&state).expect("encodes")).unwrap();
+        assert!(
+            !encoded.contains("last_snapshot_seq"),
+            "output sequence numbers are not saved: {encoded}"
+        );
+
+        // A title is what a restore brings back.
+        state.buffers.get_mut(&buffer_id).expect("buffer").title = "vim".to_owned();
+        assert!(!same_saved_state(&saved, &state.to_persisted()));
     }
 
     #[test]

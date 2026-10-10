@@ -3081,6 +3081,45 @@ async fn kill_view_closes_the_view_and_kills_its_buffer() {
 }
 
 #[tokio::test]
+async fn kill_view_removes_an_interrupted_buffer() {
+    // A buffer whose keeper is gone (left `Interrupted` with restore off) has
+    // no program to end, but killing its view must still remove it.
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    let mut response = buffer_response_from_state(&state, FOCUSED_BUFFER_ID, RequestId(0));
+    response.buffer.attachment_node_id = None;
+    response.buffer.state = BufferRecordState::Interrupted;
+    transport.push_response(ServerResponse::Buffer(response));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_pane(ctx) { action.kill_view() }
+            define_action("kill-pane", kill_pane);
+            bind("normal", "<C-x>", "kill-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Node(NodeRequest::Close {
+        request_id: RequestId(1),
+        node_id: FOCUSED_LEAF_ID,
+    })];
+    expected.extend(kill_requests(FOCUSED_BUFFER_ID, 2));
+    assert_eq!(requests[..expected.len()], expected[..]);
+}
+
+#[tokio::test]
 async fn close_view_only_detaches_its_buffer() {
     let transport = FakeTransport::default();
     transport.push_response(ServerResponse::Ok(OkResponse {

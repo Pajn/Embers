@@ -2,8 +2,8 @@ use std::path::Path;
 
 use embers_client::input::KeyParseError;
 use embers_client::{
-    Action, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
-    TabBarContext,
+    Action, InputResolution, KeyToken, PassthroughMode, PresentationModel, ScriptEngine,
+    ScriptHarness, TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::Size;
@@ -358,5 +358,29 @@ fn harness_rejects_empty_notation_without_panicking() {
     assert_eq!(
         harness.resolve_notation("normal", "").unwrap_err(),
         KeyParseError::EmptySequence
+    );
+}
+
+#[test]
+fn passthrough_is_off_unless_the_config_turns_it_on() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .unwrap()
+        .loaded_config()
+        .passthrough
+    };
+
+    // Like tmux's allow-passthrough: a program in a pane cannot write to the
+    // host terminal unless the user allows it.
+    assert_eq!(load(""), PassthroughMode::Off);
+    assert_eq!(load(r#"set_allow_passthrough("on");"#), PassthroughMode::On);
+    assert_eq!(
+        load(r#"set_allow_passthrough("all");"#),
+        PassthroughMode::All
     );
 }

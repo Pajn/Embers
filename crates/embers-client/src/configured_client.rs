@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
+use tracing::{debug, warn};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -29,7 +29,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
-use crate::host_terminal::HostCapabilities;
+use crate::host_terminal::{HostCapabilities, is_attach_query_reply};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
@@ -162,6 +162,9 @@ pub struct ConfiguredClient<T> {
     /// Passthrough writes from panes, oldest first, waiting for the next frame.
     pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
     pending_passthrough_bytes: usize,
+    /// The buffer whose passthrough write last reached the host terminal: the
+    /// pane a host reply to a query sent through passthrough is meant for.
+    last_passthrough_buffer: Option<BufferId>,
     /// Host terminal output that must follow the frame `render_session` last
     /// returned (see [`ConfiguredClient::drain_frame_output`]).
     frame_output: Vec<u8>,
@@ -206,6 +209,7 @@ where
             terminal_output: VecDeque::new(),
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
+            last_passthrough_buffer: None,
             frame_output: Vec::new(),
             detected_host: HostCapabilities::default(),
             socket_path: None,
@@ -417,8 +421,9 @@ where
                     output.extend_from_slice(&write.bytes);
                 }
                 (PassthroughMode::All, None) => output.extend_from_slice(&write.bytes),
-                _ => {}
+                _ => continue,
             }
+            self.last_passthrough_buffer = Some(buffer_id);
         }
         if output.is_empty() {
             return;
@@ -807,6 +812,41 @@ where
             .await
     }
 
+    /// Deliver `bytes`, a reply from the host terminal (a DCS, APC or OSC
+    /// string, or a CSI report), to the pane it is meant for. A reply is not
+    /// typed input: it is never copied to synchronized panes, inserted into
+    /// the command prompt or chooser filter, or matched against bindings.
+    /// Replies to the client's own attach queries are dropped whenever they
+    /// arrive (see [`is_attach_query_reply`]).
+    ///
+    /// The host only answers what it was sent, and the only queries that do
+    /// not come from the client come from panes through passthrough, so a
+    /// reply goes to the pane whose passthrough write last reached the host.
+    /// When there is none, or its buffer is gone, it goes to the focused pane.
+    pub async fn handle_host_reply(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        if is_attach_query_reply(&bytes) {
+            debug!("dropped a reply to the attach queries");
+            return Ok(());
+        }
+        self.set_active_view(session_id, viewport);
+        let source = self
+            .last_passthrough_buffer
+            .filter(|buffer_id| self.client.state().buffers.contains_key(buffer_id));
+        let buffer_id = match source {
+            Some(buffer_id) => buffer_id,
+            None => {
+                let presentation = self.prepare_presentation(session_id, viewport).await?;
+                self.resolve_buffer_id(None, &presentation)?
+            }
+        };
+        self.send_input(session_id, vec![(buffer_id, bytes)]).await
+    }
+
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
         let event = self.next_event().await?;
         self.handle_event(&event).await?;
@@ -867,6 +907,12 @@ where
     }
 
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        // The server is stopping on purpose and about to close the
+        // connection: nothing is left to ask it, so just leave.
+        if matches!(event, ServerEvent::ServerShutdown) {
+            self.exit_requested = true;
+            return Ok(());
+        }
         self.drain_background_notifications();
         let previous_render_activity = match event {
             ServerEvent::RenderInvalidated(render) => self
@@ -1672,7 +1718,8 @@ where
     /// End the programs of buffers whose views were just closed. Each is
     /// detached by then; one that is attached again by the time it is checked
     /// is shown somewhere else and keeps running, and one whose program already
-    /// ended needs nothing.
+    /// ended needs nothing. One left `Interrupted` (its keeper is gone) has no
+    /// program, but is killed too so the server removes it.
     async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
         for buffer_id in buffer_ids {
             let buffer = match self
@@ -1689,7 +1736,12 @@ where
                 Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(error),
             };
-            if buffer.attachment_node_id.is_some() || buffer.state != BufferRecordState::Running {
+            if buffer.attachment_node_id.is_some()
+                || !matches!(
+                    buffer.state,
+                    BufferRecordState::Running | BufferRecordState::Interrupted
+                )
+            {
                 continue;
             }
             match self
@@ -2492,30 +2544,17 @@ where
     }
 
     /// Send each `(buffer, bytes)` pair, then refresh the buffers that took
-    /// input and the session. The first pair is the pane the input was aimed
-    /// at and its failure is returned; a synchronized copy that fails (for
-    /// example because that pane's program exited) is only logged.
+    /// input and the session. A pane that refuses its input (see
+    /// `write_input`) is skipped and the others still get theirs.
     async fn send_input(
         &mut self,
         session_id: SessionId,
         sends: Vec<(BufferId, Vec<u8>)>,
     ) -> Result<()> {
         let mut sent = Vec::with_capacity(sends.len());
-        for (index, (buffer_id, bytes)) in sends.into_iter().enumerate() {
-            let result = self
-                .client
-                .request_message(ClientMessage::Input(InputRequest::Send {
-                    request_id: self.client.next_request_id(),
-                    buffer_id,
-                    bytes,
-                }))
-                .await;
-            match result {
-                Ok(_) => sent.push(buffer_id),
-                Err(error) if index == 0 => return Err(error),
-                Err(error) => {
-                    warn!("failed to send synchronized input to buffer {buffer_id}: {error}");
-                }
+        for (buffer_id, bytes) in sends {
+            if self.write_input(buffer_id, bytes).await? {
+                sent.push(buffer_id);
             }
         }
         for buffer_id in sent {
@@ -2842,6 +2881,7 @@ where
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Passthrough(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::DisplayMessage(_) => self.active_session_id,
+            ServerEvent::ServerShutdown => None,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -4964,19 +5004,32 @@ where
         } else {
             b"\x1b[O".to_vec()
         };
-        self.send_input_only(buffer_id, bytes).await?;
-        Ok(true)
+        self.write_input(buffer_id, bytes).await
     }
 
-    async fn send_input_only(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<()> {
-        self.client
+    /// Write `bytes` to `buffer_id`'s program and report whether it took
+    /// them. Like tmux, input for a pane that cannot take it (its program has
+    /// exited under `remain-on-exit`, or the buffer is gone) is dropped: the
+    /// server's refusal is only logged, so keys, pastes, mouse and focus
+    /// reports aimed at a dead pane never end the client. A transport failure
+    /// is still returned.
+    async fn write_input(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<bool> {
+        match self
+            .client
             .request_message(ClientMessage::Input(InputRequest::Send {
                 request_id: self.client.next_request_id(),
                 buffer_id,
                 bytes,
             }))
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(MuxError::Wire(error)) => {
+                debug!("dropped input for buffer {buffer_id}: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn record_notification(&mut self, message: impl Into<String>) {
@@ -5534,6 +5587,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::Clipboard(_) => "clipboard",
         ServerEvent::DisplayMessage(_) => "display_message",
         ServerEvent::Passthrough(_) => "passthrough",
+        ServerEvent::ServerShutdown => "server_shutdown",
     }
 }
 
@@ -5570,7 +5624,7 @@ fn event_info(
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Passthrough(event) => info.buffer_id = Some(event.buffer_id),
-        ServerEvent::DisplayMessage(_) => {}
+        ServerEvent::DisplayMessage(_) | ServerEvent::ServerShutdown => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;

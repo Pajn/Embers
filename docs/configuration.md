@@ -72,10 +72,13 @@ directories are created with `0700` permissions.
 
 The server saves sessions, layout and buffer records to `<socket>.workspace.json`
 whenever they change, batching bursts of changes into one atomic write, so a
-crash or SIGKILL of the server loses at most the last moment of changes.
+crash or SIGKILL of the server loses at most the last moment of changes: 100 ms
+of layout changes, and 1.5 s of pane title, directory and foreground command
+changes, which programs can make many times a second.
 
 On startup, panes whose runtime keeper is still alive are reattached. Panes whose
-keeper is gone, as after a reboot, are restored: a fresh shell starts in the
+keeper is gone, as after a reboot, are restored (detached buffers, which are in
+no pane, are dropped rather than restarted): a fresh shell starts in the
 pane's last known working directory, in the same place in the layout and with
 the same title. Terminal contents and scrollback are not restored. If the pane's
 last foreground program is on the allowlist (`EMBERS_RESTORE_COMMANDS`), it is
@@ -100,7 +103,9 @@ saved and when.
 A pane closes when its program exits, like tmux with `remain-on-exit off`. The
 `remain-on-exit` pane option keeps it as a dead pane that can still be
 captured: `on` always, `failed` only when the program exited with a nonzero
-status.
+status. As in tmux, keys, pastes, mouse and focus reports aimed at a dead pane
+are dropped; with synchronize-panes on, the window's other panes still get
+their copy.
 
 ```sh
 # Keep this pane once its program exits
@@ -202,17 +207,26 @@ Programs written for tmux send sequences meant for the outer terminal wrapped
 as `ESC P tmux; <sequence> ESC \`, with every ESC inside doubled. Image
 viewers (image.nvim, yazi, kitty graphics previewers) send images this way, and
 other programs send desktop notifications or titles. Embers accepts the same
-wrapper and writes the unwrapped sequence to the host terminal of each client
-showing the pane, like tmux with `set -g allow-passthrough on`, which is the
-default.
+wrapper and, once passthrough is turned on, writes the unwrapped sequence to
+the host terminal of each client showing the pane, like tmux with
+`set -g allow-passthrough on`.
 
-- **Choosing which panes.** `set_allow_passthrough("on")` (the default)
-  forwards sequences from panes that are on screen in the client.
-  `set_allow_passthrough("all")` also forwards them from panes in hidden
-  windows of the client's session. `set_allow_passthrough("off")` drops them.
-  The setting also covers [unwrapped kitty graphics
-  commands](#images-without-the-tmux-wrapper). Nothing is forwarded to a host
-  terminal that is [not known to support passthrough](#the-host-terminal).
+```rhai
+set_allow_passthrough("on");
+```
+
+- **Off by default.** As in tmux, passthrough is off unless the config turns
+  it on. With it on, any program on screen, or `cat` of an untrusted file, can
+  write raw sequences to the host terminal, bypassing `set_clipboard(false)`
+  and the filtering Embers applies to what panes print.
+- **Choosing which panes.** `set_allow_passthrough("on")` forwards sequences
+  from panes that are on screen in the client. `set_allow_passthrough("all")`
+  also forwards them from panes in hidden windows of the client's session.
+  `set_allow_passthrough("off")`, the default, drops them. The setting also
+  covers [unwrapped kitty graphics
+  commands](#images-without-the-tmux-wrapper). Turning it on does not force
+  it: nothing is forwarded to a host terminal that is [not known to support
+  passthrough](#the-host-terminal).
 - **Who receives them.** Like [clipboard writes](#clipboard-osc-52), the
   server sends them only to clients whose current session contains the pane;
   each client then checks whether the pane is on its screen. Sequences from a
@@ -230,8 +244,14 @@ default.
   command would leave the host waiting for the rest of it. Large kitty images
   are not affected: programs send them as many small chunks.
 - **Replies.** A host terminal's reply to a forwarded query (for example a
-  kitty graphics query) arrives as input and goes to the focused pane whole,
-  as under tmux.
+  kitty graphics query) arrives with the keyboard input, but the client reads
+  DCS, APC and OSC strings and CSI reports with a private marker (`CSI ?`,
+  `CSI >`, `CSI =`) as replies, not keys. A reply goes whole to the pane whose
+  passthrough sequence last reached the host, since only panes send queries
+  through passthrough; when no pane has, or that pane is gone, it goes to the
+  focused pane. A reply is never copied to other panes by synchronize-panes,
+  typed into the command prompt or a picker's filter, or matched against key
+  bindings.
 
 Images are not part of the pane's contents in Embers: they are not kept in
 snapshots or scrollback, and Embers does not move or redraw them. What a host
@@ -272,7 +292,8 @@ send their sequences unwrapped, as to a terminal of their own:
   graphics (`a=q`) and then sends a device attributes query (DA1) gets the DA1
   answer from Embers first, before the host's answer to the graphics query
   comes back, and usually concludes there is no image support. The late
-  answer then arrives in the focused pane as input. tmux behaves the same way.
+  answer then arrives in the pane as input (see Replies above). tmux behaves
+  the same way.
 
 ## Terminal capabilities
 
@@ -307,7 +328,9 @@ underline colors, OSC 8 hyperlinks and [passthrough](#passthrough) need
 sequences that not every host understands, and one that does not can draw them
 as garbage. So when the client attaches it finds out what the host supports
 and leaves out the rest: every underline becomes a plain one, underlines take
-the text color, links become plain text and passthrough is dropped.
+the text color, links become plain text and passthrough is dropped. Detection
+only decides whether passthrough is possible; it is still off until the
+config turns it on with `set_allow_passthrough`.
 
 To find out, the client writes three queries together with the sequences that
 set up the screen and enable the kitty keyboard protocol, and reads the
@@ -321,7 +344,9 @@ replies before it draws anything:
   not know the first two queries ignore them.
 
 If no DA1 reply arrives within a second the client goes on without one. Keys
-typed while it waits are dropped. Then:
+typed while it waits are dropped. Replies to these queries that arrive later,
+and kitty keyboard protocol flag reports, are recognised and dropped whenever
+they come, rather than handed to a pane as [replies](#passthrough). Then:
 
 - A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
   styles or underline colors.
