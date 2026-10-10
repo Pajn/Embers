@@ -75,7 +75,8 @@ whenever they change, batching bursts of changes into one atomic write, so a
 crash or SIGKILL of the server loses at most the last moment of changes.
 
 On startup, panes whose runtime keeper is still alive are reattached. Panes whose
-keeper is gone, as after a reboot, are restored: a fresh shell starts in the
+keeper is gone, as after a reboot, are restored (detached buffers, which are in
+no pane, are dropped rather than restarted): a fresh shell starts in the
 pane's last known working directory, in the same place in the layout and with
 the same title. Terminal contents and scrollback are not restored. If the pane's
 last foreground program is on the allowlist (`EMBERS_RESTORE_COMMANDS`), it is

@@ -810,8 +810,22 @@ async fn restore_reruns_allowlisted_foreground_commands_only() {
         .await
         .expect("connect client");
 
+    // Only panes in the layout are restored.
+    let session_id = request_session_snapshot(
+        &mut client,
+        SessionRequest::Create {
+            request_id: RequestId(700),
+            name: "main".to_owned(),
+        },
+    )
+    .await
+    .snapshot
+    .session
+    .id;
     let tail_id = create_shell_buffer(&mut client, RequestId(701), "tail", &root).await;
+    show_buffer(&mut client, RequestId(701), session_id, tail_id).await;
     let sleep_id = create_shell_buffer(&mut client, RequestId(702), "sleep", &root).await;
+    show_buffer(&mut client, RequestId(702), session_id, sleep_id).await;
     let tail_pid = wait_for_running_buffer(&mut client, RequestId(703), tail_id)
         .await
         .pid
@@ -962,7 +976,20 @@ async fn pane_options_survive_restarts() {
     let mut client = ProtocolClient::connect(&socket_path)
         .await
         .expect("connect client");
+    // Only panes in the layout are restored.
+    let session_id = request_session_snapshot(
+        &mut client,
+        SessionRequest::Create {
+            request_id: RequestId(906),
+            name: "main".to_owned(),
+        },
+    )
+    .await
+    .snapshot
+    .session
+    .id;
     let buffer_id = create_shell_buffer(&mut client, RequestId(903), "opts", tempdir.path()).await;
+    show_buffer(&mut client, RequestId(907), session_id, buffer_id).await;
     set_option(&mut client, buffer_id, "remain-on-exit", "on").await;
     set_option(&mut client, buffer_id, "is-vim", "1").await;
     set_option(&mut client, buffer_id, "theme", "dark").await;
@@ -1075,4 +1102,203 @@ async fn exited_detached_buffers_are_not_kept_across_a_restart() {
 
     drop(client);
     handle.shutdown().await.expect("shutdown restarted server");
+}
+
+/// Show `buffer_id` as a new window of `session_id`.
+async fn show_buffer(
+    client: &mut ProtocolClient,
+    request_id: RequestId,
+    session_id: embers_core::SessionId,
+    buffer_id: BufferId,
+) {
+    let _ = request_session_snapshot(
+        client,
+        SessionRequest::AddRootTab {
+            request_id,
+            session_id,
+            title: "shell".to_owned(),
+            buffer_id: Some(buffer_id),
+            child_node_id: None,
+        },
+    )
+    .await;
+}
+
+/// Whether the server still has a record of `buffer_id`.
+async fn buffer_exists(
+    client: &mut ProtocolClient,
+    request_id: RequestId,
+    buffer_id: BufferId,
+) -> bool {
+    match client
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id,
+            buffer_id,
+        }))
+        .await
+        .expect("get request round-trips")
+    {
+        ServerResponse::Buffer(_) => true,
+        ServerResponse::Error(error) if error.error.code == embers_core::ErrorCode::NotFound => {
+            false
+        }
+        other => panic!("expected buffer or not-found, got {other:?}"),
+    }
+}
+
+/// Start a server with one session showing a shell, plus a detached shell,
+/// then stop it and its keepers as a reboot would. Returns the shown and the
+/// detached buffer.
+async fn workspace_with_lost_keepers(config: &ServerConfig) -> (BufferId, BufferId) {
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&config.socket_path)
+        .await
+        .expect("connect client");
+    let session = request_session_snapshot(
+        &mut client,
+        SessionRequest::Create {
+            request_id: RequestId(1101),
+            name: "main".to_owned(),
+        },
+    )
+    .await;
+    let cwd = config.socket_path.parent().expect("socket dir");
+    let shown = create_shell_buffer(&mut client, RequestId(1102), "shown", cwd).await;
+    show_buffer(
+        &mut client,
+        RequestId(1103),
+        session.snapshot.session.id,
+        shown,
+    )
+    .await;
+    let detached = create_shell_buffer(&mut client, RequestId(1104), "hidden", cwd).await;
+    let shown_pid = wait_for_running_buffer(&mut client, RequestId(1105), shown)
+        .await
+        .pid
+        .expect("shown buffer pid");
+    let detached_pid = wait_for_running_buffer(&mut client, RequestId(1106), detached)
+        .await
+        .pid
+        .expect("detached buffer pid");
+    wait_for_saved_workspace(&config.workspace_path, "both buffers", |contents| {
+        contents.contains("\"shown\"") && contents.contains("\"hidden\"")
+    })
+    .await;
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    stop_keepers(config, &[(shown, shown_pid), (detached, detached_pid)]).await;
+    (shown, detached)
+}
+
+#[tokio::test]
+async fn killing_interrupted_buffers_removes_them_for_good() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let mut config = ServerConfig::new(socket_path.clone());
+    let (shown, detached) = workspace_with_lost_keepers(&config).await;
+
+    // Restore off: both are left `Interrupted`, with no program to end.
+    config.restore.enabled = false;
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server without restore");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    for buffer_id in [shown, detached] {
+        let buffer = request_buffer(
+            &mut client,
+            BufferRequest::Get {
+                request_id: RequestId(1107),
+                buffer_id,
+            },
+        )
+        .await
+        .buffer;
+        assert_eq!(buffer.state, BufferRecordState::Interrupted);
+        let response = client
+            .request(&ClientMessage::Buffer(BufferRequest::Kill {
+                request_id: RequestId(1108),
+                buffer_id,
+                force: false,
+            }))
+            .await
+            .expect("kill round-trips");
+        assert!(
+            matches!(response, ServerResponse::Ok(_)),
+            "killing interrupted buffer {buffer_id} should succeed, got {response:?}"
+        );
+        assert!(
+            !buffer_exists(&mut client, RequestId(1109), buffer_id).await,
+            "killed interrupted buffer {buffer_id} is still listed"
+        );
+    }
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    // Nothing killed comes back once restore is on again.
+    config.restore.enabled = true;
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server with restore");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let buffers = request_buffers(
+        &mut client,
+        BufferRequest::List {
+            request_id: RequestId(1110),
+            session_id: None,
+            attached_only: false,
+            detached_only: false,
+        },
+    )
+    .await
+    .buffers;
+    assert!(buffers.is_empty(), "killed buffers came back: {buffers:?}");
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+}
+
+#[tokio::test]
+async fn restore_only_restarts_buffers_shown_in_the_layout() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let (shown, detached) = workspace_with_lost_keepers(&config).await;
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored_pid = wait_for_running_buffer(&mut client, RequestId(1111), shown)
+        .await
+        .pid
+        .expect("restored buffer pid");
+    // A detached buffer has no place in the layout to come back to: it is
+    // dropped rather than restarted as a hidden shell.
+    assert!(
+        !buffer_exists(&mut client, RequestId(1112), detached).await,
+        "detached buffer whose keeper is gone was kept"
+    );
+    wait_for_saved_workspace(&config.workspace_path, "the dropped buffer", |contents| {
+        contents.contains("\"shown\"") && !contents.contains("\"hidden\"")
+    })
+    .await;
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+    stop_keepers(&config, &[(shown, restored_pid)]).await;
 }

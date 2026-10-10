@@ -1619,7 +1619,8 @@ where
     /// End the programs of buffers whose views were just closed. Each is
     /// detached by then; one that is attached again by the time it is checked
     /// is shown somewhere else and keeps running, and one whose program already
-    /// ended needs nothing.
+    /// ended needs nothing. One left `Interrupted` (its keeper is gone) has no
+    /// program, but is killed too so the server removes it.
     async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
         for buffer_id in buffer_ids {
             let buffer = match self
@@ -1636,7 +1637,12 @@ where
                 Err(error) if error.is_not_found() => continue,
                 Err(error) => return Err(error),
             };
-            if buffer.attachment_node_id.is_some() || buffer.state != BufferRecordState::Running {
+            if buffer.attachment_node_id.is_some()
+                || !matches!(
+                    buffer.state,
+                    BufferRecordState::Running | BufferRecordState::Interrupted
+                )
+            {
                 continue;
             }
             match self

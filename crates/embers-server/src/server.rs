@@ -752,20 +752,34 @@ impl Runtime {
         Ok(())
     }
 
-    /// Start a fresh process for every PTY buffer left `Interrupted`: its keeper
-    /// is gone, so it cannot be reattached. Restarts run concurrently so a
-    /// large workspace does not hold up startup.
+    /// Start a fresh process for every PTY buffer left `Interrupted` that a
+    /// pane shows: its keeper is gone, so it cannot be reattached. Restarts run
+    /// concurrently so a large workspace does not hold up startup.
+    ///
+    /// Like tmux-resurrect, only what is in the layout is restored. A detached
+    /// buffer has no place to come back to and its terminal contents are not
+    /// restored, so a fresh shell for it would only be a hidden process
+    /// nobody asked for; its record is dropped instead.
     async fn restart_interrupted_buffers(self: &Arc<Self>) {
         let interrupted: Vec<_> = {
-            let state = self.state.lock().await;
-            state
+            let mut state = self.state.lock().await;
+            let (attached, detached): (Vec<_>, Vec<_>) = state
                 .buffers
                 .values()
                 .filter(|buffer| {
                     matches!(buffer.state, BufferState::Interrupted(_))
                         && matches!(buffer.kind, BufferKind::Pty)
                 })
-                .map(|buffer| buffer.id)
+                .map(|buffer| (buffer.id, buffer.attachment.clone()))
+                .partition(|(_, attachment)| matches!(attachment, BufferAttachment::Attached(_)));
+            for (buffer_id, _) in detached {
+                if state.remove_buffer(buffer_id).is_ok() {
+                    info!(%buffer_id, "dropped detached buffer whose keeper was gone");
+                }
+            }
+            attached
+                .into_iter()
+                .map(|(buffer_id, _)| buffer_id)
                 .collect()
         };
         let mut restarts = tokio::task::JoinSet::new();
@@ -1568,11 +1582,8 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 force: _,
-            } => match self.buffer_runtime(buffer_id).await {
-                Ok(runtime) => match runtime.kill().await {
-                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
-                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                },
+            } => match self.kill_buffer(buffer_id).await {
+                Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             BufferRequest::Capture {
@@ -2569,6 +2580,36 @@ impl Runtime {
                 "buffer {buffer_id} has already exited"
             ))),
         }
+    }
+
+    /// End `buffer_id`'s program. A buffer left `Interrupted` (its keeper is
+    /// gone and restore is off or failed) has no program to end, so killing it
+    /// ends the buffer itself: a detached one is removed, and an attached one
+    /// is marked exited, which the exit cleanup then handles like any other
+    /// (closing its view unless it remains on exit). Without this, killing
+    /// its view would leave an orphaned record that a later restore brings
+    /// back.
+    async fn kill_buffer(&self, buffer_id: BufferId) -> Result<()> {
+        let runtime = self.buffer_runtimes.lock().await.get(&buffer_id).cloned();
+        if let Some(runtime) = runtime {
+            return runtime.kill().await;
+        }
+        {
+            let mut state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            if matches!(buffer.state, BufferState::Interrupted(_)) {
+                if matches!(buffer.attachment, BufferAttachment::Detached) {
+                    state.remove_buffer(buffer_id)?;
+                } else {
+                    state.mark_buffer_exited(buffer_id, None)?;
+                }
+                drop(state);
+                info!(%buffer_id, "removed killed buffer whose keeper was gone");
+                self.mark_workspace_dirty();
+                return Ok(());
+            }
+        }
+        self.buffer_runtime(buffer_id).await?.kill().await
     }
 
     async fn ensure_buffer_accepts_input(&self, buffer_id: BufferId) -> Result<()> {
