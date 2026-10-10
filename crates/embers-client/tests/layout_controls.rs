@@ -8,10 +8,10 @@ use embers_client::{
     MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel,
     ScriptedTransport,
 };
-use embers_core::{BufferId, RequestId, Size};
+use embers_core::{BufferId, ErrorCode, RequestId, Size, WireError};
 use embers_protocol::{
-    ClientMessage, InputRequest, NodeRequest, OkResponse, ServerResponse, SessionRequest,
-    SessionSnapshot, SessionSnapshotResponse, SynchronizePanesMode,
+    ClientMessage, ErrorResponse, InputRequest, NodeRequest, OkResponse, ServerResponse,
+    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SynchronizePanesMode,
 };
 use tempfile::tempdir;
 
@@ -455,5 +455,77 @@ async fn unsynchronized_windows_only_send_to_the_focused_pane() {
     assert_eq!(
         sent_input(&transport),
         vec![(FOCUSED_BUFFER_ID, b"x".to_vec())]
+    );
+}
+
+/// The error the server answers input to a pane whose program has exited.
+fn dead_pane_error() -> ServerResponse {
+    ServerResponse::Error(ErrorResponse {
+        request_id: Some(RequestId(0)),
+        error: WireError::new(ErrorCode::Conflict, "buffer runtime has already exited"),
+    })
+}
+
+#[tokio::test]
+async fn input_to_a_dead_pane_is_dropped_and_synchronized_copies_still_go_out() {
+    let state = synchronized(demo_state());
+    let transport = FakeTransport::default();
+    // The focused pane is dead; the other synchronized pane takes its copy.
+    transport.push_response(dead_pane_error());
+    push_input_responses(&transport, &state, &[BufferId(2)]);
+    let (mut configured, _tempdir) = configured(transport.clone(), state, "");
+
+    configured
+        .handle_key(SESSION_ID, VIEWPORT, KeyEvent::Char('a'))
+        .await
+        .expect("typing into a dead pane does not fail");
+
+    assert_eq!(
+        sent_input(&transport),
+        vec![
+            (FOCUSED_BUFFER_ID, b"a".to_vec()),
+            (BufferId(2), b"a".to_vec()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn keys_pastes_and_focus_reports_to_a_dead_pane_are_dropped() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap()
+        .focus_reporting = true;
+    let transport = FakeTransport::default();
+    for _ in 0..3 {
+        transport.push_response(dead_pane_error());
+        transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(0),
+            snapshot: session_snapshot(&state),
+        }));
+    }
+    let (mut configured, _tempdir) = configured(transport.clone(), state, "");
+
+    configured
+        .handle_key(SESSION_ID, VIEWPORT, KeyEvent::Char('a'))
+        .await
+        .expect("a key to a dead pane is dropped");
+    configured
+        .handle_paste(SESSION_ID, VIEWPORT, b"pasted".to_vec())
+        .await
+        .expect("a paste to a dead pane is dropped");
+    configured
+        .handle_focus_event(SESSION_ID, VIEWPORT, true)
+        .await
+        .expect("a focus report to a dead pane is dropped");
+
+    assert_eq!(
+        sent_input(&transport),
+        vec![
+            (FOCUSED_BUFFER_ID, b"a".to_vec()),
+            (FOCUSED_BUFFER_ID, b"pasted".to_vec()),
+            (FOCUSED_BUFFER_ID, b"\x1b[I".to_vec()),
+        ]
     );
 }

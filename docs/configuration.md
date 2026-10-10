@@ -100,7 +100,9 @@ saved and when.
 A pane closes when its program exits, like tmux with `remain-on-exit off`. The
 `remain-on-exit` pane option keeps it as a dead pane that can still be
 captured: `on` always, `failed` only when the program exited with a nonzero
-status.
+status. As in tmux, keys, pastes, mouse and focus reports aimed at a dead pane
+are dropped; with synchronize-panes on, the window's other panes still get
+their copy.
 
 ```sh
 # Keep this pane once its program exits

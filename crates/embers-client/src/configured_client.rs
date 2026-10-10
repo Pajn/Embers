@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
+use tracing::{debug, warn};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -2467,30 +2467,17 @@ where
     }
 
     /// Send each `(buffer, bytes)` pair, then refresh the buffers that took
-    /// input and the session. The first pair is the pane the input was aimed
-    /// at and its failure is returned; a synchronized copy that fails (for
-    /// example because that pane's program exited) is only logged.
+    /// input and the session. A pane that refuses its input (see
+    /// `write_input`) is skipped and the others still get theirs.
     async fn send_input(
         &mut self,
         session_id: SessionId,
         sends: Vec<(BufferId, Vec<u8>)>,
     ) -> Result<()> {
         let mut sent = Vec::with_capacity(sends.len());
-        for (index, (buffer_id, bytes)) in sends.into_iter().enumerate() {
-            let result = self
-                .client
-                .request_message(ClientMessage::Input(InputRequest::Send {
-                    request_id: self.client.next_request_id(),
-                    buffer_id,
-                    bytes,
-                }))
-                .await;
-            match result {
-                Ok(_) => sent.push(buffer_id),
-                Err(error) if index == 0 => return Err(error),
-                Err(error) => {
-                    warn!("failed to send synchronized input to buffer {buffer_id}: {error}");
-                }
+        for (buffer_id, bytes) in sends {
+            if self.write_input(buffer_id, bytes).await? {
+                sent.push(buffer_id);
             }
         }
         for buffer_id in sent {
@@ -4734,19 +4721,32 @@ where
         } else {
             b"\x1b[O".to_vec()
         };
-        self.send_input_only(buffer_id, bytes).await?;
-        Ok(true)
+        self.write_input(buffer_id, bytes).await
     }
 
-    async fn send_input_only(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<()> {
-        self.client
+    /// Write `bytes` to `buffer_id`'s program and report whether it took
+    /// them. Like tmux, input for a pane that cannot take it (its program has
+    /// exited under `remain-on-exit`, or the buffer is gone) is dropped: the
+    /// server's refusal is only logged, so keys, pastes, mouse and focus
+    /// reports aimed at a dead pane never end the client. A transport failure
+    /// is still returned.
+    async fn write_input(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<bool> {
+        match self
+            .client
             .request_message(ClientMessage::Input(InputRequest::Send {
                 request_id: self.client.next_request_id(),
                 buffer_id,
                 bytes,
             }))
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(MuxError::Wire(error)) => {
+                debug!("dropped input for buffer {buffer_id}: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn record_notification(&mut self, message: impl Into<String>) {
