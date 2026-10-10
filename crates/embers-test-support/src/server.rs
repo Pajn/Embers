@@ -1,9 +1,11 @@
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use base64::Engine as _;
 use embers_core::{Result, init_test_tracing};
-use embers_server::{Server, ServerConfig, ServerHandle};
+use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig, ServerHandle};
 use tempfile::TempDir;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,9 +71,11 @@ impl TestServer {
     fn kill_orphaned_processes(&self) {
         let socket_path_str = self.socket_path.to_string_lossy();
         let runtime_dir = self.socket_path.with_extension("runtimes");
-        let runtime_dir_str = runtime_dir.to_string_lossy();
         let pid_path = self.socket_path.with_extension("pid");
-        let orphaned = collect_orphaned_processes(&socket_path_str, &runtime_dir_str);
+        let orphaned = collect_orphaned_processes(
+            &socket_path_str,
+            &keeper_server_socket_marker(&self.socket_path),
+        );
         let mut handled = Vec::new();
 
         if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
@@ -107,13 +111,25 @@ impl Drop for TestServer {
     }
 }
 
-fn collect_orphaned_processes(socket_path: &str, runtime_dir: &str) -> Vec<(i32, &'static str)> {
+/// The server passes its own socket path to every buffer it spawns through
+/// `EMBERS_SOCKET`, which the keeper receives base64-encoded on its command
+/// line. Matching on that ties a keeper to its server wherever the keeper's own
+/// socket lives.
+fn keeper_server_socket_marker(socket_path: &Path) -> String {
+    format!(
+        "{SOCKET_ENV_VAR}=base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(socket_path.as_os_str().as_bytes())
+    )
+}
+
+fn collect_orphaned_processes(socket_path: &str, keeper_marker: &str) -> Vec<(i32, &'static str)> {
     let mut matches = Vec::new();
     if let Ok(output) = Command::new("ps").args(["-eo", "pid,args"]).output() {
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let line = line.trim();
             let is_server = line.contains("__serve") && line.contains(socket_path);
-            let is_runtime_keeper = line.contains("__runtime-keeper") && line.contains(runtime_dir);
+            let is_runtime_keeper =
+                line.contains("__runtime-keeper") && line.contains(keeper_marker);
             if (is_server || is_runtime_keeper)
                 && let Some(pid_str) = line.split_whitespace().next()
                 && let Ok(pid) = pid_str.parse::<i32>()

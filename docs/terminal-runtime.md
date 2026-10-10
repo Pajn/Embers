@@ -78,6 +78,19 @@ The intended transition graph is:
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
 - `Exited -> cleaned up` when a detached exited buffer is removed from server state
 
+## Keeper process lifetime
+
+Each PTY runs inside a runtime keeper process that owns the PTY and serves captures over a
+socket in the server's runtime directory.
+
+- a clean server shutdown leaves keepers running, so a restarted server can reattach through
+  their sockets and restore `Running` buffers
+- a keeper keeps serving captures after its child exits while a server stays attached to it
+- once no server is attached, a keeper whose child has exited has nothing left to reattach to
+  and exits; a restarted server keeps the buffer record as `Exited`
+- while no server is attached, a keeper also watches its socket; once the socket is removed or
+  replaced no server can reattach, so the keeper stops its child (SIGHUP, then SIGKILL) and exits
+
 ## Attachment transitions
 
 - `Attached(NodeId) -> Detached` when a view closes or the buffer is explicitly detached

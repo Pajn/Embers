@@ -6,7 +6,9 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -16,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
@@ -46,6 +48,13 @@ const KEEPER_PIPE_WRITE_QUEUE_CAPACITY: usize = 64;
 /// best-effort when the queue is full and keeps draining, which lets the child
 /// make progress and unblocks the writer.
 const KEEPER_WRITE_QUEUE_CAPACITY: usize = 64;
+/// How often a keeper with no connected server checks whether it is still
+/// needed: whether its child is still running and its socket is still the one it
+/// bound (servers only ever reattach through that socket).
+const KEEPER_SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// How long an unreachable keeper waits for its child to exit after SIGHUP
+/// before escalating to SIGKILL.
+const KEEPER_ORPHAN_KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct BufferRuntimeUpdate {
@@ -922,7 +931,8 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         let _ = fs::remove_file(&cli.socket_path);
     }
     let listener = UnixListener::bind(&cli.socket_path)?;
-    let _cleanup = SocketCleanup::new(cli.socket_path.clone());
+    let bound_socket = socket_identity(&cli.socket_path);
+    let _cleanup = SocketCleanup::new(cli.socket_path.clone(), bound_socket);
 
     let pty_system = NativePtySystem::default();
     let mut last_error = None;
@@ -1014,9 +1024,41 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         .name(format!("keeper-wait-{}", cli.socket_path.display()))
         .spawn(move || keeper_wait_loop(wait_runtime, child))
         .map_err(|error| MuxError::internal(error.to_string()))?;
+    // Keepers intentionally outlive the server so a restarted server can
+    // reattach through the socket. While no server is attached, the keeper
+    // exits once there is nothing left to reattach to: its child has exited
+    // (the attached server has already read the final state), or its socket was
+    // removed or replaced so no server can ever reach it again. In the latter
+    // case it stops the child instead of leaving it running unreachable.
+    let mut served_client = false;
     let mut terminate = false;
     while !terminate {
+        if !wait_for_keeper_client(&listener, KEEPER_SOCKET_CHECK_INTERVAL)? {
+            // Waiting for a first client avoids racing the spawning server's
+            // initial connect when the child exits immediately.
+            if served_client && runtime.ensure_running().is_err() {
+                debug!(
+                    socket_path = %cli.socket_path.display(),
+                    "runtime keeper child exited and no server is attached; exiting"
+                );
+                let _ = wait_join.join();
+                return Ok(());
+            }
+            if bound_socket.is_none() || socket_identity(&cli.socket_path) == bound_socket {
+                continue;
+            }
+            debug!(
+                socket_path = %cli.socket_path.display(),
+                "runtime keeper socket removed or replaced; stopping unreachable runtime"
+            );
+            stop_unreachable_runtime(&runtime, wait_join);
+            return Ok(());
+        }
+        // On both early returns above the reader thread is left to finish on
+        // its own: it only ends once every holder of the PTY slave has closed
+        // it, which a surviving grandchild may never do.
         let (mut stream, _) = listener.accept()?;
+        served_client = true;
         terminate = handle_keeper_client(runtime.clone(), &mut stream)?;
     }
 
@@ -1367,6 +1409,54 @@ fn keeper_writer_loop(mut writer: Box<dyn Write + Send>, write_rx: Receiver<Vec<
             debug!(%error, "failed to write to pty master");
         }
     }
+}
+
+/// Wait up to `timeout` for a client connection; returns whether one is pending
+/// so the caller can `accept` without blocking past the timeout.
+fn wait_for_keeper_client(listener: &UnixListener, timeout: Duration) -> Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `poll_fd` is a valid pollfd for the listener, which outlives this call.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error.into());
+    }
+    Ok(ready > 0)
+}
+
+/// Identify the filesystem entry at `path` so a keeper can tell whether its
+/// socket is still the one it bound.
+fn socket_identity(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// Stop the child of a keeper that no server can reach any more: SIGHUP like a
+/// regular kill, then SIGKILL if the child ignores it, and wait for it to exit.
+fn stop_unreachable_runtime(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
+    let _ = runtime.kill();
+    let deadline = Instant::now() + KEEPER_ORPHAN_KILL_GRACE;
+    while !wait_join.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if !wait_join.is_finished()
+        && let Some(pid) = runtime.pid.and_then(|pid| libc::pid_t::try_from(pid).ok())
+    {
+        // SAFETY: plain signal delivery. The wait thread had not reaped the child
+        // when checked just above, so `pid` still names it.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    let _ = wait_join.join();
 }
 
 fn keeper_wait_loop(runtime: Arc<KeeperRuntime>, mut child: Box<dyn Child + Send + Sync>) {
@@ -1783,18 +1873,27 @@ fn to_portable_size(size: PtySize) -> PortablePtySize {
     }
 }
 
+/// Removes the keeper socket on exit, unless another keeper has since bound a
+/// new socket at the same path.
 struct SocketCleanup {
     socket_path: PathBuf,
+    identity: Option<(u64, u64)>,
 }
 
 impl SocketCleanup {
-    fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+    fn new(socket_path: PathBuf, identity: Option<(u64, u64)>) -> Self {
+        Self {
+            socket_path,
+            identity,
+        }
     }
 }
 
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
+        if self.identity.is_some() && socket_identity(&self.socket_path) != self.identity {
+            return;
+        }
         let _ = fs::remove_file(&self.socket_path);
     }
 }
