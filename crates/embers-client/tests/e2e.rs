@@ -825,6 +825,20 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         .await
         .expect("buffer survives floating move");
 
+    // The popup is the session's only pane; a window keeps the session once
+    // the popup closes, since closing a session's last pane destroys it.
+    let keep = create_buffer(&mut connection, "keep").await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "keep".to_owned(),
+            buffer_id: Some(keep.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add keep window succeeds");
+
     let _ = connection
         .request(&ClientMessage::Floating(FloatingRequest::Close {
             request_id: new_request_id(),
@@ -2446,5 +2460,133 @@ async fn most_recently_active_client_owns_the_pane_pty_size() {
         .expect("clear typed key");
     assert_stty_size(&mut connection, buffer_id, 101, 29).await;
 
+    server.shutdown().await.expect("server shuts down");
+}
+
+/// A client attached to session "beta" of three ("alpha", "beta", "gamma"),
+/// having come there from "alpha", with `set_detach_on_destroy` as given.
+async fn client_on_beta_of_three(
+    server: &TestServer,
+    detach_on_destroy: Option<&str>,
+) -> (
+    embers_client::ConfiguredClient<embers_client::SocketTransport>,
+    tempfile::TempDir,
+) {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    two_sessions_with_shells(server);
+    run_cli(server, &["new-session", "gamma"]);
+    run_cli(server, &["new-window", "-t", "gamma", "--", "/bin/sh"]);
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let setting = detach_on_destroy
+        .map(|value| format!("set_detach_on_destroy(\"{value}\");"))
+        .unwrap_or_default();
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        format!(
+            r#"
+                {setting}
+                fn go_beta(ctx) {{ action.switch_session("beta") }}
+                define_action("go-beta", go_beta);
+                bind("normal", "o", "go-beta");
+            "#
+        ),
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+    configured
+        .render_session(alpha, size)
+        .await
+        .expect("render alpha");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    let beta = session_id_by_name(configured.client(), "beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+    (configured, tempdir)
+}
+
+/// End the only pane of "beta" by typing `exit` into its shell, and handle
+/// events until the client has left "beta".
+async fn exit_beta(
+    server: &TestServer,
+    configured: &mut embers_client::ConfiguredClient<embers_client::SocketTransport>,
+) {
+    let beta = session_id_by_name(configured.client(), "beta");
+    let pane = configured.client().state().sessions[&beta]
+        .focused_leaf_id
+        .expect("beta has a pane");
+    run_cli(
+        server,
+        &["send-keys", "-t", &pane.to_string(), "--enter", "exit"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while configured.active_session_id() == Some(beta) {
+        assert!(Instant::now() < deadline, "client stayed on beta");
+        let _ = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("handle event");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroyed_session_moves_the_client_per_detach_on_destroy() {
+    for (setting, expected) in [("off", "alpha"), ("previous", "alpha"), ("next", "gamma")] {
+        let server = TestServer::start().await.expect("server starts");
+        let (mut configured, _tempdir) = client_on_beta_of_three(&server, Some(setting)).await;
+
+        exit_beta(&server, &mut configured).await;
+
+        let expected_id = session_id_by_name(configured.client(), expected);
+        assert_eq!(
+            configured.active_session_id(),
+            Some(expected_id),
+            "{setting}"
+        );
+        assert!(!configured.should_exit(), "{setting}");
+        let clients = stdout(&run_cli(&server, &["list-clients"]));
+        assert!(
+            clients.contains(&format!(":{expected}\t")),
+            "{setting}: the server has the client on {expected}: {clients}"
+        );
+        server.shutdown().await.expect("server shuts down");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroyed_session_detaches_the_client_by_default() {
+    let server = TestServer::start().await.expect("server starts");
+    let (mut configured, _tempdir) = client_on_beta_of_three(&server, None).await;
+
+    exit_beta(&server, &mut configured).await;
+
+    assert_eq!(configured.active_session_id(), None);
+    assert!(configured.should_exit());
     server.shutdown().await.expect("server shuts down");
 }

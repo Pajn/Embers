@@ -1256,6 +1256,71 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
     );
 }
 
+fn not_found(request_id: u64, message: &str) -> ServerResponse {
+    ServerResponse::Error(embers_protocol::ErrorResponse {
+        request_id: Some(RequestId(request_id)),
+        error: embers_core::WireError::new(embers_core::ErrorCode::NotFound, message),
+    })
+}
+
+#[tokio::test]
+async fn events_about_a_buffer_or_session_that_is_gone_drop_it() {
+    // A pane whose command exits is removed with its buffer, and a session
+    // whose last pane closed with it, before the client asks about them.
+    let state = second_session_state();
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    }));
+    transport.push_response(not_found(1, "unknown buffer"));
+    // The session showing the buffer is refreshed so no view is left pointing
+    // at a buffer the client no longer has.
+    transport.push_response(not_found(2, "unknown session"));
+    transport.push_response(not_found(3, "unknown buffer"));
+    transport.push_event(ServerEvent::NodeChanged(NodeChangedEvent {
+        session_id: SECOND_SESSION_ID,
+    }));
+    transport.push_response(not_found(4, "unknown session"));
+    transport.push_response(ServerResponse::Buffers(BuffersResponse {
+        request_id: RequestId(5),
+        buffers: Vec::new(),
+    }));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .process_next_event()
+        .await
+        .expect("a removed buffer is not an error");
+    assert!(
+        !configured
+            .client()
+            .state()
+            .buffers
+            .contains_key(&SECOND_BUFFER_ID)
+    );
+    assert!(
+        !configured.client().state().nodes.values().any(|node| node
+            .buffer_view
+            .as_ref()
+            .is_some_and(|view| view.buffer_id == SECOND_BUFFER_ID)),
+        "no view shows the removed buffer"
+    );
+    configured
+        .process_next_event()
+        .await
+        .expect("a removed session is not an error");
+    assert!(
+        !configured
+            .client()
+            .state()
+            .sessions
+            .contains_key(&SECOND_SESSION_ID)
+    );
+}
+
 #[tokio::test]
 async fn ready_events_are_handled_as_one_batch_with_one_refresh_per_buffer() {
     let state = second_session_state();

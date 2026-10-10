@@ -745,6 +745,28 @@ fn on(event_name: string, callback: Fn) -> ();
 /// # rhai-autodocs:index:8
 fn set_clipboard(enabled: bool) -> ();
 
+/// Choose where the client goes when the session it shows is destroyed,
+/// like tmux's `detach-on-destroy`. A session is destroyed when its last
+/// pane closes, because the pane's program exited or the pane was killed,
+/// or when the session is killed.
+///
+/// - `"on"` (the default): detach; the client exits.
+/// - `"off"`: switch to the session the client showed before, or else the
+///   first remaining session.
+/// - `"previous"` / `"next"`: switch to the session listed before or after
+///   the destroyed one (`embers list-sessions` order), wrapping around.
+///
+/// When no other session is left, the client exits whatever the setting.
+///
+/// # Example
+///
+/// ```rhai
+/// set_detach_on_destroy("off");
+/// ```
+///
+/// # rhai-autodocs:index:9
+fn set_detach_on_destroy(value: string) -> ();
+
 /// Set the leader sequence used in binding notations.
 ///
 /// # Example

@@ -776,6 +776,94 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
     server.shutdown().await.expect("shutdown server");
 }
 
+/// Attach a live client to "main" of two sessions ("main", "ops"), with
+/// `config` as its config file, and end main's only pane by typing `exit`.
+async fn exit_last_pane_of_attached_session(
+    server: &TestServer,
+    config: &str,
+) -> (SpawnedEmbers, PtyHarness, tempfile::TempDir) {
+    for session in ["main", "ops"] {
+        run_cli(server, ["new-session", session]);
+        run_cli(
+            server,
+            [
+                "new-window",
+                "-t",
+                session,
+                "--title",
+                "shell",
+                "--",
+                "/bin/sh",
+            ],
+        );
+    }
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_path = tempdir.path().join("config.rhai");
+    fs::write(&config_path, config).expect("write config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let (spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        server.socket_path().to_path_buf(),
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders main");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("main's shell settles");
+    harness
+        .write_all("exit\r")
+        .expect("type exit into the pane");
+    (spawned, harness, tempdir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_moves_to_another_session_when_its_session_is_destroyed() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    let (_spawned, mut harness, _config) =
+        exit_last_pane_of_attached_session(&server, r#"set_detach_on_destroy("off");"#).await;
+    harness
+        .read_until_contains("[ops]", IO_TIMEOUT)
+        .expect("the client switches to the remaining session");
+    let sessions = stdout(&run_cli(&server, ["list-sessions"]));
+    assert!(!sessions.contains("main"), "main is destroyed: {sessions}");
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_exits_when_its_session_is_destroyed_by_default() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+
+    let (_spawned, mut harness, _config) = exit_last_pane_of_attached_session(&server, "").await;
+    harness
+        .wait()
+        .expect("the client exits once its session is destroyed");
+    let sessions = stdout(&run_cli(&server, ["list-sessions"]));
+    assert!(sessions.contains("ops") && !sessions.contains("main"));
+
+    server.shutdown().await.expect("shutdown server");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn buffer_reveal_switches_the_attached_client_to_the_buffer_session() {
     let _guard = acquire_test_lock().await.expect("acquire test lock");

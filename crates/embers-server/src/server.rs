@@ -820,24 +820,35 @@ impl Runtime {
             // These can attach or detach buffers, which can make an exited
             // buffer due for cleanup (a dead pane closed, a buffer whose command
             // exited before it was first shown now attached).
+            // Closing a view (the kill commands do) can also close a session's
+            // last pane, which destroys the session.
             ClientMessage::Session(request) => {
+                let closes = matches!(request, SessionRequest::CloseRootTab { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
                 let (resp, mut events) = self.dispatch_session(request).await;
-                events.extend(self.dispose_exited_buffers().await);
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Buffer(request) => {
                 let (resp, mut events) = self.dispatch_buffer(connection_id, request).await;
-                events.extend(self.dispose_exited_buffers().await);
+                self.dispose_exited_buffers(&mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Node(request) => {
+                let closes = matches!(request, embers_protocol::NodeRequest::Close { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
                 let (resp, mut events) = self.dispatch_node(request).await;
-                events.extend(self.dispose_exited_buffers().await);
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Floating(request) => {
+                let closes = matches!(request, FloatingRequest::Close { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
                 let (resp, mut events) = self.dispatch_floating(request).await;
-                events.extend(self.dispose_exited_buffers().await);
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Input(request) => {
@@ -3407,21 +3418,90 @@ impl Runtime {
                 events.push(ServerEvent::BufferPipeChanged(pipe_event));
             }
             if !should_interrupt {
-                events.extend(self.dispose_exited_buffers().await);
+                self.dispose_exited_buffers(&mut events).await;
             }
-            self.broadcast(events, &[]).await;
+            let retired_session_ids = closed_session_ids(&events);
+            self.broadcast(events, &retired_session_ids).await;
         }
+    }
+
+    /// The sessions that show a pane, when a request is about to close a view
+    /// (`closes`); none otherwise.
+    async fn sessions_with_panes_if(&self, closes: bool) -> BTreeSet<embers_core::SessionId> {
+        if closes {
+            self.state.lock().await.sessions_with_panes()
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    /// Destroy every session in `had_panes` that no longer shows any pane,
+    /// like tmux destroys a session whose last window closed: its last pane's
+    /// command exited, or its view was closed (`kill-pane`, `kill-window` and
+    /// `kill-popup` close views, with or without `--detach`). Detaching or
+    /// moving a buffer out of its session does not count. A session that
+    /// never had a pane, such as one just created, is left alone.
+    ///
+    /// Clients on a destroyed session are left without one; the interactive
+    /// client then moves to another session or exits, per its
+    /// `detach-on-destroy` setting. Layout and focus events about a destroyed
+    /// session are dropped from `events`, so no client asks about it after
+    /// learning it is gone, and `SessionClosed` and `ClientChanged` events are
+    /// added.
+    async fn destroy_emptied_sessions(
+        &self,
+        had_panes: BTreeSet<embers_core::SessionId>,
+        events: &mut Vec<ServerEvent>,
+    ) {
+        let (destroyed, changed_clients) = {
+            let mut state = self.state.lock().await;
+            let mut clients = self.clients.lock().await;
+            let mut destroyed = Vec::new();
+            let mut changed_clients = Vec::new();
+            for session_id in had_panes {
+                if !state.sessions.contains_key(&session_id) || state.session_has_panes(session_id)
+                {
+                    continue;
+                }
+                if let Err(error) = state.close_session(session_id) {
+                    warn!(%session_id, %error, "failed to destroy session without panes");
+                    continue;
+                }
+                changed_clients.extend(Self::clear_client_session(&mut clients, session_id));
+                destroyed.push(session_id);
+            }
+            (destroyed, changed_clients)
+        };
+        if destroyed.is_empty() {
+            return;
+        }
+        info!(sessions = ?destroyed, "destroyed sessions whose last pane closed");
+        self.mark_workspace_dirty();
+        events.retain(|event| match event {
+            ServerEvent::NodeChanged(NodeChangedEvent { session_id })
+            | ServerEvent::FocusChanged(FocusChangedEvent { session_id, .. })
+            | ServerEvent::FloatingChanged(FloatingChangedEvent { session_id, .. }) => {
+                !destroyed.contains(session_id)
+            }
+            _ => true,
+        });
+        events.extend(
+            destroyed
+                .iter()
+                .map(|&session_id| ServerEvent::SessionClosed(SessionClosedEvent { session_id })),
+        );
+        events.extend(self.client_changed_events(changed_clients).await);
     }
 
     /// Apply [`ServerState::dispose_exited_buffers`]: close the views of
     /// exited buffers and remove their records, then release the runtimes of
-    /// the removed buffers so their keepers can exit. Returns the events that
-    /// describe the closed views.
-    async fn dispose_exited_buffers(&self) -> Vec<ServerEvent> {
-        let (removed, events) = {
+    /// the removed buffers so their keepers can exit. Adds the events that
+    /// describe the closed views to `events`, and destroys sessions whose last
+    /// pane this closed.
+    async fn dispose_exited_buffers(&self, events: &mut Vec<ServerEvent>) {
+        let (removed, changed_sessions) = {
             let mut state = self.state.lock().await;
             let disposed = state.dispose_exited_buffers();
-            let mut events = Vec::new();
             for &session_id in &disposed.changed_sessions {
                 if !state.sessions.contains_key(&session_id) {
                     continue;
@@ -3431,10 +3511,12 @@ impl Runtime {
                     events.push(ServerEvent::FocusChanged(focus_event));
                 }
             }
-            (disposed.removed_buffers, events)
+            (disposed.removed_buffers, disposed.changed_sessions)
         };
+        self.destroy_emptied_sessions(changed_sessions, events)
+            .await;
         if removed.is_empty() {
-            return events;
+            return;
         }
         self.mark_workspace_dirty();
         let runtimes = {
@@ -3451,7 +3533,6 @@ impl Runtime {
                 debug!(%error, "failed to join runtime threads of a removed buffer");
             }
         }
-        events
     }
 
     async fn sync_buffer_runtime_status(

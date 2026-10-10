@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-1087260a.js";
+            window.path_to_searchindex_js = "searchindex-30f3e15c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -302,6 +302,46 @@ always ignored.</p>
 
 <div group="set_clipboard" id="set_clipboard-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_clipboard(false);
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_detach_on_destroy </h2>
+
+<pre><code class="language-rust ignore">fn set_detach_on_destroy(value: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Description" class="tablinks active" onclick="openTab(event, &#39;set_detach_on_destroy&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Example" class="tablinks" onclick="openTab(event, &#39;set_detach_on_destroy&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Description" class="tabcontent" style="display: block;">
+Choose where the client goes when the session it shows is destroyed,
+like tmux's `detach-on-destroy`. A session is destroyed when its last
+pane closes, because the pane's program exited or the pane was killed,
+or when the session is killed.
+<ul>
+<li><code>"on"</code> (the default): detach; the client exits.</li>
+<li><code>"off"</code>: switch to the session the client showed before, or else the
+first remaining session.</li>
+<li><code>"previous"</code> / <code>"next"</code>: switch to the session listed before or after
+the destroyed one (<code>embers list-sessions</code> order), wrapping around.</li>
+</ul>
+<p>When no other session is left, the client exits whatever the setting.</p>
+</div>
+
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_detach_on_destroy("off");
 </code></pre>
 </div>
 

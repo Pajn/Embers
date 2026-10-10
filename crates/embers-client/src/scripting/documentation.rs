@@ -36,6 +36,7 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
             "define_action",
             "on",
             "set_clipboard",
+            "set_detach_on_destroy",
         ],
     },
     PageSpec {

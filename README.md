@@ -93,7 +93,10 @@ Useful subcommand groups include:
 As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
 programs they show; pass `--detach` to keep them running as detached buffers
 instead. A pane closes when its program exits, unless its buffer has
-`remain-on-exit` set (`embers buffer set-option remain-on-exit on`).
+`remain-on-exit` set (`embers buffer set-option remain-on-exit on`). A session
+whose last pane closes is destroyed; an attached client then exits, or moves to
+another session with `set_detach_on_destroy("off")` (or `"previous"`/`"next"`)
+in the config file, like tmux's `detach-on-destroy`.
 
 Every pane's processes get `EMBERS_SOCKET` and `EMBERS_BUFFER`, the id of the
 pane's buffer, much like tmux's `TMUX` and `TMUX_PANE`. A command run inside a

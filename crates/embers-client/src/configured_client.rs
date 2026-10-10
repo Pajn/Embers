@@ -33,8 +33,8 @@ use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
-    Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
+    Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
+    FloatingSize, MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size};
 use crate::split_resize::SplitResize;
@@ -110,6 +110,9 @@ pub struct ConfiguredClient<T> {
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
     /// child), drained into `notifications` on the next input/event tick.
     background_notifications: Arc<Mutex<Vec<String>>>,
+    /// Set once the session this client showed was destroyed and
+    /// `detach-on-destroy` left it nowhere to go (see [`Self::should_exit`]).
+    exit_requested: bool,
 }
 
 impl<T> ConfiguredClient<T>
@@ -135,7 +138,15 @@ where
             terminal_output: VecDeque::new(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
+            exit_requested: false,
         }
+    }
+
+    /// Whether the interactive client should exit: the session it showed was
+    /// destroyed and, per the `detach-on-destroy` setting, it detaches rather
+    /// than moving to another session, or no other session is left.
+    pub fn should_exit(&self) -> bool {
+        self.exit_requested
     }
 
     /// Record the socket this client is attached to, so `run_shell` children can
@@ -605,6 +616,14 @@ where
                 Some(session_id) => {
                     self.set_active_session(session_id);
                     self.emit_terminal_title(session_id);
+                }
+                // The session this client showed was destroyed: move on as
+                // detach-on-destroy says.
+                None if changed.previous_session_id.is_some_and(|session_id| {
+                    !self.client.state().sessions.contains_key(&session_id)
+                }) =>
+                {
+                    self.leave_destroyed_session().await?
                 }
                 // The server detached this client from every session; drop the
                 // now-stale active session instead of leaving it dangling.
@@ -2416,6 +2435,51 @@ where
             }
             self.active_session_id = Some(session_id);
         }
+    }
+
+    /// Leave the active session after the server destroyed it, as the
+    /// `detach-on-destroy` setting says: switch to another session, or ask the
+    /// interactive client to exit when it detaches or no session is left.
+    async fn leave_destroyed_session(&mut self) -> Result<()> {
+        let Some(destroyed) = self.active_session_id.take() else {
+            return Ok(());
+        };
+        self.cancel_active_hints();
+        let sessions = &self.client.state().sessions;
+        let remaining = sessions.keys().copied().collect::<Vec<_>>();
+        let previous = self
+            .previous_session_id
+            .filter(|session_id| sessions.contains_key(session_id));
+        let target = match self
+            .config
+            .active_script()
+            .loaded_config()
+            .detach_on_destroy
+        {
+            DetachOnDestroy::On => None,
+            DetachOnDestroy::Off => previous.or_else(|| remaining.first().copied()),
+            DetachOnDestroy::Previous => remaining
+                .iter()
+                .rev()
+                .find(|session_id| **session_id < destroyed)
+                .or(remaining.last())
+                .copied(),
+            DetachOnDestroy::Next => remaining
+                .iter()
+                .find(|session_id| **session_id > destroyed)
+                .or(remaining.first())
+                .copied(),
+        };
+        // `last_session` keeps toggling to the session before the destroyed
+        // one, unless that is where the client goes now.
+        self.previous_session_id = previous.filter(|session_id| Some(*session_id) != target);
+        let Some(target) = target else {
+            self.exit_requested = true;
+            return Ok(());
+        };
+        self.client.switch_current_session(target).await?;
+        self.active_session_id = Some(target);
+        Ok(())
     }
 
     /// Drop the active session (e.g. the server detached this client), keeping

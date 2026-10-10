@@ -162,9 +162,7 @@ pub async fn run(
             // session rather than the old one — not just after the queue drains.
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
-            if let Some(active_session_id) = configured.active_session_id()
-                && Some(active_session_id) != session_id
-            {
+            if let Some(active_session_id) = moved_to_session(&configured, session_id) {
                 ensure_root_window(
                     configured.client_mut(),
                     active_session_id,
@@ -201,7 +199,15 @@ pub async fn run(
         }
         for event in &events {
             match switched_session_id(event, attached_client_id) {
-                SwitchedSession::Switched(next_session_id) => {
+                // A session destroyed since the switch is left to the
+                // ClientChanged that reports it.
+                SwitchedSession::Switched(next_session_id)
+                    if configured
+                        .client()
+                        .state()
+                        .sessions
+                        .contains_key(&next_session_id) =>
+                {
                     ensure_root_window(
                         configured.client_mut(),
                         next_session_id,
@@ -213,8 +219,23 @@ pub async fn run(
                 SwitchedSession::Detached => {
                     session_id = None;
                 }
-                SwitchedSession::Ignore => {}
+                SwitchedSession::Switched(_) | SwitchedSession::Ignore => {}
             }
+        }
+        // The session shown was destroyed (its last pane closed, or it was
+        // killed): detach-on-destroy either moved the client to another
+        // session, picked up here, or detaches it, which ends the client.
+        if configured.should_exit() {
+            return Ok(());
+        }
+        if let Some(active_session_id) = moved_to_session(&configured, session_id) {
+            ensure_root_window(
+                configured.client_mut(),
+                active_session_id,
+                Some(content_viewport(terminal_size)),
+            )
+            .await?;
+            session_id = Some(active_session_id);
         }
         // handle_event drains background notifications up front, but its own
         // awaits (and the session-switch handling above) can race a background
@@ -224,6 +245,24 @@ pub async fn run(
         terminal.write_bytes(&drain_terminal_output(&mut configured))?;
         dirty = true;
     }
+}
+
+/// The session the client moved to when it is not the one `shown`: an action
+/// switched sessions, or detach-on-destroy left a destroyed one. A session the
+/// client no longer knows, destroyed before the server said so, is not one to
+/// move to; the `ClientChanged` that follows its destruction settles it.
+fn moved_to_session(
+    configured: &ConfiguredClient<SocketTransport>,
+    shown: Option<SessionId>,
+) -> Option<SessionId> {
+    configured.active_session_id().filter(|session_id| {
+        Some(*session_id) != shown
+            && configured
+                .client()
+                .state()
+                .sessions
+                .contains_key(session_id)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

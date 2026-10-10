@@ -154,6 +154,50 @@ set_clipboard(false);
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_detach_on_destroy </h2>
+
+```rust,ignore
+fn set_detach_on_destroy(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_detach_on_destroy', 'Description')">
+Description
+</button>
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Example"  class="tablinks"
+    onclick="openTab(event, 'set_detach_on_destroy', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Description" class="tabcontent"  style="display: block;" >
+Choose where the client goes when the session it shows is destroyed,
+like tmux's `detach-on-destroy`. A session is destroyed when its last
+pane closes, because the pane's program exited or the pane was killed,
+or when the session is killed.
+
+- `"on"` (the default): detach; the client exits.
+- `"off"`: switch to the session the client showed before, or else the
+  first remaining session.
+- `"previous"` / `"next"`: switch to the session listed before or after
+  the destroyed one (`embers list-sessions` order), wrapping around.
+
+When no other session is left, the client exits whatever the setting.
+</div>
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_detach_on_destroy("off");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_leader </h2>
 
 ```rust,ignore

@@ -179,16 +179,21 @@ impl ClientState {
             .collect::<BTreeSet<_>>();
 
         for buffer_id in current_detached.difference(&incoming_ids) {
-            self.buffers.remove(buffer_id);
-            self.snapshots.remove(buffer_id);
-            self.view_state
-                .retain(|_, state| state.buffer_id != *buffer_id);
-            self.invalidated_buffers.remove(buffer_id);
+            self.remove_buffer(*buffer_id);
         }
 
         for buffer in buffers {
             self.buffers.insert(buffer.id, buffer);
         }
+    }
+
+    /// Forget a buffer the server no longer has.
+    pub fn remove_buffer(&mut self, buffer_id: BufferId) {
+        self.buffers.remove(&buffer_id);
+        self.snapshots.remove(&buffer_id);
+        self.view_state
+            .retain(|_, state| state.buffer_id != buffer_id);
+        self.invalidated_buffers.remove(&buffer_id);
     }
 
     pub fn apply_buffer_record(&mut self, buffer: BufferRecord) {

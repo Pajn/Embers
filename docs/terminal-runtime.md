@@ -83,6 +83,23 @@ after its command exits has to be kept:
 Cleanup runs when a buffer exits and after every request that can attach or detach a buffer.
 Helper buffers (history views) have no command and are not affected.
 
+## When a session's last pane closes
+
+A session that no longer shows any pane, in a window or a popup, is destroyed, as tmux destroys a
+session whose last window closed. That happens when its last pane's command exits, or when the
+pane's view is closed (`NodeRequest::Close`, `SessionRequest::CloseRootTab`,
+`FloatingRequest::Close`, which `kill-pane`, `kill-window` and `kill-popup` use with or without
+`--detach`). Detaching a buffer from its view (`BufferRequest::Detach`) or moving it to another
+pane leaves its session in place even when that empties it, and a dead pane kept by
+`remain-on-exit` still counts as a pane. A session that never had a pane, such as one `new-session`
+just created, is left alone.
+
+Destroying a session is the same as `kill-session`: clients that showed it are left without a
+session (`ClientChanged` with no current session) after `SessionClosed`. The interactive client
+then follows its `detach-on-destroy` setting (`set_detach_on_destroy` in the config file): by
+default it detaches and exits; `off` switches to the session it showed before, `previous` and
+`next` to the neighbouring session in `list-sessions` order. With no other session left, it exits.
+
 ## Attachment and move semantics
 
 `Attached -> Detached` happens when the owning view is closed or explicitly detached.

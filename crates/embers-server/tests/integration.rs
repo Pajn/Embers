@@ -9,5 +9,6 @@ mod model_state;
 mod nested_tabs;
 mod persistence;
 mod ping_server;
+mod session_destroy;
 mod session_root_tabs;
 mod split_layout;

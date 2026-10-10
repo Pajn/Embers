@@ -1408,6 +1408,24 @@ impl ServerState {
         Ok(seen.into_iter().collect())
     }
 
+    /// Whether the session shows at least one pane, in a window or a popup.
+    pub fn session_has_panes(&self, session_id: SessionId) -> bool {
+        self.session_node_ids(session_id).is_ok_and(|node_ids| {
+            node_ids
+                .iter()
+                .any(|node_id| matches!(self.nodes.get(node_id), Some(Node::BufferView(_))))
+        })
+    }
+
+    /// Every session that shows at least one pane.
+    pub fn sessions_with_panes(&self) -> BTreeSet<SessionId> {
+        self.sessions
+            .keys()
+            .copied()
+            .filter(|session_id| self.session_has_panes(*session_id))
+            .collect()
+    }
+
     pub fn session_buffer_ids(&self, session_id: SessionId) -> Result<Vec<BufferId>> {
         let mut buffers = BTreeSet::new();
         for node_id in self.session_node_ids(session_id)? {

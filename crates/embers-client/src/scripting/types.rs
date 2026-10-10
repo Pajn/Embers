@@ -104,6 +104,34 @@ pub struct ModeHooks {
     pub on_leave: Option<ScriptFunctionRef>,
 }
 
+/// Where the client goes when the session it shows is destroyed, because its
+/// last pane closed or it was killed (`set_detach_on_destroy`), like tmux's
+/// `detach-on-destroy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DetachOnDestroy {
+    /// Detach: the interactive client exits.
+    #[default]
+    On,
+    /// Switch to the session the client showed before, else the first one.
+    Off,
+    /// Switch to the session listed before the destroyed one, wrapping around.
+    Previous,
+    /// Switch to the session listed after the destroyed one, wrapping around.
+    Next,
+}
+
+impl DetachOnDestroy {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            "previous" => Some(Self::Previous),
+            "next" => Some(Self::Next),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MouseSettings {
     pub click_focus: bool,
@@ -152,6 +180,9 @@ pub struct LoadedConfig {
     /// Forward OSC 52 clipboard writes from programs in panes to the host
     /// terminal (`set_clipboard`). On by default.
     pub clipboard: bool,
+    /// Where the client goes when its session is destroyed
+    /// (`set_detach_on_destroy`).
+    pub detach_on_destroy: DetachOnDestroy,
 }
 
 impl LoadedConfig {

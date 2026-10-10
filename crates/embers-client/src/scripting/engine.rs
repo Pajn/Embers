@@ -20,7 +20,8 @@ use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
 use super::types::{
-    HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
+    DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor,
+    ScriptFunctionRef, ThemeSpec,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -260,6 +261,7 @@ struct RegistrationState {
     hints: HintsSettings,
     theme: ThemeSpec,
     clipboard: Option<bool>,
+    detach_on_destroy: DetachOnDestroy,
 }
 
 impl RegistrationState {
@@ -364,6 +366,7 @@ impl RegistrationState {
             hints: self.hints,
             theme: self.theme,
             clipboard: self.clipboard.unwrap_or(true),
+            detach_on_destroy: self.detach_on_destroy,
         })
     }
 }
@@ -797,6 +800,43 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .clipboard = Some(enabled);
+        Ok(())
+    }
+
+    /// Choose where the client goes when the session it shows is destroyed,
+    /// like tmux's `detach-on-destroy`. A session is destroyed when its last
+    /// pane closes, because the pane's program exited or the pane was killed,
+    /// or when the session is killed.
+    ///
+    /// - `"on"` (the default): detach; the client exits.
+    /// - `"off"`: switch to the session the client showed before, or else the
+    ///   first remaining session.
+    /// - `"previous"` / `"next"`: switch to the session listed before or after
+    ///   the destroyed one (`embers list-sessions` order), wrapping around.
+    ///
+    /// When no other session is left, the client exits whatever the setting.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_detach_on_destroy("off");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:9
+    #[rhai_fn(return_raw, global, name = "set_detach_on_destroy")]
+    pub fn set_detach_on_destroy(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(setting) = DetachOnDestroy::parse(value) else {
+            return Err(runtime_error(
+                format!(
+                    "set_detach_on_destroy expects \"on\", \"off\", \"previous\" or \"next\", got {value:?}"
+                ),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .detach_on_destroy = setting;
         Ok(())
     }
 }
