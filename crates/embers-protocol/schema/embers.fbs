@@ -368,6 +368,8 @@ table BufferRecord {
   pipe:BufferPipeRecord (id: 21);
   user_option_keys:[string] (id: 22);
   user_option_values:[string] (id: 23);
+  // Absent while the buffer's own process is in the foreground.
+  foreground_command:[string] (id: 24);
 }
 
 table BufferPipeRecord {

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b97576b2.js";
+            window.path_to_searchindex_js = "searchindex-1087260a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -286,6 +286,28 @@ Return the process exit code, if any.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> foreground_command </h2>
+
+<pre><code class="language-rust ignore">fn foreground_command(buffer: BufferRef) -&gt; Array</code></pre>
+<div>
+<div class="tab">
+<button group="foreground_command" id="link-foreground_command-Description" class="tablinks active" onclick="openTab(event, &#39;foreground_command&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="foreground_command" id="foreground_command-Description" class="tabcontent" style="display: block;">
+Return the command line of the program in the buffer's foreground: the
+job its shell runs, else the buffer's own command.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> history_text </h2>
 
 <pre><code class="language-rust ignore">fn history_text(buffer: BufferRef) -&gt; String</code></pre>
@@ -475,11 +497,25 @@ Return the process id, if any.
 <button group="process_name" id="link-process_name-Description" class="tablinks active" onclick="openTab(event, &#39;process_name&#39;, &#39;Description&#39;)">
 Description
 </button>
+<button group="process_name" id="link-process_name-Example" class="tablinks" onclick="openTab(event, &#39;process_name&#39;, &#39;Example&#39;)">
+Example
+</button>
 </div>
 
 <div group="process_name" id="process_name-Description" class="tabcontent" style="display: block;">
-Return the detected process name, if any.
+Return the name of the program in the buffer's foreground, like tmux's
+`pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+runs in a shell), else the buffer's own command (`"zsh"` at the
+prompt). Use `command()` for the command the buffer was started with.
 <p>ReturnType: <code>string | ()</code></p>
+</div>
+
+<div group="process_name" id="process_name-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let buffer = ctx.current_buffer();
+if buffer != () &amp;&amp; buffer.process_name() == "nvim" {
+    action.send_keys_current("&lt;C-h&gt;")
+}
+</code></pre>
 </div>
 
 </div>

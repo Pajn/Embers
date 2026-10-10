@@ -225,6 +225,7 @@ fn second_session_state() -> embers_client::ClientState {
             pipe: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
     state.snapshots.insert(
@@ -1511,6 +1512,7 @@ async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
             pipe: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     }));
     let client = MuxClient::new(transport);

@@ -87,12 +87,11 @@ fn is_nvim_buffer(ctx) {
         return false;
     }
 
-    // Prefer the user option set by the nvim autocmds (see
-    // docs/layout-controls.md); it survives shells launched inside the pane
-    // the way tmux @pane-is-vim does. An explicit
-    // "0" means Vim reported it is no longer active, so trust it and stop. Only an
-    // unset () value falls back to matching the direct child process name for panes
-    // spawned straight into nvim.
+    // The is-vim option set by the nvim autocmds (see docs/layout-controls.md)
+    // overrides detection, the way tmux @pane-is-vim does: "1" for a Neovim
+    // that detection misses (one running over ssh, say) and an explicit "0"
+    // once Vim reported it is no longer active. Unset, match the program in
+    // the pane's foreground, whether a shell started it or the pane did.
     let is_vim = buffer.user_option("is-vim");
     if is_vim == "1" {
         return true;

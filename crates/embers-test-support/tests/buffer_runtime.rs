@@ -839,6 +839,52 @@ async fn pid_polling_reports_shell_cwd() {
     server.shutdown().await.expect("shutdown server");
 }
 
+async fn wait_for_foreground_command(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    expected: Option<Vec<String>>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let buffer = get_buffer(connection, buffer_id).await;
+        if buffer.foreground_command == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground command stayed {:?}, expected {expected:?}",
+            buffer.foreground_command
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_record_reports_the_job_a_shell_runs() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(&mut connection, &["/bin/sh"]).await;
+    wait_for_foreground_command(&mut connection, buffer.id, None).await;
+
+    send_input(&mut connection, buffer.id, "sleep 30\r").await;
+    wait_for_foreground_command(
+        &mut connection,
+        buffer.id,
+        Some(vec!["sleep".to_owned(), "30".to_owned()]),
+    )
+    .await;
+
+    // Back at the prompt, the shell itself is in the foreground again.
+    send_input(&mut connection, buffer.id, "\u{3}").await;
+    wait_for_foreground_command(&mut connection, buffer.id, None).await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
 fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }

@@ -3424,6 +3424,10 @@ fn encode_buffer_record<'a>(
     let user_option_values_vec = record.user_options.values().cloned().collect::<Vec<_>>();
     let user_option_keys = create_string_vector(builder, &user_option_keys_vec);
     let user_option_values = create_string_vector(builder, &user_option_values_vec);
+    let foreground_command = record
+        .foreground_command
+        .as_ref()
+        .map(|command| create_string_vector(builder, command));
 
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
@@ -3480,6 +3484,7 @@ fn encode_buffer_record<'a>(
             env_values: Some(env_values),
             user_option_keys: Some(user_option_keys),
             user_option_values: Some(user_option_values),
+            foreground_command,
         },
     )
 }
@@ -4854,6 +4859,9 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         },
         env,
         user_options,
+        foreground_command: record
+            .foreground_command()
+            .map(|command| command.iter().map(str::to_owned).collect()),
     };
     record
         .validate()
@@ -5154,6 +5162,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5193,6 +5202,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5572,6 +5582,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5610,6 +5621,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5649,6 +5661,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -5678,6 +5691,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -5706,6 +5720,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5754,6 +5769,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -5797,6 +5813,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -5836,6 +5853,7 @@ mod tests {
                 exit_code: None,
                 env: Default::default(),
                 user_options: Default::default(),
+                foreground_command: None,
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -5872,6 +5890,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -5898,6 +5917,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -5939,6 +5959,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -5965,6 +5986,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6064,6 +6086,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))

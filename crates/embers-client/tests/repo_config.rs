@@ -46,6 +46,53 @@ fn repository_config_smart_nav_uses_buffer_input_for_nvim() {
 }
 
 #[test]
+fn repository_config_smart_nav_detects_nvim_started_from_a_shell() {
+    let engine = repository_config_engine();
+    let run = |is_vim: Option<&str>| {
+        let mut state = demo_state();
+        let buffer = state.buffers.get_mut(&BufferId(4)).unwrap();
+        buffer.command = vec!["/bin/zsh".to_owned()];
+        // The shell runs Neovim as its foreground job.
+        buffer.foreground_command = Some(vec!["nvim".to_owned(), "notes.txt".to_owned()]);
+        if let Some(is_vim) = is_vim {
+            buffer
+                .user_options
+                .insert("is-vim".to_owned(), is_vim.to_owned());
+        }
+        let presentation = PresentationModel::project(
+            &state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .unwrap();
+        engine
+            .run_named_action(
+                "smart-nav-left",
+                Context::from_state(&state, Some(&presentation)),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(
+        run(None),
+        vec![Action::SendBytes {
+            buffer_id: None,
+            bytes: vec![8],
+        }]
+    );
+    // The is-vim option still overrides what is detected.
+    assert_eq!(
+        run(Some("0")),
+        vec![Action::FocusDirection {
+            direction: NavigationDirection::Left
+        }]
+    );
+}
+
+#[test]
 fn repository_config_smart_resize_passes_alt_keys_to_nvim() {
     let engine = repository_config_engine();
     let mut state = demo_state();

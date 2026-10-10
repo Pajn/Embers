@@ -3102,6 +3102,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -3139,6 +3140,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -3184,6 +3186,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );

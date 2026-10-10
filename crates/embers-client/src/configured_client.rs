@@ -4896,6 +4896,7 @@ mod tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location,
                 false,

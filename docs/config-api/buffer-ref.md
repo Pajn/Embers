@@ -119,6 +119,29 @@ ReturnType: `int | ()`
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> foreground_command </h2>
+
+```rust,ignore
+fn foreground_command(buffer: BufferRef) -> Array
+```
+
+<div>
+<div class="tab">
+<button group="foreground_command" id="link-foreground_command-Description"  class="tablinks active"
+    onclick="openTab(event, 'foreground_command', 'Description')">
+Description
+</button>
+</div>
+
+<div group="foreground_command" id="foreground_command-Description" class="tabcontent"  style="display: block;" >
+Return the command line of the program in the buffer's foreground: the
+job its shell runs, else the buffer's own command.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> history_text </h2>
 
 ```rust,ignore
@@ -324,12 +347,28 @@ fn process_name(buffer: BufferRef) -> ?
     onclick="openTab(event, 'process_name', 'Description')">
 Description
 </button>
+<button group="process_name" id="link-process_name-Example"  class="tablinks"
+    onclick="openTab(event, 'process_name', 'Example')">
+Example
+</button>
 </div>
 
 <div group="process_name" id="process_name-Description" class="tabcontent"  style="display: block;" >
-Return the detected process name, if any.
+Return the name of the program in the buffer's foreground, like tmux's
+`pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+runs in a shell), else the buffer's own command (`"zsh"` at the
+prompt). Use `command()` for the command the buffer was started with.
 
 ReturnType: `string | ()`
+</div>
+<div group="process_name" id="process_name-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+let buffer = ctx.current_buffer();
+if buffer != () && buffer.process_name() == "nvim" {
+    action.send_keys_current("<C-h>")
+}
+```
 </div>
 
 </div>

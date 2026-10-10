@@ -735,6 +735,10 @@ fn floating(session: SessionRef) -> array;
 /// ReturnType: `int | ()`
 fn floating_id(event: EventInfo) -> ?;
 
+/// Return the command line of the program in the buffer's foreground: the
+/// job its shell runs, else the buffer's own command.
+fn foreground_command(buffer: BufferRef) -> array;
+
 /// Return the floating geometry map.
 fn geometry(floating: FloatingRef) -> map;
 
@@ -852,9 +856,21 @@ fn pid(buffer: BufferRef) -> ?;
 /// ReturnType: `int | ()`
 fn previous_session_id(event: EventInfo) -> ?;
 
-/// Return the detected process name, if any.
+/// Return the name of the program in the buffer's foreground, like tmux's
+/// `pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+/// runs in a shell), else the buffer's own command (`"zsh"` at the
+/// prompt). Use `command()` for the command the buffer was started with.
 ///
 /// ReturnType: `string | ()`
+///
+/// # Example
+///
+/// ```rhai
+/// let buffer = ctx.current_buffer();
+/// if buffer != () && buffer.process_name() == "nvim" {
+///     action.send_keys_current("<C-h>")
+/// }
+/// ```
 fn process_name(buffer: BufferRef) -> ?;
 
 /// Return the root node id.

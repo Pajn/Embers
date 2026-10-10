@@ -292,6 +292,7 @@ fn foreign_session_zoom_targets_are_ignored() {
             exit_code: None,
             pipe: None,
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
 

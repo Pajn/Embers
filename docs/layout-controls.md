@@ -116,13 +116,22 @@ Alt-h/j/k/l to resize the multiplexer pane by 3 cells unless the pane runs
 Neovim, which then gets the key and resizes its own windows. Ctrl-h/j/k/l move
 between panes the same way.
 
-Embers has no foreground process detection: `buffer.process_name()` is the
-name of the command the pane was started with. Neovim instead marks its own
-pane with the `is-vim` pane option, the counterpart of tmux's `@pane-is-vim`,
-and the config reads it with `buffer.user_option("is-vim")`. The detection
-used by the repository config treats `"1"` as Neovim and `"0"` as not, and
-otherwise falls back to the command name, which catches panes started
-directly into Neovim:
+### Neovim detection
+
+`buffer.process_name()` is the name of the program in the pane's foreground,
+like tmux's `pane_current_command`: the job the pane's shell runs, so `nvim`
+once Neovim is started from a shell, and the pane's own command (`zsh`) while
+the shell is at its prompt. `buffer.foreground_command()` gives the whole
+command line, and `buffer.command()` the command the pane was started with.
+The runtime keeper reads the foreground job from the PTY's foreground process
+group, and the client sees a change within about 50 ms.
+
+Detection cannot see through every layer: Neovim run over `ssh`, or inside a
+nested multiplexer, shows up as `ssh` or `tmux`. For those, Neovim can mark its
+own pane with the `is-vim` pane option, the counterpart of tmux's
+`@pane-is-vim`, which the config reads with `buffer.user_option("is-vim")`.
+The detection used by the repository config treats `"1"` as Neovim and `"0"`
+as not, and otherwise goes by the foreground program's name:
 
 ```rhai
 fn is_nvim_buffer(ctx) {
@@ -165,26 +174,33 @@ bind("normal", "<C-h>", "smart-nav-left");
 // ...and likewise for j/k/l with resize_down/up/right and focus_down/up/right.
 ```
 
-smart-splits.nvim only sets `@pane-is-vim` under tmux, so Neovim needs its own
-autocommands to set the Embers option. Panes inherit `EMBERS_SOCKET`, so the
-`embers` command reaches the right server, and `EMBERS_BUFFER`, the id of the
-pane's buffer, so without `-t` the command sets the option on Neovim's own pane,
-whichever pane is focused and however many sessions exist (see
-[Set in panes](configuration.md#set-in-panes)):
+smart-splits.nvim only sets `@pane-is-vim` under tmux, so a Neovim that
+detection misses needs its own autocommands to set the Embers option. Panes
+inherit `EMBERS_SOCKET`, so the `embers` command reaches the right server, and
+`EMBERS_BUFFER`, the id of the pane's buffer, so without `-t` the command sets
+the option on Neovim's own pane, whichever pane is focused and however many
+sessions exist (see [Set in panes](configuration.md#set-in-panes)). Leaving or
+suspending Neovim unsets the option rather than setting `"0"`, so detection
+takes over again for whatever runs in the pane next:
 
 ```lua
-local function set_is_vim(value)
+local function set_is_vim(args)
   if vim.env.EMBERS_BUFFER then
-    vim.system({ "embers", "buffer", "set-option", "is-vim", value })
+    vim.system(vim.list_extend({ "embers", "buffer", "set-option" }, args))
   end
 end
 vim.api.nvim_create_autocmd({ "VimEnter", "VimResume" }, {
-  callback = function() set_is_vim("1") end,
+  callback = function() set_is_vim({ "is-vim", "1" }) end,
 })
 vim.api.nvim_create_autocmd({ "VimLeavePre", "VimSuspend" }, {
-  callback = function() set_is_vim("0") end,
+  callback = function() set_is_vim({ "--unset", "is-vim" }) end,
 })
 ```
+
+Where the pane's environment does not reach Neovim, as on the far side of
+`ssh`, set the option from the local side instead: a wrapper that starts the
+remote editor can run `embers buffer set-option is-vim 1` before it and
+`embers buffer set-option --unset is-vim` after it.
 
 The full example lives in
 [`crates/embers-client/tests/fixtures/repository_config.rhai`](../crates/embers-client/tests/fixtures/repository_config.rhai).

@@ -829,5 +829,6 @@ fn sample_buffer_record(
         exit_code,
         env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
         user_options: std::collections::BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]),
+        foreground_command: Some(vec!["nvim".to_owned(), "notes.txt".to_owned()]),
     }
 }

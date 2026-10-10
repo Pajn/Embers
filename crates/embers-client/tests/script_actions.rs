@@ -871,6 +871,55 @@ fn query_api_supports_smart_nav_style_scripts() {
 }
 
 #[test]
+fn buffer_process_name_follows_the_foreground_job() {
+    let engine = load_engine(
+        r#"
+            fn describe(ctx) {
+                let buffer = ctx.current_buffer();
+                let command = buffer.foreground_command();
+                action.notify("info", buffer.process_name() + ":" + command[command.len - 1])
+            }
+            define_action("describe", describe);
+        "#,
+    );
+    let run = |command: &[&str], foreground: Option<&[&str]>| {
+        let mut state = demo_state();
+        let buffer = state.buffers.get_mut(&FOCUSED_BUFFER_ID).unwrap();
+        buffer.command = command.iter().map(|arg| (*arg).to_owned()).collect();
+        buffer.foreground_command =
+            foreground.map(|command| command.iter().map(|arg| (*arg).to_owned()).collect());
+        let presentation = PresentationModel::project(
+            &state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .unwrap();
+        engine
+            .run_named_action("describe", Context::from_state(&state, Some(&presentation)))
+            .unwrap()
+    };
+    let notified = |message: &str| {
+        vec![Action::Notify {
+            level: NotifyLevel::Info,
+            message: message.to_owned(),
+        }]
+    };
+
+    // A shell at its prompt: the pane's own command.
+    assert_eq!(run(&["/bin/zsh", "-l"], None), notified("zsh:-l"));
+    // A job the shell runs, like tmux's pane_current_command.
+    assert_eq!(
+        run(&["/bin/zsh"], Some(&["/usr/local/bin/nvim", "notes.txt"])),
+        notified("nvim:notes.txt")
+    );
+    // A login shell's argv[0] starts with a dash.
+    assert_eq!(run(&["-zsh"], None), notified("zsh:-zsh"));
+}
+
+#[test]
 fn event_handlers_can_inspect_visibility_and_session_relationships() {
     let engine = load_engine(
         r#"

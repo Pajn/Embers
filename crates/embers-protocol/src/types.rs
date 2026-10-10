@@ -716,6 +716,10 @@ pub struct BufferRecord {
     pub exit_code: Option<i32>,
     pub env: BTreeMap<String, String>,
     pub user_options: BTreeMap<String, String>,
+    /// Command line of the job in the foreground of the buffer's PTY when that
+    /// is not the buffer's own process, for example a program its shell runs.
+    /// `None` while the buffer's own process is in the foreground.
+    pub foreground_command: Option<Vec<String>>,
 }
 
 impl BufferRecord {

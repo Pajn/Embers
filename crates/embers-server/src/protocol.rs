@@ -107,6 +107,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         exit_code,
         env: buffer.env.clone(),
         user_options: buffer.user_options.clone(),
+        foreground_command: buffer.foreground_command.clone(),
     }
 }
 

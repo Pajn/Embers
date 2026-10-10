@@ -3216,6 +3216,9 @@ impl Runtime {
                     && foreground_command != buffer.foreground_command
                 {
                     buffer.foreground_command = foreground_command;
+                    // Clients read it to tell what runs in the pane (smart
+                    // navigation detecting Neovim), so they refetch the record.
+                    render_invalidated = true;
                     workspace_changed = true;
                 }
                 if sequence_current && let Some(pipe) = update.pipe {
@@ -4984,6 +4987,68 @@ mod tests {
             .clone();
         assert_eq!(buffer.last_snapshot_seq, 6);
         assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_tells_clients_about_a_new_foreground_job() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+            state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created")
+                .last_snapshot_seq = 5;
+            buffer_id
+        };
+        let (sender, mut receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
+        runtime.subscriptions.lock().await.insert(
+            1,
+            Subscription {
+                connection_id: 1,
+                session_id: None,
+                sender,
+            },
+        );
+
+        // A job taking over the foreground prints nothing by itself, so the
+        // update does not advance the sequence.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 5,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: None,
+                    foreground_command: Some(Some(vec!["nvim".to_owned()])),
+                },
+            )
+            .await;
+
+        let record = crate::protocol::buffer_record(
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists"),
+        );
+        assert_eq!(record.foreground_command, Some(vec!["nvim".to_owned()]));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ServerEnvelope::Event(ServerEvent::RenderInvalidated(event)))
+                if event.buffer_id == buffer_id
+        ));
     }
 
     #[tokio::test]

@@ -331,6 +331,7 @@ fn buffer(
         exit_code: None,
         pipe: None,
         user_options: Default::default(),
+        foreground_command: None,
     }
 }
 

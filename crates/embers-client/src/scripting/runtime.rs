@@ -475,12 +475,36 @@ mod documented_ref_api {
         buffer.pid.map(dynamic_u32).unwrap_or(Dynamic::UNIT)
     }
 
-    /// Return the detected process name, if any.
+    /// Return the name of the program in the buffer's foreground, like tmux's
+    /// `pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+    /// runs in a shell), else the buffer's own command (`"zsh"` at the
+    /// prompt). Use `command()` for the command the buffer was started with.
     ///
     /// ReturnType: `string | ()`
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let buffer = ctx.current_buffer();
+    /// if buffer != () && buffer.process_name() == "nvim" {
+    ///     action.send_keys_current("<C-h>")
+    /// }
+    /// ```
     #[rhai_fn(name = "process_name")]
     pub fn buffer_process_name(buffer: &mut BufferRef) -> Dynamic {
         dynamic_option_string(buffer.process_name())
+    }
+
+    /// Return the command line of the program in the buffer's foreground: the
+    /// job its shell runs, else the buffer's own command.
+    #[rhai_fn(name = "foreground_command")]
+    pub fn buffer_foreground_command(buffer: &mut BufferRef) -> Array {
+        buffer
+            .current_command()
+            .iter()
+            .cloned()
+            .map(Dynamic::from)
+            .collect()
     }
 
     /// Return the controlling TTY path, if any.
