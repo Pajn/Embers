@@ -11,7 +11,9 @@ pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
 /// `TERM` advertised to buffer child processes. Embers ships no terminfo of its
 /// own; alacritty's emulation is closest to xterm and `xterm-256color` exists
 /// everywhere. A user-supplied `TERM` in the buffer spawn env still overrides
-/// this (hints are merged after the base env).
+/// this (hints are merged after the base env). The entry lacks `Smulx`,
+/// `Setulc` and `Ms`; programs that probe the terminal (DECRQSS, XTGETTCAP)
+/// learn them from the keeper's answers instead (see `RawByteRouter`).
 pub const TERM_ENV_VAR: &str = "TERM";
 /// Default `TERM` value injected into buffer children.
 pub const DEFAULT_TERM: &str = "xterm-256color";

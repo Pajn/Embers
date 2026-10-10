@@ -82,11 +82,29 @@ pub trait TerminalBackend: Send {
     /// against the client-thread readers of the same state.
     fn take_events(&mut self) -> BackendEvents;
     fn take_damage(&mut self) -> BackendDamage;
+    /// Answer a terminal query the emulator itself does not handle. The reply is
+    /// queued with the emulator's own replies (drained by
+    /// [`TerminalBackend::take_events`]) so replies keep their order. The router
+    /// calls this right after ingesting the query's final byte, so the reply
+    /// reflects the state at that point in the stream.
+    fn answer_query(&mut self, query: &TerminalQuery);
+}
+
+/// A DCS query intercepted by [`RawByteRouter`] for the backend to answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalQuery {
+    /// DECRQSS (`DCS $ q <setting> ST`): report a setting's current value.
+    /// Holds the setting, for example `m` for SGR.
+    RequestSetting(Vec<u8>),
+    /// XTGETTCAP (`DCS + q <hex name>;... ST`): look up terminfo capabilities.
+    /// Holds the raw payload of hex-encoded names separated by `;`.
+    Termcap(Vec<u8>),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RawByteRouter {
     osc7: Osc7Scanner,
+    queries: DcsQueryScanner,
 }
 
 impl RawByteRouter {
@@ -103,9 +121,23 @@ impl RawByteRouter {
     /// Output is forwarded directly into the backend (alacritty drops OSC 7), while a
     /// side scanner sniffs OSC 7 `file://host/path` working-directory reports so the
     /// keeper can report the shell's live cwd the way tmux does.
+    ///
+    /// A second scanner picks out the DCS queries alacritty leaves unanswered
+    /// (DECRQSS and XTGETTCAP). Output is split after each one so the backend
+    /// answers it with the state as of that byte.
     pub fn route_output(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
         self.osc7.feed(bytes);
-        backend.ingest_bytes(bytes);
+        let mut start = 0;
+        for (index, &byte) in bytes.iter().enumerate() {
+            if let Some(query) = self.queries.step(byte) {
+                backend.ingest_bytes(&bytes[start..=index]);
+                backend.answer_query(&query);
+                start = index + 1;
+            }
+        }
+        if start < bytes.len() {
+            backend.ingest_bytes(&bytes[start..]);
+        }
     }
 
     /// The most recent working directory reported by the inner shell via OSC 7, if any.
@@ -227,6 +259,226 @@ impl Osc7Scanner {
             self.cwd = Some(PathBuf::from(text));
         }
     }
+}
+
+/// Streaming scanner for the DCS queries the router answers on the emulator's
+/// behalf: DECRQSS (`ESC P $ q <setting> ESC \`) and XTGETTCAP
+/// (`ESC P + q <hex names> ESC \`). Like [`Osc7Scanner`] it keeps state across
+/// read chunks; any other DCS (sixel, tmux passthrough, ...) is skipped without
+/// buffering.
+#[derive(Clone, Debug, Default)]
+struct DcsQueryScanner {
+    state: DcsState,
+    kind: u8,
+    buf: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DcsState {
+    #[default]
+    Ground,
+    /// Saw ESC; expecting `P` to enter a DCS.
+    Escape,
+    /// Saw `ESC P`; expecting the `$` or `+` intermediate.
+    Entry,
+    /// Saw the intermediate; expecting the `q` final byte.
+    Final,
+    /// Inside a recognised query; buffering its payload.
+    Collect,
+    /// Inside a recognised query and saw ESC; `\` terminates it.
+    CollectEscape,
+    /// Inside some other DCS; discarding until the terminator.
+    Skip,
+    /// Inside a skipped DCS and saw ESC.
+    SkipEscape,
+}
+
+/// Upper bound on a buffered query payload. Real queries are a few bytes; the
+/// cap bounds memory if one is never terminated.
+const DCS_QUERY_MAX_PAYLOAD: usize = 256;
+
+impl DcsQueryScanner {
+    /// Advance by one byte, returning a query when `byte` completes one.
+    fn step(&mut self, byte: u8) -> Option<TerminalQuery> {
+        const ESC: u8 = 0x1b;
+        const CAN: u8 = 0x18;
+        const SUB: u8 = 0x1a;
+        // CAN and SUB abort any control string.
+        if matches!(byte, CAN | SUB) {
+            self.state = DcsState::Ground;
+            return None;
+        }
+        match self.state {
+            DcsState::Ground => {
+                if byte == ESC {
+                    self.state = DcsState::Escape;
+                }
+            }
+            DcsState::Escape => {
+                self.state = match byte {
+                    b'P' => DcsState::Entry,
+                    ESC => DcsState::Escape,
+                    _ => DcsState::Ground,
+                };
+            }
+            DcsState::Entry => match byte {
+                b'$' | b'+' => {
+                    self.kind = byte;
+                    self.state = DcsState::Final;
+                }
+                ESC => self.state = DcsState::SkipEscape,
+                _ => self.state = DcsState::Skip,
+            },
+            DcsState::Final => match byte {
+                b'q' => {
+                    self.buf.clear();
+                    self.state = DcsState::Collect;
+                }
+                ESC => self.state = DcsState::SkipEscape,
+                _ => self.state = DcsState::Skip,
+            },
+            DcsState::Collect => match byte {
+                ESC => self.state = DcsState::CollectEscape,
+                _ if self.buf.len() >= DCS_QUERY_MAX_PAYLOAD => self.state = DcsState::Skip,
+                _ => self.buf.push(byte),
+            },
+            DcsState::CollectEscape => {
+                if byte == b'\\' {
+                    self.state = DcsState::Ground;
+                    let payload = std::mem::take(&mut self.buf);
+                    return Some(if self.kind == b'$' {
+                        TerminalQuery::RequestSetting(payload)
+                    } else {
+                        TerminalQuery::Termcap(payload)
+                    });
+                }
+                // ESC followed by anything else cancels the string; that ESC
+                // may itself start the next sequence.
+                self.state = if byte == ESC {
+                    DcsState::Escape
+                } else {
+                    DcsState::Ground
+                };
+            }
+            DcsState::Skip => {
+                if byte == ESC {
+                    self.state = DcsState::SkipEscape;
+                }
+            }
+            DcsState::SkipEscape => {
+                self.state = match byte {
+                    b'\\' => DcsState::Ground,
+                    ESC => DcsState::SkipEscape,
+                    _ => DcsState::Skip,
+                };
+            }
+        }
+        None
+    }
+}
+
+/// Terminfo capabilities Embers reports through XTGETTCAP, as the decoded
+/// strings a terminal would send. `Ms` tells programs such as Neovim that
+/// OSC 52 clipboard writes work; `Smulx` and `Setulc` that underline styles
+/// and colors do.
+const TERMCAP_ANSWERS: &[(&str, &str)] = &[
+    ("Ms", "\x1b]52;%p1%s;%p2%s\x07"),
+    ("Smulx", "\x1b[4:%p1%dm"),
+    (
+        "Setulc",
+        "\x1b[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+    ),
+];
+
+fn hex_encode(bytes: &[u8], out: &mut String) {
+    use std::fmt::Write as _;
+    for byte in bytes {
+        let _ = write!(out, "{byte:02X}");
+    }
+}
+
+fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    hex.chunks(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
+}
+
+/// XTGETTCAP reply: one `DCS 1 + r name=value ST` per known name and
+/// `DCS 0 + r name ST` per unknown one, in request order.
+fn termcap_reply(payload: &[u8]) -> String {
+    let mut reply = String::new();
+    for hex_name in payload.split(|&byte| byte == b';') {
+        let decoded = hex_decode(hex_name).unwrap_or_default();
+        let value = TERMCAP_ANSWERS
+            .iter()
+            .find(|(known, _)| known.as_bytes() == decoded.as_slice())
+            .map(|(_, value)| *value);
+        // Echo the name back as hex, normalized to upper case.
+        let mut name = String::new();
+        hex_encode(&decoded, &mut name);
+        match value {
+            Some(value) => {
+                reply.push_str("\x1bP1+r");
+                reply.push_str(&name);
+                reply.push('=');
+                hex_encode(value.as_bytes(), &mut reply);
+            }
+            None => {
+                reply.push_str("\x1bP0+r");
+                reply.push_str(&name);
+            }
+        }
+        reply.push_str("\x1b\\");
+    }
+    reply
+}
+
+/// The SGR parameters (without `CSI` and `m`) that recreate `template`'s pen,
+/// for a DECRQSS reply. Always starts with `0` so the report is absolute.
+fn sgr_report(template: &Cell) -> String {
+    use std::fmt::Write as _;
+    let mut params = String::from("0");
+    let flags = template.flags;
+    for (flag, code) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::UNDERLINE, "4"),
+        (Flags::DOUBLE_UNDERLINE, "4:2"),
+        (Flags::UNDERCURL, "4:3"),
+        (Flags::DOTTED_UNDERLINE, "4:4"),
+        (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
+        if flags.contains(flag) {
+            params.push(';');
+            params.push_str(code);
+        }
+    }
+    for (color, base) in [
+        (Some(template.fg), 38),
+        (Some(template.bg), 48),
+        (template.underline_color(), 58),
+    ] {
+        match color.map(map_color) {
+            None | Some(TermColor::Default) => {}
+            Some(TermColor::Indexed(index)) => {
+                let _ = write!(params, ";{base}:5:{index}");
+            }
+            Some(TermColor::Rgb { r, g, b }) => {
+                let _ = write!(params, ";{base}:2::{r}:{g}:{b}");
+            }
+        }
+    }
+    params
 }
 
 /// Percent-decode a byte slice (`%XX` escapes) as used by `file://` URIs.
@@ -686,6 +938,26 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         }
     }
 
+    fn answer_query(&mut self, query: &TerminalQuery) {
+        let reply = match query {
+            // DECRQSS for SGR. Neovim sets `4:3` and asks this to learn whether
+            // the terminal keeps curly underlines before it uses them (and
+            // underline colors) under a TERM without `Smulx`.
+            TerminalQuery::RequestSetting(setting) if setting == b"m" => {
+                let pen = sgr_report(&self.term.grid().cursor.template);
+                format!("\x1bP1$r{pen}m\x1b\\")
+            }
+            // Any other setting: the "invalid request" reply.
+            TerminalQuery::RequestSetting(_) => "\x1bP0$r\x1b\\".to_owned(),
+            TerminalQuery::Termcap(payload) => termcap_reply(payload),
+        };
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pty_write
+            .extend_from_slice(reply.as_bytes());
+    }
+
     fn take_damage(&mut self) -> BackendDamage {
         let damage = match self.term.damage() {
             TermDamage::Full => BackendDamage::Full,
@@ -872,7 +1144,7 @@ mod tests {
 
     use super::{
         AlacrittyTerminalBackend, BackendDamage, BackendEvents, BackendMetadata,
-        BackendScrollbackSlice, RawByteRouter, TerminalBackend,
+        BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalQuery,
     };
     use crate::config::DEFAULT_MAX_SCROLLBACK_LINES;
     use embers_core::{
@@ -887,6 +1159,8 @@ mod tests {
     #[derive(Default)]
     struct StubBackend {
         ingested: Vec<u8>,
+        /// Each query with how many bytes had been ingested when it was asked.
+        queries: Vec<(usize, TerminalQuery)>,
     }
 
     impl TerminalBackend for StubBackend {
@@ -939,6 +1213,10 @@ mod tests {
                 replies: Vec::new(),
                 clipboard: None,
             }
+        }
+
+        fn answer_query(&mut self, query: &TerminalQuery) {
+            self.queries.push((self.ingested.len(), query.clone()));
         }
 
         fn take_damage(&mut self) -> BackendDamage {
@@ -1477,6 +1755,81 @@ mod tests {
                 text: "yo".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn router_splits_output_after_each_dcs_query() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // A DECRQSS split across chunks, then an XTGETTCAP, then a sixel DCS
+        // (not a query) and trailing text.
+        router.route_output(&mut backend, b"a\x1b[4:3m\x1bP$");
+        router.route_output(&mut backend, b"qm\x1b\\b\x1bP+q4D73;5463\x1b\\");
+        router.route_output(&mut backend, b"\x1bPq#0;2;0;0;0\x1b\\c");
+
+        assert_eq!(
+            backend.queries,
+            vec![
+                (
+                    b"a\x1b[4:3m\x1bP$qm\x1b\\".len(),
+                    TerminalQuery::RequestSetting(b"m".to_vec())
+                ),
+                (
+                    b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\".len(),
+                    TerminalQuery::Termcap(b"4D73;5463".to_vec())
+                ),
+            ]
+        );
+        // Every byte still reaches the backend, in order.
+        assert!(backend.ingested.ends_with(b"\x1b\\c"));
+        assert_eq!(
+            backend.ingested.len(),
+            b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\\x1bPq#0;2;0;0;0\x1b\\c".len()
+        );
+    }
+
+    #[test]
+    fn decrqss_sgr_reports_the_current_pen() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut router = RawByteRouter::default();
+        let _ = backend.take_damage();
+
+        // Neovim's undercurl probe: set a curly underline, then ask for SGR.
+        router.route_output(&mut backend, b"\x1b[0m\x1b[4:3m\x1bP$qm\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(reply, "\x1bP1$r0;4:3m\x1b\\");
+
+        router.route_output(
+            &mut backend,
+            b"\x1b[0;1;38;5;208;58:2::255:0:0m\x1bP$qm\x1b\\\x1b[0m\x1bP$qm\x1b\\",
+        );
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(
+            reply,
+            "\x1bP1$r0;1;38:5:208;58:2::255:0:0m\x1b\\\x1bP1$r0m\x1b\\"
+        );
+
+        // Settings other than SGR get the "invalid request" reply.
+        router.route_output(&mut backend, b"\x1bP$qr\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        assert_eq!(reply, "\x1bP0$r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_advertises_clipboard_and_underline_capabilities() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut router = RawByteRouter::default();
+        let _ = backend.take_damage();
+
+        // "Ms" (as Neovim sends it) and an unknown "TN".
+        router.route_output(&mut backend, b"\x1bP+q4D73;544e\x1b\\");
+        let reply = String::from_utf8(backend.take_events().replies).expect("utf8");
+        let mut expected_ms = String::from("\x1bP1+r4D73=");
+        for byte in b"\x1b]52;%p1%s;%p2%s\x07" {
+            expected_ms.push_str(&format!("{byte:02X}"));
+        }
+        expected_ms.push_str("\x1b\\");
+        assert_eq!(reply, format!("{expected_ms}\x1bP0+r544E\x1b\\"));
     }
 
     #[test]

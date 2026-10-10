@@ -19,6 +19,9 @@ behavior.
 | Activity, bell, and hidden-buffer metadata | `crates/embers-client/tests/e2e.rs` and `crates/embers-server/tests/buffer_lifecycle.rs` | Hidden and detached buffers keep activity, bell, and continuity metadata coherent. |
 | Render invalidation and snapshot freshness | `crates/embers-client/tests/configured_client.rs` and `crates/embers-client/tests/e2e.rs` | Confirms the client renders from refreshed authoritative snapshots, not stale cache. |
 | Full-screen and alternate-screen behavior | `crates/embers-client/tests/e2e.rs` | Verifies enter/exit semantics, hidden fullscreen buffers, and primary-screen restoration. |
+| Underline styles/colors and OSC 8 hyperlinks reach the host | `crates/embers-client/tests/e2e.rs` (`undercurl_and_underline_color_reach_client_ansi_lines`, `osc8_hyperlink_reaches_client_ansi_lines`) and `crates/embers-client/tests/renderer.rs` | A real PTY child's `CSI 4:3 m`, `CSI 58:2::r:g:b m` and OSC 8 come out of the client renderer intact. |
+| OSC 52 from programs in panes | `crates/embers-client/tests/e2e.rs` (`osc52_from_pane_*`) and `crates/embers-server/src/server.rs` (`clipboard_writes_reach_only_clients_showing_the_buffer_session`) | A real PTY child's clipboard write reaches the attached client's terminal output, only clients on the buffer's session get it, and `set_clipboard(false)` drops it. |
+| Terminal capability queries | `crates/embers-server/src/terminal_backend.rs` (`decrqss_*`, `xtgettcap_*`, `router_splits_output_after_each_dcs_query`) | DECRQSS SGR and XTGETTCAP answers that Neovim uses to detect undercurl and OSC 52. |
 | PTY size follows the drawn pane | `crates/embers-client/tests/e2e.rs` and `crates/embers-client/src/pty_sizes.rs` | Attach, split, outer resize and zoom reach the real PTY; resizes are deduplicated and the most recently active client wins. |
 
 ## Real PTY end-to-end workflows

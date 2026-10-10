@@ -125,3 +125,37 @@ This is the equivalent of tmux's `set-clipboard on`, and it is on by default.
   without a reply, so a program in a pane cannot read the clipboard through
   Embers. There is no option to allow it.
 - **Size.** Writes larger than 4 MiB of text are dropped.
+
+A program inside Embers only uses OSC 52 if it believes the terminal supports
+it; see [Terminal capabilities](#terminal-capabilities).
+
+## Terminal capabilities
+
+Programs in panes see `TERM=xterm-256color` and `COLORTERM=truecolor` unless
+the buffer's environment sets them. Embers ships no terminfo entry of its own,
+and `xterm-256color` exists on every system, including remote hosts reached
+over SSH. That entry does not list the extended capabilities Embers supports:
+`Smulx` (underline styles), `Setulc` (underline color) and `Ms` (OSC 52). So
+that programs can still find them, Embers answers the two queries they use to
+ask the terminal directly:
+
+- **DECRQSS for SGR** (`DCS $ q m ST`) reports the current graphic rendition,
+  including `4:n` underline styles and the `58` underline color. Neovim sets a
+  curly underline and asks this; if the answer keeps `4:3` it uses curly
+  underlines and underline colors (diagnostics, spelling) even though the
+  terminfo entry lacks `Smulx`. Without the answer it falls back to plain
+  underlines in the text color. Other settings get the "invalid request"
+  reply.
+- **XTGETTCAP** (`DCS + q <hex names> ST`) answers `Ms`, `Smulx` and
+  `Setulc`, and reports any other name as unknown. Neovim asks for `Ms` and,
+  when the answer is OSC 52 and no other clipboard tool is available (as on a
+  typical remote host), uses OSC 52 for its `+` and `*` registers.
+
+Programs that read capabilities only from terminfo still see plain
+`xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
+that lists the capabilities and that is installed where the program runs.
+
+Embers always renders underline styles, underline colors and OSC 8 hyperlinks
+to the host terminal with the standard sequences (see
+[the render-source contract](render-source-contract.md)), so the host terminal
+must support them; Ghostty, kitty, WezTerm, foot and VTE-based terminals do.

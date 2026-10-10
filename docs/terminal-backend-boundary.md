@@ -23,7 +23,7 @@ For live PTY buffers, that pipeline runs inside the runtime keeper (`KeeperSurfa
 Today it is intentionally minimal:
 
 - input routing is passthrough
-- output routing forwards bytes directly to the backend
+- output routing forwards bytes directly to the backend, with two side scanners: one sniffs OSC 7 working-directory reports, and one picks out the DCS queries alacritty leaves unanswered (DECRQSS and XTGETTCAP). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
 
 That seam exists so future work can add:
 
