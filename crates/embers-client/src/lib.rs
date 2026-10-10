@@ -24,7 +24,7 @@ pub mod transport;
 
 pub use chooser::{Chooser, ChooserItem, ChooserRow, ChooserScope};
 pub use client::MuxClient;
-pub use command_prompt::{CommandContext, CommandPrompt, CommandRunner};
+pub use command_prompt::{CommandContext, CommandPrompt, CommandRunner, StatusKeys, ViMode};
 pub use config::{
     BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError, ConfigManager,
     ConfigManagerError, ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir,

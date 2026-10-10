@@ -11,8 +11,67 @@ use async_trait::async_trait;
 use embers_core::{Result, SessionId};
 use unicode_width::UnicodeWidthStr;
 
+use crate::controller::KeyEvent;
+
 /// Most command lines the prompt remembers.
 pub const PROMPT_HISTORY_LIMIT: usize = 100;
+
+/// The keys prompts are edited with, like tmux's `status-keys`
+/// (`set_status_keys`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusKeys {
+    /// Emacs-style keys only (C-a, C-e, C-w, ...).
+    #[default]
+    Emacs,
+    /// Emacs-style keys while inserting, and a vi normal mode after Esc.
+    Vi,
+}
+
+impl StatusKeys {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "emacs" => Some(Self::Emacs),
+            "vi" => Some(Self::Vi),
+            _ => None,
+        }
+    }
+}
+
+/// The mode of a prompt edited with vi keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViMode {
+    /// Typed text goes into the line.
+    Insert,
+    /// Keys are commands (`h`, `w`, `x`, `dw`, `i`, ...).
+    Normal,
+}
+
+/// Vi editing state of a prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViState {
+    mode: ViMode,
+    /// An operator (`d` or `c`) waiting for its motion.
+    pending: Option<char>,
+}
+
+/// What a character is, for vi word motions: runs of word characters and runs
+/// of other non-blank characters are words, as in vi.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Blank,
+    Word,
+    Punctuation,
+}
+
+fn char_class(ch: char) -> CharClass {
+    if ch.is_whitespace() {
+        CharClass::Blank
+    } else if ch.is_alphanumeric() || ch == '_' {
+        CharClass::Word
+    } else {
+        CharClass::Punctuation
+    }
+}
 
 /// What a command run from the prompt applies to when it names no target.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -51,6 +110,8 @@ pub struct CommandPrompt {
     history_index: Option<usize>,
     /// The input typed before browsing history, restored past the newest entry.
     draft: String,
+    /// Vi editing state, when the prompt uses vi keys.
+    vi: Option<ViState>,
 }
 
 impl CommandPrompt {
@@ -69,7 +130,213 @@ impl CommandPrompt {
             return_mode: return_mode.into(),
             history_index: None,
             draft: String::new(),
+            vi: None,
         }
+    }
+
+    /// Edit with vi keys (`status-keys vi`), starting in insert mode.
+    pub fn with_vi_keys(mut self) -> Self {
+        self.vi = Some(ViState {
+            mode: ViMode::Insert,
+            pending: None,
+        });
+        self
+    }
+
+    /// The vi mode, or `None` for a prompt edited with emacs keys only.
+    pub fn vi_mode(&self) -> Option<ViMode> {
+        self.vi.map(|vi| vi.mode)
+    }
+
+    /// Handle `key` with the vi key table. Returns `false` for keys the
+    /// table leaves to the default prompt keys: every key in insert mode
+    /// except Esc, which switches to normal mode, and in normal mode Enter,
+    /// Esc (which cancels), C-c, C-g and the arrow, Home, End, Backspace and
+    /// Delete keys. Other keys in normal mode are commands, or ignored.
+    pub fn vi_key(&mut self, key: &KeyEvent, history: &VecDeque<String>) -> bool {
+        let Some(vi) = self.vi else {
+            return false;
+        };
+        match (vi.mode, key) {
+            (ViMode::Insert, KeyEvent::Escape) => {
+                self.set_vi(ViMode::Normal);
+                self.left();
+                true
+            }
+            (ViMode::Insert, _) => false,
+            (ViMode::Normal, KeyEvent::Char(ch)) => {
+                match vi.pending {
+                    Some(operator) => self.vi_operator(operator, *ch),
+                    None => self.vi_command(*ch, history),
+                }
+                self.clamp_normal_cursor();
+                true
+            }
+            (
+                ViMode::Normal,
+                KeyEvent::Enter
+                | KeyEvent::Escape
+                | KeyEvent::Ctrl('c' | 'g')
+                | KeyEvent::Left
+                | KeyEvent::Right
+                | KeyEvent::Up
+                | KeyEvent::Down
+                | KeyEvent::Home
+                | KeyEvent::End
+                | KeyEvent::Backspace
+                | KeyEvent::Delete,
+            ) => {
+                self.set_vi(ViMode::Normal);
+                false
+            }
+            (ViMode::Normal, _) => {
+                self.set_vi(ViMode::Normal);
+                true
+            }
+        }
+    }
+
+    fn set_vi(&mut self, mode: ViMode) {
+        self.vi = Some(ViState {
+            mode,
+            pending: None,
+        });
+    }
+
+    fn vi_command(&mut self, ch: char, history: &VecDeque<String>) {
+        match ch {
+            'h' => self.left(),
+            'l' => self.right(),
+            '0' => self.home(),
+            '$' => self.end(),
+            'w' => self.cursor = self.next_word_start(),
+            'b' => self.cursor = self.previous_word_start(),
+            'e' => self.cursor = self.next_word_end(),
+            'x' => self.delete(),
+            'D' => self.kill_to_end(),
+            'C' => {
+                self.kill_to_end();
+                self.set_vi(ViMode::Insert);
+            }
+            'i' => self.set_vi(ViMode::Insert),
+            'a' => {
+                self.right();
+                self.set_vi(ViMode::Insert);
+            }
+            'A' => {
+                self.end();
+                self.set_vi(ViMode::Insert);
+            }
+            'I' => {
+                self.home();
+                self.set_vi(ViMode::Insert);
+            }
+            'k' => self.history_up(history),
+            'j' => self.history_down(history),
+            'd' | 'c' => {
+                self.vi = Some(ViState {
+                    mode: ViMode::Normal,
+                    pending: Some(ch),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply `operator` (`d` or `c`) with the motion `motion`. Only `w` is a
+    /// motion: `dw` deletes to the next word, `cw`, as in vi, changes to the
+    /// end of the word.
+    fn vi_operator(&mut self, operator: char, motion: char) {
+        self.set_vi(ViMode::Normal);
+        if motion != 'w' {
+            return;
+        }
+        let end = if operator == 'c' && !self.char_at(self.cursor).is_none_or(char::is_whitespace) {
+            self.word_end_from(self.cursor) + 1
+        } else {
+            self.next_word_start()
+        };
+        let from = self.byte_index(self.cursor);
+        let to = self.byte_index(end);
+        self.input.replace_range(from..to, "");
+        if operator == 'c' {
+            self.set_vi(ViMode::Insert);
+        }
+    }
+
+    /// Keep the cursor on a character in normal mode, as vi does.
+    fn clamp_normal_cursor(&mut self) {
+        if self.vi_mode() == Some(ViMode::Normal) {
+            self.cursor = self
+                .cursor
+                .min(self.input.chars().count().saturating_sub(1));
+        }
+    }
+
+    fn char_at(&self, index: usize) -> Option<char> {
+        self.input.chars().nth(index)
+    }
+
+    /// `w`: the start of the next word, or the end of the line.
+    fn next_word_start(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut index = self.cursor;
+        if let Some(&ch) = chars.get(index) {
+            let class = char_class(ch);
+            if class != CharClass::Blank {
+                while index < chars.len() && char_class(chars[index]) == class {
+                    index += 1;
+                }
+            }
+        }
+        while index < chars.len() && char_class(chars[index]) == CharClass::Blank {
+            index += 1;
+        }
+        index
+    }
+
+    /// `b`: the start of this word, or of the previous one when already there.
+    fn previous_word_start(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut index = self.cursor.min(chars.len());
+        while index > 0 && char_class(chars[index - 1]) == CharClass::Blank {
+            index -= 1;
+        }
+        if index == 0 {
+            return 0;
+        }
+        let class = char_class(chars[index - 1]);
+        while index > 0 && char_class(chars[index - 1]) == class {
+            index -= 1;
+        }
+        index
+    }
+
+    /// `e`: the end of this word, or of the next one when already there.
+    fn next_word_end(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut index = self.cursor + 1;
+        while index < chars.len() && char_class(chars[index]) == CharClass::Blank {
+            index += 1;
+        }
+        if index >= chars.len() {
+            return chars.len().saturating_sub(1);
+        }
+        self.word_end_from(index)
+    }
+
+    /// The last character of the word that `index` is in.
+    fn word_end_from(&self, index: usize) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let Some(&ch) = chars.get(index) else {
+            return index;
+        };
+        let class = char_class(ch);
+        let mut end = index;
+        while end + 1 < chars.len() && char_class(chars[end + 1]) == class {
+            end += 1;
+        }
+        end
     }
 
     /// The prompt as shown in the status line.
@@ -301,6 +568,133 @@ mod tests {
         prompt.history_down(&history);
         assert_eq!(prompt.input, "sel");
         assert_eq!(prompt.cursor, 3);
+    }
+
+    fn vi_prompt(initial: &str) -> CommandPrompt {
+        CommandPrompt::new(":", initial, None, "normal").with_vi_keys()
+    }
+
+    /// Feed `keys` to the prompt as vi keys, the way the client does: keys
+    /// the vi table does not take get the default editing.
+    fn type_vi(prompt: &mut CommandPrompt, keys: &str, history: &VecDeque<String>) {
+        for ch in keys.chars() {
+            let key = if ch == '\u{1b}' {
+                KeyEvent::Escape
+            } else {
+                KeyEvent::Char(ch)
+            };
+            if !prompt.vi_key(&key, history) {
+                match key {
+                    KeyEvent::Char(ch) => prompt.insert(ch.encode_utf8(&mut [0; 4])),
+                    other => panic!("vi table passed on {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vi_keys_start_in_insert_mode_and_escape_to_normal_mode() {
+        let history = VecDeque::new();
+        let mut prompt = vi_prompt("");
+        assert_eq!(prompt.vi_mode(), Some(ViMode::Insert));
+        type_vi(&mut prompt, "kill-pane", &history);
+        assert_eq!(prompt.input, "kill-pane");
+
+        // Esc goes to normal mode and steps back onto the last character.
+        type_vi(&mut prompt, "\u{1b}", &history);
+        assert_eq!(prompt.vi_mode(), Some(ViMode::Normal));
+        assert_eq!(prompt.cursor, 8);
+        // Normal-mode keys edit rather than insert.
+        type_vi(&mut prompt, "0x", &history);
+        assert_eq!(prompt.input, "ill-pane");
+        type_vi(&mut prompt, "$x", &history);
+        assert_eq!(prompt.input, "ill-pan");
+        assert_eq!(prompt.cursor, 6);
+        // Unbound normal-mode keys do nothing.
+        type_vi(&mut prompt, "z", &history);
+        assert_eq!(prompt.input, "ill-pan");
+
+        // Esc in normal mode is left to the client, which cancels.
+        assert!(!prompt.vi_key(&KeyEvent::Escape, &history));
+        // So are Enter and C-c.
+        assert!(!prompt.vi_key(&KeyEvent::Enter, &history));
+        assert!(!prompt.vi_key(&KeyEvent::Ctrl('c'), &history));
+    }
+
+    #[test]
+    fn vi_insert_commands_place_the_cursor() {
+        let history = VecDeque::new();
+        let mut prompt = vi_prompt("split-window");
+        type_vi(&mut prompt, "\u{1b}0iX\u{1b}", &history);
+        assert_eq!(prompt.input, "Xsplit-window");
+        type_vi(&mut prompt, "aY\u{1b}", &history);
+        assert_eq!(prompt.input, "XYsplit-window");
+        type_vi(&mut prompt, "A -h\u{1b}", &history);
+        assert_eq!(prompt.input, "XYsplit-window -h");
+        type_vi(&mut prompt, "I: \u{1b}", &history);
+        assert_eq!(prompt.input, ": XYsplit-window -h");
+        // h and l move within the line.
+        type_vi(&mut prompt, "lllhx", &history);
+        assert_eq!(prompt.input, ": Xsplit-window -h");
+    }
+
+    #[test]
+    fn vi_word_motions_and_operators() {
+        let history = VecDeque::new();
+        let mut prompt = vi_prompt("new-window --title logs");
+        type_vi(&mut prompt, "\u{1b}0", &history);
+        // `-` is punctuation, so words are "new", "-", "window", "--", ...
+        type_vi(&mut prompt, "w", &history);
+        assert_eq!(prompt.cursor, 3);
+        type_vi(&mut prompt, "ww", &history);
+        assert_eq!(prompt.cursor, 11);
+        type_vi(&mut prompt, "e", &history);
+        assert_eq!(prompt.cursor, 12);
+        type_vi(&mut prompt, "b", &history);
+        assert_eq!(prompt.cursor, 11);
+        type_vi(&mut prompt, "b", &history);
+        assert_eq!(prompt.cursor, 4);
+
+        // dw deletes to the next word; cw changes to the end of the word.
+        type_vi(&mut prompt, "dw", &history);
+        assert_eq!(prompt.input, "new---title logs");
+        type_vi(&mut prompt, "$bcwtail\u{1b}", &history);
+        assert_eq!(prompt.input, "new---title tail");
+        assert_eq!(prompt.vi_mode(), Some(ViMode::Normal));
+
+        // D deletes to the end; C changes to the end.
+        type_vi(&mut prompt, "0wD", &history);
+        assert_eq!(prompt.input, "new");
+        type_vi(&mut prompt, "0Cfoo\u{1b}", &history);
+        assert_eq!(prompt.input, "foo");
+        // An operator followed by an unknown motion is dropped.
+        type_vi(&mut prompt, "dzx", &history);
+        assert_eq!(prompt.input, "fo");
+    }
+
+    #[test]
+    fn vi_j_and_k_browse_history() {
+        let mut history = VecDeque::new();
+        record_history(&mut history, "new-window");
+        record_history(&mut history, "kill-pane");
+        let mut prompt = vi_prompt("sel");
+        type_vi(&mut prompt, "\u{1b}k", &history);
+        assert_eq!(prompt.input, "kill-pane");
+        // The cursor stays on a character in normal mode.
+        assert_eq!(prompt.cursor, 8);
+        type_vi(&mut prompt, "k", &history);
+        assert_eq!(prompt.input, "new-window");
+        type_vi(&mut prompt, "jj", &history);
+        assert_eq!(prompt.input, "sel");
+    }
+
+    #[test]
+    fn emacs_prompts_leave_every_key_to_the_client() {
+        let history = VecDeque::new();
+        let mut prompt = prompt("x");
+        assert_eq!(prompt.vi_mode(), None);
+        assert!(!prompt.vi_key(&KeyEvent::Escape, &history));
+        assert!(!prompt.vi_key(&KeyEvent::Char('h'), &history));
     }
 
     #[test]

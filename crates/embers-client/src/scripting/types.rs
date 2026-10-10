@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use rhai::AST;
 use thiserror::Error;
 
+use crate::command_prompt::StatusKeys;
 use crate::grid::TerminalColor;
 use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
@@ -260,6 +261,8 @@ pub struct LoadedConfig {
     /// Where the client goes when its session is destroyed
     /// (`set_detach_on_destroy`).
     pub detach_on_destroy: DetachOnDestroy,
+    /// The keys prompts are edited with (`set_status_keys`).
+    pub status_keys: StatusKeys,
 }
 
 impl LoadedConfig {
@@ -300,6 +303,7 @@ impl fmt::Debug for LoadedConfig {
             .field("base_index", &self.base_index)
             .field("passthrough", &self.passthrough)
             .field("terminal_features", &self.terminal_features)
+            .field("status_keys", &self.status_keys)
             .finish()
     }
 }

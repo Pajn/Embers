@@ -1046,6 +1046,28 @@ fn set_detach_on_destroy(value: string) -> ();
 /// # rhai-autodocs:index:1
 fn set_leader(notation: string) -> ();
 
+/// Choose the keys the command prompt and the rename prompts are edited
+/// with, like tmux's `status-keys`.
+///
+/// - `"emacs"` (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+///   other keys listed in the command prompt docs.
+/// - `"vi"`: the prompt opens in insert mode, where those keys work too.
+///   Esc switches to normal mode, which has `h` `l` `w` `b` `e` `0` `$`
+///   to move, `x` `dw` `D` to delete, `cw` `C` to change, `i` `a` `I`
+///   `A` to insert again and `k` `j` for older and newer history lines.
+///   Esc in normal mode cancels the prompt; Enter runs it in either mode.
+///
+/// The copy-mode search prompt keeps its own keys.
+///
+/// # Example
+///
+/// ```rhai
+/// set_status_keys("vi");
+/// ```
+///
+/// # rhai-autodocs:index:13
+fn set_status_keys(value: string) -> ();
+
 /// Say what the terminal running the client supports, overriding what
 /// Embers detected when it attached.
 ///

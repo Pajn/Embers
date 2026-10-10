@@ -61,8 +61,19 @@ const BINDINGS: &str = r##"
 fn configured(
     runner: Option<Arc<RecordingRunner>>,
 ) -> (ConfiguredClient<FakeTransport>, tempfile::TempDir) {
+    configured_with(runner, "")
+}
+
+fn configured_with(
+    runner: Option<Arc<RecordingRunner>>,
+    extra: &str,
+) -> (ConfiguredClient<FakeTransport>, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
-    fs::write(tempdir.path().join("config.rhai"), BINDINGS).unwrap();
+    fs::write(
+        tempdir.path().join("config.rhai"),
+        format!("{BINDINGS}\n{extra}"),
+    )
+    .unwrap();
     let config = ConfigManager::load(
         ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
     )
@@ -113,6 +124,35 @@ async fn typed_lines_run_with_the_session_as_context() {
     assert_eq!(calls[0].0, ["resize-pane", "-L", "5"]);
     assert_eq!(calls[0].1.session_id, Some(SESSION_ID));
     assert_eq!(calls[0].1.base_index, Some(1));
+}
+
+#[tokio::test]
+async fn vi_status_keys_edit_in_normal_mode_and_escape_twice_cancels() {
+    let runner = Arc::new(RecordingRunner::default());
+    let (mut configured, _tempdir) =
+        configured_with(Some(runner.clone()), r#"set_status_keys("vi");"#);
+
+    press(&mut configured, &[KeyEvent::Alt(':')]).await;
+    type_text(&mut configured, "kill-window").await;
+    // Esc leaves insert mode: the prompt stays open and keys edit the line.
+    press(&mut configured, &[KeyEvent::Escape]).await;
+    assert_eq!(configured.current_mode(), PROMPT_MODE);
+    type_text(&mut configured, "bcwpane").await;
+    assert_eq!(status(&configured), ":kill-pane");
+    press(&mut configured, &[KeyEvent::Escape]).await;
+    type_text(&mut configured, "0x").await;
+    assert_eq!(status(&configured), ":ill-pane");
+    // A second Esc, in normal mode, cancels.
+    press(&mut configured, &[KeyEvent::Escape]).await;
+    assert_eq!(configured.current_mode(), NORMAL_MODE);
+    assert!(runner.calls().is_empty());
+
+    // Enter runs the line from either mode, and rename prompts use vi keys too.
+    press(&mut configured, &[KeyEvent::Alt(',')]).await;
+    press(&mut configured, &[KeyEvent::Escape]).await;
+    type_text(&mut configured, "0Cbuild").await;
+    press(&mut configured, &[KeyEvent::Enter]).await;
+    assert_eq!(runner.argv(), [["rename-window", "--", "build"]]);
 }
 
 #[tokio::test]

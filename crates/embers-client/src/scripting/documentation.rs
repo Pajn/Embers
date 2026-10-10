@@ -40,6 +40,7 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
             "set_allow_passthrough",
             "set_terminal_features",
             "set_detach_on_destroy",
+            "set_status_keys",
         ],
     },
     PageSpec {

@@ -336,6 +336,22 @@ fn theme_sets_pane_border_colors() {
 }
 
 #[test]
+fn status_keys_choose_the_prompt_key_table() {
+    use embers_client::StatusKeys;
+
+    let keys = |source: &str| {
+        ScriptHarness::load(source).map(|harness| harness.engine().loaded_config().status_keys)
+    };
+    assert_eq!(keys("").unwrap(), StatusKeys::Emacs);
+    assert_eq!(keys(r#"set_status_keys("vi");"#).unwrap(), StatusKeys::Vi);
+    assert_eq!(
+        keys(r#"set_status_keys("emacs");"#).unwrap(),
+        StatusKeys::Emacs
+    );
+    assert!(keys(r#"set_status_keys("vim");"#).is_err());
+}
+
+#[test]
 fn harness_rejects_empty_notation_without_panicking() {
     let mut harness = ScriptHarness::load("").unwrap();
 

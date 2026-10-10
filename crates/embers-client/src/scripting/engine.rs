@@ -19,6 +19,7 @@ use super::error::ScriptError;
 use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
+use crate::command_prompt::StatusKeys;
 use crate::host_terminal::TerminalFeatures;
 use crate::presentation::TabBarPosition;
 
@@ -269,6 +270,7 @@ struct RegistrationState {
     passthrough: Option<PassthroughMode>,
     terminal_features: TerminalFeatures,
     detach_on_destroy: DetachOnDestroy,
+    status_keys: StatusKeys,
 }
 
 impl RegistrationState {
@@ -378,6 +380,7 @@ impl RegistrationState {
             passthrough: self.passthrough.unwrap_or_default(),
             terminal_features: self.terminal_features,
             detach_on_destroy: self.detach_on_destroy,
+            status_keys: self.status_keys,
         })
     }
 }
@@ -1012,6 +1015,41 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .detach_on_destroy = setting;
+        Ok(())
+    }
+
+    /// Choose the keys the command prompt and the rename prompts are edited
+    /// with, like tmux's `status-keys`.
+    ///
+    /// - `"emacs"` (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+    ///   other keys listed in the command prompt docs.
+    /// - `"vi"`: the prompt opens in insert mode, where those keys work too.
+    ///   Esc switches to normal mode, which has `h` `l` `w` `b` `e` `0` `$`
+    ///   to move, `x` `dw` `D` to delete, `cw` `C` to change, `i` `a` `I`
+    ///   `A` to insert again and `k` `j` for older and newer history lines.
+    ///   Esc in normal mode cancels the prompt; Enter runs it in either mode.
+    ///
+    /// The copy-mode search prompt keeps its own keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_status_keys("vi");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:13
+    #[rhai_fn(return_raw, global, name = "set_status_keys")]
+    pub fn set_status_keys(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(keys) = StatusKeys::parse(value) else {
+            return Err(runtime_error(
+                format!("set_status_keys expects \"emacs\" or \"vi\", got {value:?}"),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .status_keys = keys;
         Ok(())
     }
 }

@@ -323,6 +323,50 @@ set_leader("<C-a>");
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_status_keys </h2>
+
+```rust,ignore
+fn set_status_keys(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_status_keys" id="link-set_status_keys-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_status_keys', 'Description')">
+Description
+</button>
+<button group="set_status_keys" id="link-set_status_keys-Example"  class="tablinks"
+    onclick="openTab(event, 'set_status_keys', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_status_keys" id="set_status_keys-Description" class="tabcontent"  style="display: block;" >
+Choose the keys the command prompt and the rename prompts are edited
+with, like tmux's `status-keys`.
+
+- `"emacs"` (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+  other keys listed in the command prompt docs.
+- `"vi"`: the prompt opens in insert mode, where those keys work too.
+  Esc switches to normal mode, which has `h` `l` `w` `b` `e` `0` `$`
+  to move, `x` `dw` `D` to delete, `cw` `C` to change, `i` `a` `I`
+  `A` to insert again and `k` `j` for older and newer history lines.
+  Esc in normal mode cancels the prompt; Enter runs it in either mode.
+
+The copy-mode search prompt keeps its own keys.
+</div>
+<div group="set_status_keys" id="set_status_keys-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_status_keys("vi");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
 
 ```rust,ignore

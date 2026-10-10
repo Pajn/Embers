@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-2fe4a907.js";
+            window.path_to_searchindex_js = "searchindex-bb2f21af.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -453,6 +453,46 @@ Set the leader sequence used in binding notations.
 
 <div group="set_leader" id="set_leader-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_leader("&lt;C-a&gt;");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_status_keys </h2>
+
+<pre><code class="language-rust ignore">fn set_status_keys(value: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_status_keys" id="link-set_status_keys-Description" class="tablinks active" onclick="openTab(event, &#39;set_status_keys&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_status_keys" id="link-set_status_keys-Example" class="tablinks" onclick="openTab(event, &#39;set_status_keys&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_status_keys" id="set_status_keys-Description" class="tabcontent" style="display: block;">
+Choose the keys the command prompt and the rename prompts are edited
+with, like tmux's `status-keys`.
+<ul>
+<li><code>"emacs"</code> (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+other keys listed in the command prompt docs.</li>
+<li><code>"vi"</code>: the prompt opens in insert mode, where those keys work too.
+Esc switches to normal mode, which has <code>h</code> <code>l</code> <code>w</code> <code>b</code> <code>e</code> <code>0</code> <code>$</code>
+to move, <code>x</code> <code>dw</code> <code>D</code> to delete, <code>cw</code> <code>C</code> to change, <code>i</code> <code>a</code> <code>I</code>
+<code>A</code> to insert again and <code>k</code> <code>j</code> for older and newer history lines.
+Esc in normal mode cancels the prompt; Enter runs it in either mode.</li>
+</ul>
+<p>The copy-mode search prompt keeps its own keys.</p>
+</div>
+
+<div group="set_status_keys" id="set_status_keys-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_status_keys("vi");
 </code></pre>
 </div>
 

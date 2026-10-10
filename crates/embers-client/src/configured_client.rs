@@ -20,7 +20,9 @@ use embers_protocol::{
 use crate::RenderGrid;
 use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area};
 use crate::client::MuxClient;
-use crate::command_prompt::{CommandContext, CommandPrompt, CommandRunner, record_history};
+use crate::command_prompt::{
+    CommandContext, CommandPrompt, CommandRunner, StatusKeys, record_history,
+};
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::copy_mode::{
@@ -1270,8 +1272,13 @@ where
                             mode.to_owned()
                         };
                     self.search_prompt = None;
-                    self.command_prompt =
-                        Some(CommandPrompt::new(label, initial, template, return_mode));
+                    let prompt = CommandPrompt::new(label, initial, template, return_mode);
+                    self.command_prompt = Some(
+                        match self.config.active_script().loaded_config().status_keys {
+                            StatusKeys::Vi => prompt.with_vi_keys(),
+                            StatusKeys::Emacs => prompt,
+                        },
+                    );
                     self.input_state.set_mode(PROMPT_MODE);
                     Ok(())
                 }
@@ -3499,6 +3506,9 @@ where
             return Ok(());
         };
         let history = &self.prompt_history;
+        if prompt.vi_key(&key, history) {
+            return Ok(());
+        }
         match key {
             KeyEvent::Enter => return self.commit_command_prompt(session_id).await,
             KeyEvent::Escape | KeyEvent::Ctrl('c') | KeyEvent::Ctrl('g') => {

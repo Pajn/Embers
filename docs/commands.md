@@ -268,6 +268,29 @@ The history holds the last 100 lines run from the plain prompt, for as long as
 the client runs. Lines from template prompts, like the rename prompts, are not
 recorded.
 
+#### vi keys
+
+`set_status_keys("vi")` in the config is tmux's `status-keys vi`. The command
+prompt and the rename and other template prompts then open in insert mode,
+where the keys above work as usual, and Esc switches to normal mode:
+
+| Key | Effect |
+| --- | --- |
+| `h`/`l` | move the cursor |
+| `w`/`b`/`e` | next word, start of the word, end of the word |
+| `0`/`$` | start/end of the line |
+| `x` | delete the character under the cursor |
+| `dw`, `D` | delete to the next word, to the end of the line |
+| `cw`, `C` | change to the end of the word, to the end of the line |
+| `i`/`a`/`I`/`A` | insert before/after the cursor, at the start/end of the line |
+| `k`/`j` | earlier/later lines from the history |
+| Esc, C-c, C-g | cancel |
+| Enter | run the line |
+
+As in vi, a word is a run of letters, digits and underscores, or a run of
+other non-blank characters. Other keys do nothing in normal mode. The copy-mode
+search prompt (`/`, `?`) keeps its own keys.
+
 ### Actions
 
 | Action | tmux |
