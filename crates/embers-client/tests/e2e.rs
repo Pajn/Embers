@@ -1083,6 +1083,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "3.0"),
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1284,6 +1285,8 @@ async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
         vec!["/bin/sh".to_owned(), "-lc".to_owned(), script.to_owned()],
     )
     .await;
+    // The script may finish before the pane is rendered.
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
