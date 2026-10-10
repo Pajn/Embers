@@ -200,6 +200,10 @@ socket in the server's runtime directory.
   (SIGHUP, then SIGKILL) and exit, stops the server and deletes the saved workspace, so a server
   started afterwards begins empty, as after tmux's `kill-server`. The command returns once the
   server no longer accepts connections, and never starts a server.
+- either way, a server that stops on purpose sends every connection
+  `ServerEvent::ServerShutdown` before closing it. An attached client then restores the terminal,
+  prints `[server exited]` and exits successfully, as under tmux; a connection that closes
+  without that event (the server crashed or was killed with SIGKILL) is still an error.
 - a keeper keeps serving captures after its child exits while a server stays attached to it
 - once no server is attached, a keeper whose child has exited has nothing left to reattach to
   and exits; a restarted server keeps the buffer record as `Exited`

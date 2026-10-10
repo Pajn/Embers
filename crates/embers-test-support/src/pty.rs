@@ -225,14 +225,16 @@ impl PtyHarness {
             .map_err(|error| MuxError::pty(error.to_string()))
     }
 
-    pub fn wait(&mut self) -> Result<()> {
-        self.child
+    /// Wait for the child to exit and return how it exited.
+    pub fn wait(&mut self) -> Result<portable_pty::ExitStatus> {
+        let status = self
+            .child
             .wait()
             .map_err(|error| MuxError::pty(error.to_string()))?;
         if let Some(join) = self.reader_join.take() {
             let _ = join.join();
         }
-        Ok(())
+        Ok(status)
     }
 }
 

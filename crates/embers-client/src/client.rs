@@ -376,7 +376,8 @@ where
             ServerEvent::BufferPipeChanged(_)
             | ServerEvent::Clipboard(_)
             | ServerEvent::DisplayMessage(_)
-            | ServerEvent::Passthrough(_) => Ok(()),
+            | ServerEvent::Passthrough(_)
+            | ServerEvent::ServerShutdown => Ok(()),
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_) => Ok(()),

@@ -47,6 +47,9 @@ enum MessageKind : ubyte {
   ClipboardEvent = 51,
   DisplayMessageEvent = 52,
   PassthroughEvent = 53,
+  // Carries no table: the server is stopping on purpose and is about to
+  // close every connection.
+  ServerShutdownEvent = 54,
 }
 
 enum ErrorCodeWire : ubyte {

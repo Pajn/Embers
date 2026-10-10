@@ -33,7 +33,26 @@ pub async fn run(
     target: Option<String>,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    let mut client = MuxClient::connect(&socket_path).await?;
+    let transport = SocketTransport::connect(&socket_path).await?;
+    let server_shutdown = transport.server_shutdown_flag();
+    let result = run_attached(MuxClient::new(transport), socket_path, target, config_path).await;
+    // The terminal is restored by now. Like tmux, a server stopped on purpose
+    // (kill-server) ends the client normally, whatever the connection's close
+    // did to the request in flight; a server that went away without saying so
+    // is still an error.
+    if server_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+        println!("[server exited]");
+        return Ok(());
+    }
+    result
+}
+
+async fn run_attached(
+    mut client: MuxClient<SocketTransport>,
+    socket_path: PathBuf,
+    target: Option<String>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;

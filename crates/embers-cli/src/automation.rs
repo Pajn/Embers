@@ -304,6 +304,7 @@ fn event_value(event: &ServerEvent) -> Value {
             "writes": event.writes.len(),
             "bytes": event.writes.iter().map(|write| write.bytes.len()).sum::<usize>(),
         }),
+        ServerEvent::ServerShutdown => json!({ "type": "server_shutdown" }),
     }
 }
 

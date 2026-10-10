@@ -65,6 +65,10 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 /// so a burst costs one write, and a crash loses at most this much.
 const WORKSPACE_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// How long a connection gets to write the shutdown notice to its client when
+/// the server stops, before it is closed anyway.
+const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How long a restored shell gets to print its prompt before the command it
 /// should run again is typed into it anyway.
 const RESTORED_SHELL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -210,7 +214,11 @@ impl Server {
                             .await;
 
                         let write_runtime = runtime.clone();
-                        let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        let mut write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        // Held until the shutdown notice is flushed, so the
+                        // server does not exit first; released right away
+                        // otherwise.
+                        let flush_task = runtime.connection_tasks.enter();
                         let read_runtime = runtime.clone();
                         let connection_task = runtime.connection_tasks.enter();
                         let read_handle = tokio::spawn(async move {
@@ -238,7 +246,22 @@ impl Server {
                             };
                             let _ = stopped_tx.send(());
 
+                            if exit == ConnectionExit::ServerStopped {
+                                // Dropping the connection's subscriptions drops
+                                // the last senders, so the writer ends once it
+                                // has written what is queued.
+                                write_runtime.cleanup_connection(connection_id).await;
+                                if tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, &mut write_handle)
+                                    .await
+                                    .is_err()
+                                {
+                                    write_handle.abort();
+                                }
+                                return;
+                            }
+                            drop(flush_task);
                             match exit {
+                                ConnectionExit::ServerStopped => {}
                                 ConnectionExit::SelfDetached => match write_handle.await {
                                     Ok(Ok(())) => {}
                                     Ok(Err(error)) => {
@@ -4051,6 +4074,9 @@ fn location_is_root_tab(state: &ServerState, location: &BufferLocation) -> Resul
 enum ConnectionExit {
     Closed,
     SelfDetached,
+    /// The server is stopping; the connection's last event,
+    /// [`ServerEvent::ServerShutdown`], is queued and should be flushed.
+    ServerStopped,
 }
 
 fn closed_session_ids(events: &[ServerEvent]) -> Vec<embers_core::SessionId> {
@@ -4074,7 +4100,11 @@ async fn handle_connection(
     loop {
         let frame = tokio::select! {
             _ = wait_for_shutdown(&mut server_shutdown) => {
-                return Ok(ConnectionExit::Closed);
+                // Tell the client the server is stopping on purpose, so it can
+                // exit cleanly rather than report a lost server. Best effort:
+                // a client too slow to take it sees the connection close.
+                let _ = outbound.try_send(ServerEnvelope::Event(ServerEvent::ServerShutdown));
+                return Ok(ConnectionExit::ServerStopped);
             }
             _ = &mut shutdown => {
                 debug!(connection_id, "client detach requested");

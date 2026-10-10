@@ -1250,6 +1250,10 @@ pub enum ServerEvent {
     Clipboard(ClipboardEvent),
     DisplayMessage(DisplayMessageEvent),
     Passthrough(PassthroughEvent),
+    /// The server is stopping on purpose (`kill-server`, or a signal asking it
+    /// to): every connection is about to close. Sent to every connection, so a
+    /// client can tell this from the server crashing.
+    ServerShutdown,
 }
 
 impl ServerEvent {
@@ -1266,7 +1270,10 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
-            Self::Clipboard(_) | Self::DisplayMessage(_) | Self::Passthrough(_) => None,
+            Self::Clipboard(_)
+            | Self::DisplayMessage(_)
+            | Self::Passthrough(_)
+            | Self::ServerShutdown => None,
         }
     }
 

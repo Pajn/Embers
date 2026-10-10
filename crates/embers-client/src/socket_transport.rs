@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,6 +17,7 @@ use crate::transport::Transport;
 pub struct SocketTransport {
     client: Mutex<ProtocolClient>,
     queued_events: Mutex<VecDeque<ServerEvent>>,
+    server_shutdown: Arc<AtomicBool>,
 }
 
 impl SocketTransport {
@@ -25,9 +28,44 @@ impl SocketTransport {
         Ok(Self {
             client: Mutex::new(client),
             queued_events: Mutex::new(VecDeque::new()),
+            server_shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
+
+    /// Set once the server said it is stopping on purpose
+    /// ([`ServerEvent::ServerShutdown`]), whichever call read that event. A
+    /// connection that closes without it means the server went away
+    /// unexpectedly. Shared, so it can still be read after the transport is
+    /// gone.
+    pub fn server_shutdown_flag(&self) -> Arc<AtomicBool> {
+        self.server_shutdown.clone()
+    }
+
+    fn note_event(&self, event: &ServerEvent) {
+        if matches!(event, ServerEvent::ServerShutdown) {
+            self.server_shutdown.store(true, Ordering::Release);
+        }
+    }
+
+    /// After a write to the server failed, queue the events it had already
+    /// sent, so a [`ServerEvent::ServerShutdown`] that arrived just before the
+    /// connection closed is still seen.
+    async fn read_final_events(&self, client: &mut ProtocolClient) {
+        let mut events = Vec::new();
+        while let Ok(Ok(Some(ServerEnvelope::Event(event)))) =
+            tokio::time::timeout(FINAL_EVENTS_TIMEOUT, client.recv()).await
+        {
+            self.note_event(&event);
+            events.push(event);
+        }
+        self.queued_events.lock().await.extend(events);
+    }
 }
+
+/// How long [`SocketTransport::read_final_events`] waits for each event the
+/// server sent before it closed the connection. They are already buffered,
+/// so this only bounds the wait when nothing is.
+const FINAL_EVENTS_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[async_trait]
 impl Transport for SocketTransport {
@@ -37,11 +75,19 @@ impl Transport for SocketTransport {
 
         let response = {
             let mut client = self.client.lock().await;
-            client.send(&message).await.map_err(protocol_error_to_mux)?;
+            if let Err(error) = client.send(&message).await {
+                // The server may have closed the connection after telling us
+                // why; read what it sent before reporting the failure.
+                self.read_final_events(&mut client).await;
+                return Err(protocol_error_to_mux(error));
+            }
 
             loop {
                 match client.recv().await.map_err(protocol_error_to_mux)? {
-                    Some(ServerEnvelope::Event(event)) => drained_events.push(event),
+                    Some(ServerEnvelope::Event(event)) => {
+                        self.note_event(&event);
+                        drained_events.push(event);
+                    }
                     Some(ServerEnvelope::Response(response)) => {
                         if let Some(response_id) = response.request_id()
                             && response_id != request_id
@@ -70,7 +116,9 @@ impl Transport for SocketTransport {
         }
 
         let mut client = self.client.lock().await;
-        expect_event(client.recv().await.map_err(protocol_error_to_mux)?)
+        let event = expect_event(client.recv().await.map_err(protocol_error_to_mux)?)?;
+        self.note_event(&event);
+        Ok(event)
     }
 
     async fn ready_event(&self) -> Result<Option<ServerEvent>> {
@@ -82,7 +130,11 @@ impl Transport for SocketTransport {
         // `recv` is cancel-safe, so a zero timeout takes only what has already
         // arrived and loses nothing.
         match tokio::time::timeout(Duration::ZERO, client.recv()).await {
-            Ok(envelope) => expect_event(envelope.map_err(protocol_error_to_mux)?).map(Some),
+            Ok(envelope) => {
+                let event = expect_event(envelope.map_err(protocol_error_to_mux)?)?;
+                self.note_event(&event);
+                Ok(Some(event))
+            }
             Err(_) => Ok(None),
         }
     }

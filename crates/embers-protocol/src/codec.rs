@@ -1849,7 +1849,7 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         ServerEvent::Clipboard(event) => {
             validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
         }
-        ServerEvent::DisplayMessage(_) => Ok(()),
+        ServerEvent::DisplayMessage(_) | ServerEvent::ServerShutdown => Ok(()),
         ServerEvent::Passthrough(event) => {
             validate_required_buffer_id(event.buffer_id, "passthrough_event.buffer_id")
         }
@@ -3518,6 +3518,14 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::ServerShutdown => fb::Envelope::create(
+            builder,
+            &fb::EnvelopeArgs {
+                request_id: 0,
+                kind: fb::MessageKind::ServerShutdownEvent,
+                ..Default::default()
+            },
+        ),
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -4971,6 +4979,9 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                     duration_ms: event.duration_ms(),
                 },
             )))
+        }
+        fb::MessageKind::ServerShutdownEvent => {
+            Ok(ServerEnvelope::Event(ServerEvent::ServerShutdown))
         }
         fb::MessageKind::ClientChangedEvent => {
             let event = required(envelope.client_changed_event(), "client_changed_event")?;

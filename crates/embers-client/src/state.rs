@@ -267,7 +267,8 @@ impl ClientState {
             ServerEvent::ClientChanged(_)
             | ServerEvent::Clipboard(_)
             | ServerEvent::DisplayMessage(_)
-            | ServerEvent::Passthrough(_) => {}
+            | ServerEvent::Passthrough(_)
+            | ServerEvent::ServerShutdown => {}
         }
     }
 

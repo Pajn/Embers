@@ -884,6 +884,12 @@ where
     }
 
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        // The server is stopping on purpose and about to close the
+        // connection: nothing is left to ask it, so just leave.
+        if matches!(event, ServerEvent::ServerShutdown) {
+            self.exit_requested = true;
+            return Ok(());
+        }
         self.drain_background_notifications();
         let previous_render_activity = match event {
             ServerEvent::RenderInvalidated(render) => self
@@ -2731,6 +2737,7 @@ where
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Passthrough(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::DisplayMessage(_) => self.active_session_id,
+            ServerEvent::ServerShutdown => None,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -5340,6 +5347,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::Clipboard(_) => "clipboard",
         ServerEvent::DisplayMessage(_) => "display_message",
         ServerEvent::Passthrough(_) => "passthrough",
+        ServerEvent::ServerShutdown => "server_shutdown",
     }
 }
 
@@ -5376,7 +5384,7 @@ fn event_info(
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Passthrough(event) => info.buffer_id = Some(event.buffer_id),
-        ServerEvent::DisplayMessage(_) => {}
+        ServerEvent::DisplayMessage(_) | ServerEvent::ServerShutdown => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;
