@@ -1,3 +1,4 @@
+mod command_prompt;
 mod config_api_docs;
 mod config_loading;
 mod configured_client;

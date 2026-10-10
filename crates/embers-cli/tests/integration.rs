@@ -1,4 +1,5 @@
 mod automation;
+mod command_prompt;
 mod display_message;
 mod environment;
 mod interactive;

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod command_prompt;
 pub mod config;
 pub mod configured_client;
 pub mod controller;
@@ -20,6 +21,7 @@ pub mod testing;
 pub mod transport;
 
 pub use client::MuxClient;
+pub use command_prompt::{CommandContext, CommandPrompt, CommandRunner};
 pub use config::{
     BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError, ConfigManager,
     ConfigManagerError, ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir,
@@ -33,8 +35,9 @@ pub use grid::{
 };
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
-    KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, SEARCH_MODE,
-    SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
+    KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, PROMPT_MODE,
+    SEARCH_MODE, SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence,
+    resolve_key,
 };
 pub use numbering::{
     BASE_INDEX_ENV_VAR, base_index_from_env, parse_base_index, window_number, window_position,

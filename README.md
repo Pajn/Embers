@@ -85,6 +85,10 @@ Windows are numbered from 0 unless a base index is set (`EMBERS_BASE_INDEX=1`,
 `base-index`. Closing a window renumbers the ones after it. See
 [`docs/commands.md`](docs/commands.md).
 
+The same commands can be typed at the client's command prompt, tmux's
+`prefix :`, bound with `action.command_prompt()`. See
+[`docs/commands.md`](docs/commands.md#command-prompt).
+
 Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`, `set-environment`, `show-environment`

@@ -49,6 +49,9 @@ pub async fn run(
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
     configured.set_socket_path(socket_path.clone());
+    configured.set_command_runner(std::sync::Arc::new(crate::PromptCommandRunner::new(
+        socket_path.clone(),
+    )));
     if let Some(session_id) = session_id {
         configured.emit_terminal_title(session_id);
     }
@@ -86,10 +89,15 @@ pub async fn run(
                     .render_session(active_session_id, viewport)
                     .await?;
                 let status = configured.status_line(active_session_id, &socket_path);
-                terminal.render(&grid, terminal_size, Some(&status))?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some(&status),
+                    configured.status_cursor(),
+                )?;
             } else {
                 let grid = RenderGrid::new(viewport.width, viewport.height);
-                terminal.render(&grid, terminal_size, Some("detached"))?;
+                terminal.render(&grid, terminal_size, Some("detached"), None)?;
             }
             dirty = false;
         }
@@ -1060,7 +1068,16 @@ impl TerminalGuard {
         Ok(())
     }
 
-    fn render(&self, grid: &RenderGrid, terminal_size: Size, status: Option<&str>) -> Result<()> {
+    /// Draw `grid` and the status line below it. With `status_cursor` (the
+    /// command prompt is open) the cursor goes to that column of the status
+    /// line instead of the grid's cursor.
+    fn render(
+        &self,
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status: Option<&str>,
+        status_cursor: Option<u16>,
+    ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
         for line in grid.ansi_lines() {
@@ -1073,7 +1090,19 @@ impl TerminalGuard {
         }
 
         write!(stdout, "\x1b[J")?;
-        if let Some(cursor) = grid.cursor() {
+        if let Some(column) = status_cursor
+            && terminal_size.height > grid.height()
+        {
+            write!(
+                stdout,
+                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+                cursor_shape_code(CursorShape::Beam),
+                terminal_size.height,
+                column
+                    .min(terminal_size.width.saturating_sub(1))
+                    .saturating_add(1)
+            )?;
+        } else if let Some(cursor) = grid.cursor() {
             write!(
                 stdout,
                 "\x1b[{} q\x1b[?25h\x1b[{};{}H",

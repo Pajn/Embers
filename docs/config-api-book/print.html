@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-5bc58bf9.js";
+            window.path_to_searchindex_js = "searchindex-32ae8305.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -670,6 +670,101 @@ Description
 
 <div group="close_view" id="close_view-Description" class="tabcontent" style="display: block;">
 Close the currently focused view.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> command_prompt </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt" id="link-command_prompt-Description" class="tablinks active" onclick="openTab(event, &#39;command_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt" id="link-command_prompt-Example" class="tablinks" onclick="openTab(event, &#39;command_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt" id="command_prompt-Description" class="tabcontent" style="display: block;">
+Open the command prompt (tmux `:`). Enter runs the typed line with the
+same commands and options as the `embers` CLI, such as
+`split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+commands without `-t` apply to the current session, window and pane.
+Up and Down browse earlier lines; Esc cancels.
+</div>
+
+<div group="command_prompt" id="command_prompt-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;:", action.command_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> command_prompt_template </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt_template(_: ActionApi, prompt: String, initial: String, template: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt_template" id="link-command_prompt_template-Description" class="tablinks active" onclick="openTab(event, &#39;command_prompt_template&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt_template" id="link-command_prompt_template-Example" class="tablinks" onclick="openTab(event, &#39;command_prompt_template&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt_template" id="command_prompt_template-Description" class="tabcontent" style="display: block;">
+Open a prompt labelled `prompt` with `initial` typed (both may use
+formats); Enter runs `template` with `%%` replaced by the input as one
+word, like tmux `command-prompt -p prompt -I initial template`.
+</div>
+
+<div group="command_prompt_template" id="command_prompt_template-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.command_prompt_template("(new window) ", "", "new-window --title %%")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> command_prompt_with </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt_with(_: ActionApi, initial: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt_with" id="link-command_prompt_with-Description" class="tablinks active" onclick="openTab(event, &#39;command_prompt_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt_with" id="link-command_prompt_with-Example" class="tablinks" onclick="openTab(event, &#39;command_prompt_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt_with" id="command_prompt_with-Description" class="tabcontent" style="display: block;">
+Open the command prompt with `initial` already typed, like tmux
+`command-prompt -I`. The text may use the formats `display_message`
+accepts, such as `#W`.
+</div>
+
+<div group="command_prompt_with" id="command_prompt_with-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.command_prompt_with("split-window -- ")
+</code></pre>
 </div>
 
 </div>
@@ -2311,6 +2406,66 @@ Select the previous tab in a specific tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> rename_session_prompt </h2>
+
+<pre><code class="language-rust ignore">fn rename_session_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="rename_session_prompt" id="link-rename_session_prompt-Description" class="tablinks active" onclick="openTab(event, &#39;rename_session_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="rename_session_prompt" id="link-rename_session_prompt-Example" class="tablinks" onclick="openTab(event, &#39;rename_session_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="rename_session_prompt" id="rename_session_prompt-Description" class="tabcontent" style="display: block;">
+Prompt for a new name for the current session, starting from its
+current name (tmux `prefix $`).
+</div>
+
+<div group="rename_session_prompt" id="rename_session_prompt-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;$", action.rename_session_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> rename_window_prompt </h2>
+
+<pre><code class="language-rust ignore">fn rename_window_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="rename_window_prompt" id="link-rename_window_prompt-Description" class="tablinks active" onclick="openTab(event, &#39;rename_window_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="rename_window_prompt" id="link-rename_window_prompt-Example" class="tablinks" onclick="openTab(event, &#39;rename_window_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="rename_window_prompt" id="rename_window_prompt-Description" class="tabcontent" style="display: block;">
+Prompt for a new name for the current window, starting from its current
+name (tmux `prefix ,`).
+</div>
+
+<div group="rename_window_prompt" id="rename_window_prompt-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;,", action.rename_window_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> replace_current_with </h2>
 
 <pre><code class="language-rust ignore">fn replace_current_with(_: ActionApi, tree: TreeSpec) -&gt; Action</code></pre>
@@ -2466,6 +2621,36 @@ Description
 
 <div group="reveal_buffer" id="reveal_buffer-Description" class="tabcontent" style="display: block;">
 Reveal a specific buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_command </h2>
+
+<pre><code class="language-rust ignore">fn run_command(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_command" id="link-run_command-Description" class="tablinks active" onclick="openTab(event, &#39;run_command&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_command" id="link-run_command-Example" class="tablinks" onclick="openTab(event, &#39;run_command&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_command" id="run_command-Description" class="tabcontent" style="display: block;">
+Run a command line as if it was typed at the command prompt, like
+binding a tmux command. Output and errors are shown in the status line.
+</div>
+
+<div group="run_command" id="run_command-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;E", action.run_command("set-environment -g EDITOR nvim"));
+</code></pre>
 </div>
 
 </div>
@@ -4116,6 +4301,101 @@ Close the currently focused view.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> command_prompt </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt" id="link-command_prompt-Description-1" class="tablinks active" onclick="openTab(event, &#39;command_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt" id="link-command_prompt-Example-1" class="tablinks" onclick="openTab(event, &#39;command_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt" id="command_prompt-Description-1" class="tabcontent" style="display: block;">
+Open the command prompt (tmux `:`). Enter runs the typed line with the
+same commands and options as the `embers` CLI, such as
+`split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+commands without `-t` apply to the current session, window and pane.
+Up and Down browse earlier lines; Esc cancels.
+</div>
+
+<div group="command_prompt" id="command_prompt-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;:", action.command_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> command_prompt_template </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt_template(_: ActionApi, prompt: String, initial: String, template: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt_template" id="link-command_prompt_template-Description-1" class="tablinks active" onclick="openTab(event, &#39;command_prompt_template&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt_template" id="link-command_prompt_template-Example-1" class="tablinks" onclick="openTab(event, &#39;command_prompt_template&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt_template" id="command_prompt_template-Description-1" class="tabcontent" style="display: block;">
+Open a prompt labelled `prompt` with `initial` typed (both may use
+formats); Enter runs `template` with `%%` replaced by the input as one
+word, like tmux `command-prompt -p prompt -I initial template`.
+</div>
+
+<div group="command_prompt_template" id="command_prompt_template-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.command_prompt_template("(new window) ", "", "new-window --title %%")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> command_prompt_with </h2>
+
+<pre><code class="language-rust ignore">fn command_prompt_with(_: ActionApi, initial: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="command_prompt_with" id="link-command_prompt_with-Description-1" class="tablinks active" onclick="openTab(event, &#39;command_prompt_with&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="command_prompt_with" id="link-command_prompt_with-Example-1" class="tablinks" onclick="openTab(event, &#39;command_prompt_with&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="command_prompt_with" id="command_prompt_with-Description-1" class="tabcontent" style="display: block;">
+Open the command prompt with `initial` already typed, like tmux
+`command-prompt -I`. The text may use the formats `display_message`
+accepts, such as `#W`.
+</div>
+
+<div group="command_prompt_with" id="command_prompt_with-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.command_prompt_with("split-window -- ")
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> commit_search </h2>
 
 <pre><code class="language-rust ignore">fn commit_search(_: ActionApi) -&gt; Action</code></pre>
@@ -5748,6 +6028,66 @@ Select the previous tab in a specific tabs node.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> rename_session_prompt </h2>
+
+<pre><code class="language-rust ignore">fn rename_session_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="rename_session_prompt" id="link-rename_session_prompt-Description-1" class="tablinks active" onclick="openTab(event, &#39;rename_session_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="rename_session_prompt" id="link-rename_session_prompt-Example-1" class="tablinks" onclick="openTab(event, &#39;rename_session_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="rename_session_prompt" id="rename_session_prompt-Description-1" class="tabcontent" style="display: block;">
+Prompt for a new name for the current session, starting from its
+current name (tmux `prefix $`).
+</div>
+
+<div group="rename_session_prompt" id="rename_session_prompt-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;$", action.rename_session_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> rename_window_prompt </h2>
+
+<pre><code class="language-rust ignore">fn rename_window_prompt(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="rename_window_prompt" id="link-rename_window_prompt-Description-1" class="tablinks active" onclick="openTab(event, &#39;rename_window_prompt&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="rename_window_prompt" id="link-rename_window_prompt-Example-1" class="tablinks" onclick="openTab(event, &#39;rename_window_prompt&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="rename_window_prompt" id="rename_window_prompt-Description-1" class="tabcontent" style="display: block;">
+Prompt for a new name for the current window, starting from its current
+name (tmux `prefix ,`).
+</div>
+
+<div group="rename_window_prompt" id="rename_window_prompt-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;,", action.rename_window_prompt());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> replace_current_with </h2>
 
 <pre><code class="language-rust ignore">fn replace_current_with(_: ActionApi, tree: TreeSpec) -&gt; Action</code></pre>
@@ -5903,6 +6243,36 @@ Description
 
 <div group="reveal_buffer" id="reveal_buffer-Description-1" class="tabcontent" style="display: block;">
 Reveal a specific buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> run_command </h2>
+
+<pre><code class="language-rust ignore">fn run_command(_: ActionApi, command: String) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="run_command" id="link-run_command-Description-1" class="tablinks active" onclick="openTab(event, &#39;run_command&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="run_command" id="link-run_command-Example-1" class="tablinks" onclick="openTab(event, &#39;run_command&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="run_command" id="run_command-Description-1" class="tabcontent" style="display: block;">
+Run a command line as if it was typed at the command prompt, like
+binding a tmux command. Output and errors are shown in the status line.
+</div>
+
+<div group="run_command" id="run_command-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;E", action.run_command("set-environment -g EDITOR nvim"));
+</code></pre>
 </div>
 
 </div>

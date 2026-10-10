@@ -2,7 +2,8 @@
 
 This page covers the tmux-style commands Embers offers beyond the basics in the
 [README](../README.md): how windows are numbered, session environments,
-`display-message`, and the commands and client actions that go with them.
+`display-message`, the command prompt, and the client actions that go with
+them.
 
 ## Window numbering
 
@@ -142,4 +143,88 @@ focused pane and show the result in this client's status line.
 
 ```rhai
 bind("normal", "<leader>i", action.display_message("#S:#I #{pane_current_path}"));
+```
+
+## Command prompt
+
+The command prompt is tmux's `prefix :`. It opens in the status line, and on
+Enter runs the typed line as an `embers` command:
+
+```text
+:split-window --horizontal
+:new-window --title logs -- tail -f app.log
+:rename-window build
+:resize-pane -L 5
+:select-window -t 2
+:kill-pane
+:set-environment -g EDITOR nvim
+:display-message "#S:#I #{pane_current_path}"
+```
+
+### How commands are run
+
+The prompt accepts exactly the commands, options and arguments of the CLI, so
+there is one command language to learn. The line is split into words like a
+shell would (quotes group words; there are no variables or `;` separators), and
+the words are parsed with the same definitions the `embers` binary uses for its
+command line. The parsed command then runs the same code as `embers <command>`,
+over a short connection of its own to the server the client is attached to.
+
+Two things differ from running the CLI in a shell:
+
+- Without `-t`, a command applies to the client's current session, and through
+  it to that session's current window and focused pane, even when several
+  sessions exist. The CLI would ask for `-t` then.
+- Client commands default to this client: `display-message` shows on it, and
+  `switch-client -t other` and `detach-client` need no client id.
+
+Window numbers follow the client's base index (`set_base_index`). Output, such
+as from `list-windows`, and errors are shown in the status line for a few
+seconds; lines of output are joined with `; `. `attach` and `automation` cannot
+be run from the prompt.
+
+The alternative, mapping prompt commands onto client actions, would have meant
+a second command language whose options drift from the CLI's. Reusing the CLI
+definitions keeps the two in step, and kill and rename commands from the prompt
+behave exactly as from the shell.
+
+### Keys
+
+| Key | Effect |
+| --- | --- |
+| Enter | run the line |
+| Esc, C-c, C-g | cancel |
+| Left/Right, C-b/C-f | move the cursor |
+| Home/End, C-a/C-e | start/end of the line |
+| Backspace, Delete (C-h, C-d) | delete a character |
+| C-u, C-k | delete to the start/end of the line |
+| C-w | delete the previous word |
+| Up/Down, C-p/C-n | earlier/later lines from this client's history |
+
+The history holds the last 100 lines run from the plain prompt, for as long as
+the client runs. Lines from template prompts, like the rename prompts, are not
+recorded.
+
+### Actions
+
+| Action | tmux |
+| --- | --- |
+| `action.command_prompt()` | `command-prompt` |
+| `action.command_prompt_with(initial)` | `command-prompt -I initial` |
+| `action.command_prompt_template(prompt, initial, template)` | `command-prompt -p prompt -I initial template` |
+| `action.rename_window_prompt()` | `prefix ,` |
+| `action.rename_session_prompt()` | `prefix $` |
+| `action.run_command(line)` | binding a command, such as `bind x kill-pane` |
+
+The prompt label and initial text may use formats, so `#W` starts the window
+rename prompt from the current name. In a template, `%%` is replaced by the
+typed text as a single word, quoted as needed, so templates need no quotes of
+their own: `rename-window -- %%`.
+
+```rhai
+bind("normal", "<leader>:", action.command_prompt());
+bind("normal", "<leader>,", action.rename_window_prompt());
+bind("normal", "<leader>$", action.rename_session_prompt());
+bind("normal", "<leader>x", action.run_command("kill-pane"));
+bind("normal", "<leader>N", action.command_prompt_template("(new session) ", "", "new-session %%"));
 ```

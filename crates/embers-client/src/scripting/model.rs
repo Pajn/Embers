@@ -203,6 +203,19 @@ pub enum Action {
     EnterHints {
         action: Option<String>,
     },
+    /// tmux `command-prompt`: open the prompt labelled `prompt` (`:` when
+    /// `None`) with `initial` text, both expanded as formats. On Enter the
+    /// input runs as a command line, or `template` does with `%%` replaced by
+    /// the quoted input.
+    CommandPrompt {
+        prompt: Option<String>,
+        initial: String,
+        template: Option<String>,
+    },
+    /// Run a command line as if typed at the command prompt.
+    RunCommand {
+        command: String,
+    },
     /// tmux `display-message`: expand `message` as a format for the focused
     /// pane and show it in the status line for `duration_ms` (the default
     /// display time when `None`).

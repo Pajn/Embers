@@ -1069,6 +1069,116 @@ mod documented_action_api {
         }
     }
 
+    /// Open the command prompt (tmux `:`). Enter runs the typed line with the
+    /// same commands and options as the `embers` CLI, such as
+    /// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+    /// commands without `-t` apply to the current session, window and pane.
+    /// Up and Down browse earlier lines; Esc cancels.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>:", action.command_prompt());
+    /// ```
+    #[rhai_fn(name = "command_prompt")]
+    pub fn command_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: String::new(),
+            template: None,
+        }
+    }
+
+    /// Open the command prompt with `initial` already typed, like tmux
+    /// `command-prompt -I`. The text may use the formats `display_message`
+    /// accepts, such as `#W`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_with("split-window -- ")
+    /// ```
+    #[rhai_fn(name = "command_prompt_with")]
+    pub fn command_prompt_with(_: &mut ActionApi, initial: &str) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: initial.to_owned(),
+            template: None,
+        }
+    }
+
+    /// Open a prompt labelled `prompt` with `initial` typed (both may use
+    /// formats); Enter runs `template` with `%%` replaced by the input as one
+    /// word, like tmux `command-prompt -p prompt -I initial template`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+    /// ```
+    #[rhai_fn(name = "command_prompt_template")]
+    pub fn command_prompt_template(
+        _: &mut ActionApi,
+        prompt: &str,
+        initial: &str,
+        template: &str,
+    ) -> Action {
+        Action::CommandPrompt {
+            prompt: Some(prompt.to_owned()),
+            initial: initial.to_owned(),
+            template: Some(template.to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current window, starting from its current
+    /// name (tmux `prefix ,`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>,", action.rename_window_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_window_prompt")]
+    pub fn rename_window_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-window) ".to_owned()),
+            initial: "#W".to_owned(),
+            template: Some("rename-window -- %%".to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current session, starting from its
+    /// current name (tmux `prefix $`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>$", action.rename_session_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_session_prompt")]
+    pub fn rename_session_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-session) ".to_owned()),
+            initial: "#S".to_owned(),
+            template: Some("rename-session -- %%".to_owned()),
+        }
+    }
+
+    /// Run a command line as if it was typed at the command prompt, like
+    /// binding a tmux command. Output and errors are shown in the status line.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+    /// ```
+    #[rhai_fn(name = "run_command")]
+    pub fn run_command(_: &mut ActionApi, command: &str) -> Action {
+        Action::RunCommand {
+            command: command.to_owned(),
+        }
+    }
+
     /// Show a message in the status line for a few seconds, like tmux
     /// `display-message`. The text may use the format variables `#S` (session),
     /// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane

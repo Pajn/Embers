@@ -17,8 +17,9 @@ use std::process::{Command as ProcessCommand, Stdio};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
-    ClientState, FormatContext, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
-    drawn_viewport, expand_format, spawn_pty_size, window_number, window_position,
+    ClientState, CommandContext, CommandRunner, FormatContext, NavigationDirection, PanePlacement,
+    PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size, window_number,
+    window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -179,11 +180,15 @@ pub enum Command {
     },
     #[command(name = "list-clients")]
     ListClients,
+    /// Detach a client. From the command prompt the client defaults to the
+    /// one the prompt belongs to.
     #[command(name = "detach-client")]
-    DetachClient { client_id: u64 },
+    DetachClient { client_id: Option<u64> },
+    /// Show session `-t` on a client. From the command prompt the client
+    /// defaults to the one the prompt belongs to.
     #[command(name = "switch-client")]
     SwitchClient {
-        client_id: u64,
+        client_id: Option<u64>,
         #[arg(short = 't', long = "target")]
         target: String,
     },
@@ -602,8 +607,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(format_clients(&clients, &sessions))
         }
         Command::DetachClient { client_id } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             connection
                 .request(ClientMessage::Client(ClientRequest::Detach {
                     request_id: new_request_id(),
@@ -613,8 +617,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(String::new())
         }
         Command::SwitchClient { client_id, target } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             let session = connection.resolve_session_record(Some(&target)).await?;
             match connection
                 .request(ClientMessage::Client(ClientRequest::Switch {
@@ -1309,6 +1312,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             duration,
             message,
         } => {
+            let client = client.or(connection.default_client);
             let template = if message.is_empty() {
                 DEFAULT_DISPLAY_MESSAGE.to_owned()
             } else {
@@ -1859,12 +1863,71 @@ impl Drop for ServerPidFile {
     }
 }
 
+/// Runs command prompt lines (tmux `:`) for the interactive client. The words
+/// are parsed with the CLI's own definitions and executed like CLI commands
+/// over a connection of their own, with the client's session and the client
+/// itself as the default targets.
+pub struct PromptCommandRunner {
+    socket_path: PathBuf,
+}
+
+impl PromptCommandRunner {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for PromptCommandRunner {
+    async fn run(&self, argv: Vec<String>, context: CommandContext) -> Result<String> {
+        let cli = Cli::try_parse_from(std::iter::once("embers".to_owned()).chain(argv))
+            .map_err(|error| MuxError::invalid_input(clap_error_summary(&error)))?;
+        let base_index = cli.base_index.or(context.base_index);
+        let command = cli
+            .command
+            .ok_or_else(|| MuxError::invalid_input("no command given"))?;
+        if let Some(name) = interactive_command_name(&command) {
+            return Err(MuxError::invalid_input(format!(
+                "{name} cannot be run from the command prompt"
+            )));
+        }
+        let mut connection = CliConnection::connect(&self.socket_path).await?;
+        connection.base_index = base_index;
+        connection.default_session = context.session_id;
+        connection.default_client = context.client_id.and_then(NonZeroU64::new);
+        execute_command(&mut connection, command).await
+    }
+}
+
+/// The one-line gist of a clap error, for the status line.
+fn clap_error_summary(error: &clap::Error) -> String {
+    let rendered = error.to_string();
+    let line = rendered.lines().next().unwrap_or_default();
+    line.strip_prefix("error: ").unwrap_or(line).to_owned()
+}
+
+fn interactive_command_name(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Attach { .. } => Some("attach"),
+        Command::Serve => Some("__serve"),
+        Command::RuntimeKeeper { .. } => Some("__runtime-keeper"),
+        Command::Automation { .. } => Some("automation"),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
     /// Window base index (tmux `base-index`); `None` keeps the legacy
     /// numbering described in [`embers_client::numbering`].
     base_index: Option<u32>,
+    /// The session commands without a session target apply to, when set by
+    /// the command prompt; otherwise such commands need the only session.
+    default_session: Option<SessionId>,
+    /// The client that client commands apply to by default, when set by the
+    /// command prompt.
+    default_client: Option<NonZeroU64>,
 }
 
 impl CliConnection {
@@ -1875,7 +1938,19 @@ impl CliConnection {
         Ok(Self {
             client,
             base_index: None,
+            default_session: None,
+            default_client: None,
         })
+    }
+
+    fn client_id_or_default(&self, client_id: Option<u64>) -> Result<NonZeroU64> {
+        match client_id {
+            Some(client_id) => NonZeroU64::new(client_id)
+                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero")),
+            None => self
+                .default_client
+                .ok_or_else(|| MuxError::invalid_input("a client id is required")),
+        }
     }
 
     async fn request(&mut self, message: ClientMessage) -> Result<ServerResponse> {
@@ -2014,6 +2089,15 @@ impl CliConnection {
                 .into_iter()
                 .find(|session| session.name == target)
                 .ok_or_else(|| MuxError::not_found(format!("session '{target}' was not found"))),
+            None if self
+                .default_session
+                .is_some_and(|id| sessions.iter().any(|session| session.id == id)) =>
+            {
+                Ok(sessions
+                    .into_iter()
+                    .find(|session| Some(session.id) == self.default_session)
+                    .expect("checked default session"))
+            }
             None => match sessions.as_slice() {
                 [session] => Ok(session.clone()),
                 [] => Err(MuxError::not_found("no sessions exist")),

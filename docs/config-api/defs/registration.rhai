@@ -137,6 +137,41 @@ fn close_node(_: ActionApi, node_id: int) -> Action;
 /// Close the currently focused view.
 fn close_view(_: ActionApi) -> Action;
 
+/// Open the command prompt (tmux `:`). Enter runs the typed line with the
+/// same commands and options as the `embers` CLI, such as
+/// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+/// commands without `-t` apply to the current session, window and pane.
+/// Up and Down browse earlier lines; Esc cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>:", action.command_prompt());
+/// ```
+fn command_prompt(_: ActionApi) -> Action;
+
+/// Open a prompt labelled `prompt` with `initial` typed (both may use
+/// formats); Enter runs `template` with `%%` replaced by the input as one
+/// word, like tmux `command-prompt -p prompt -I initial template`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+/// ```
+fn command_prompt_template(_: ActionApi, prompt: string, initial: string, template: string) -> Action;
+
+/// Open the command prompt with `initial` already typed, like tmux
+/// `command-prompt -I`. The text may use the formats `display_message`
+/// accepts, such as `#W`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_with("split-window -- ")
+/// ```
+fn command_prompt_with(_: ActionApi, initial: string) -> Action;
+
 /// Finalize the active search, keep the current match and cursor position, and leave search
 /// mode with the committed result in place.
 fn commit_search(_: ActionApi) -> Action;
@@ -433,6 +468,26 @@ fn prev_session(_: ActionApi) -> Action;
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
+/// Prompt for a new name for the current session, starting from its
+/// current name (tmux `prefix $`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>$", action.rename_session_prompt());
+/// ```
+fn rename_session_prompt(_: ActionApi) -> Action;
+
+/// Prompt for a new name for the current window, starting from its current
+/// name (tmux `prefix ,`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>,", action.rename_window_prompt());
+/// ```
+fn rename_window_prompt(_: ActionApi) -> Action;
+
 /// Replace the focused node with a new tree.
 fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action;
 
@@ -469,6 +524,16 @@ fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
 fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
+
+/// Run a command line as if it was typed at the command prompt, like
+/// binding a tmux command. Output and errors are shown in the status line.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+/// ```
+fn run_command(_: ActionApi, command: string) -> Action;
 
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;

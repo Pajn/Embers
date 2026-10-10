@@ -7,6 +7,8 @@ pub const COPY_MODE: &str = "copy";
 pub const SEARCH_MODE: &str = "search";
 pub const SELECT_MODE: &str = "select";
 pub const HINTS_MODE: &str = "hints";
+/// The command prompt (tmux `:`) is open; keys edit its line.
+pub const PROMPT_MODE: &str = "prompt";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FallbackPolicy {
@@ -92,6 +94,10 @@ pub fn builtin_modes() -> BTreeMap<String, ModeSpec> {
         (
             HINTS_MODE.to_owned(),
             ModeSpec::new(HINTS_MODE, FallbackPolicy::Ignore),
+        ),
+        (
+            PROMPT_MODE.to_owned(),
+            ModeSpec::new(PROMPT_MODE, FallbackPolicy::Ignore),
         ),
     ])
 }

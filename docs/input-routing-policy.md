@@ -16,7 +16,8 @@ Today, routing is decided before the protocol request is sent. The server does n
 
 For normal key events, `ConfiguredClient::handle_key` follows this order:
 
-1. If the client is in search mode, search-prompt handling wins.
+1. If the command prompt is open (`prompt` mode), its line editor takes the
+   key; if the client is in search mode, search-prompt handling wins.
 2. Otherwise, the key is resolved against the current mode's bindings.
 3. Exact matches execute configured actions.
 4. Prefix matches stay pending and do not forward bytes yet.
@@ -34,6 +35,8 @@ Built-in fallback policy is:
 - `copy`: ignore
 - `search`: ignore
 - `select`: ignore
+- `hints`: ignore
+- `prompt`: ignore (the command prompt edits its line itself)
 
 Changing modes clears any pending key sequence. Reloading config also clears pending input if the current mode still exists, or resets the client back to `normal` if it no longer does.
 

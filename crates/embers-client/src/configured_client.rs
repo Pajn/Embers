@@ -19,6 +19,7 @@ use embers_protocol::{
 
 use crate::RenderGrid;
 use crate::client::MuxClient;
+use crate::command_prompt::{CommandContext, CommandPrompt, CommandRunner, record_history};
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::copy_mode::{
@@ -27,7 +28,7 @@ use crate::copy_mode::{
 };
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
-    SEARCH_MODE, SELECT_MODE, resolve_key,
+    PROMPT_MODE, SEARCH_MODE, SELECT_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::pty_sizes::PtySizeSync;
@@ -110,6 +111,10 @@ pub struct ConfiguredClient<T> {
     /// when it changes.
     reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
+    command_prompt: Option<CommandPrompt>,
+    /// Command lines run from the prompt, oldest first.
+    prompt_history: VecDeque<String>,
+    command_runner: Option<Arc<dyn CommandRunner>>,
     status_message: Option<StatusMessage>,
     hints_node: Option<NodeId>,
     copy: CopyModeState,
@@ -140,6 +145,9 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             search_prompt: None,
+            command_prompt: None,
+            prompt_history: VecDeque::new(),
+            command_runner: None,
             status_message: None,
             hints_node: None,
             copy: CopyModeState::default(),
@@ -154,6 +162,26 @@ where
     /// drive Embers via `$EMBERS_SOCKET` and the `embers` CLI (tmux `run-shell`).
     pub fn set_socket_path(&mut self, socket_path: PathBuf) {
         self.socket_path = Some(socket_path);
+    }
+
+    /// Install what runs command lines from the command prompt and
+    /// `action.run_command`. Without one, those report that commands are
+    /// unavailable.
+    pub fn set_command_runner(&mut self, runner: Arc<dyn CommandRunner>) {
+        self.command_runner = Some(runner);
+    }
+
+    /// The open command prompt, if any.
+    pub fn command_prompt(&self) -> Option<&CommandPrompt> {
+        self.command_prompt.as_ref()
+    }
+
+    /// Where the terminal cursor belongs in the status line, as a display
+    /// column, while the command prompt is open.
+    pub fn status_cursor(&self) -> Option<u16> {
+        self.command_prompt
+            .as_ref()
+            .map(|prompt| u16::try_from(prompt.cursor_column()).unwrap_or(u16::MAX))
     }
 
     pub fn client(&self) -> &MuxClient<T> {
@@ -269,6 +297,9 @@ where
             .get(&session_id)
             .map(|session| session.name.as_str())
             .unwrap_or("<missing>");
+        if let Some(prompt) = &self.command_prompt {
+            return prompt.display();
+        }
         if let Some(prompt) = &self.search_prompt {
             let prefix = if prompt.backward { '?' } else { '/' };
             return format!("[{session_name}] {prefix}{}", prompt.query);
@@ -300,6 +331,10 @@ where
         // legacy form up front so every downstream path — binding tokenization,
         // hints label matching, and search input — treats both encodings alike.
         let key = normalize_text_key(key);
+
+        if self.input_state.current_mode() == PROMPT_MODE {
+            return self.handle_prompt_key(session_id, key).await;
+        }
 
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
@@ -427,6 +462,12 @@ where
     ) -> Result<()> {
         self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
+        if self.input_state.current_mode() == PROMPT_MODE {
+            if let Some(prompt) = &mut self.command_prompt {
+                prompt.insert(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
         if self.input_state.current_mode() == SEARCH_MODE {
             return self.handle_search_paste(session_id, viewport, bytes).await;
         }
@@ -807,6 +848,7 @@ where
         } else {
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
+            self.command_prompt = None;
             // Also drop any active hints overlay so it can't outlive its mode.
             if let Some(node_id) = self.hints_node.take()
                 && let Some(state) = self.client.state_mut().view_state_mut(node_id)
@@ -1021,21 +1063,38 @@ where
                         .await
                         .map(|_| ()),
                 },
+                Action::CommandPrompt {
+                    prompt,
+                    initial,
+                    template,
+                } => {
+                    let label =
+                        self.expand_format(current_session_id, prompt.as_deref().unwrap_or(":"));
+                    let initial = self.expand_format(current_session_id, &initial);
+                    // Return to copy mode when opened from it; the other
+                    // modes that read keys themselves are left for normal.
+                    let mode = self.input_state.current_mode();
+                    let return_mode =
+                        if mode == SEARCH_MODE || mode == HINTS_MODE || mode == PROMPT_MODE {
+                            NORMAL_MODE.to_owned()
+                        } else {
+                            mode.to_owned()
+                        };
+                    self.search_prompt = None;
+                    self.command_prompt =
+                        Some(CommandPrompt::new(label, initial, template, return_mode));
+                    self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::RunCommand { command } => {
+                    self.run_command_line(current_session_id, &command).await;
+                    Ok(())
+                }
                 Action::DisplayMessage {
                     message,
                     duration_ms,
                 } => {
-                    let text = current_session_id
-                        .and_then(|session_id| {
-                            crate::format::FormatContext::from_state(
-                                self.client.state(),
-                                session_id,
-                                None,
-                                self.base_index(),
-                            )
-                        })
-                        .map(|context| crate::format::expand_format(&message, &context))
-                        .unwrap_or(message);
+                    let text = self.expand_format(current_session_id, &message);
                     self.show_message(&text, display_duration(duration_ms.unwrap_or(0)));
                     Ok(())
                 }
@@ -2898,6 +2957,105 @@ where
             .state_mut()
             .set_view_visible_lines(node_id, scroll_top_line, response.lines);
         Ok(())
+    }
+
+    /// Expand `template` as a format for the focused pane of `session_id`, or
+    /// leave it as is without a session.
+    fn expand_format(&self, session_id: Option<SessionId>, template: &str) -> String {
+        session_id
+            .or(self.active_session_id)
+            .and_then(|session_id| {
+                crate::format::FormatContext::from_state(
+                    self.client.state(),
+                    session_id,
+                    None,
+                    self.base_index(),
+                )
+            })
+            .map(|context| crate::format::expand_format(template, &context))
+            .unwrap_or_else(|| template.to_owned())
+    }
+
+    async fn handle_prompt_key(&mut self, session_id: SessionId, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.command_prompt.as_mut() else {
+            self.input_state.set_mode(NORMAL_MODE);
+            return Ok(());
+        };
+        let history = &self.prompt_history;
+        match key {
+            KeyEvent::Enter => return self.commit_command_prompt(session_id).await,
+            KeyEvent::Escape | KeyEvent::Ctrl('c') | KeyEvent::Ctrl('g') => {
+                let return_mode = prompt.return_mode.clone();
+                self.command_prompt = None;
+                self.input_state.set_mode(return_mode);
+            }
+            KeyEvent::Char(ch) => prompt.insert(ch.encode_utf8(&mut [0; 4])),
+            KeyEvent::Bytes(bytes) => prompt.insert(&String::from_utf8_lossy(&bytes)),
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => prompt.backspace(),
+            KeyEvent::Delete | KeyEvent::Ctrl('d') => prompt.delete(),
+            KeyEvent::Left | KeyEvent::Ctrl('b') => prompt.left(),
+            KeyEvent::Right | KeyEvent::Ctrl('f') => prompt.right(),
+            KeyEvent::Home | KeyEvent::Ctrl('a') => prompt.home(),
+            KeyEvent::End | KeyEvent::Ctrl('e') => prompt.end(),
+            KeyEvent::Ctrl('u') => prompt.kill_to_start(),
+            KeyEvent::Ctrl('k') => prompt.kill_to_end(),
+            KeyEvent::Ctrl('w') => prompt.delete_word(),
+            KeyEvent::Up | KeyEvent::Ctrl('p') => prompt.history_up(history),
+            KeyEvent::Down | KeyEvent::Ctrl('n') => prompt.history_down(history),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn commit_command_prompt(&mut self, session_id: SessionId) -> Result<()> {
+        let Some(prompt) = self.command_prompt.take() else {
+            return Ok(());
+        };
+        self.input_state.set_mode(prompt.return_mode.clone());
+        // Only lines typed as commands are worth recalling; rename prompts
+        // and other templates are not.
+        if prompt.template.is_none() {
+            record_history(&mut self.prompt_history, &prompt.input);
+        }
+        self.run_command_line(Some(session_id), &prompt.command_line())
+            .await;
+        Ok(())
+    }
+
+    /// Run `line` through the command runner and show its output, or its
+    /// error, in the status line.
+    async fn run_command_line(&mut self, session_id: Option<SessionId>, line: &str) {
+        let argv = match shell_words::split(line) {
+            Ok(argv) => argv,
+            Err(error) => {
+                self.show_message(&format!("{error}"), DEFAULT_DISPLAY_TIME);
+                return;
+            }
+        };
+        if argv.is_empty() {
+            return;
+        }
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: session_id.or(self.active_session_id),
+            client_id: self.client.cached_client_id(),
+            base_index: self.base_index(),
+        };
+        match runner.run(argv, context).await {
+            Ok(output) => {
+                let output = output.lines().collect::<Vec<_>>().join("; ");
+                if !output.trim().is_empty() {
+                    self.show_message(&output, DEFAULT_DISPLAY_TIME);
+                }
+            }
+            Err(error) => self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME),
+        }
     }
 
     /// Open the search prompt. The prompt starts empty, as in vim and tmux;
