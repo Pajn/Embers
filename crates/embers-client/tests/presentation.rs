@@ -57,6 +57,57 @@ fn projects_nested_tabs_in_split_and_tracks_focus_path() {
 }
 
 #[test]
+fn tabs_report_the_pane_they_show() {
+    let mut state = demo_state();
+    let shell = state.buffers.get_mut(&BufferId(1)).unwrap();
+    shell.title = "shell title".to_owned();
+    shell.command = vec!["-zsh".to_owned()];
+    shell.cwd = Some("/srv/app".to_owned());
+    let editor = state.buffers.get_mut(&BufferId(4)).unwrap();
+    editor.foreground_command = Some(vec!["nvim".to_owned(), "notes.txt".to_owned()]);
+    let project = |state: &embers_client::ClientState| {
+        PresentationModel::project(
+            state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("projection succeeds")
+    };
+    let pane = |presentation: &PresentationModel, tabs: NodeId, index: usize| {
+        let frame = presentation
+            .tab_bars
+            .iter()
+            .find(|frame| frame.node_id == tabs)
+            .expect("tabs are projected");
+        frame.tabs[index].pane.clone().expect("tab shows a pane")
+    };
+
+    let presentation = project(&state);
+    // A hidden window shows its only pane.
+    let hidden = pane(&presentation, ROOT_TABS_ID, 0);
+    assert_eq!(hidden.title, "shell title");
+    assert_eq!(hidden.process_name.as_deref(), Some("zsh"));
+    assert_eq!(hidden.cwd.as_deref(), Some("/srv/app"));
+    // The window holding the focus shows the focused pane, also through its
+    // nested tabs.
+    let focused = pane(&presentation, ROOT_TABS_ID, 1);
+    assert_eq!(focused.process_name.as_deref(), Some("nvim"));
+    assert_eq!(focused.title, "logs-long-title");
+    assert_eq!(
+        pane(&presentation, NESTED_TABS_ID, 0).title,
+        "build",
+        "a hidden nested tab shows its own pane"
+    );
+
+    state.sessions.get_mut(&SESSION_ID).unwrap().focused_leaf_id = Some(LEFT_LEAF_ID);
+    let presentation = project(&state);
+    assert_eq!(pane(&presentation, ROOT_TABS_ID, 1).title, "editor");
+}
+
+#[test]
 fn projects_split_in_floating_window() {
     let state = demo_state();
     let presentation = PresentationModel::project(

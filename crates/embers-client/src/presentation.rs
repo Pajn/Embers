@@ -25,6 +25,19 @@ pub struct TabItem {
     pub buffer_count: usize,
     /// tmux `synchronize-panes` is on for the window this tab holds.
     pub synchronize_panes: bool,
+    /// The pane the tab shows, as tmux's window formats see its active pane.
+    pub pane: Option<TabPane>,
+}
+
+/// What a tab bar shows of a tab's pane: the focused pane when the tab holds
+/// the focus, otherwise the pane its active nested tabs lead to (the first
+/// pane of a split).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TabPane {
+    pub title: String,
+    /// The program in the pane's foreground, like tmux `pane_current_command`.
+    pub process_name: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,6 +389,7 @@ impl Projector<'_> {
                             &mut self.buffer_count_by_node,
                         ),
                         synchronize_panes: tab.synchronize_panes,
+                        pane: tab_pane(self.state, tab.child_id, self.session.focused_leaf_id),
                     });
                 }
 
@@ -507,6 +521,50 @@ fn subtree_activity_cached(
 
     cache.insert(node_id, activity);
     activity
+}
+
+/// The pane a tab whose content is `child_id` shows; see [`TabPane`].
+fn tab_pane(
+    state: &ClientState,
+    child_id: NodeId,
+    focused_leaf_id: Option<NodeId>,
+) -> Option<TabPane> {
+    let holds_focus = |leaf_id: NodeId| {
+        let mut current = leaf_id;
+        loop {
+            if current == child_id {
+                return true;
+            }
+            match state.nodes.get(&current).and_then(|node| node.parent_id) {
+                Some(parent_id) => current = parent_id,
+                None => return false,
+            }
+        }
+    };
+    let mut leaf_id = match focused_leaf_id {
+        Some(leaf_id) if holds_focus(leaf_id) => leaf_id,
+        _ => child_id,
+    };
+    // Bounded by the node count, so a malformed cycle cannot spin forever.
+    for _ in 0..=state.nodes.len() {
+        let node = state.nodes.get(&leaf_id)?;
+        leaf_id = match node.kind {
+            NodeRecordKind::BufferView => {
+                let buffer = state.buffers.get(&node.buffer_view.as_ref()?.buffer_id)?;
+                return Some(TabPane {
+                    title: buffer.title.clone(),
+                    process_name: buffer.process_name(),
+                    cwd: buffer.cwd.clone(),
+                });
+            }
+            NodeRecordKind::Tabs => {
+                let tabs = node.tabs.as_ref()?;
+                tabs.tabs.get(usize::try_from(tabs.active).ok()?)?.child_id
+            }
+            NodeRecordKind::Split => *node.split.as_ref()?.child_ids.first()?,
+        };
+    }
+    None
 }
 
 pub(crate) fn subtree_buffer_count(state: &ClientState, node_id: NodeId) -> usize {

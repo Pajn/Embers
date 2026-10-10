@@ -870,6 +870,12 @@ fn command(buffer: BufferRef) -> array;
 /// ReturnType: `string | ()`
 fn cwd(buffer: BufferRef) -> ?;
 
+/// Return the working directory of the pane the tab shows (see
+/// `pane_title`), like tmux's `#{pane_current_path}`.
+///
+/// ReturnType: `string | ()`
+fn cwd(tab: TabInfo) -> ?;
+
 /// Look up a single environment hint captured on the buffer.
 ///
 /// ReturnType: `string | ()`
@@ -1006,6 +1012,13 @@ fn node_id(event: EventInfo) -> ?;
 /// ```
 fn number(tab: TabInfo) -> int;
 
+/// Return the title of the pane the tab shows: the focused pane when the
+/// tab holds the focus, otherwise the pane its active nested tabs lead to
+/// (the first pane of a split).
+///
+/// ReturnType: `string | ()`
+fn pane_title(tab: TabInfo) -> ?;
+
 /// Return the parent node id, if any.
 ///
 /// ReturnType: `int | ()`
@@ -1037,6 +1050,18 @@ fn previous_session_id(event: EventInfo) -> ?;
 /// }
 /// ```
 fn process_name(buffer: BufferRef) -> ?;
+
+/// Return the name of the program in the foreground of the pane the tab
+/// shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+///
+/// ReturnType: `string | ()`
+///
+/// # Example
+///
+/// ```rhai
+/// let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
+/// ```
+fn process_name(tab: TabInfo) -> ?;
 
 /// Return the root node id.
 fn root_node(floating: FloatingRef) -> int;

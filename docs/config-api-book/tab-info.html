@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-16e21fbe.js";
+            window.path_to_searchindex_js = "searchindex-83c39519.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -199,6 +199,29 @@ Return how many buffers are attached to the tab.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> cwd </h2>
+
+<pre><code class="language-rust ignore">fn cwd(tab: TabInfo) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="cwd" id="link-cwd-Description" class="tablinks active" onclick="openTab(event, &#39;cwd&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="cwd" id="cwd-Description" class="tabcontent" style="display: block;">
+Return the working directory of the pane the tab shows (see
+`pane_title`), like tmux's `#{pane_current_path}`.
+<p>ReturnType: <code>string | ()</code></p>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> has_activity </h2>
 
 <pre><code class="language-rust ignore">fn has_activity(tab: TabInfo) -&gt; bool</code></pre>
@@ -305,6 +328,61 @@ the numbers match CLI targets such as `select-window -t work:2` and
 
 <div group="number" id="number-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">let label = `${tab.number()}:${tab.title()}`;
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> pane_title </h2>
+
+<pre><code class="language-rust ignore">fn pane_title(tab: TabInfo) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="pane_title" id="link-pane_title-Description" class="tablinks active" onclick="openTab(event, &#39;pane_title&#39;, &#39;Description&#39;)">
+Description
+</button>
+</div>
+
+<div group="pane_title" id="pane_title-Description" class="tabcontent" style="display: block;">
+Return the title of the pane the tab shows: the focused pane when the
+tab holds the focus, otherwise the pane its active nested tabs lead to
+(the first pane of a split).
+<p>ReturnType: <code>string | ()</code></p>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> process_name </h2>
+
+<pre><code class="language-rust ignore">fn process_name(tab: TabInfo) -&gt; ?</code></pre>
+<div>
+<div class="tab">
+<button group="process_name" id="link-process_name-Description" class="tablinks active" onclick="openTab(event, &#39;process_name&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="process_name" id="link-process_name-Example" class="tablinks" onclick="openTab(event, &#39;process_name&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="process_name" id="process_name-Description" class="tabcontent" style="display: block;">
+Return the name of the program in the foreground of the pane the tab
+shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+<p>ReturnType: <code>string | ()</code></p>
+</div>
+
+<div group="process_name" id="process_name-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
 </code></pre>
 </div>
 

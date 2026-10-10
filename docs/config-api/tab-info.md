@@ -25,6 +25,31 @@ Return how many buffers are attached to the tab.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> cwd </h2>
+
+```rust,ignore
+fn cwd(tab: TabInfo) -> ?
+```
+
+<div>
+<div class="tab">
+<button group="cwd" id="link-cwd-Description"  class="tablinks active"
+    onclick="openTab(event, 'cwd', 'Description')">
+Description
+</button>
+</div>
+
+<div group="cwd" id="cwd-Description" class="tabcontent"  style="display: block;" >
+Return the working directory of the pane the tab shows (see
+`pane_title`), like tmux's `#{pane_current_path}`.
+
+ReturnType: `string | ()`
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> has_activity </h2>
 
 ```rust,ignore
@@ -141,6 +166,67 @@ the numbers match CLI targets such as `select-window -t work:2` and
 
 ```rhai
 let label = `${tab.number()}:${tab.title()}`;
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> pane_title </h2>
+
+```rust,ignore
+fn pane_title(tab: TabInfo) -> ?
+```
+
+<div>
+<div class="tab">
+<button group="pane_title" id="link-pane_title-Description"  class="tablinks active"
+    onclick="openTab(event, 'pane_title', 'Description')">
+Description
+</button>
+</div>
+
+<div group="pane_title" id="pane_title-Description" class="tabcontent"  style="display: block;" >
+Return the title of the pane the tab shows: the focused pane when the
+tab holds the focus, otherwise the pane its active nested tabs lead to
+(the first pane of a split).
+
+ReturnType: `string | ()`
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> process_name </h2>
+
+```rust,ignore
+fn process_name(tab: TabInfo) -> ?
+```
+
+<div>
+<div class="tab">
+<button group="process_name" id="link-process_name-Description"  class="tablinks active"
+    onclick="openTab(event, 'process_name', 'Description')">
+Description
+</button>
+<button group="process_name" id="link-process_name-Example"  class="tablinks"
+    onclick="openTab(event, 'process_name', 'Example')">
+Example
+</button>
+</div>
+
+<div group="process_name" id="process_name-Description" class="tabcontent"  style="display: block;" >
+Return the name of the program in the foreground of the pane the tab
+shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+
+ReturnType: `string | ()`
+</div>
+<div group="process_name" id="process_name-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
 ```
 </div>
 

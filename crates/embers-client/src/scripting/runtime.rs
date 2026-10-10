@@ -861,6 +861,40 @@ mod documented_ref_api {
         tab.synchronize_panes
     }
 
+    /// Return the title of the pane the tab shows: the focused pane when the
+    /// tab holds the focus, otherwise the pane its active nested tabs lead to
+    /// (the first pane of a split).
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "pane_title")]
+    pub fn tab_pane_title(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().map(|pane| pane.title.clone()))
+    }
+
+    /// Return the name of the program in the foreground of the pane the tab
+    /// shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+    ///
+    /// ReturnType: `string | ()`
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
+    /// ```
+    #[rhai_fn(name = "process_name")]
+    pub fn tab_process_name(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().and_then(|pane| pane.process_name.clone()))
+    }
+
+    /// Return the working directory of the pane the tab shows (see
+    /// `pane_title`), like tmux's `#{pane_current_path}`.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "cwd")]
+    pub fn tab_cwd(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().and_then(|pane| pane.cwd.clone()))
+    }
+
     /// Return the formatter viewport width in cells.
     #[rhai_fn(name = "viewport_width")]
     pub fn bar_viewport_width(bar: &mut TabBarContext) -> i64 {

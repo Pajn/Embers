@@ -51,7 +51,7 @@ pub use numbering::{
 };
 pub use presentation::{
     DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,
-    TabItem, TabsFrame,
+    TabItem, TabPane, TabsFrame,
 };
 pub use renderer::Renderer;
 pub use scripting::{

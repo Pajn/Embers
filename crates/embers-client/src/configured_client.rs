@@ -2601,6 +2601,7 @@ where
                                             tab.child_id,
                                         ),
                                         synchronize_panes: tab.synchronize_panes,
+                                        pane: None,
                                     })
                                     .collect(),
                                 active: usize::try_from(tabs.active).unwrap_or(0),

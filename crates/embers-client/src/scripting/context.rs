@@ -4,7 +4,7 @@ use embers_core::{ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, Re
 use embers_protocol::{BufferRecordState, NodeRecordKind};
 
 use crate::input::NORMAL_MODE;
-use crate::{ClientState, PresentationModel, TabsFrame};
+use crate::{ClientState, PresentationModel, TabPane, TabsFrame};
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Context {
@@ -475,6 +475,7 @@ impl TabBarContext {
                     has_bell: matches!(tab.activity, ActivityState::Bell),
                     buffer_count: tab.buffer_count,
                     synchronize_panes: tab.synchronize_panes,
+                    pane: tab.pane.clone(),
                 })
                 .collect(),
         }
@@ -503,6 +504,9 @@ pub struct TabInfo {
     pub has_bell: bool,
     pub buffer_count: usize,
     pub synchronize_panes: bool,
+    /// The pane the tab shows, for window labels like tmux's
+    /// `#{pane_current_command}` in `window-status-format`.
+    pub pane: Option<TabPane>,
 }
 
 fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> {
