@@ -441,6 +441,19 @@ fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
         ClientRequest::Switch { session_id, .. } => {
             validate_required_session_id(*session_id, "client_request.session_id")
         }
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => {
+            validate_optional_session_id(*session_id, "client_request.session_id")?;
+            if client_id.is_none() && session_id.is_none() {
+                return Err(ProtocolError::InvalidMessage(
+                    "display message requires a client_id or session_id",
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -941,6 +954,23 @@ fn encode_client_request<'a>(
             client_id.map(|id| id.get()).unwrap_or(0),
             (*session_id).into(),
         ),
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => (
+            fb::ClientOp::DisplayMessage,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            session_id.map_or(0, u64::from),
+        ),
+    };
+    let (message, duration_ms) = match req {
+        ClientRequest::DisplayMessage {
+            message,
+            duration_ms,
+            ..
+        } => (Some(builder.create_string(message)), *duration_ms),
+        _ => (None, 0),
     };
 
     let client_req = fb::ClientRequest::create(
@@ -949,6 +979,8 @@ fn encode_client_request<'a>(
             op,
             client_id,
             session_id,
+            message,
+            duration_ms,
         },
     );
 
@@ -1808,6 +1840,7 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         ServerEvent::Clipboard(event) => {
             validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
         }
+        ServerEvent::DisplayMessage(_) => Ok(()),
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
             validate_optional_session_id(
@@ -3420,6 +3453,25 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::DisplayMessage(e) => {
+            let message = builder.create_string(&e.message);
+            let event = fb::DisplayMessageEvent::create(
+                builder,
+                &fb::DisplayMessageEventArgs {
+                    message: Some(message),
+                    duration_ms: e.duration_ms,
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::DisplayMessageEvent,
+                    display_message_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -3488,6 +3540,11 @@ fn encode_buffer_record<'a>(
     let user_option_values_vec = record.user_options.values().cloned().collect::<Vec<_>>();
     let user_option_keys = create_string_vector(builder, &user_option_keys_vec);
     let user_option_values = create_string_vector(builder, &user_option_values_vec);
+    let foreground_command = record
+        .foreground_command
+        .as_ref()
+        .filter(|command| !command.is_empty())
+        .map(|command| create_string_vector(builder, command));
 
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
@@ -3544,6 +3601,7 @@ fn encode_buffer_record<'a>(
             env_values: Some(env_values),
             user_option_keys: Some(user_option_keys),
             user_option_values: Some(user_option_values),
+            foreground_command,
         },
     )
 }
@@ -4390,6 +4448,21 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         )?,
                     }
                 }
+                fb::ClientOp::DisplayMessage => {
+                    let session_id = (req.session_id() != 0).then(|| SessionId(req.session_id()));
+                    if client_id.is_none() && session_id.is_none() {
+                        return Err(ProtocolError::InvalidMessage(
+                            "display message requires a client_id or session_id",
+                        ));
+                    }
+                    ClientRequest::DisplayMessage {
+                        request_id,
+                        client_id,
+                        session_id,
+                        message: required(req.message(), "client_request.message")?.to_owned(),
+                        duration_ms: req.duration_ms(),
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
             };
             Ok(ClientMessage::Client(request))
@@ -4814,6 +4887,15 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::DisplayMessageEvent => {
+            let event = required(envelope.display_message_event(), "display_message_event")?;
+            Ok(ServerEnvelope::Event(ServerEvent::DisplayMessage(
+                DisplayMessageEvent {
+                    message: required(event.message(), "display_message_event.message")?.to_owned(),
+                    duration_ms: event.duration_ms(),
+                },
+            )))
+        }
         fb::MessageKind::ClientChangedEvent => {
             let event = required(envelope.client_changed_event(), "client_changed_event")?;
             let client = required(event.client(), "client_changed_event.client")?;
@@ -4896,6 +4978,10 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         record.user_option_values(),
         "buffer_record.user_options",
     )?;
+    let foreground_command = record
+        .foreground_command()
+        .map(|command| command.iter().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|command| !command.is_empty());
     let kind = match record.kind() {
         fb::BufferKindWire::Pty => BufferRecordKind::Pty,
         fb::BufferKindWire::Helper => BufferRecordKind::Helper,
@@ -4947,6 +5033,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         },
         env,
         user_options,
+        foreground_command,
     };
     record
         .validate()
@@ -5247,6 +5334,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5286,6 +5374,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5665,6 +5754,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5703,6 +5793,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5742,6 +5833,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -5771,6 +5863,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -5799,6 +5892,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5847,6 +5941,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -5890,6 +5985,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -5929,6 +6025,7 @@ mod tests {
                 exit_code: None,
                 env: Default::default(),
                 user_options: Default::default(),
+                foreground_command: None,
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -5965,6 +6062,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -5991,6 +6089,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6032,6 +6131,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6058,6 +6158,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6157,6 +6258,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))

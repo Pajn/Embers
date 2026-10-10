@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d0750936.js";
+            window.path_to_searchindex_js = "searchindex-5bc58bf9.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -1348,6 +1348,40 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description" class="tabcontent" style="display: block;">
 Detach a buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> display_message </h2>
+
+<pre><code class="language-rust ignore">fn display_message(_: ActionApi, message: String) -&gt; Action
+fn display_message(_: ActionApi, message: String, duration_ms: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="display_message" id="link-display_message-Description" class="tablinks active" onclick="openTab(event, &#39;display_message&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="display_message" id="link-display_message-Example" class="tablinks" onclick="openTab(event, &#39;display_message&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="display_message" id="display_message-Description" class="tabcontent" style="display: block;">
+Show a message in the status line for a few seconds, like tmux
+`display-message`. The text may use the format variables `#S` (session),
+`#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+for the focused pane; `##` is a literal `#`.
+</div>
+
+<div group="display_message" id="display_message-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.display_message("#S:#I #{pane_current_path}")
+</code></pre>
 </div>
 
 </div>
@@ -4751,6 +4785,40 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description-1" class="tabcontent" style="display: block;">
 Detach a buffer by id.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> display_message </h2>
+
+<pre><code class="language-rust ignore">fn display_message(_: ActionApi, message: String) -&gt; Action
+fn display_message(_: ActionApi, message: String, duration_ms: int) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="display_message" id="link-display_message-Description-1" class="tablinks active" onclick="openTab(event, &#39;display_message&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="display_message" id="link-display_message-Example-1" class="tablinks" onclick="openTab(event, &#39;display_message&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="display_message" id="display_message-Description-1" class="tabcontent" style="display: block;">
+Show a message in the status line for a few seconds, like tmux
+`display-message`. The text may use the format variables `#S` (session),
+`#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+for the focused pane; `##` is a literal `#`.
+</div>
+
+<div group="display_message" id="display_message-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.display_message("#S:#I #{pane_current_path}")
+</code></pre>
 </div>
 
 </div>

@@ -856,6 +856,7 @@ mod zoom_tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             );
         }
@@ -948,6 +949,7 @@ mod zoom_tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             );
         }
@@ -1026,6 +1028,7 @@ mod zoom_tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             );
         }
@@ -1151,6 +1154,7 @@ mod zoom_tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             );
         }
@@ -1175,6 +1179,7 @@ mod zoom_tests {
                 pipe: None,
                 env: Default::default(),
                 user_options: Default::default(),
+                foreground_command: None,
             },
         );
         state.floating.insert(
@@ -1283,6 +1288,7 @@ mod zoom_tests {
                 pipe: None,
                 env: Default::default(),
                 user_options: Default::default(),
+                foreground_command: None,
             },
         );
 

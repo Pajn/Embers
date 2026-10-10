@@ -914,6 +914,43 @@ Detach a buffer by id.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> display_message </h2>
+
+```rust,ignore
+fn display_message(_: ActionApi, message: String) -> Action
+fn display_message(_: ActionApi, message: String, duration_ms: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="display_message" id="link-display_message-Description"  class="tablinks active"
+    onclick="openTab(event, 'display_message', 'Description')">
+Description
+</button>
+<button group="display_message" id="link-display_message-Example"  class="tablinks"
+    onclick="openTab(event, 'display_message', 'Example')">
+Example
+</button>
+</div>
+
+<div group="display_message" id="display_message-Description" class="tabcontent"  style="display: block;" >
+Show a message in the status line for a few seconds, like tmux
+`display-message`. The text may use the format variables `#S` (session),
+`#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+for the focused pane; `##` is a literal `#`.
+</div>
+<div group="display_message" id="display_message-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.display_message("#S:#I #{pane_current_path}")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> enter_copy_mode </h2>
 
 ```rust,ignore

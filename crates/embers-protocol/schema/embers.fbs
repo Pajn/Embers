@@ -43,6 +43,7 @@ enum MessageKind : ubyte {
   ClientChangedEvent = 49,
   BufferPipeChangedEvent = 50,
   ClipboardEvent = 51,
+  DisplayMessageEvent = 52,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -138,6 +139,7 @@ enum ClientOp : ubyte {
   Get = 1,
   Detach = 2,
   Switch = 3,
+  DisplayMessage = 4,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -321,6 +323,9 @@ table ClientRequest {
   op:ClientOp = List;
   client_id:ulong = 0;
   session_id:ulong = 0;
+  // DisplayMessage: the text to show and for how long (0 = client default).
+  message:string;
+  duration_ms:uint = 0;
 }
 
 table PingResponse {
@@ -371,6 +376,8 @@ table BufferRecord {
   pipe:BufferPipeRecord (id: 21);
   user_option_keys:[string] (id: 22);
   user_option_values:[string] (id: 23);
+  // The program in the foreground of the buffer's terminal, when known.
+  foreground_command:[string] (id: 24);
 }
 
 table BufferPipeRecord {
@@ -647,6 +654,13 @@ table ClipboardEvent {
   text:string;
 }
 
+// A message for a client to show in its status line (`display-message`),
+// sent only to the clients the request named.
+table DisplayMessageEvent {
+  message:string;
+  duration_ms:uint = 0;
+}
+
 table SessionRenamedEvent {
   session_id:ulong;
   name:string;
@@ -701,6 +715,7 @@ table Envelope {
   buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
   clipboard_event:ClipboardEvent (id: 39);
   environment_response:EnvironmentResponse (id: 40);
+  display_message_event:DisplayMessageEvent (id: 41);
 }
 
 root_type Envelope;

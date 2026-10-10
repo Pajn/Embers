@@ -17,8 +17,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
-    ClientState, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
-    drawn_viewport, spawn_pty_size, window_number, window_position,
+    ClientState, FormatContext, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
+    drawn_viewport, expand_format, spawn_pty_size, window_number, window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -35,6 +35,9 @@ use embers_protocol::{
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 use tracing::warn;
+
+/// What `display-message` shows without a message, like tmux's default.
+const DEFAULT_DISPLAY_MESSAGE: &str = "[#S] #I:#W, current pane #D - (#{pane_current_command})";
 
 /// Environment variable selecting the tracing filter (e.g. `info`, `embers=debug`).
 pub const EMBERS_LOG_ENV_VAR: &str = "EMBERS_LOG";
@@ -312,6 +315,24 @@ pub enum Command {
     KillPopup {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+    },
+    /// Show a message in the status line of the clients showing the target
+    /// pane's session (or of client `-c`) for a few seconds, like tmux. `-p`
+    /// prints it instead. The message may use `#S`, `#I`, `#W`, `#D`, `#T`,
+    /// `#{pane_current_path}` and `#{pane_current_command}`.
+    #[command(name = "display-message", visible_alias = "display")]
+    DisplayMessage {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(short = 'c', long = "client")]
+        client: Option<NonZeroU64>,
+        #[arg(short = 'p', long = "print")]
+        print: bool,
+        /// How long to show the message, in milliseconds.
+        #[arg(short = 'd', long = "duration", value_name = "MS")]
+        duration: Option<u32>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        message: Vec<String>,
     },
     /// Set an environment variable for panes created later in a session, or in
     /// every session with `-g`, like tmux. `-u` unsets it.
@@ -1281,6 +1302,62 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             .await?;
             Ok(popup.id.to_string())
         }
+        Command::DisplayMessage {
+            target,
+            client,
+            print,
+            duration,
+            message,
+        } => {
+            let template = if message.is_empty() {
+                DEFAULT_DISPLAY_MESSAGE.to_owned()
+            } else {
+                message.join(" ")
+            };
+            let pane = match (&target, client) {
+                (None, Some(client_id)) => {
+                    let session_id = connection
+                        .client_record(client_id)
+                        .await?
+                        .current_session_id
+                        .ok_or_else(|| {
+                            MuxError::not_found(format!("client {client_id} shows no session"))
+                        })?;
+                    let snapshot = connection.session_snapshot(session_id).await?;
+                    let pane_id = snapshot
+                        .session
+                        .focused_leaf_id
+                        .ok_or_else(|| MuxError::not_found("session has no focused pane"))?;
+                    resolved_pane(snapshot, pane_id)?
+                }
+                _ => connection.resolve_pane(target.as_deref()).await?,
+            };
+            let session_id = pane.snapshot.session.id;
+            let mut state = ClientState::default();
+            state.apply_session_snapshot(pane.snapshot);
+            let text = FormatContext::from_state(
+                &state,
+                session_id,
+                Some(pane.leaf_id),
+                connection.base_index,
+            )
+            .map(|context| expand_format(&template, &context))
+            .unwrap_or(template);
+            if print {
+                return Ok(text);
+            }
+            let response = connection
+                .request(ClientMessage::Client(ClientRequest::DisplayMessage {
+                    request_id: new_request_id(),
+                    client_id: client,
+                    session_id: client.is_none().then_some(session_id),
+                    message: text,
+                    duration_ms: duration.unwrap_or(0),
+                }))
+                .await?;
+            expect_ok(response, "display-message")?;
+            Ok(String::new())
+        }
         Command::SetEnvironment {
             target,
             global,
@@ -1837,6 +1914,21 @@ impl CliConnection {
             ServerResponse::Clients(response) => Ok(response.clients),
             other => Err(MuxError::protocol(format!(
                 "unexpected response to list-clients: {other:?}"
+            ))),
+        }
+    }
+
+    async fn client_record(&mut self, client_id: NonZeroU64) -> Result<ClientRecord> {
+        match self
+            .request(ClientMessage::Client(ClientRequest::Get {
+                request_id: new_request_id(),
+                client_id: Some(client_id),
+            }))
+            .await?
+        {
+            ServerResponse::Client(response) => Ok(response.client),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to client get: {other:?}"
             ))),
         }
     }
@@ -3032,6 +3124,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -3069,6 +3162,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -3114,6 +3208,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );

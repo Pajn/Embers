@@ -203,6 +203,13 @@ pub enum Action {
     EnterHints {
         action: Option<String>,
     },
+    /// tmux `display-message`: expand `message` as a format for the focused
+    /// pane and show it in the status line for `duration_ms` (the default
+    /// display time when `None`).
+    DisplayMessage {
+        message: String,
+        duration_ms: Option<u32>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

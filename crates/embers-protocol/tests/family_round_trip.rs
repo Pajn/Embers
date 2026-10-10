@@ -123,6 +123,20 @@ fn client_message_families_round_trip() {
             request_id: RequestId(96),
             session_id: None,
         }),
+        ClientMessage::Client(ClientRequest::DisplayMessage {
+            request_id: RequestId(97),
+            client_id: NonZeroU64::new(3),
+            session_id: None,
+            message: "hello".to_owned(),
+            duration_ms: 2000,
+        }),
+        ClientMessage::Client(ClientRequest::DisplayMessage {
+            request_id: RequestId(98),
+            client_id: None,
+            session_id: Some(SessionId(10)),
+            message: String::new(),
+            duration_ms: 0,
+        }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
             session_id: Some(SessionId(10)),
@@ -672,6 +686,14 @@ fn server_envelope_families_round_trip() {
             selection: ClipboardSelection::Primary,
             text: String::new(),
         })),
+        ServerEnvelope::Event(ServerEvent::DisplayMessage(DisplayMessageEvent {
+            message: "[main] 1:editor".to_owned(),
+            duration_ms: 1500,
+        })),
+        ServerEnvelope::Event(ServerEvent::DisplayMessage(DisplayMessageEvent {
+            message: String::new(),
+            duration_ms: 0,
+        })),
     ];
 
     for envelope in envelopes {
@@ -866,5 +888,6 @@ fn sample_buffer_record(
         exit_code,
         env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
         user_options: std::collections::BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]),
+        foreground_command: (!is_helper).then(|| vec!["vim".to_owned(), "notes.txt".to_owned()]),
     }
 }

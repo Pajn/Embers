@@ -3,6 +3,7 @@ pub mod config;
 pub mod configured_client;
 pub mod controller;
 pub mod copy_mode;
+pub mod format;
 pub mod grid;
 pub mod hints;
 pub mod input;
@@ -24,8 +25,9 @@ pub use config::{
     ConfigManagerError, ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir,
     default_config_path, discover_config, load_config_source,
 };
-pub use configured_client::ConfiguredClient;
+pub use configured_client::{ConfiguredClient, DEFAULT_DISPLAY_TIME};
 pub use controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
+pub use format::{FormatContext, expand_format};
 pub use grid::{
     BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor, UnderlineStyle,
 };

@@ -135,6 +135,7 @@ fn add_new_leaf(layout: &mut ClientState, session_id: SessionId) {
             exit_code: None,
             env: Default::default(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
     layout.nodes.insert(

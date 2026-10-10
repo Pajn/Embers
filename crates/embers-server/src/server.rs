@@ -16,13 +16,13 @@ use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
-    EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
-    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
-    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
-    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
-    SubscriptionAckResponse, SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame_no_flush,
+    DisplayMessageEvent, EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest,
+    FloatingResponse, FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse,
+    PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse,
+    ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent,
+    SessionRenamedEvent, SessionRequest, SessionSnapshotResponse, SessionsResponse,
+    SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode, VisibleSnapshotResponse,
+    decode_client_message, encode_server_envelope, read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -933,6 +933,23 @@ impl Runtime {
                         None,
                     ),
                 }
+            }
+            ClientRequest::DisplayMessage {
+                request_id,
+                client_id,
+                session_id,
+                message,
+                duration_ms,
+            } => {
+                let event = ServerEvent::DisplayMessage(DisplayMessageEvent {
+                    message,
+                    duration_ms,
+                });
+                let response = match self.display_message(client_id, session_id, event).await {
+                    Ok(()) => ServerResponse::Ok(OkResponse { request_id }),
+                    Err(error) => mux_error_response(Some(request_id), error),
+                };
+                (response, Vec::new(), None)
             }
             ClientRequest::Switch {
                 request_id,
@@ -3285,8 +3302,50 @@ impl Runtime {
             selection: write.selection,
             text: write.text,
         }));
+        self.send_to_clients(&client_ids, event).await;
+    }
+
+    /// Send a `display-message` event to `client_id`, or to every client whose
+    /// current session is `session_id`. Fails when no such client exists, as
+    /// tmux does without a client to show the message on.
+    async fn display_message(
+        &self,
+        client_id: Option<std::num::NonZeroU64>,
+        session_id: Option<embers_core::SessionId>,
+        event: ServerEvent,
+    ) -> Result<()> {
+        let client_ids: BTreeSet<u64> = {
+            let clients = self.clients.lock().await;
+            match (client_id, session_id) {
+                (Some(client_id), _) => {
+                    if !clients.contains_key(&client_id.get()) {
+                        return Err(MuxError::not_found(format!("unknown client {client_id}")));
+                    }
+                    BTreeSet::from([client_id.get()])
+                }
+                (None, Some(session_id)) => clients
+                    .iter()
+                    .filter(|(_, client)| client.current_session_id == Some(session_id))
+                    .map(|(&client_id, _)| client_id)
+                    .collect(),
+                (None, None) => BTreeSet::new(),
+            }
+        };
+        if client_ids.is_empty() {
+            return Err(MuxError::not_found(
+                "no client is attached to show the message on",
+            ));
+        }
+        self.send_to_clients(&client_ids, ServerEnvelope::Event(event))
+            .await;
+        Ok(())
+    }
+
+    /// Send `event` once to each of `client_ids`, best effort: unlike
+    /// `broadcast`, a client too slow to take it misses it but stays attached.
+    async fn send_to_clients(&self, client_ids: &BTreeSet<u64>, event: ServerEnvelope) {
         // Events reach a client through its subscriptions; send through one per
-        // client so a client with several subscriptions still copies once.
+        // client so a client with several subscriptions gets it once.
         let mut delivered = BTreeSet::new();
         let subscriptions = self.subscriptions.lock().await;
         for subscription in subscriptions.values() {
@@ -3295,13 +3354,11 @@ impl Runtime {
             {
                 continue;
             }
-            // Best effort, unlike `broadcast`: a client too slow to take one
-            // clipboard write misses it but stays attached.
             if let Err(error) = subscription.sender.try_send(event.clone()) {
                 debug!(
                     connection_id = subscription.connection_id,
                     %error,
-                    "dropping clipboard write for client"
+                    "dropping event for slow client"
                 );
             }
         }

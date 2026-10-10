@@ -259,7 +259,9 @@ impl ClientState {
             ServerEvent::RenderInvalidated(event) => {
                 self.invalidated_buffers.insert(event.buffer_id);
             }
-            ServerEvent::ClientChanged(_) | ServerEvent::Clipboard(_) => {}
+            ServerEvent::ClientChanged(_)
+            | ServerEvent::Clipboard(_)
+            | ServerEvent::DisplayMessage(_) => {}
         }
     }
 

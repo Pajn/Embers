@@ -197,6 +197,10 @@ pub async fn run(
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
+            // A display-message whose time is up leaves the status line.
+            if configured.expire_status_message() {
+                dirty = true;
+            }
             continue;
         }
         for event in &events {

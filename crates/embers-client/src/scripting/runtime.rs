@@ -1069,6 +1069,50 @@ mod documented_action_api {
         }
     }
 
+    /// Show a message in the status line for a few seconds, like tmux
+    /// `display-message`. The text may use the format variables `#S` (session),
+    /// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+    /// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+    /// for the focused pane; `##` is a literal `#`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("#S:#I #{pane_current_path}")
+    /// ```
+    #[rhai_fn(name = "display_message")]
+    pub fn display_message(_: &mut ActionApi, message: &str) -> Action {
+        Action::DisplayMessage {
+            message: message.to_owned(),
+            duration_ms: None,
+        }
+    }
+
+    /// Show a message in the status line for `duration_ms` milliseconds, like
+    /// tmux `display-message -d`. See `display_message(message)` for formats.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("saved", 1000)
+    /// ```
+    #[rhai_fn(return_raw, name = "display_message")]
+    pub fn display_message_for(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        message: &str,
+        duration_ms: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::DisplayMessage {
+                message: message.to_owned(),
+                duration_ms: Some(u32::try_from(duration_ms).map_err(|_| {
+                    super::runtime_error("display time must be between 0 and 4294967295 ms")
+                })?),
+            })
+        })
+    }
+
     /// Set an environment variable for panes created later in the current
     /// session (tmux `set-environment`). Pass `()` as the value to unset it.
     /// Panes that already run keep their environment.

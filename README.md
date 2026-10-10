@@ -93,6 +93,7 @@ Useful subcommand groups include:
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
+- `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
 
 ## Logging
 

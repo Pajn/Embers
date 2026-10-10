@@ -35,6 +35,7 @@ fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord
         exit_code: None,
         pipe: None,
         user_options: Default::default(),
+        foreground_command: None,
     }
 }
 

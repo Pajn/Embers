@@ -1,8 +1,8 @@
 # Commands
 
 This page covers the tmux-style commands Embers offers beyond the basics in the
-[README](../README.md): how windows are numbered, session environments, and the
-commands and client actions that go with them.
+[README](../README.md): how windows are numbered, session environments,
+`display-message`, and the commands and client actions that go with them.
 
 ## Window numbering
 
@@ -97,4 +97,49 @@ global environment; a value of `()` unsets it.
 
 ```rhai
 bind("normal", "<leader>P", action.set_environment("AWS_PROFILE", "prod"));
+```
+
+## display-message
+
+`display-message` shows a message in the status line of the clients showing a
+session, for three seconds unless `-d` gives a time in milliseconds. With `-p`
+it prints the message instead.
+
+```sh
+embers display-message "build finished"           # every client on the session
+embers display-message -d 10000 -t 12 "#S: done"   # format for pane 12, 10 s
+embers display-message -c 3 "hello"                # client 3 only (see list-clients)
+embers display-message -p "#{pane_current_path}"   # print, show nothing
+```
+
+The message is expanded for the target pane (`-t`, a pane id), or the focused
+pane of the session or client. Words after the options are joined with
+spaces. Without a message it shows `[#S] #I:#W, current pane #D -
+(#{pane_current_command})`. If no client shows the session, the command fails,
+as it does in tmux.
+
+### Formats
+
+A small part of tmux's format language is supported:
+
+| Short | Long | Value |
+| --- | --- | --- |
+| `#S` | `#{session_name}` | session name |
+| `#I` | `#{window_index}` | window number, counting from the base index |
+| `#W` | `#{window_name}` | window title |
+| `#D` | `#{pane_id}` | pane id, as `list-panes` prints it and `-t` takes it |
+| `#T` | `#{pane_title}` | pane title |
+| | `#{pane_current_path}` | the pane's working directory |
+| | `#{pane_current_command}` | the program in the pane's foreground, or the one it started with when that is unknown |
+| `##` | | a literal `#` |
+
+An unknown `#{name}` expands to nothing. Conditionals, modifiers and styles
+are not supported. A pane in a popup reports the session's active window.
+
+From the Rhai config, `action.display_message(text)` and
+`action.display_message(text, milliseconds)` expand the same formats for the
+focused pane and show the result in this client's status line.
+
+```rhai
+bind("normal", "<leader>i", action.display_message("#S:#I #{pane_current_path}"));
 ```

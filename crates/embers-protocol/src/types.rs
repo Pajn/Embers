@@ -638,6 +638,16 @@ pub enum ClientRequest {
         client_id: Option<NonZeroU64>,
         session_id: SessionId,
     },
+    /// tmux `display-message`: show `message` in the status line of
+    /// `client_id`, or of every client whose current session is `session_id`,
+    /// for `duration_ms` (0 for the client's default).
+    DisplayMessage {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+        session_id: Option<SessionId>,
+        message: String,
+        duration_ms: u32,
+    },
 }
 
 impl ClientRequest {
@@ -646,7 +656,8 @@ impl ClientRequest {
             Self::List { request_id }
             | Self::Get { request_id, .. }
             | Self::Detach { request_id, .. }
-            | Self::Switch { request_id, .. } => *request_id,
+            | Self::Switch { request_id, .. }
+            | Self::DisplayMessage { request_id, .. } => *request_id,
         }
     }
 }
@@ -728,6 +739,9 @@ pub struct BufferRecord {
     pub exit_code: Option<i32>,
     pub env: BTreeMap<String, String>,
     pub user_options: BTreeMap<String, String>,
+    /// The argv of the program in the foreground of the buffer's terminal, as
+    /// last reported by its runtime, when known.
+    pub foreground_command: Option<Vec<String>>,
 }
 
 impl BufferRecord {
@@ -1146,6 +1160,15 @@ pub struct ClipboardEvent {
     pub text: String,
 }
 
+/// A message to show in a client's status line (`display-message`). Sent only
+/// to the clients the request named, not broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMessageEvent {
+    pub message: String,
+    /// How long to show it; 0 for the client's default.
+    pub duration_ms: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRenamedEvent {
     pub session_id: SessionId,
@@ -1172,6 +1195,7 @@ pub enum ServerEvent {
     RenderInvalidated(RenderInvalidatedEvent),
     ClientChanged(ClientChangedEvent),
     Clipboard(ClipboardEvent),
+    DisplayMessage(DisplayMessageEvent),
 }
 
 impl ServerEvent {
@@ -1188,7 +1212,7 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
-            Self::Clipboard(_) => None,
+            Self::Clipboard(_) | Self::DisplayMessage(_) => None,
         }
     }
 

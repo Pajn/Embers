@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -44,6 +44,9 @@ use crate::state::{
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
+/// How long `display-message` text stays in the status line unless the
+/// request gives its own time.
+pub const DEFAULT_DISPLAY_TIME: Duration = Duration::from_secs(3);
 const MAX_EXPANDED_ACTIONS: usize = 256;
 /// Most events `process_ready_events_timeout` handles before the caller gets
 /// to draw, so a flood of output cannot hold off input and frames for long.
@@ -57,6 +60,13 @@ struct SearchPrompt {
     backward: bool,
     /// Mode to return to once the prompt is committed or cancelled.
     return_mode: String,
+}
+
+/// A `display-message` shown in the status line until `until`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusMessage {
+    text: String,
+    until: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +110,7 @@ pub struct ConfiguredClient<T> {
     /// when it changes.
     reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
+    status_message: Option<StatusMessage>,
     hints_node: Option<NodeId>,
     copy: CopyModeState,
     /// The divider being dragged with the mouse, from the press on it until
@@ -129,6 +140,7 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             search_prompt: None,
+            status_message: None,
             hints_node: None,
             copy: CopyModeState::default(),
             divider_drag: None,
@@ -187,6 +199,42 @@ where
         self.previous_session_id
     }
 
+    /// Show `text` in the status line for `duration` (tmux `display-message`).
+    /// Control characters are replaced, so the text cannot reach the host
+    /// terminal as escape sequences.
+    pub fn show_message(&mut self, text: &str, duration: Duration) {
+        let text = text
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect();
+        self.status_message = Some(StatusMessage {
+            text,
+            until: Instant::now() + duration,
+        });
+    }
+
+    /// The `display-message` text in the status line, if it has not expired.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message
+            .as_ref()
+            .filter(|message| message.until > Instant::now())
+            .map(|message| message.text.as_str())
+    }
+
+    /// Drop a `display-message` whose time is up. Returns `true` when one was
+    /// dropped, so the caller redraws the status line.
+    pub fn expire_status_message(&mut self) -> bool {
+        if self
+            .status_message
+            .as_ref()
+            .is_some_and(|message| message.until <= Instant::now())
+        {
+            self.status_message = None;
+            return true;
+        }
+        false
+    }
+
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
         self.terminal_output.drain(..).collect()
     }
@@ -224,6 +272,11 @@ where
         if let Some(prompt) = &self.search_prompt {
             let prefix = if prompt.backward { '?' } else { '/' };
             return format!("[{session_name}] {prefix}{}", prompt.query);
+        }
+        if let Some(message) = &self.status_message
+            && message.until > Instant::now()
+        {
+            return message.text.clone();
         }
         match self.notifications.last() {
             Some(message) => format!("[{session_name}] {message}"),
@@ -622,6 +675,9 @@ where
                 None => self.clear_active_session(),
             }
         }
+        if let ServerEvent::DisplayMessage(message) = event {
+            self.show_message(&message.message, display_duration(message.duration_ms));
+        }
         // A program in a pane set the clipboard (OSC 52): pass it on to the
         // host terminal unless the config turned that off.
         if let ServerEvent::Clipboard(clipboard) = event
@@ -965,6 +1021,24 @@ where
                         .await
                         .map(|_| ()),
                 },
+                Action::DisplayMessage {
+                    message,
+                    duration_ms,
+                } => {
+                    let text = current_session_id
+                        .and_then(|session_id| {
+                            crate::format::FormatContext::from_state(
+                                self.client.state(),
+                                session_id,
+                                None,
+                                self.base_index(),
+                            )
+                        })
+                        .map(|context| crate::format::expand_format(&message, &context))
+                        .unwrap_or(message);
+                    self.show_message(&text, display_duration(duration_ms.unwrap_or(0)));
+                    Ok(())
+                }
                 Action::EnterHints { action } => match (current_session_id, current_viewport) {
                     (Some(session_id), Some(viewport)) => {
                         let presentation = self.prepare_presentation(session_id, viewport).await?;
@@ -2302,6 +2376,7 @@ where
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::DisplayMessage(_) => self.active_session_id,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -4293,6 +4368,15 @@ fn prepend_actions_with_limit(
     Ok(())
 }
 
+/// A `display-message` time in milliseconds, 0 meaning the default.
+fn display_duration(duration_ms: u32) -> Duration {
+    if duration_ms == 0 {
+        DEFAULT_DISPLAY_TIME
+    } else {
+        Duration::from_millis(u64::from(duration_ms))
+    }
+}
+
 fn format_notification(level: NotifyLevel, message: &str) -> String {
     match level {
         NotifyLevel::Info => message.to_owned(),
@@ -4532,6 +4616,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
         ServerEvent::Clipboard(_) => "clipboard",
+        ServerEvent::DisplayMessage(_) => "display_message",
     }
 }
 
@@ -4567,6 +4652,7 @@ fn event_info(
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::DisplayMessage(_) => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;
@@ -4875,6 +4961,7 @@ mod tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location,
                 false,

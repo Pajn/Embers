@@ -288,6 +288,29 @@ fn detach_buffer(_: ActionApi) -> Action;
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Show a message in the status line for a few seconds, like tmux
+/// `display-message`. The text may use the format variables `#S` (session),
+/// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+/// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+/// for the focused pane; `##` is a literal `#`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("#S:#I #{pane_current_path}")
+/// ```
+fn display_message(_: ActionApi, message: string) -> Action;
+
+/// Show a message in the status line for `duration_ms` milliseconds, like
+/// tmux `display-message -d`. See `display_message(message)` for formats.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("saved", 1000)
+/// ```
+fn display_message(_: ActionApi, message: string, duration_ms: int) -> Action;
+
 /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
 /// following output and a cursor appears at the program's cursor; copy-mode
 /// motions move it. Does nothing on the alternate screen.
