@@ -374,13 +374,7 @@ impl BufferRef {
     /// `pane_current_command`: the file name of the first word of
     /// [`Self::current_command`], without the dash a login shell starts with.
     pub fn process_name(&self) -> Option<String> {
-        let program = self.current_command().first()?;
-        let program = program.strip_prefix('-').unwrap_or(program);
-        let name = std::path::Path::new(program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(program);
-        (!name.is_empty()).then(|| name.to_owned())
+        embers_protocol::program_name(self.current_command())
     }
 
     pub fn env_hint(&self, key: &str) -> Option<String> {

@@ -522,19 +522,7 @@ fn pane_label(state: &ClientState, leaf_id: NodeId) -> String {
         .and_then(|view| state.buffers.get(&view.buffer_id));
     match buffer {
         Some(buffer) => {
-            let command = buffer
-                .foreground_command
-                .as_ref()
-                .and_then(|command| command.first())
-                .or_else(|| buffer.command.first())
-                .map(|program| {
-                    std::path::Path::new(program)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(program)
-                        .to_owned()
-                })
-                .unwrap_or_default();
+            let command = buffer.process_name().unwrap_or_default();
             format!("{leaf_id}: {} [{command}]", buffer.title)
         }
         None => leaf_id.to_string(),

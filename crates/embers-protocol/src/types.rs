@@ -755,6 +755,19 @@ pub struct BufferRecord {
 }
 
 impl BufferRecord {
+    /// Command line of what runs in the foreground of the buffer now: the
+    /// job its shell runs, or the buffer's own command when that is in the
+    /// foreground (a shell at its prompt, or a program started directly).
+    pub fn current_command(&self) -> &[String] {
+        self.foreground_command.as_deref().unwrap_or(&self.command)
+    }
+
+    /// Name of the program in the foreground of the buffer, like tmux's
+    /// `pane_current_command`. See [`program_name`].
+    pub fn process_name(&self) -> Option<String> {
+        program_name(self.current_command())
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
         if let Some(pipe) = &self.pipe {
             pipe.validate("buffer_record.pipe")?;
@@ -784,6 +797,19 @@ impl BufferRecord {
         }
         Ok(())
     }
+}
+
+/// Name of the program a command line runs: the file name of its first word,
+/// without the dash a login shell starts with (`-zsh` is `zsh`). `None` for
+/// an empty command.
+pub fn program_name(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let program = program.strip_prefix('-').unwrap_or(program);
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1291,4 +1317,53 @@ impl ServerEvent {
 pub enum ServerEnvelope {
     Response(ServerResponse),
     Event(ServerEvent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(command: &[&str], foreground: Option<&[&str]>) -> BufferRecord {
+        let owned = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
+        BufferRecord {
+            id: BufferId(1),
+            title: "shell".to_owned(),
+            command: owned(command),
+            cwd: None,
+            pipe: None,
+            kind: BufferRecordKind::Pty,
+            state: BufferRecordState::Running,
+            pid: None,
+            attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            exit_code: None,
+            env: BTreeMap::new(),
+            user_options: BTreeMap::new(),
+            foreground_command: foreground.map(owned),
+        }
+    }
+
+    #[test]
+    fn process_name_is_the_foreground_program_without_path_or_login_dash() {
+        assert_eq!(
+            buffer(&["/bin/zsh"], None).process_name().as_deref(),
+            Some("zsh")
+        );
+        assert_eq!(
+            buffer(&["-zsh"], None).process_name().as_deref(),
+            Some("zsh")
+        );
+        assert_eq!(
+            buffer(&["/bin/zsh"], Some(&["/usr/bin/nvim", "notes.txt"]))
+                .process_name()
+                .as_deref(),
+            Some("nvim")
+        );
+        assert_eq!(buffer(&[], None).process_name(), None);
+    }
 }

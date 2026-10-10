@@ -2669,6 +2669,18 @@ fn format_buffer_details(
             serde_json::to_string(&buffer.command).expect("buffer commands serialize to JSON");
         lines.push(format!("command\t{serialized_args}"));
     }
+    // What runs in the foreground now, like tmux's `pane_current_command`,
+    // and the job's whole command line when it is not the buffer's own.
+    if let Some(name) = buffer.process_name() {
+        let serialized_name =
+            serde_json::to_string(&name).expect("program names serialize to JSON");
+        lines.push(format!("current_command\t{serialized_name}"));
+    }
+    if let Some(foreground) = &buffer.foreground_command {
+        let serialized_foreground =
+            serde_json::to_string(foreground).expect("foreground commands serialize to JSON");
+        lines.push(format!("foreground_command\t{serialized_foreground}"));
+    }
     if let Some(cwd) = &buffer.cwd {
         let serialized_cwd =
             serde_json::to_string(cwd).expect("buffer working directories serialize to JSON");
@@ -3534,6 +3546,58 @@ mod tests {
                 "printf '%s\\n' 'hello world'".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn buffer_details_show_the_foreground_command() {
+        let buffer = |foreground_command: Option<Vec<String>>| BufferRecord {
+            id: BufferId(10),
+            title: "shell".to_owned(),
+            command: vec!["/bin/zsh".to_owned()],
+            cwd: None,
+            kind: BufferRecordKind::Pty,
+            pid: None,
+            env: Default::default(),
+            state: BufferRecordState::Running,
+            attachment_node_id: Some(NodeId(6)),
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            exit_code: None,
+            pipe: None,
+            user_options: Default::default(),
+            foreground_command,
+        };
+        let location = BufferLocation::session(BufferId(10), SessionId(1), NodeId(6));
+        let row = |details: &str, name: &str| {
+            details
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}\t")))
+                .map(str::to_owned)
+        };
+
+        // The shell runs Neovim as its foreground job.
+        let details = format_buffer_details(
+            &buffer(Some(vec!["nvim".to_owned(), "notes.txt".to_owned()])),
+            &location,
+        );
+        assert_eq!(
+            row(&details, "current_command").as_deref(),
+            Some("\"nvim\"")
+        );
+        let foreground: Vec<String> = serde_json::from_str(
+            &row(&details, "foreground_command").expect("foreground_command row present"),
+        )
+        .expect("foreground_command row uses JSON");
+        assert_eq!(foreground, ["nvim", "notes.txt"]);
+
+        // The shell itself is in the foreground.
+        let details = format_buffer_details(&buffer(None), &location);
+        assert_eq!(row(&details, "current_command").as_deref(), Some("\"zsh\""));
+        assert_eq!(row(&details, "foreground_command"), None);
     }
 
     #[test]

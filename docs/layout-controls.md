@@ -124,7 +124,9 @@ once Neovim is started from a shell, and the pane's own command (`zsh`) while
 the shell is at its prompt. `buffer.foreground_command()` gives the whole
 command line, and `buffer.command()` the command the pane was started with.
 The runtime keeper reads the foreground job from the PTY's foreground process
-group, and the client sees a change within about 50 ms.
+group, and the client sees a change within about 50 ms. `embers buffer show
+<id>` prints the same as its `current_command` row, and the job's command line
+as `foreground_command` while a job runs.
 
 Detection cannot see through every layer: Neovim run over `ssh`, or inside a
 nested multiplexer, shows up as `ssh` or `tmux`. For those, Neovim can mark its

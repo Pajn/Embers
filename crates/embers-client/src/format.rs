@@ -6,8 +6,6 @@
 //! `##` is a literal `#`. An unknown `#{name}` expands to nothing, like tmux;
 //! any other `#` is kept as is. There are no conditionals or modifiers.
 
-use std::path::Path;
-
 use embers_core::{NodeId, SessionId};
 use embers_protocol::NodeRecordKind;
 
@@ -70,14 +68,7 @@ impl FormatContext {
             };
 
         let pane_current_command = buffer
-            .and_then(|buffer| {
-                buffer
-                    .foreground_command
-                    .as_ref()
-                    .and_then(|command| command.first())
-                    .or_else(|| buffer.command.first())
-            })
-            .map(|program| program_name(program))
+            .and_then(|buffer| buffer.process_name())
             .unwrap_or_default();
 
         Some(Self {
@@ -181,14 +172,6 @@ fn root_tab_position(state: &ClientState, root_id: NodeId, node_id: NodeId) -> O
     }
 }
 
-fn program_name(program: &str) -> String {
-    Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(program)
-        .to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,11 +209,5 @@ mod tests {
         assert_eq!(expand_format("a#{nope}b", &context()), "ab");
         assert_eq!(expand_format("a#{open", &context()), "a#{open");
         assert_eq!(expand_format("", &context()), "");
-    }
-
-    #[test]
-    fn program_name_strips_directories() {
-        assert_eq!(program_name("/usr/bin/nvim"), "nvim");
-        assert_eq!(program_name("zsh"), "zsh");
     }
 }
