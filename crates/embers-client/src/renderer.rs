@@ -4,7 +4,9 @@ use embers_core::{ActivityState, CursorShape, Point, Rect, Size, SnapshotLine};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle};
+use crate::grid::{
+    BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle, replace_controls,
+};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
 use crate::scripting::{BarSegment, BarSpec, PaneBorderColors};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
@@ -145,6 +147,21 @@ impl Renderer {
         grid.put_str(x, y, &" ".repeat(usize::from(tabs.rect.size.width)));
 
         if let Some(bar) = custom {
+            // Formatters build segments from titles programs set.
+            let sanitize = |segments: &[BarSegment]| -> Vec<BarSegment> {
+                segments
+                    .iter()
+                    .map(|segment| BarSegment {
+                        text: replace_controls(&segment.text).into_owned(),
+                        ..segment.clone()
+                    })
+                    .collect()
+            };
+            let bar = BarSpec {
+                left: sanitize(&bar.left),
+                center: sanitize(&bar.center),
+                right: sanitize(&bar.right),
+            };
             let width = tabs.rect.size.width;
             let left_width = bar
                 .left
@@ -684,10 +701,13 @@ fn render_bar_segments(
     }
 }
 
+/// Fit `text` in `width` columns, ending it with `~` when it is cut. Control
+/// characters become spaces, since titles come from programs in panes.
 fn truncate(text: &str, width: u16) -> String {
     if width == 0 {
         return String::new();
     }
+    let text = &*replace_controls(text);
 
     let width = usize::from(width);
     if UnicodeWidthStr::width(text) <= width {

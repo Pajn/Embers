@@ -168,6 +168,65 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
 }
 
 #[test]
+fn titles_from_programs_cannot_reach_the_host_as_escape_sequences() {
+    use embers_client::{BarSegment, BarSpec, StyleSpec};
+    use std::collections::BTreeMap;
+
+    // Programs set pane titles with OSC 2, so a title can carry sequences of
+    // its own; so can window titles and what tab bar formatters build.
+    let evil = "evil\x1b]2;pwned\x07\x1b[2J";
+    let mut state = demo_state();
+    for buffer in state.buffers.values_mut() {
+        buffer.title = evil.to_owned();
+    }
+    for tab in &mut state
+        .nodes
+        .get_mut(&ROOT_TABS_ID)
+        .unwrap()
+        .tabs
+        .as_mut()
+        .unwrap()
+        .tabs
+    {
+        tab.title = evil.to_owned();
+    }
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let custom = BTreeMap::from([(
+        ROOT_TABS_ID,
+        BarSpec {
+            left: vec![BarSegment {
+                text: evil.to_owned(),
+                style: StyleSpec::default(),
+                target: None,
+            }],
+            center: Vec::new(),
+            right: Vec::new(),
+        },
+    )]);
+
+    for grid in [
+        Renderer::default().render(&state, &presentation),
+        Renderer::default().render_with_tab_bars(&state, &presentation, &custom),
+    ] {
+        let rendered = grid.render();
+        assert!(rendered.contains("evil ]2;pwned  [2J"), "{rendered}");
+        for line in grid.ansi_lines() {
+            assert!(!line.contains('\x07'), "{line:?}");
+            assert!(!line.contains("\x1b]"), "{line:?}");
+            assert!(!line.contains("\x1b[2J"), "{line:?}");
+        }
+    }
+}
+
+#[test]
 fn default_tab_bar_marks_synchronized_windows() {
     let mut state = demo_state();
     let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();

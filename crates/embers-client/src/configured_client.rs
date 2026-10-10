@@ -302,12 +302,8 @@ where
     /// Control characters are replaced, so the text cannot reach the host
     /// terminal as escape sequences.
     pub fn show_message(&mut self, text: &str, duration: Duration) {
-        let text = text
-            .chars()
-            .map(|ch| if ch.is_control() { ' ' } else { ch })
-            .collect();
         self.status_message = Some(StatusMessage {
-            text,
+            text: crate::grid::replace_controls(text).into_owned(),
             until: Instant::now() + duration,
         });
     }

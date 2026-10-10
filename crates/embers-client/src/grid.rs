@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -581,6 +582,22 @@ impl RenderGrid {
 
     fn index(&self, x: u16, y: u16) -> usize {
         usize::from(y) * usize::from(self.width) + usize::from(x)
+    }
+}
+
+/// `text` with each control character replaced by a space. Text that comes
+/// from programs in panes, such as titles set with OSC 2, goes through this
+/// before it is drawn as chrome, so it cannot reach the host terminal as
+/// escape sequences or move its cursor.
+pub fn replace_controls(text: &str) -> Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        Cow::Owned(
+            text.chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
     }
 }
 
