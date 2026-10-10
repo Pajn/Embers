@@ -110,11 +110,16 @@ pub struct MouseSettings {
     pub click_forward: bool,
     pub wheel_scroll: bool,
     pub wheel_forward: bool,
+    pub drag_resize: bool,
 }
 
 impl MouseSettings {
     pub const fn capture_enabled(self) -> bool {
-        self.click_focus || self.click_forward || self.wheel_scroll || self.wheel_forward
+        self.click_focus
+            || self.click_forward
+            || self.wheel_scroll
+            || self.wheel_forward
+            || self.drag_resize
     }
 }
 
@@ -140,6 +145,9 @@ pub struct LoadedConfig {
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
+    /// Forward OSC 52 clipboard writes from programs in panes to the host
+    /// terminal (`set_clipboard`). On by default.
+    pub clipboard: bool,
 }
 
 impl LoadedConfig {
@@ -175,6 +183,7 @@ impl fmt::Debug for LoadedConfig {
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
+            .field("clipboard", &self.clipboard)
             .finish()
     }
 }

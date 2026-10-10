@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CursorState, FloatGeometry, FloatingId, NodeId, PtySize, RequestId,
-    SessionId, Size, SnapshotLine, SplitDirection, WireError,
+    ActivityState, BufferId, ClipboardSelection, CursorState, FloatGeometry, FloatingId, NodeId,
+    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,6 +64,14 @@ pub enum SessionRequest {
         session_id: SessionId,
         index: u32,
     },
+    /// Turn tmux-style `synchronize-panes` on, off, or flip it for a window
+    /// (a root tab).
+    SetRootTabSynchronizePanes {
+        request_id: RequestId,
+        session_id: SessionId,
+        index: u32,
+        mode: SynchronizePanesMode,
+    },
     /// Records the area an attached client draws the session in, so panes
     /// created without a client can still be spawned at their drawn size.
     SetViewport {
@@ -71,6 +79,13 @@ pub enum SessionRequest {
         session_id: SessionId,
         viewport: Size,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SynchronizePanesMode {
+    Toggle,
+    On,
+    Off,
 }
 
 impl SessionRequest {
@@ -85,6 +100,7 @@ impl SessionRequest {
             | Self::SelectRootTab { request_id, .. }
             | Self::RenameRootTab { request_id, .. }
             | Self::CloseRootTab { request_id, .. }
+            | Self::SetRootTabSynchronizePanes { request_id, .. }
             | Self::SetViewport { request_id, .. } => *request_id,
         }
     }
@@ -752,6 +768,9 @@ pub struct SplitRecord {
 pub struct TabRecord {
     pub title: String,
     pub child_id: NodeId,
+    /// Whether input typed into one pane of this window goes to all of its
+    /// panes. Only meaningful on root tabs.
+    pub synchronize_panes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1088,6 +1107,16 @@ pub struct RenderInvalidatedEvent {
     pub buffer_id: BufferId,
 }
 
+/// A clipboard write (OSC 52) from a program in a buffer. Unlike other events it
+/// is not broadcast to subscribers: the server sends it only to the clients
+/// whose current session shows the buffer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardEvent {
+    pub buffer_id: BufferId,
+    pub selection: ClipboardSelection,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRenamedEvent {
     pub session_id: SessionId,
@@ -1113,6 +1142,7 @@ pub enum ServerEvent {
     FocusChanged(FocusChangedEvent),
     RenderInvalidated(RenderInvalidatedEvent),
     ClientChanged(ClientChangedEvent),
+    Clipboard(ClipboardEvent),
 }
 
 impl ServerEvent {
@@ -1129,6 +1159,7 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
+            Self::Clipboard(_) => None,
         }
     }
 

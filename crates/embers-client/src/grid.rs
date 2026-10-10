@@ -1,6 +1,7 @@
 use std::fmt::Write;
+use std::sync::Arc;
 
-use embers_core::{CellAttrs, CursorShape, Rect, SnapshotLine, StyledRun, TermColor};
+use embers_core::{CellAttrs, CursorShape, Hyperlink, Rect, SnapshotLine, StyledRun, TermColor};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -37,13 +38,33 @@ impl From<Color> for TerminalColor {
     }
 }
 
+/// Underline shape. Discriminants match the SGR `4:n` sub-parameter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    #[default]
+    None = 0,
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
+}
+
+impl UnderlineStyle {
+    pub const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CellStyle {
     pub fg: Option<TerminalColor>,
     pub bg: Option<TerminalColor>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
+    /// Underline color (SGR 58); `None` follows the foreground.
+    pub underline_color: Option<TerminalColor>,
     pub dim: bool,
     pub reverse: bool,
     pub blink: bool,
@@ -83,7 +104,12 @@ impl From<&crate::scripting::StyleSpec> for CellStyle {
             bg: value.bg.map(|color| TerminalColor::Rgb(color.into())),
             bold: value.bold,
             italic: value.italic,
-            underline: value.underline,
+            underline: if value.underline {
+                UnderlineStyle::Single
+            } else {
+                UnderlineStyle::None
+            },
+            underline_color: None,
             dim: value.dim,
             reverse: false,
             blink: value.blink,
@@ -104,6 +130,10 @@ struct Cell {
     text: String,
     style: CellStyle,
     continuation: bool,
+    /// OSC 8 hyperlink from pane content. Lives on the cell rather than in
+    /// [`CellStyle`] so overlays that restyle content keep the link, while
+    /// anything drawn over the cell (borders, labels, popups) drops it.
+    link: Option<Arc<Hyperlink>>,
 }
 
 impl Default for Cell {
@@ -112,6 +142,7 @@ impl Default for Cell {
             text: " ".to_owned(),
             style: CellStyle::default(),
             continuation: false,
+            link: None,
         }
     }
 }
@@ -122,6 +153,7 @@ impl Cell {
             text: fill.to_string(),
             style: CellStyle::default(),
             continuation: false,
+            link: None,
         }
     }
 }
@@ -179,6 +211,17 @@ impl RenderGrid {
     }
 
     pub fn put_str_styled(&mut self, x: u16, y: u16, text: &str, style: CellStyle) {
+        self.put_str_linked(x, y, text, style, None);
+    }
+
+    fn put_str_linked(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        style: CellStyle,
+        link: Option<&Arc<Hyperlink>>,
+    ) {
         if y >= self.height || x >= self.width {
             return;
         }
@@ -197,7 +240,7 @@ impl RenderGrid {
             }
 
             self.clear_overlapping_cells(x_pos, y, width);
-            self.set_cell(x_pos, y, grapheme, style, width);
+            self.set_cell(x_pos, y, grapheme, style, width, link);
             x_pos = x_pos.saturating_add(width);
         }
     }
@@ -207,7 +250,8 @@ impl RenderGrid {
     ///
     /// Mirrors [`truncate`]'s column budget: when the text is wider than `width`,
     /// it draws up to `width - 1` columns then a default-styled `~` marker.
-    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked.
+    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked. Linked
+    /// runs keep their OSC 8 hyperlink on the drawn cells.
     pub fn put_snapshot_line(&mut self, x: u16, y: u16, width: u16, line: &SnapshotLine) {
         if width == 0 || y >= self.height || x >= self.width {
             return;
@@ -219,6 +263,9 @@ impl RenderGrid {
         } else {
             width
         };
+
+        // Shared once per line so each linked cell holds a cheap handle.
+        let links: Vec<Arc<Hyperlink>> = line.links.iter().cloned().map(Arc::new).collect();
 
         let mut column = 0_u16;
         let mut byte_offset = 0_usize;
@@ -232,12 +279,16 @@ impl RenderGrid {
             let run = runs.run_at(byte_offset);
             let style = run.map(style_for_run).unwrap_or_default();
             let hidden = run.is_some_and(|run| run.attrs.contains(CellAttrs::HIDDEN));
+            let link = run
+                .and_then(|run| usize::from(run.link).checked_sub(1))
+                .and_then(|index| links.get(index));
 
             let draw_x = x.saturating_add(column);
             if hidden {
-                self.put_str_styled(draw_x, y, &" ".repeat(usize::from(grapheme_width)), style);
+                let blank = " ".repeat(usize::from(grapheme_width));
+                self.put_str_linked(draw_x, y, &blank, style, link);
             } else {
-                self.put_str_styled(draw_x, y, grapheme, style);
+                self.put_str_linked(draw_x, y, grapheme, style, link);
             }
 
             column = column.saturating_add(grapheme_width);
@@ -416,17 +467,27 @@ impl RenderGrid {
                 let end = start + usize::from(self.width);
                 let mut output = String::new();
                 let mut current_style = CellStyle::default();
+                let mut current_link: Option<&Arc<Hyperlink>> = None;
                 for cell in &self.cells[start..end] {
                     if cell.continuation {
                         continue;
                     }
                     write_style_transition(&mut output, current_style, cell.style);
                     current_style = cell.style;
+                    if cell.link.as_ref() != current_link {
+                        current_link = cell.link.as_ref();
+                        write_hyperlink(&mut output, current_link.map(Arc::as_ref));
+                    }
                     if cell.text.is_empty() {
                         output.push(' ');
                     } else {
                         output.push_str(&cell.text);
                     }
+                }
+                // Links never span rows: the next row (or the status line)
+                // must not inherit one.
+                if current_link.is_some() {
+                    write_hyperlink(&mut output, None);
                 }
                 if !current_style.is_plain() {
                     output.push_str("\x1b[0m");
@@ -457,12 +518,21 @@ impl RenderGrid {
         }
     }
 
-    fn set_cell(&mut self, x: u16, y: u16, grapheme: &str, style: CellStyle, width: u16) {
+    fn set_cell(
+        &mut self,
+        x: u16,
+        y: u16,
+        grapheme: &str,
+        style: CellStyle,
+        width: u16,
+        link: Option<&Arc<Hyperlink>>,
+    ) {
         let idx = self.index(x, y);
         self.cells[idx] = Cell {
             text: grapheme.to_owned(),
             style,
             continuation: false,
+            link: link.cloned(),
         };
 
         for offset in 1..width {
@@ -471,6 +541,7 @@ impl RenderGrid {
                 text: String::new(),
                 style,
                 continuation: true,
+                link: link.cloned(),
             };
         }
     }
@@ -515,8 +586,7 @@ impl<'a> RunCursor<'a> {
     }
 }
 
-/// Map a content style run to a renderable [`CellStyle`]. Double underline folds
-/// to a single underline (the client has no distinct double-underline SGR).
+/// Map a content style run to a renderable [`CellStyle`].
 pub(crate) fn style_for_run(run: &StyledRun) -> CellStyle {
     let attrs = run.attrs;
     CellStyle {
@@ -524,12 +594,28 @@ pub(crate) fn style_for_run(run: &StyledRun) -> CellStyle {
         bg: term_color_to_cell(run.bg),
         bold: attrs.contains(CellAttrs::BOLD),
         italic: attrs.contains(CellAttrs::ITALIC),
-        underline: attrs.contains(CellAttrs::UNDERLINE)
-            || attrs.contains(CellAttrs::DOUBLE_UNDERLINE),
+        underline: underline_for_attrs(attrs),
+        underline_color: term_color_to_cell(run.underline_color),
         dim: attrs.contains(CellAttrs::DIM),
         reverse: attrs.contains(CellAttrs::INVERSE),
         blink: false,
         strikeout: attrs.contains(CellAttrs::STRIKEOUT),
+    }
+}
+
+fn underline_for_attrs(attrs: CellAttrs) -> UnderlineStyle {
+    if !attrs.contains(CellAttrs::ANY_UNDERLINE) {
+        UnderlineStyle::None
+    } else if attrs.contains(CellAttrs::CURLY_UNDERLINE) {
+        UnderlineStyle::Curly
+    } else if attrs.contains(CellAttrs::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if attrs.contains(CellAttrs::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if attrs.contains(CellAttrs::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else {
+        UnderlineStyle::Single
     }
 }
 
@@ -559,8 +645,13 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     if to.italic {
         output.push_str("\x1b[3m");
     }
-    if to.underline {
-        output.push_str("\x1b[4m");
+    match to.underline {
+        UnderlineStyle::None => {}
+        // Plain `4` for a single underline: understood by every terminal.
+        UnderlineStyle::Single => output.push_str("\x1b[4m"),
+        style => {
+            let _ = write!(output, "\x1b[4:{}m", style as u8);
+        }
     }
     if to.blink {
         output.push_str("\x1b[5m");
@@ -599,6 +690,46 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
             }
         }
     }
+    // SGR 58 only has the colon form (`58:2::r:g:b`, `58:5:n`), the one kitty,
+    // Ghostty, WezTerm, foot and VTE all accept.
+    if let Some(color) = to.underline_color {
+        match color {
+            TerminalColor::Rgb(color) => {
+                let _ = write!(
+                    output,
+                    "\x1b[58:2::{}:{}:{}m",
+                    color.red, color.green, color.blue
+                );
+            }
+            TerminalColor::Indexed(index) => {
+                let _ = write!(output, "\x1b[58:5:{index}m");
+            }
+        }
+    }
+}
+
+/// Open an OSC 8 hyperlink, or close the current one when `link` is `None`.
+///
+/// The id and URI come from programs in panes, so control characters are
+/// dropped before they reach the host terminal: a stray BEL or ESC would end
+/// the sequence early and let the rest run as terminal input. The id also
+/// loses `:` and `;`, which delimit OSC 8 parameters.
+fn write_hyperlink(output: &mut String, link: Option<&Hyperlink>) {
+    output.push_str("\x1b]8;");
+    if let Some(link) = link {
+        if let Some(id) = link.id.as_deref().filter(|id| !id.is_empty()) {
+            output.push_str("id=");
+            output.extend(
+                id.chars()
+                    .filter(|ch| !ch.is_control() && *ch != ':' && *ch != ';'),
+            );
+        }
+        output.push(';');
+        output.extend(link.uri.chars().filter(|ch| !ch.is_control()));
+    } else {
+        output.push(';');
+    }
+    output.push_str("\x1b\\");
 }
 
 fn clamp_i32_to_u16(value: i32) -> u16 {
@@ -656,7 +787,10 @@ mod tests {
                 fg,
                 bg: TermColor::Default,
                 attrs: CellAttrs(attrs),
+                underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         }
     }
 
@@ -696,14 +830,19 @@ mod tests {
                     fg: TermColor::Indexed(1),
                     bg: TermColor::Default,
                     attrs: CellAttrs(CellAttrs::HIDDEN),
+                    underline_color: TermColor::Default,
+                    link: 0,
                 },
                 StyledRun {
                     len: 1,
                     fg: TermColor::Default,
                     bg: TermColor::Default,
                     attrs: CellAttrs::empty(),
+                    underline_color: TermColor::Default,
+                    link: 0,
                 },
             ],
+            links: Vec::new(),
         };
         grid.put_snapshot_line(0, 0, 4, &line);
 

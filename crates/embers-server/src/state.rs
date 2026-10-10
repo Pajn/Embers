@@ -313,6 +313,37 @@ impl ServerState {
         self.rename_tab(root_tabs, index, title)
     }
 
+    /// Set tmux `synchronize-panes` for the window at `index`: `Some` sets it,
+    /// `None` flips it. Returns the new value. Like `rename_root_tab`, a
+    /// session whose root is a single untabbed window gets a root tabs node.
+    pub fn set_root_tab_synchronize_panes(
+        &mut self,
+        session_id: SessionId,
+        index: usize,
+        enabled: Option<bool>,
+    ) -> Result<bool> {
+        let root_tabs = if let Some(root_tabs) = self.root_tabs_node(session_id)? {
+            root_tabs
+        } else {
+            if index != 0 {
+                return Err(MuxError::not_found(format!(
+                    "tab index {index} is out of range for session {session_id}"
+                )));
+            }
+            self.ensure_root_tabs_container(session_id)?
+        };
+        let Node::Tabs(tabs) = self.node_mut(root_tabs)? else {
+            return Err(MuxError::invalid_input("node is not a tabs container"));
+        };
+        let tab = tabs.tabs.get_mut(index).ok_or_else(|| {
+            MuxError::not_found(format!(
+                "tab index {index} is out of range for session {session_id}"
+            ))
+        })?;
+        tab.synchronize_panes = enabled.unwrap_or(!tab.synchronize_panes);
+        Ok(tab.synchronize_panes)
+    }
+
     pub fn close_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
         if let Some(root_tabs) = self.root_tabs_node(session_id)? {
             return self.close_tab(root_tabs, index);

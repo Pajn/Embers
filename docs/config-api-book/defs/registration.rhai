@@ -308,6 +308,34 @@ fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action;
 /// Replace a specific node by id with a new tree.
 fn replace_node(_: ActionApi, node_id: int, tree: TreeSpec) -> Action;
 
+/// Move the focused pane's border `cells` rows down (tmux `resize-pane -D`).
+/// See `resize_left` for which divider moves.
+fn resize_down(_: ActionApi, cells: int) -> Action;
+
+/// Move the focused pane's border `cells` cells left (tmux `resize-pane -L`).
+///
+/// The nearest split with panes side by side is resized: the divider to the right of the
+/// pane moves left, shrinking the pane, or, when the pane is the split's rightmost child,
+/// the divider to its left moves left, growing it. Panes keep at least one column of
+/// content, and the action does nothing when there is no such split or the divider cannot
+/// move. While a pane is zoomed only splits inside the zoomed view can be resized.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<M-h>", action.resize_left(3));
+/// ```
+fn resize_left(_: ActionApi, cells: int) -> Action;
+
+/// Move the focused pane's border `cells` cells right (tmux `resize-pane -R`).
+/// See `resize_left` for which divider moves.
+fn resize_right(_: ActionApi, cells: int) -> Action;
+
+/// Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
+/// See `resize_left` for which divider moves; panes keep their title row and at least
+/// one row of content.
+fn resize_up(_: ActionApi, cells: int) -> Action;
+
 /// Reveal a specific buffer by id.
 fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
 
@@ -404,6 +432,17 @@ fn send_keys(_: ActionApi, buffer_id: int, notation: string) -> Action;
 /// Send a key notation sequence to the focused buffer.
 fn send_keys_current(_: ActionApi, notation: string) -> Action;
 
+/// Turn tmux-style `synchronize-panes` on or off for the active window.
+///
+/// The setting belongs to the window (a root tab) and is shared by every client. While it
+/// is on, keys, pastes and `send_keys_current`/`send_bytes_current` input aimed at the
+/// focused pane go to every pane the window shows, each encoded for that pane. Panes in
+/// hidden nested tabs or hidden by zoom, panes in other windows, and popups are left out,
+/// and input typed into a focused popup is never copied. Mouse and focus events, input
+/// sent to a specific buffer id, and `embers send-keys` are not synchronized. Tab bars can
+/// show the state through `TabInfo.synchronize_panes()`.
+fn set_synchronize_panes(_: ActionApi, enabled: bool) -> Action;
+
 /// Split the current node and attach the provided tree as the new sibling.
 fn split_with(_: ActionApi, direction: string, tree: TreeSpec) -> Action;
 
@@ -422,9 +461,29 @@ fn switch_session(_: ActionApi, name: string) -> Action;
 /// Toggle a named input mode.
 fn toggle_mode(_: ActionApi, mode: string) -> Action;
 
+/// Toggle tmux-style `synchronize-panes` for the active window.
+///
+/// While it is on, input typed into a pane of the window is also sent to every other pane
+/// the window currently shows. Popups and other windows never take part. See
+/// `set_synchronize_panes` for details.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>S", action.toggle_synchronize_panes());
+/// ```
+fn toggle_synchronize_panes(_: ActionApi) -> Action;
+
+/// Toggle zoom for the focused node (tmux `resize-pane -Z`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>z", action.toggle_zoom_current_node());
+/// ```
+fn toggle_zoom_current_node(_: ActionApi) -> Action;
+
 /// Toggle zoom for the specified node id.
-/// There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
-/// focused node and `toggle_zoom_node` when you already know the target id.
 fn toggle_zoom_node(_: ActionApi, node_id: int) -> Action;
 
 /// Clear the current session's active zoom state.
@@ -461,6 +520,14 @@ fn set_click_focus(mouse: MouseApi, value: bool) -> ();
 ///
 /// # rhai-autodocs:index:23
 fn set_click_forward(mouse: MouseApi, value: bool) -> ();
+
+/// Toggle resizing splits by dragging their dividers with the left button.
+///
+/// Only drags that start on a divider are claimed; clicks and drags inside panes behave
+/// as before. The built-in config turns this on.
+///
+/// # rhai-autodocs:index:27
+fn set_drag_resize(mouse: MouseApi, value: bool) -> ();
 
 /// Toggle wheel event forwarding into the focused buffer.
 ///
@@ -519,6 +586,24 @@ fn define_mode(mode_name: string, options: map) -> ();
 ///
 /// # rhai-autodocs:index:7
 fn on(event_name: string, callback: Fn) -> ();
+
+/// Choose whether programs in panes may set the system clipboard.
+///
+/// When on (the default), an OSC 52 clipboard write from a program in a
+/// pane, such as a Neovim yank over SSH, is passed on to the terminal
+/// running the Embers client, which puts it on the system clipboard. This
+/// matches tmux's `set-clipboard on`. When off, those writes are dropped.
+/// Programs can never read the clipboard through Embers: OSC 52 queries are
+/// always ignored.
+///
+/// # Example
+///
+/// ```rhai
+/// set_clipboard(false);
+/// ```
+///
+/// # rhai-autodocs:index:8
+fn set_clipboard(enabled: bool) -> ();
 
 /// Set the leader sequence used in binding notations.
 ///

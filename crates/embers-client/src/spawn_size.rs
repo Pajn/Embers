@@ -212,6 +212,7 @@ fn root_tabs(layout: &mut ClientState, session_id: SessionId) -> Option<NodeId> 
                 tabs: vec![TabRecord {
                     title: String::new(),
                     child_id: root_id,
+                    synchronize_panes: false,
                 }],
             }),
         },
@@ -228,6 +229,7 @@ fn add_active_tab(layout: &mut ClientState, tabs_node_id: NodeId) -> Option<()> 
     tabs.tabs.push(TabRecord {
         title: String::new(),
         child_id: NEW_LEAF,
+        synchronize_panes: false,
     });
     tabs.active = u32::try_from(tabs.tabs.len() - 1).ok()?;
     set_parent(layout, NEW_LEAF, tabs_node_id);

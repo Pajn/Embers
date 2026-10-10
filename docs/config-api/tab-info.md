@@ -113,6 +113,39 @@ Return whether the tab is active.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> synchronize_panes </h2>
+
+```rust,ignore
+fn synchronize_panes(tab: TabInfo) -> bool
+```
+
+<div>
+<div class="tab">
+<button group="synchronize_panes" id="link-synchronize_panes-Description"  class="tablinks active"
+    onclick="openTab(event, 'synchronize_panes', 'Description')">
+Description
+</button>
+<button group="synchronize_panes" id="link-synchronize_panes-Example"  class="tablinks"
+    onclick="openTab(event, 'synchronize_panes', 'Example')">
+Example
+</button>
+</div>
+
+<div group="synchronize_panes" id="synchronize_panes-Description" class="tabcontent"  style="display: block;" >
+Return whether `synchronize-panes` is on for the window this tab holds, so a formatter
+can flag it. Always `false` for nested tabs.
+</div>
+<div group="synchronize_panes" id="synchronize_panes-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+let label = if tab.synchronize_panes() { tab.title() + " [sync]" } else { tab.title() };
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> title </h2>
 
 ```rust,ignore

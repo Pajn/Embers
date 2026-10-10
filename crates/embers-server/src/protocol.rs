@@ -174,6 +174,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
                     .map(|tab| TabRecord {
                         title: tab.title.clone(),
                         child_id: tab.child,
+                        synchronize_panes: tab.synchronize_panes,
                     })
                     .collect(),
             }),

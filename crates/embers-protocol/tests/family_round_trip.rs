@@ -1,9 +1,9 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, CursorPosition, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, Size, SnapshotLine,
-    SplitDirection, StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, Size,
+    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -60,6 +60,24 @@ fn client_message_families_round_trip() {
                 width: 120,
                 height: 40,
             },
+        }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 1,
+            mode: SynchronizePanesMode::Toggle,
+        }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 0,
+            mode: SynchronizePanesMode::On,
+        }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 0,
+            mode: SynchronizePanesMode::Off,
         }),
         ClientMessage::Buffer(BufferRequest::Create {
             request_id: RequestId(10),
@@ -526,7 +544,10 @@ fn server_envelope_families_round_trip() {
                         fg: TermColor::Indexed(1),
                         bg: TermColor::Default,
                         attrs: CellAttrs(CellAttrs::BOLD),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     }],
+                    links: Vec::new(),
                 },
                 SnapshotLine::plain("beta"),
                 SnapshotLine::plain(""),
@@ -562,7 +583,10 @@ fn server_envelope_families_round_trip() {
                         },
                         bg: TermColor::Indexed(4),
                         attrs: CellAttrs(CellAttrs::UNDERLINE),
+                        underline_color: TermColor::Default,
+                        link: 0,
                     }],
+                    links: Vec::new(),
                 },
                 SnapshotLine::plain("delta"),
             ],
@@ -597,6 +621,16 @@ fn server_envelope_families_round_trip() {
         })),
         ServerEnvelope::Event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
             buffer_id: BufferId(11),
+        })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Clipboard,
+            text: "yanked\nline".to_owned(),
+        })),
+        ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id: BufferId(11),
+            selection: ClipboardSelection::Primary,
+            text: String::new(),
         })),
     ];
 
@@ -664,10 +698,12 @@ fn sample_snapshot() -> SessionSnapshot {
                         TabRecord {
                             title: "logs".to_owned(),
                             child_id: NodeId(23),
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "shell".to_owned(),
                             child_id: NodeId(24),
+                            synchronize_panes: true,
                         },
                     ],
                 }),

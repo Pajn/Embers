@@ -88,10 +88,12 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
                         TabRecord {
                             title: "shell".to_owned(),
                             child_id: NodeId(11),
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "hidden".to_owned(),
                             child_id: NodeId(20),
+                            synchronize_panes: false,
                         },
                     ],
                 }),
@@ -110,10 +112,12 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
                         TabRecord {
                             title: "build".to_owned(),
                             child_id: NodeId(21),
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "logs".to_owned(),
                             child_id: NodeId(22),
+                            synchronize_panes: false,
                         },
                     ],
                 }),

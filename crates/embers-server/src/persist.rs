@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result,
-    SessionId, SplitDirection, Timestamp,
+    SessionId, Size, SplitDirection, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,10 @@ pub struct PersistedSession {
     pub focused_floating: Option<u64>,
     #[serde(default)]
     pub zoomed_node: Option<u64>,
+    /// The viewport a client last drew the session in, so panes created
+    /// after a restart, before a client attaches, still start at that size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<Size>,
     pub created_at_ms: u64,
 }
 
@@ -58,6 +62,8 @@ pub struct PersistedBuffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<Vec<String>>,
     #[serde(default)]
     pub runtime_socket_path: Option<PathBuf>,
     pub state: PersistedBufferState,
@@ -192,14 +198,27 @@ pub fn load_workspace(path: &Path) -> Result<Option<ServerState>> {
     }
 }
 
+#[cfg(test)]
 pub fn save_workspace(path: &Path, state: &ServerState) -> Result<()> {
+    write_workspace(path, &encode_workspace(state)?)
+}
+
+/// Serialize `state` into the bytes [`write_workspace`] stores.
+pub fn encode_workspace(state: &ServerState) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&state.to_persisted())
+        .map_err(|error| MuxError::internal(error.to_string()))
+}
+
+/// Atomically replace the workspace file at `path` with `bytes`: write a temp
+/// file next to it, fsync it, rename it over `path`, then fsync the directory.
+/// A crash at any point leaves either the old file or the new one, never a
+/// partial write.
+pub fn write_workspace(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(&state.to_persisted())
-        .map_err(|error| MuxError::internal(error.to_string()))?;
     let (temp_path, mut file) = open_workspace_temp_file(path)?;
-    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(&temp_path);
         return Err(error.into());
     }
@@ -330,6 +349,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         focused_leaf: session.focused_leaf.map(|id| id.0),
         focused_floating: session.focused_floating.map(|id| id.0),
         zoomed_node: session.zoomed_node.map(|id| id.0),
+        viewport: session.viewport,
         created_at_ms: timestamp_to_millis(session.created_at),
     }
 }
@@ -343,7 +363,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_leaf: session.focused_leaf.map(NodeId),
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
-        viewport: None,
+        viewport: session.viewport,
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
 }
@@ -355,6 +375,7 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         command: buffer.command.clone(),
         cwd: buffer.cwd.clone(),
         env: buffer.env.clone(),
+        foreground_command: buffer.foreground_command.clone(),
         runtime_socket_path: buffer.runtime_socket_path().cloned(),
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
@@ -374,6 +395,7 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
         buffer.cwd,
         buffer.env,
     );
+    restored.foreground_command = buffer.foreground_command;
     restored.set_runtime_socket_path(buffer.runtime_socket_path);
     restored.state = restored_buffer_state(buffer.state)?;
     restored.attachment = restored_buffer_attachment(buffer.attachment);
@@ -477,10 +499,7 @@ pub fn restored_node(node: PersistedNode) -> Node {
             parent: parent.map(NodeId),
             tabs: tabs
                 .into_iter()
-                .map(|tab| TabEntry {
-                    title: tab.title,
-                    child: NodeId(tab.child),
-                })
+                .map(|tab| TabEntry::new(tab.title, NodeId(tab.child)))
                 .collect(),
             active,
             last_focused_descendant: last_focused_descendant.map(NodeId),
@@ -675,6 +694,31 @@ mod tests {
     }
 
     #[test]
+    fn session_viewport_round_trips_through_persistence() {
+        let tempdir = tempdir().expect("tempdir");
+        let workspace_path = tempdir.path().join("workspace.json");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("main");
+        let viewport = Size {
+            width: 120,
+            height: 40,
+        };
+        state
+            .set_session_viewport(session_id, viewport)
+            .expect("viewport is set");
+
+        save_workspace(&workspace_path, &state).expect("workspace saves");
+        let restored = load_workspace(&workspace_path)
+            .expect("workspace loads")
+            .expect("workspace exists");
+
+        assert_eq!(
+            restored.session(session_id).expect("session").viewport,
+            Some(viewport)
+        );
+    }
+
+    #[test]
     fn load_current_workspace_migrates_unversioned_workspace() {
         let workspace = PersistedWorkspace {
             format_version: None,
@@ -850,6 +894,7 @@ mod tests {
                 focused_leaf: Some(10),
                 focused_floating: None,
                 zoomed_node: None,
+                viewport: None,
                 created_at_ms: 1234,
             }],
             buffers: Vec::new(),

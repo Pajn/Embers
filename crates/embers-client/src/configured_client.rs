@@ -7,8 +7,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, PtySize, Result, SessionId,
-    Size,
+    ActivityState, BufferId, ClipboardSelection, FloatGeometry, MuxError, NodeId, Point, PtySize,
+    Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
@@ -29,9 +29,10 @@ use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    NotifyLevel, TabBarContext, TreeSpec,
+    MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size};
+use crate::split_resize::SplitResize;
 use crate::state::{
     HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
 };
@@ -47,6 +48,12 @@ const MAX_EVENT_BATCH: usize = 256;
 struct SearchPrompt {
     node_id: NodeId,
     query: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DividerDrag {
+    split_node_id: NodeId,
+    index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +92,9 @@ pub struct ConfiguredClient<T> {
     reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
     hints_node: Option<NodeId>,
+    /// The divider being dragged with the mouse, from the press on it until
+    /// the button is released.
+    divider_drag: Option<DividerDrag>,
     terminal_output: VecDeque<Vec<u8>>,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
@@ -110,6 +120,7 @@ where
             reported_viewport: None,
             search_prompt: None,
             hints_node: None,
+            divider_drag: None,
             terminal_output: VecDeque::new(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
@@ -232,9 +243,10 @@ where
                     return Ok(());
                 }
                 let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                self.send_bytes_to_buffer(buffer_id, session_id, bytes)
-                    .await?;
-                Ok(())
+                self.send_typed_input(&presentation, buffer_id, session_id, |_, _| {
+                    Ok(bytes.clone())
+                })
+                .await
             }
             other => {
                 let token = key_event_to_token(other)?;
@@ -250,12 +262,17 @@ where
                             &binding.target,
                         ) {
                             let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                            let mode = self.buffer_keyboard_mode(buffer_id);
                             return self
-                                .send_bytes_to_buffer(
+                                .send_typed_input(
+                                    &presentation,
                                     buffer_id,
                                     session_id,
-                                    sequence_to_bytes(&binding.sequence, mode)?,
+                                    |client, target| {
+                                        sequence_to_bytes(
+                                            &binding.sequence,
+                                            client.buffer_keyboard_mode(target),
+                                        )
+                                    },
                                 )
                                 .await;
                         }
@@ -274,11 +291,16 @@ where
                     } => match fallback_policy {
                         FallbackPolicy::Passthrough => {
                             let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                            let mode = self.buffer_keyboard_mode(buffer_id);
-                            self.send_bytes_to_buffer(
+                            self.send_typed_input(
+                                &presentation,
                                 buffer_id,
                                 session_id,
-                                sequence_to_bytes(&sequence, mode)?,
+                                |client, target| {
+                                    sequence_to_bytes(
+                                        &sequence,
+                                        client.buffer_keyboard_mode(target),
+                                    )
+                                },
                             )
                             .await
                         }
@@ -306,22 +328,25 @@ where
 
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-        let bytes = if self
-            .client
-            .state()
-            .snapshots
-            .get(&buffer_id)
-            .is_some_and(|snapshot| snapshot.bracketed_paste)
-        {
-            let mut wrapped = b"\x1b[200~".to_vec();
-            wrapped.extend(bytes);
-            wrapped.extend_from_slice(b"\x1b[201~");
-            wrapped
-        } else {
-            bytes
-        };
-        self.send_bytes_to_buffer(buffer_id, session_id, bytes)
-            .await
+        self.send_typed_input(&presentation, buffer_id, session_id, |client, target| {
+            Ok(
+                if client
+                    .client
+                    .state()
+                    .snapshots
+                    .get(&target)
+                    .is_some_and(|snapshot| snapshot.bracketed_paste)
+                {
+                    let mut wrapped = b"\x1b[200~".to_vec();
+                    wrapped.extend_from_slice(&bytes);
+                    wrapped.extend_from_slice(b"\x1b[201~");
+                    wrapped
+                } else {
+                    bytes.clone()
+                },
+            )
+        })
+        .await
     }
 
     pub async fn handle_mouse(
@@ -337,11 +362,17 @@ where
             x: i32::from(event.column),
             y: i32::from(event.row),
         };
+        let settings = self.config.active_script().loaded_config().mouse;
+        if self
+            .handle_divider_drag(session_id, &presentation, point, event.kind, settings)
+            .await?
+        {
+            return Ok(());
+        }
         let Some(target_leaf) = self.mouse_target_leaf(&presentation, point).cloned() else {
             return Ok(());
         };
 
-        let settings = self.config.active_script().loaded_config().mouse;
         let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
         let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
         let point_in_content = point.y > target_leaf.rect.origin.y;
@@ -517,6 +548,13 @@ where
                 // now-stale active session instead of leaving it dangling.
                 None => self.clear_active_session(),
             }
+        }
+        // A program in a pane set the clipboard (OSC 52): pass it on to the
+        // host terminal unless the config turned that off.
+        if let ServerEvent::Clipboard(clipboard) = event
+            && self.config.active_script().loaded_config().clipboard
+        {
+            self.enqueue_osc52(clipboard.selection, &clipboard.text);
         }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
@@ -1330,16 +1368,43 @@ where
                     .await?;
                 self.client.resync_all_sessions().await
             }
-            Action::SendKeys { buffer_id, keys } => {
-                let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
+            Action::SendKeys {
+                buffer_id: Some(buffer_id),
+                keys,
+            } => {
                 let mode = self.buffer_keyboard_mode(buffer_id);
                 self.send_bytes_to_buffer(buffer_id, session_id, sequence_to_bytes(&keys, mode)?)
                     .await
             }
-            Action::SendBytes { buffer_id, bytes } => {
-                let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
+            Action::SendKeys {
+                buffer_id: None,
+                keys,
+            } => {
+                let buffer_id = self.resolve_buffer_id(None, presentation)?;
+                self.send_typed_input(presentation, buffer_id, session_id, |client, target| {
+                    sequence_to_bytes(&keys, client.buffer_keyboard_mode(target))
+                })
+                .await
+            }
+            Action::SendBytes {
+                buffer_id: Some(buffer_id),
+                bytes,
+            } => {
                 self.send_bytes_to_buffer(buffer_id, session_id, bytes)
                     .await
+            }
+            Action::SendBytes {
+                buffer_id: None,
+                bytes,
+            } => {
+                let buffer_id = self.resolve_buffer_id(None, presentation)?;
+                self.send_typed_input(
+                    presentation,
+                    buffer_id,
+                    session_id,
+                    |_, _| Ok(bytes.clone()),
+                )
+                .await
             }
             Action::CloseFloating { floating_id } => {
                 let floating_id = floating_id
@@ -1513,6 +1578,37 @@ where
                     }))
                     .await?;
                 self.client.resync_all_sessions().await
+            }
+            Action::ResizePane { direction, cells } => {
+                let leaf = self.focused_leaf(presentation)?;
+                match presentation.resize_leaf(self.client.state(), leaf.node_id, direction, cells)
+                {
+                    Some(resize) => self.resize_split(session_id, resize).await,
+                    None => Ok(()),
+                }
+            }
+            Action::SetSynchronizePanes { mode } => {
+                // Windows are the root tabs; a session whose root is a single
+                // untabbed window addresses it as index 0.
+                let index = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .and_then(|root| root.tabs.as_ref())
+                    .map_or(0, |tabs| tabs.active);
+                self.client
+                    .request_message(ClientMessage::Session(
+                        SessionRequest::SetRootTabSynchronizePanes {
+                            request_id: self.client.next_request_id(),
+                            session_id,
+                            index,
+                            mode,
+                        },
+                    ))
+                    .await?;
+                self.client.resync_session(session_id).await
             }
             Action::SwapSiblingNodes {
                 first_node_id,
@@ -1722,15 +1818,156 @@ where
         session_id: SessionId,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        self.send_input(session_id, vec![(buffer_id, bytes)]).await
+    }
+
+    /// Send input typed into the focused pane's `buffer_id`, honouring
+    /// synchronize-panes (see `input_targets`). `encode` produces the bytes
+    /// for each target, so key encodings and bracketed paste follow what each
+    /// pane's program asked for.
+    async fn send_typed_input(
+        &mut self,
+        presentation: &PresentationModel,
+        buffer_id: BufferId,
+        session_id: SessionId,
+        encode: impl Fn(&Self, BufferId) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        let sends = self
+            .input_targets(presentation, buffer_id)
+            .into_iter()
+            .map(|target| Ok((target, encode(self, target)?)))
+            .collect::<Result<Vec<_>>>()?;
+        self.send_input(session_id, sends).await
+    }
+
+    /// The buffers input for `buffer_id` goes to: `buffer_id` itself, then,
+    /// when it is the focused pane of a window with synchronize-panes on,
+    /// every other pane the window shows. Panes in hidden nested tabs or
+    /// hidden by zoom are not shown, so they are left out, as are popups:
+    /// input typed into a popup is never copied, and popup panes never
+    /// receive copies.
+    fn input_targets(
+        &self,
+        presentation: &PresentationModel,
+        buffer_id: BufferId,
+    ) -> Vec<BufferId> {
+        let mut targets = vec![buffer_id];
+        let synchronized = presentation
+            .focused_leaf()
+            .is_some_and(|leaf| leaf.buffer_id == buffer_id && leaf.floating_id.is_none())
+            && self.window_synchronized(presentation.session_id);
+        if synchronized {
+            for leaf in presentation
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.floating_id.is_none())
+            {
+                if !targets.contains(&leaf.buffer_id) {
+                    targets.push(leaf.buffer_id);
+                }
+            }
+        }
+        targets
+    }
+
+    /// Whether synchronize-panes is on for the session's active window.
+    fn window_synchronized(&self, session_id: SessionId) -> bool {
+        let state = self.client.state();
+        state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| state.nodes.get(&session.root_node_id))
+            .and_then(|root| root.tabs.as_ref())
+            .and_then(|tabs| tabs.tabs.get(usize::try_from(tabs.active).ok()?))
+            .is_some_and(|tab| tab.synchronize_panes)
+    }
+
+    /// Send each `(buffer, bytes)` pair, then refresh the buffers that took
+    /// input and the session. The first pair is the pane the input was aimed
+    /// at and its failure is returned; a synchronized copy that fails (for
+    /// example because that pane's program exited) is only logged.
+    async fn send_input(
+        &mut self,
+        session_id: SessionId,
+        sends: Vec<(BufferId, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut sent = Vec::with_capacity(sends.len());
+        for (index, (buffer_id, bytes)) in sends.into_iter().enumerate() {
+            let result = self
+                .client
+                .request_message(ClientMessage::Input(InputRequest::Send {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    bytes,
+                }))
+                .await;
+            match result {
+                Ok(_) => sent.push(buffer_id),
+                Err(error) if index == 0 => return Err(error),
+                Err(error) => {
+                    warn!("failed to send synchronized input to buffer {buffer_id}: {error}");
+                }
+            }
+        }
+        for buffer_id in sent {
+            self.client.refresh_buffer_snapshot(buffer_id).await?;
+        }
+        self.client.resync_session(session_id).await
+    }
+
+    async fn resize_split(&mut self, session_id: SessionId, resize: SplitResize) -> Result<()> {
         self.client
-            .request_message(ClientMessage::Input(InputRequest::Send {
+            .request_message(ClientMessage::Node(NodeRequest::Resize {
                 request_id: self.client.next_request_id(),
-                buffer_id,
-                bytes,
+                node_id: resize.split_node_id,
+                sizes: resize.sizes,
             }))
             .await?;
-        self.client.refresh_buffer_snapshot(buffer_id).await?;
         self.client.resync_session(session_id).await
+    }
+
+    /// Claim mouse events that drag a split divider: a left press on a
+    /// divider starts a drag, left drags move the divider to the pointer
+    /// wherever it is, and the release ends it. Returns whether the event was
+    /// claimed; everything else, including drags that start inside a pane, is
+    /// left to the normal pane handling.
+    async fn handle_divider_drag(
+        &mut self,
+        session_id: SessionId,
+        presentation: &PresentationModel,
+        point: Point,
+        kind: MouseEventKind,
+        settings: MouseSettings,
+    ) -> Result<bool> {
+        match kind {
+            MouseEventKind::Press(button) => {
+                self.divider_drag = None;
+                if button != MouseButton::Left || !settings.drag_resize {
+                    return Ok(false);
+                }
+                let Some(divider) = presentation.divider_at(point) else {
+                    return Ok(false);
+                };
+                self.divider_drag = Some(DividerDrag {
+                    split_node_id: divider.split_node_id,
+                    index: divider.index,
+                });
+                Ok(true)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(drag) = self.divider_drag else {
+                    return Ok(false);
+                };
+                if let Some(resize) =
+                    presentation.drag_divider(drag.split_node_id, drag.index, point)
+                {
+                    self.resize_split(session_id, resize).await?;
+                }
+                Ok(true)
+            }
+            MouseEventKind::Release(_) => Ok(self.divider_drag.take().is_some()),
+            _ => Ok(false),
+        }
     }
 
     fn resolve_buffer_id(
@@ -1779,6 +2016,7 @@ where
                                             self.client.state(),
                                             tab.child_id,
                                         ),
+                                        synchronize_panes: tab.synchronize_panes,
                                     })
                                     .collect(),
                                 active: usize::try_from(tabs.active).unwrap_or(0),
@@ -1873,6 +2111,7 @@ where
             }
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -2977,11 +3216,17 @@ where
     }
 
     fn enqueue_clipboard(&mut self, text: String) {
+        self.enqueue_osc52(ClipboardSelection::Clipboard, &text);
+    }
+
+    /// Queue an OSC 52 write that puts `text` on the host terminal's clipboard.
+    fn enqueue_osc52(&mut self, selection: ClipboardSelection, text: &str) {
         use base64::Engine as _;
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let parameter = selection.osc52_parameter();
         self.terminal_output
-            .push_back(format!("\x1b]52;c;{encoded}\x07").into_bytes());
+            .push_back(format!("\x1b]52;{parameter};{encoded}\x07").into_bytes());
     }
 
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
@@ -3598,6 +3843,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::FocusChanged(_) => "focus_changed",
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
+        ServerEvent::Clipboard(_) => "clipboard",
     }
 }
 
@@ -3632,6 +3878,7 @@ fn event_info(
             info.floating_id = event.focused_floating_id;
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;
