@@ -163,7 +163,7 @@ fn smart_resize_left(ctx) {
 
 fn smart_nav_left(ctx) {
     if is_nvim_buffer(ctx) {
-        action.send_bytes_current([8])
+        action.send_keys_current("<C-h>")
     } else {
         action.focus_left()
     }
@@ -204,5 +204,4 @@ Where the pane's environment does not reach Neovim, as on the far side of
 remote editor can run `embers buffer set-option is-vim 1` before it and
 `embers buffer set-option --unset is-vim` after it.
 
-The full example lives in
-[`crates/embers-client/tests/fixtures/repository_config.rhai`](../crates/embers-client/tests/fixtures/repository_config.rhai).
+The full example lives in the repository's [`config.rhai`](../config.rhai).

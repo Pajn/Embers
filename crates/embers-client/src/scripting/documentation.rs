@@ -728,14 +728,14 @@ fn rewrite_mdbook_searchindex_js(content: &str) -> String {
 fn example_page() -> &'static str {
     r##"# Example
 
-This is a trimmed example based on the repository fixture config. It shows the two main phases together.
+This is a trimmed example based on the repository's [`config.rhai`](../../config.rhai), which translates a typical tmux setup. It shows the two main phases together.
 
 ```rhai
 set_leader("<C-a>");
 
 fn shell_tree(ctx) {
     tree.buffer_spawn(
-        ["/bin/zsh"],
+        ["zsh"],
         #{
             title: "shell",
             cwd: if ctx.current_buffer() == () { () } else { ctx.current_buffer().cwd() }

@@ -186,7 +186,7 @@ Embers loads configuration in this order:
 
 User config is loaded as an overlay on top of the built-in defaults. The built-in config enables mouse behavior (including drag-to-copy), scroll/search modes, and tmux `copy-mode-vi` style bindings for copy mode, described in [`docs/copy-mode.md`](docs/copy-mode.md).
 
-This repository includes a fuller example at [`config.rhai`](config.rhai). It defines a tmux-inspired leader, smart navigation for Vim/Neovim panes, split/tab helpers, popup helpers, history views, and a custom tab bar/theme.
+This repository includes a fuller example at [`config.rhai`](config.rhai): a typical tmux setup translated to Embers, section by section, with a note for each tmux setting that works differently or has no equivalent. It has a `C-a` prefix, splits and windows that open in the pane's directory, popups for tools such as lazygit, history views, smart-splits.nvim navigation, and a Catppuccin tab bar that labels windows from their panes. The tests in `crates/embers-client/tests/repo_config.rs` load it.
 
 Run with an explicit config while developing:
 

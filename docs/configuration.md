@@ -342,3 +342,11 @@ set_terminal_features(#{ hyperlinks: true, passthrough: false });
 
 The names are `underline_styles`, `underline_color`, `hyperlinks` and
 `passthrough`. Capabilities the call does not name stay as detected.
+
+### Window title
+
+The client sets the host terminal's window title to the name of the session
+it shows (OSC 2), when it attaches and whenever it switches sessions or the
+session is renamed, like tmux with `set-titles on` and `set-titles-string
+'#S'`. It does not restore the previous title on exit; most terminals do that
+themselves.
