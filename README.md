@@ -12,6 +12,15 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Layout saved as it changes and panes restored after a crash or reboot, tmux-resurrect style
 - Scrollback, visible snapshots, search, and a vi-style copy mode with mouse selection (see
   [`docs/copy-mode.md`](docs/copy-mode.md))
+- A session/window/pane picker, a command prompt that runs the CLI's commands,
+  `display-message` and session environments, as in tmux (see
+  [`docs/commands.md`](docs/commands.md))
+- OSC 52 clipboard writes and tmux-style passthrough (`ESC P tmux; ... ESC \`) from programs in
+  panes to the outer terminal, for images and notifications (see
+  [`docs/configuration.md`](docs/configuration.md#passthrough))
+- Underline styles and colors, OSC 8 hyperlinks and passthrough sent only to outer terminals that
+  support them, detected when the client attaches (see
+  [`docs/configuration.md`](docs/configuration.md#the-host-terminal))
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
 - FlatBuffers protocol shared by the client and server crates
@@ -80,14 +89,24 @@ embers --socket /tmp/my-embers.sock list-sessions
 EMBERS_SOCKET=/tmp/my-embers.sock embers attach
 ```
 
+Windows are numbered from 0 unless a base index is set (`EMBERS_BASE_INDEX=1`,
+`--base-index 1`, or `set_base_index(1)` in the config), as with tmux's
+`base-index`. Closing a window renumbers the ones after it. See
+[`docs/commands.md`](docs/commands.md).
+
+The same commands can be typed at the client's command prompt, tmux's
+`prefix :`, bound with `action.command_prompt()`. See
+[`docs/commands.md`](docs/commands.md#command-prompt).
+
 Useful subcommand groups include:
 
-- `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`
+- `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`, `set-environment`, `show-environment`
 - `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`, `synchronize-panes`
 - `pane`: `split-window`, `list-panes`, `select-pane`, `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
+- `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
 - `server`: `kill-server` (stop the server and every program it runs)
 
 As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the

@@ -1,11 +1,16 @@
+pub mod chooser;
 pub mod client;
+pub mod command_prompt;
 pub mod config;
 pub mod configured_client;
 pub mod controller;
 pub mod copy_mode;
+pub mod format;
 pub mod grid;
 pub mod hints;
+pub mod host_terminal;
 pub mod input;
+pub mod numbering;
 pub mod presentation;
 mod pty_sizes;
 pub mod renderer;
@@ -17,21 +22,32 @@ pub mod state;
 pub mod testing;
 pub mod transport;
 
+pub use chooser::{Chooser, ChooserItem, ChooserRow, ChooserScope};
 pub use client::MuxClient;
+pub use command_prompt::{CommandContext, CommandPrompt, CommandRunner};
 pub use config::{
     BUILTIN_CONFIG_SOURCE, CONFIG_ENV_VAR, ConfigDiscoveryOptions, ConfigError, ConfigManager,
     ConfigManagerError, ConfigOrigin, DiscoveredConfig, LoadedConfigSource, config_file_in_dir,
     default_config_path, discover_config, load_config_source,
 };
-pub use configured_client::ConfiguredClient;
+pub use configured_client::{ConfiguredClient, DEFAULT_DISPLAY_TIME};
 pub use controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers};
+pub use format::{FormatContext, expand_format};
 pub use grid::{
     BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor, UnderlineStyle,
 };
+pub use host_terminal::{
+    HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies, TerminalFeatures,
+    detect_host_capabilities,
+};
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
-    KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, SEARCH_MODE,
-    SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
+    KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, PROMPT_MODE,
+    SEARCH_MODE, SELECT_MODE, TREE_MODE, encode_key, expand_leader, mode_disambiguates,
+    parse_key_sequence, resolve_key,
+};
+pub use numbering::{
+    BASE_INDEX_ENV_VAR, base_index_from_env, parse_base_index, window_number, window_position,
 };
 pub use presentation::{
     DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,
@@ -41,8 +57,8 @@ pub use renderer::Renderer;
 pub use scripting::{
     Action, BarSegment, BarSpec, BarTarget, BufferRef, BufferSpawnSpec, Context, DetachOnDestroy,
     EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingRef, FloatingSize, FloatingSpec,
-    LoadedConfig, ModeHooks, MouseSettings, NodeRef, NotifyLevel, PaletteError, RgbColor,
-    ScriptEngine, ScriptError, ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec,
+    LoadedConfig, ModeHooks, MouseSettings, NodeRef, NotifyLevel, PaletteError, PassthroughMode,
+    RgbColor, ScriptEngine, ScriptError, ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec,
     TabBarContext, TabInfo, TabSpec, TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;

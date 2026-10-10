@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-30f3e15c.js";
+            window.path_to_searchindex_js = "searchindex-16e21fbe.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -252,7 +252,7 @@ Description
 </div>
 
 <div group="index" id="index-Description" class="tabcontent" style="display: block;">
-Return the zero-based tab index.
+Return the zero-based tab index, as `action.select_tab` takes it.
 </div>
 
 </div>
@@ -274,6 +274,38 @@ Description
 
 <div group="is_active" id="is_active-Description" class="tabcontent" style="display: block;">
 Return whether the tab is active.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> number </h2>
+
+<pre><code class="language-rust ignore">fn number(tab: TabInfo) -&gt; int</code></pre>
+<div>
+<div class="tab">
+<button group="number" id="link-number-Description" class="tablinks active" onclick="openTab(event, &#39;number&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="number" id="link-number-Example" class="tablinks" onclick="openTab(event, &#39;number&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="number" id="number-Description" class="tabcontent" style="display: block;">
+Return the tab's window number: its index plus the base index set with
+`set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+the numbers match CLI targets such as `select-window -t work:2` and
+`action.select_window`.
+</div>
+
+<div group="number" id="number-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let label = `${tab.number()}:${tab.title()}`;
+</code></pre>
 </div>
 
 </div>

@@ -803,10 +803,25 @@ mod documented_ref_api {
         tab.title.clone()
     }
 
-    /// Return the zero-based tab index.
+    /// Return the zero-based tab index, as `action.select_tab` takes it.
     #[rhai_fn(name = "index")]
     pub fn tab_index(tab: &mut TabInfo) -> i64 {
         i64::try_from(tab.index).unwrap_or(i64::MAX)
+    }
+
+    /// Return the tab's window number: its index plus the base index set with
+    /// `set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+    /// the numbers match CLI targets such as `select-window -t work:2` and
+    /// `action.select_window`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = `${tab.number()}:${tab.title()}`;
+    /// ```
+    #[rhai_fn(name = "number")]
+    pub fn tab_number(tab: &mut TabInfo) -> i64 {
+        i64::try_from(tab.number).unwrap_or(i64::MAX)
     }
 
     /// Return whether the tab is active.
@@ -1078,6 +1093,245 @@ mod documented_action_api {
         }
     }
 
+    /// Open the command prompt (tmux `:`). Enter runs the typed line with the
+    /// same commands and options as the `embers` CLI, such as
+    /// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+    /// commands without `-t` apply to the current session, window and pane.
+    /// Up and Down browse earlier lines; Esc cancels.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>:", action.command_prompt());
+    /// ```
+    #[rhai_fn(name = "command_prompt")]
+    pub fn command_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: String::new(),
+            template: None,
+        }
+    }
+
+    /// Open the command prompt with `initial` already typed, like tmux
+    /// `command-prompt -I`. The text may use the formats `display_message`
+    /// accepts, such as `#W`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_with("split-window -- ")
+    /// ```
+    #[rhai_fn(name = "command_prompt_with")]
+    pub fn command_prompt_with(_: &mut ActionApi, initial: &str) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: initial.to_owned(),
+            template: None,
+        }
+    }
+
+    /// Open a prompt labelled `prompt` with `initial` typed (both may use
+    /// formats); Enter runs `template` with `%%` replaced by the input as one
+    /// word, like tmux `command-prompt -p prompt -I initial template`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+    /// ```
+    #[rhai_fn(name = "command_prompt_template")]
+    pub fn command_prompt_template(
+        _: &mut ActionApi,
+        prompt: &str,
+        initial: &str,
+        template: &str,
+    ) -> Action {
+        Action::CommandPrompt {
+            prompt: Some(prompt.to_owned()),
+            initial: initial.to_owned(),
+            template: Some(template.to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current window, starting from its current
+    /// name (tmux `prefix ,`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>,", action.rename_window_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_window_prompt")]
+    pub fn rename_window_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-window) ".to_owned()),
+            initial: "#W".to_owned(),
+            template: Some("rename-window -- %%".to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current session, starting from its
+    /// current name (tmux `prefix $`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>$", action.rename_session_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_session_prompt")]
+    pub fn rename_session_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-session) ".to_owned()),
+            initial: "#S".to_owned(),
+            template: Some("rename-session -- %%".to_owned()),
+        }
+    }
+
+    /// Open the picker on a tree of every session, window and pane, like
+    /// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+    /// expand and collapse, Enter switches to the selected item, `x` kills it
+    /// after asking, `/` or typing other text filters, and `q`/Esc closes.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>T", action.choose_tree());
+    /// ```
+    #[rhai_fn(name = "choose_tree")]
+    pub fn choose_tree(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Tree,
+        }
+    }
+
+    /// Open the picker with every session expanded to its windows, like tmux
+    /// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>\"", action.choose_window());
+    /// ```
+    #[rhai_fn(name = "choose_window")]
+    pub fn choose_window(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Windows,
+        }
+    }
+
+    /// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+    /// (`prefix s`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>S", action.choose_session());
+    /// ```
+    #[rhai_fn(name = "choose_session")]
+    pub fn choose_session(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Sessions,
+        }
+    }
+
+    /// Run a command line as if it was typed at the command prompt, like
+    /// binding a tmux command. Output and errors are shown in the status line.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+    /// ```
+    #[rhai_fn(name = "run_command")]
+    pub fn run_command(_: &mut ActionApi, command: &str) -> Action {
+        Action::RunCommand {
+            command: command.to_owned(),
+        }
+    }
+
+    /// Show a message in the status line for a few seconds, like tmux
+    /// `display-message`. The text may use the format variables `#S` (session),
+    /// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+    /// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+    /// for the focused pane; `##` is a literal `#`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("#S:#I #{pane_current_path}")
+    /// ```
+    #[rhai_fn(name = "display_message")]
+    pub fn display_message(_: &mut ActionApi, message: &str) -> Action {
+        Action::DisplayMessage {
+            message: message.to_owned(),
+            duration_ms: None,
+        }
+    }
+
+    /// Show a message in the status line for `duration_ms` milliseconds, like
+    /// tmux `display-message -d`. See `display_message(message)` for formats.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("saved", 1000)
+    /// ```
+    #[rhai_fn(return_raw, name = "display_message")]
+    pub fn display_message_for(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        message: &str,
+        duration_ms: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::DisplayMessage {
+                message: message.to_owned(),
+                duration_ms: Some(u32::try_from(duration_ms).map_err(|_| {
+                    super::runtime_error("display time must be between 0 and 4294967295 ms")
+                })?),
+            })
+        })
+    }
+
+    /// Set an environment variable for panes created later in the current
+    /// session (tmux `set-environment`). Pass `()` as the value to unset it.
+    /// Panes that already run keep their environment.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_environment("AWS_PROFILE", "staging")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_environment")]
+    pub fn set_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(false, name, value))
+    }
+
+    /// Set an environment variable for panes created later in every session
+    /// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+    /// session's own value wins over the global one.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_global_environment("EDITOR", "nvim")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_global_environment")]
+    pub fn set_global_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(true, name, value))
+    }
+
     /// Enter thumbs-style hint mode: label the matches in the visible pane and
     /// copy the selected one to the clipboard (OSC 52).
     ///
@@ -1178,6 +1432,29 @@ mod documented_action_api {
             Ok(Action::SelectTab {
                 tabs_node_id: Some(parse_node_id(tabs_node_id)?),
                 index: parse_index(index, "tab index")?,
+            })
+        })
+    }
+
+    /// Select a window (a root tab of the current session) by its number, which
+    /// counts from the base index set with `set_base_index` (0 when unset), like
+    /// tmux `select-window -t :N`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>1", action.select_window(1));
+    /// ```
+    #[rhai_fn(return_raw, name = "select_window")]
+    pub fn select_window(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        number: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SelectWindow {
+                number: u64::try_from(number)
+                    .map_err(|_| super::runtime_error("window number must be zero or greater"))?,
             })
         })
     }
@@ -3014,6 +3291,28 @@ fn parse_amount(value: i64, label: &str) -> ScriptResult<u16> {
         return Err(runtime_error(format!("{label} must be greater than zero")));
     }
     u16::try_from(value).map_err(|_| runtime_error(format!("{label} is too large")))
+}
+
+fn environment_action(global: bool, name: &str, value: Dynamic) -> ScriptResult<Action> {
+    if name.is_empty() || name.contains('=') {
+        return Err(runtime_error(format!(
+            "invalid environment variable name '{name}'"
+        )));
+    }
+    let value = if value.is_unit() {
+        None
+    } else {
+        Some(
+            value
+                .into_string()
+                .map_err(|_| runtime_error("environment value must be a string or ()"))?,
+        )
+    };
+    Ok(Action::SetEnvironment {
+        global,
+        name: name.to_owned(),
+        value,
+    })
 }
 
 fn parse_index(value: i64, label: &str) -> ScriptResult<usize> {

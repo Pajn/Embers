@@ -154,6 +154,32 @@ fn repository_config_smart_resize_resizes_other_panes_by_three_cells() {
 }
 
 #[test]
+fn repository_config_binds_tmux_prompt_keys() {
+    let engine = repository_config_engine();
+    let normal = &engine.loaded_config().bindings["normal"];
+    let target = |notation: &str| {
+        normal
+            .iter()
+            .find(|binding| binding.notation == notation)
+            .map(|binding| binding.target.clone())
+            .unwrap_or_else(|| panic!("{notation} is bound"))
+    };
+
+    assert!(matches!(
+        target("<leader>:").as_slice(),
+        [Action::CommandPrompt { template: None, .. }]
+    ));
+    assert!(matches!(
+        target("<leader>,").as_slice(),
+        [Action::CommandPrompt { template: Some(template), .. }] if template.starts_with("rename-window")
+    ));
+    assert!(matches!(
+        target("<leader>$").as_slice(),
+        [Action::CommandPrompt { template: Some(template), .. }] if template.starts_with("rename-session")
+    ));
+}
+
+#[test]
 fn repository_config_tab_bar_flags_synchronized_windows() {
     let engine = repository_config_engine();
     let mut state = demo_state();

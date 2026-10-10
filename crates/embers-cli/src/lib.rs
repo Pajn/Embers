@@ -17,8 +17,9 @@ use std::process::{Command as ProcessCommand, Stdio};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
-    ClientState, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
-    drawn_viewport, spawn_pty_size,
+    ClientState, CommandContext, CommandRunner, FormatContext, NavigationDirection, PanePlacement,
+    PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size, window_number,
+    window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -35,6 +36,9 @@ use embers_protocol::{
 use embers_server::{BUFFER_ENV_VAR, SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 use tracing::warn;
+
+/// What `display-message` shows without a message, like tmux's default.
+const DEFAULT_DISPLAY_MESSAGE: &str = "[#S] #I:#W, current pane #D - (#{pane_current_command})";
 
 /// Environment variable selecting the tracing filter (e.g. `info`, `embers=debug`).
 pub const EMBERS_LOG_ENV_VAR: &str = "EMBERS_LOG";
@@ -55,6 +59,11 @@ pub struct Cli {
     pub log: Option<String>,
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Number windows from this index, like tmux `base-index`. Defaults to
+    /// `EMBERS_BASE_INDEX`; when neither is set, window numbers start at 0 and
+    /// numeric targets are accepted as 0- or 1-based unless that is ambiguous.
+    #[arg(long = "base-index", global = true, value_name = "N", value_parser = parse_base_index_arg)]
+    pub base_index: Option<u32>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -83,6 +92,20 @@ impl Cli {
         }
         "info".to_owned()
     }
+
+    /// The window base index from `--base-index`, then `EMBERS_BASE_INDEX`.
+    pub fn base_index(&self) -> Option<u32> {
+        self.base_index.or_else(embers_client::base_index_from_env)
+    }
+}
+
+fn parse_base_index_arg(value: &str) -> std::result::Result<u32, String> {
+    embers_client::parse_base_index(value).ok_or_else(|| {
+        format!(
+            "expected a number from 0 to {}",
+            embers_client::numbering::MAX_BASE_INDEX
+        )
+    })
 }
 
 #[derive(Debug, Subcommand)]
@@ -166,11 +189,15 @@ pub enum Command {
     },
     #[command(name = "list-clients")]
     ListClients,
+    /// Detach a client. From the command prompt the client defaults to the
+    /// one the prompt belongs to.
     #[command(name = "detach-client")]
-    DetachClient { client_id: u64 },
+    DetachClient { client_id: Option<u64> },
+    /// Show session `-t` on a client. From the command prompt the client
+    /// defaults to the one the prompt belongs to.
     #[command(name = "switch-client")]
     SwitchClient {
-        client_id: u64,
+        client_id: Option<u64>,
         #[arg(short = 't', long = "target")]
         target: String,
     },
@@ -315,6 +342,48 @@ pub enum Command {
         #[arg(long)]
         detach: bool,
     },
+    /// Show a message in the status line of the clients showing the target
+    /// pane's session (or of client `-c`) for a few seconds, like tmux. `-p`
+    /// prints it instead. The message may use `#S`, `#I`, `#W`, `#D`, `#T`,
+    /// `#{pane_current_path}` and `#{pane_current_command}`.
+    #[command(name = "display-message", visible_alias = "display")]
+    DisplayMessage {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(short = 'c', long = "client")]
+        client: Option<NonZeroU64>,
+        #[arg(short = 'p', long = "print")]
+        print: bool,
+        /// How long to show the message, in milliseconds.
+        #[arg(short = 'd', long = "duration", value_name = "MS")]
+        duration: Option<u32>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        message: Vec<String>,
+    },
+    /// Set an environment variable for panes created later in a session, or in
+    /// every session with `-g`, like tmux. `-u` unsets it.
+    #[command(name = "set-environment", visible_alias = "setenv")]
+    SetEnvironment {
+        #[arg(short = 't', long = "target", conflicts_with = "global")]
+        target: Option<String>,
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        #[arg(short = 'u', long = "unset")]
+        unset: bool,
+        name: String,
+        #[arg(conflicts_with = "unset", allow_hyphen_values = true)]
+        value: Option<String>,
+    },
+    /// Print a session's environment (or the global one with `-g`) as
+    /// `NAME=VALUE` lines, or one variable when NAME is given.
+    #[command(name = "show-environment", visible_alias = "showenv")]
+    ShowEnvironment {
+        #[arg(short = 't', long = "target", conflicts_with = "global")]
+        target: Option<String>,
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -446,8 +515,9 @@ pub enum JoinPlacementArg {
     TabAfter,
 }
 
-async fn execute(socket: &Path, command: Command) -> Result<String> {
+async fn execute(socket: &Path, command: Command, base_index: Option<u32>) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
+    connection.base_index = base_index;
     connection.pane_buffer = pane_buffer(
         std::env::var(BUFFER_ENV_VAR).ok().as_deref(),
         std::env::var_os(SOCKET_ENV_VAR).as_deref(),
@@ -585,8 +655,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(format_clients(&clients, &sessions))
         }
         Command::DetachClient { client_id } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             connection
                 .request(ClientMessage::Client(ClientRequest::Detach {
                     request_id: new_request_id(),
@@ -596,8 +665,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(String::new())
         }
         Command::SwitchClient { client_id, target } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             let session = connection.resolve_session_record(Some(&target)).await?;
             match connection
                 .request(ClientMessage::Client(ClientRequest::Switch {
@@ -963,7 +1031,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let snapshot = connection.session_snapshot(session.id).await?;
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, None, size)
+                .create_buffer(Some(window_title.clone()), command, None, size, session.id)
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -989,13 +1057,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
-            Ok(format!("{index}\t{title}"))
+            let number = window_number(index as usize, connection.base_index);
+            Ok(format!("{number}\t{title}"))
         }
         Command::ListWindows { target } => {
             let snapshot = connection
                 .resolve_session_snapshot(target.as_deref())
                 .await?;
-            Ok(format_windows(&snapshot)?)
+            Ok(format_windows(&snapshot, connection.base_index)?)
         }
         Command::SelectWindow { target } => {
             let window = connection.resolve_window(Some(&target)).await?;
@@ -1078,7 +1147,13 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 },
             );
             let buffer = connection
-                .create_buffer(Some(default_title(&command, "pane")), command, None, size)
+                .create_buffer(
+                    Some(default_title(&command, "pane")),
+                    command,
+                    None,
+                    size,
+                    pane.snapshot.session.id,
+                )
                 .await?;
             let response = connection
                 .request(ClientMessage::Node(NodeRequest::Split {
@@ -1257,7 +1332,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let snapshot = connection.session_snapshot(session.id).await?;
             let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, None, size)
+                .create_buffer(Some(popup_title.clone()), command, None, size, session.id)
                 .await?;
             let response = connection
                 .request(ClientMessage::Floating(FloatingRequest::Create {
@@ -1287,6 +1362,137 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             .await?;
             Ok(popup.id.to_string())
         }
+        Command::DisplayMessage {
+            target,
+            client,
+            print,
+            duration,
+            message,
+        } => {
+            let client = client.or(connection.default_client);
+            let template = if message.is_empty() {
+                DEFAULT_DISPLAY_MESSAGE.to_owned()
+            } else {
+                message.join(" ")
+            };
+            let pane = match (&target, client) {
+                (None, Some(client_id)) => {
+                    let session_id = connection
+                        .client_record(client_id)
+                        .await?
+                        .current_session_id
+                        .ok_or_else(|| {
+                            MuxError::not_found(format!("client {client_id} shows no session"))
+                        })?;
+                    let snapshot = connection.session_snapshot(session_id).await?;
+                    let pane_id = snapshot
+                        .session
+                        .focused_leaf_id
+                        .ok_or_else(|| MuxError::not_found("session has no focused pane"))?;
+                    resolved_pane(snapshot, pane_id)?
+                }
+                _ => connection.resolve_pane(target.as_deref()).await?,
+            };
+            let session_id = pane.snapshot.session.id;
+            let mut state = ClientState::default();
+            state.apply_session_snapshot(pane.snapshot);
+            let text = FormatContext::from_state(
+                &state,
+                session_id,
+                Some(pane.leaf_id),
+                connection.base_index,
+            )
+            .map(|context| expand_format(&template, &context))
+            .unwrap_or(template);
+            if print {
+                return Ok(text);
+            }
+            let response = connection
+                .request(ClientMessage::Client(ClientRequest::DisplayMessage {
+                    request_id: new_request_id(),
+                    client_id: client,
+                    session_id: client.is_none().then_some(session_id),
+                    message: text,
+                    duration_ms: duration.unwrap_or(0),
+                }))
+                .await?;
+            expect_ok(response, "display-message")?;
+            Ok(String::new())
+        }
+        Command::SetEnvironment {
+            target,
+            global,
+            unset,
+            name,
+            value,
+        } => {
+            if !unset && value.is_none() {
+                return Err(MuxError::invalid_input(format!(
+                    "set-environment {name} requires a value (or -u to unset it)"
+                )));
+            }
+            let session_id = if global {
+                None
+            } else {
+                Some(
+                    connection
+                        .resolve_session_record(target.as_deref())
+                        .await?
+                        .id,
+                )
+            };
+            let response = connection
+                .request(ClientMessage::Session(SessionRequest::SetEnvironment {
+                    request_id: new_request_id(),
+                    session_id,
+                    name,
+                    value,
+                }))
+                .await?;
+            expect_ok(response, "set-environment")?;
+            Ok(String::new())
+        }
+        Command::ShowEnvironment {
+            target,
+            global,
+            name,
+        } => {
+            let session_id = if global {
+                None
+            } else {
+                Some(
+                    connection
+                        .resolve_session_record(target.as_deref())
+                        .await?
+                        .id,
+                )
+            };
+            let env = match connection
+                .request(ClientMessage::Session(SessionRequest::ShowEnvironment {
+                    request_id: new_request_id(),
+                    session_id,
+                }))
+                .await?
+            {
+                ServerResponse::Environment(response) => response.env,
+                other => {
+                    return Err(MuxError::protocol(format!(
+                        "unexpected response to show-environment: {other:?}"
+                    )));
+                }
+            };
+            match name {
+                Some(name) => env
+                    .get(&name)
+                    .map(|value| format!("{name}={value}"))
+                    .ok_or_else(|| MuxError::not_found(format!("unknown variable: {name}"))),
+                None => Ok(env
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")),
+            }
+        }
         Command::KillPopup { target, detach } => {
             let popup = connection.resolve_popup(target.as_deref()).await?;
             let snapshot = connection.session_snapshot(popup.session_id).await?;
@@ -1307,6 +1513,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
 
 pub async fn run(cli: Cli) -> Result<()> {
     let log_filter = cli.log_filter();
+    let base_index = cli.base_index();
     let Cli {
         socket,
         config,
@@ -1358,7 +1565,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Some(Command::KillServer) => kill_server(&socket).await,
                 Some(command) => {
                     ensure_server_process(&socket, &log_filter).await?;
-                    let output = execute(&socket, command).await?;
+                    let output = execute(&socket, command, base_index).await?;
                     if !output.is_empty() {
                         println!("{output}");
                     }
@@ -1551,7 +1758,7 @@ async fn kill_server(socket_path: &Path) -> Result<()> {
             socket_path.display()
         )));
     }
-    execute(socket_path, Command::KillServer).await?;
+    execute(socket_path, Command::KillServer, None).await?;
     let deadline = tokio::time::Instant::now() + KILL_SERVER_TIMEOUT;
     while server_is_available(socket_path).await {
         if tokio::time::Instant::now() >= deadline {
@@ -1750,9 +1957,71 @@ impl Drop for ServerPidFile {
     }
 }
 
+/// Runs command prompt lines (tmux `:`) for the interactive client. The words
+/// are parsed with the CLI's own definitions and executed like CLI commands
+/// over a connection of their own, with the client's session and the client
+/// itself as the default targets.
+pub struct PromptCommandRunner {
+    socket_path: PathBuf,
+}
+
+impl PromptCommandRunner {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for PromptCommandRunner {
+    async fn run(&self, argv: Vec<String>, context: CommandContext) -> Result<String> {
+        let cli = Cli::try_parse_from(std::iter::once("embers".to_owned()).chain(argv))
+            .map_err(|error| MuxError::invalid_input(clap_error_summary(&error)))?;
+        let base_index = cli.base_index.or(context.base_index);
+        let command = cli
+            .command
+            .ok_or_else(|| MuxError::invalid_input("no command given"))?;
+        if let Some(name) = interactive_command_name(&command) {
+            return Err(MuxError::invalid_input(format!(
+                "{name} cannot be run from the command prompt"
+            )));
+        }
+        let mut connection = CliConnection::connect(&self.socket_path).await?;
+        connection.base_index = base_index;
+        connection.default_session = context.session_id;
+        connection.default_client = context.client_id.and_then(NonZeroU64::new);
+        execute_command(&mut connection, command).await
+    }
+}
+
+/// The one-line gist of a clap error, for the status line.
+fn clap_error_summary(error: &clap::Error) -> String {
+    let rendered = error.to_string();
+    let line = rendered.lines().next().unwrap_or_default();
+    line.strip_prefix("error: ").unwrap_or(line).to_owned()
+}
+
+fn interactive_command_name(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Attach { .. } => Some("attach"),
+        Command::Serve => Some("__serve"),
+        Command::RuntimeKeeper { .. } => Some("__runtime-keeper"),
+        Command::Automation { .. } => Some("automation"),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
+    /// Window base index (tmux `base-index`); `None` keeps the legacy
+    /// numbering described in [`embers_client::numbering`].
+    base_index: Option<u32>,
+    /// The session commands without a session target apply to, when set by
+    /// the command prompt; otherwise such commands need the only session.
+    default_session: Option<SessionId>,
+    /// The client that client commands apply to by default, when set by the
+    /// command prompt.
+    default_client: Option<NonZeroU64>,
     /// The buffer of the pane the command runs in, when it runs inside a pane
     /// of this server (see [`pane_buffer`]). Commands given no target act on
     /// that pane, its window and its session, like tmux with `TMUX_PANE`.
@@ -1779,8 +2048,21 @@ impl CliConnection {
             .map_err(|error| MuxError::transport(error.to_string()))?;
         Ok(Self {
             client,
+            base_index: None,
+            default_session: None,
+            default_client: None,
             pane_buffer: None,
         })
+    }
+
+    fn client_id_or_default(&self, client_id: Option<u64>) -> Result<NonZeroU64> {
+        match client_id {
+            Some(client_id) => NonZeroU64::new(client_id)
+                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero")),
+            None => self
+                .default_client
+                .ok_or_else(|| MuxError::invalid_input("a client id is required")),
+        }
     }
 
     /// Where the pane the command runs in is shown, if it runs in one.
@@ -1847,6 +2129,21 @@ impl CliConnection {
         }
     }
 
+    async fn client_record(&mut self, client_id: NonZeroU64) -> Result<ClientRecord> {
+        match self
+            .request(ClientMessage::Client(ClientRequest::Get {
+                request_id: new_request_id(),
+                client_id: Some(client_id),
+            }))
+            .await?
+        {
+            ServerResponse::Client(response) => Ok(response.client),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to client get: {other:?}"
+            ))),
+        }
+    }
+
     /// End the programs of buffers whose views a kill command just closed.
     /// Each is detached by then; one that is attached again by the time it is
     /// checked is shown somewhere else and keeps running, and one whose program
@@ -1906,6 +2203,7 @@ impl CliConnection {
         command: Vec<String>,
         cwd: Option<String>,
         size: Option<PtySize>,
+        session_id: SessionId,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -1915,6 +2213,7 @@ impl CliConnection {
                 cwd,
                 env: Default::default(),
                 size,
+                session_id: Some(session_id),
             }))
             .await?
         {
@@ -1977,6 +2276,15 @@ impl CliConnection {
                 .into_iter()
                 .find(|session| session.name == target)
                 .ok_or_else(|| MuxError::not_found(format!("session '{target}' was not found"))),
+            None if self
+                .default_session
+                .is_some_and(|id| sessions.iter().any(|session| session.id == id)) =>
+            {
+                Ok(sessions
+                    .into_iter()
+                    .find(|session| Some(session.id) == self.default_session)
+                    .expect("checked default session"))
+            }
             None => match sessions.as_slice() {
                 [session] => Ok(session.clone()),
                 [] => Err(MuxError::not_found("no sessions exist")),
@@ -2016,7 +2324,7 @@ impl CliConnection {
             .await?;
         let (index, child_id) = {
             if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref())?;
+                let index = resolve_window_index(root_tabs, selector.as_deref(), self.base_index)?;
                 let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
                     MuxError::not_found(format!(
                         "window index {index} is not present in session {}",
@@ -2026,7 +2334,8 @@ impl CliConnection {
                 (index, tab.child_id)
             } else {
                 let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index = resolve_single_window_index(&title, selector.as_deref())?;
+                let index =
+                    resolve_single_window_index(&title, selector.as_deref(), self.base_index)?;
                 (index, snapshot.session.root_node_id)
             }
         };
@@ -2471,7 +2780,7 @@ fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
         .unwrap_or_else(|| session_id.to_string())
 }
 
-fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
+fn format_windows(snapshot: &SessionSnapshot, base_index: Option<u32>) -> Result<String> {
     if let Some((_, tabs)) = root_tabs(snapshot)? {
         Ok(tabs
             .tabs
@@ -2479,7 +2788,8 @@ fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
             .enumerate()
             .map(|(index, tab)| {
                 format!(
-                    "{index}\t{}\t{}",
+                    "{}\t{}\t{}",
+                    window_number(index, base_index),
                     usize::from(u32::try_from(index).ok() == Some(tabs.active)),
                     tab.title
                 )
@@ -2488,7 +2798,7 @@ fn format_windows(snapshot: &SessionSnapshot) -> Result<String> {
             .join("\n"))
     } else {
         let title = window_title(snapshot, snapshot.session.root_node_id)?;
-        Ok(format!("0\t1\t{title}"))
+        Ok(format!("{}\t1\t{title}", window_number(0, base_index)))
     }
 }
 
@@ -2612,10 +2922,24 @@ fn visible_leaf_ids(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<Vec<N
     }
 }
 
-fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&str>) -> Result<u32> {
+fn resolve_window_index(
+    tabs: &embers_protocol::TabsRecord,
+    selector: Option<&str>,
+    base_index: Option<u32>,
+) -> Result<u32> {
     let Some(selector) = selector else {
         return Ok(tabs.active);
     };
+
+    if let Some(base_index) = base_index
+        && let Ok(number) = selector.parse::<u64>()
+    {
+        return window_position(number, tabs.tabs.len(), base_index)
+            .map(|position| u32::try_from(position).expect("tab index fits into protocol width"))
+            .ok_or_else(|| {
+                MuxError::not_found(format!("window index '{selector}' is out of range"))
+            });
+    }
 
     if let Ok(index) = selector.parse::<u32>() {
         let mut candidates = Vec::new();
@@ -2659,10 +2983,24 @@ fn resolve_window_index(tabs: &embers_protocol::TabsRecord, selector: Option<&st
     }
 }
 
-fn resolve_single_window_index(title: &str, selector: Option<&str>) -> Result<u32> {
+fn resolve_single_window_index(
+    title: &str,
+    selector: Option<&str>,
+    base_index: Option<u32>,
+) -> Result<u32> {
     let Some(selector) = selector else {
         return Ok(0);
     };
+
+    if let Some(base_index) = base_index
+        && let Ok(number) = selector.parse::<u64>()
+    {
+        return window_position(number, 1, base_index)
+            .map(|_| 0)
+            .ok_or_else(|| {
+                MuxError::not_found(format!("window index '{selector}' is out of range"))
+            });
+    }
 
     if let Ok(index) = selector.parse::<u32>() {
         return match index {
@@ -2948,7 +3286,8 @@ mod tests {
     use super::{
         BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
         JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
-        pane_buffer, resolve_window_index, split_scoped_required, split_scoped_target,
+        pane_buffer, resolve_single_window_index, resolve_window_index, split_scoped_required,
+        split_scoped_target,
     };
 
     #[test]
@@ -3071,16 +3410,46 @@ mod tests {
             ],
         };
 
-        let error = resolve_window_index(&tabs, Some("1")).expect_err("index is ambiguous");
+        let error = resolve_window_index(&tabs, Some("1"), None).expect_err("index is ambiguous");
         assert!(
             error
                 .to_string()
                 .contains("ambiguous between 0-based and 1-based")
         );
         assert_eq!(
-            resolve_window_index(&tabs, Some("0")).expect("zero resolves"),
+            resolve_window_index(&tabs, Some("0"), None).expect("zero resolves"),
             0
         );
+    }
+
+    #[test]
+    fn numeric_window_indices_count_from_a_set_base_index() {
+        let tabs = TabsRecord {
+            active: 0,
+            tabs: ["one", "two"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, title)| TabRecord {
+                    title: title.to_owned(),
+                    child_id: NodeId(index as u64 + 1),
+                    synchronize_panes: false,
+                })
+                .collect(),
+        };
+
+        assert_eq!(resolve_window_index(&tabs, Some("1"), Some(1)).unwrap(), 0);
+        assert_eq!(resolve_window_index(&tabs, Some("2"), Some(1)).unwrap(), 1);
+        assert!(resolve_window_index(&tabs, Some("0"), Some(1)).is_err());
+        assert_eq!(resolve_window_index(&tabs, Some("1"), Some(0)).unwrap(), 1);
+        assert_eq!(
+            resolve_window_index(&tabs, Some("two"), Some(1)).unwrap(),
+            1
+        );
+        assert_eq!(
+            resolve_single_window_index("solo", Some("1"), Some(1)).unwrap(),
+            0
+        );
+        assert!(resolve_single_window_index("solo", Some("0"), Some(1)).is_err());
     }
 
     #[test]

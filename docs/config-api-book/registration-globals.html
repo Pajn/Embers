@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-30f3e15c.js";
+            window.path_to_searchindex_js = "searchindex-16e21fbe.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -277,6 +277,88 @@ Attach a callback to an emitted event such as `buffer_bell`.
 
 <div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
     
+<h2 class="func-name"> <code>fn</code> set_allow_passthrough </h2>
+
+<pre><code class="language-rust ignore">fn set_allow_passthrough(mode: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Description" class="tablinks active" onclick="openTab(event, &#39;set_allow_passthrough&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Example" class="tablinks" onclick="openTab(event, &#39;set_allow_passthrough&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Description" class="tabcontent" style="display: block;">
+Choose which panes may write to the host terminal through tmux
+passthrough, like tmux's `allow-passthrough`.
+<p>Programs that run under tmux wrap sequences meant for the outer
+terminal, such as kitty graphics images or desktop notifications, as
+<code>ESC P tmux; ... ESC \</code>. Embers unwraps them and writes them to the
+terminal running the client, with its cursor at the pane’s cursor so
+images land where the program put them. Kitty graphics commands sent
+without the wrapper are passed on the same way.</p>
+<ul>
+<li><code>"on"</code> (the default): only from panes that are on screen.</li>
+<li><code>"all"</code>: from every pane in the client’s session, on screen or not.
+Sequences from a pane that is not on screen are written without
+moving the cursor.</li>
+<li><code>"off"</code>: drop them.</li>
+</ul>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_allow_passthrough("all");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_base_index </h2>
+
+<pre><code class="language-rust ignore">fn set_base_index(index: int)</code></pre>
+<div>
+<div class="tab">
+<button group="set_base_index" id="link-set_base_index-Description" class="tablinks active" onclick="openTab(event, &#39;set_base_index&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_base_index" id="link-set_base_index-Example" class="tablinks" onclick="openTab(event, &#39;set_base_index&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_base_index" id="set_base_index-Description" class="tabcontent" style="display: block;">
+Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+<p>Windows are a session’s root tabs. Their numbers are what
+<code>TabInfo.number()</code> gives tab bar formatters and what
+<code>action.select_window</code> takes. Windows are always numbered without gaps:
+closing one renumbers the windows after it, like tmux with
+<code>renumber-windows on</code>.</p>
+<p>This setting covers the client and the commands it runs from the command
+prompt. The <code>embers</code> CLI reads <code>EMBERS_BASE_INDEX</code> (or <code>--base-index</code>)
+instead; set that variable where the server and your shells start to use
+the same numbering everywhere. Without this call the client uses
+<code>EMBERS_BASE_INDEX</code> when it is set, and numbers windows from 0 otherwise.</p>
+</div>
+
+<div group="set_base_index" id="set_base_index-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_base_index(1);
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
 <h2 class="func-name"> <code>fn</code> set_clipboard </h2>
 
 <pre><code class="language-rust ignore">fn set_clipboard(enabled: bool)</code></pre>
@@ -371,6 +453,49 @@ Set the leader sequence used in binding notations.
 
 <div group="set_leader" id="set_leader-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_leader("&lt;C-a&gt;");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
+
+<pre><code class="language-rust ignore">fn set_terminal_features(features: Map)</code></pre>
+<div>
+<div class="tab">
+<button group="set_terminal_features" id="link-set_terminal_features-Description" class="tablinks active" onclick="openTab(event, &#39;set_terminal_features&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_terminal_features" id="link-set_terminal_features-Example" class="tablinks" onclick="openTab(event, &#39;set_terminal_features&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Description" class="tabcontent" style="display: block;">
+Say what the terminal running the client supports, overriding what
+Embers detected when it attached.
+<p>Embers asks the terminal at attach and otherwise goes by <code>TERM</code> and
+<code>TERM_PROGRAM</code>, and leaves out what it cannot confirm. This sets each
+named capability on (<code>true</code>) or off (<code>false</code>); capabilities not named
+stay as detected. Like tmux’s <code>terminal-features</code>.</p>
+<ul>
+<li><code>underline_styles</code>: double, curly, dotted and dashed underlines
+(<code>CSI 4:n m</code>). Without it every underline is plain.</li>
+<li><code>underline_color</code>: colored underlines (<code>CSI 58:...m</code>). Without it
+underlines take the text color.</li>
+<li><code>hyperlinks</code>: OSC 8 links. Without it links are plain text.</li>
+<li><code>passthrough</code>: sequences programs send for the terminal, such as
+images (see <code>set_allow_passthrough</code>). Without it they are dropped.</li>
+</ul>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_terminal_features(#{ hyperlinks: true, passthrough: false });
 </code></pre>
 </div>
 

@@ -1,6 +1,6 @@
 use embers_client::{
-    PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind, SelectionPoint,
-    SelectionState,
+    HostCapabilities, PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind,
+    SelectionPoint, SelectionState,
 };
 use embers_core::{
     CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
@@ -526,6 +526,59 @@ fn renders_osc8_hyperlinks_and_closes_them() {
             "unbalanced OSC 8 in {line:?}"
         );
     }
+}
+
+#[test]
+fn hosts_without_support_get_plain_underlines_and_no_links() {
+    let mut curly = styled_line("diag", TermColor::Default, CellAttrs::CURLY_UNDERLINE);
+    curly.runs[0].underline_color = TermColor::Indexed(3);
+    let linked = linked_line(
+        "docs here",
+        4,
+        Hyperlink {
+            id: None,
+            uri: "https://example.com/docs".to_owned(),
+        },
+    );
+    let grid = render_focused_with_lines(vec![curly, linked]);
+
+    let ansi = grid.ansi_lines_for(HostCapabilities::NONE).join("\n");
+    assert!(
+        ansi.contains("\x1b[4mdiag"),
+        "expected a plain underline in {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[4:"),
+        "underline style leaked: {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[58"),
+        "underline color leaked: {ansi:?}"
+    );
+    assert!(!ansi.contains("\x1b]8;"), "hyperlink leaked: {ansi:?}");
+    assert!(ansi.contains("docs here"));
+
+    // Each capability is independent: styles without colors.
+    let ansi = grid
+        .ansi_lines_for(HostCapabilities {
+            underline_styles: true,
+            ..HostCapabilities::NONE
+        })
+        .join("\n");
+    assert!(
+        ansi.contains("\x1b[4:3mdiag"),
+        "expected a curly underline in {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[58"),
+        "underline color leaked: {ansi:?}"
+    );
+
+    // Full support is what `ansi_lines` renders.
+    assert_eq!(
+        grid.ansi_lines_for(HostCapabilities::ALL),
+        grid.ansi_lines()
+    );
 }
 
 #[test]

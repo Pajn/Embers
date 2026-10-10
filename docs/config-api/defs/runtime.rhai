@@ -171,6 +171,38 @@ fn cancel_selection(_: ActionApi) -> Action;
 /// Chain multiple actions into one composite action.
 fn chain(_: ActionApi, actions: array) -> Action;
 
+/// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+/// (`prefix s`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>S", action.choose_session());
+/// ```
+fn choose_session(_: ActionApi) -> Action;
+
+/// Open the picker on a tree of every session, window and pane, like
+/// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+/// expand and collapse, Enter switches to the selected item, `x` kills it
+/// after asking, `/` or typing other text filters, and `q`/Esc closes.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>T", action.choose_tree());
+/// ```
+fn choose_tree(_: ActionApi) -> Action;
+
+/// Open the picker with every session expanded to its windows, like tmux
+/// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>\"", action.choose_window());
+/// ```
+fn choose_window(_: ActionApi) -> Action;
+
 /// Clear any partially-entered key sequence.
 fn clear_pending_keys(_: ActionApi) -> Action;
 
@@ -187,6 +219,41 @@ fn close_node(_: ActionApi, node_id: int) -> Action;
 /// Close the currently focused view. Its buffer keeps running, detached;
 /// use `kill_view` to end it.
 fn close_view(_: ActionApi) -> Action;
+
+/// Open the command prompt (tmux `:`). Enter runs the typed line with the
+/// same commands and options as the `embers` CLI, such as
+/// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+/// commands without `-t` apply to the current session, window and pane.
+/// Up and Down browse earlier lines; Esc cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>:", action.command_prompt());
+/// ```
+fn command_prompt(_: ActionApi) -> Action;
+
+/// Open a prompt labelled `prompt` with `initial` typed (both may use
+/// formats); Enter runs `template` with `%%` replaced by the input as one
+/// word, like tmux `command-prompt -p prompt -I initial template`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+/// ```
+fn command_prompt_template(_: ActionApi, prompt: string, initial: string, template: string) -> Action;
+
+/// Open the command prompt with `initial` already typed, like tmux
+/// `command-prompt -I`. The text may use the formats `display_message`
+/// accepts, such as `#W`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_with("split-window -- ")
+/// ```
+fn command_prompt_with(_: ActionApi, initial: string) -> Action;
 
 /// Finalize the active search, keep the current match and cursor position, and leave search
 /// mode with the committed result in place.
@@ -289,6 +356,29 @@ fn detach_buffer(_: ActionApi) -> Action;
 
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
+
+/// Show a message in the status line for a few seconds, like tmux
+/// `display-message`. The text may use the format variables `#S` (session),
+/// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+/// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+/// for the focused pane; `##` is a literal `#`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("#S:#I #{pane_current_path}")
+/// ```
+fn display_message(_: ActionApi, message: string) -> Action;
+
+/// Show a message in the status line for `duration_ms` milliseconds, like
+/// tmux `display-message -d`. See `display_message(message)` for formats.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("saved", 1000)
+/// ```
+fn display_message(_: ActionApi, message: string, duration_ms: int) -> Action;
 
 /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
 /// following output and a cursor appears at the program's cursor; copy-mode
@@ -478,6 +568,26 @@ fn prev_session(_: ActionApi) -> Action;
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
+/// Prompt for a new name for the current session, starting from its
+/// current name (tmux `prefix $`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>$", action.rename_session_prompt());
+/// ```
+fn rename_session_prompt(_: ActionApi) -> Action;
+
+/// Prompt for a new name for the current window, starting from its current
+/// name (tmux `prefix ,`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>,", action.rename_window_prompt());
+/// ```
+fn rename_window_prompt(_: ActionApi) -> Action;
+
 /// Replace the focused node with a new tree.
 fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action;
 
@@ -514,6 +624,16 @@ fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
 fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
+
+/// Run a command line as if it was typed at the command prompt, like
+/// binding a tmux command. Output and errors are shown in the status line.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+/// ```
+fn run_command(_: ActionApi, command: string) -> Action;
 
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;
@@ -584,6 +704,17 @@ fn select_other_end(_: ActionApi) -> Action;
 /// Select a tab by index in a specific tabs node.
 fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action;
 
+/// Select a window (a root tab of the current session) by its number, which
+/// counts from the base index set with `set_base_index` (0 when unset), like
+/// tmux `select-window -t :N`.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>1", action.select_window(1));
+/// ```
+fn select_window(_: ActionApi, number: int) -> Action;
+
 /// Send a string of bytes to a specific buffer.
 fn send_bytes(_: ActionApi, buffer_id: int, bytes: string) -> Action;
 
@@ -610,6 +741,28 @@ fn send_keys(_: ActionApi, buffer_id: int, notation: string) -> Action;
 
 /// Send a key notation sequence to the focused buffer.
 fn send_keys_current(_: ActionApi, notation: string) -> Action;
+
+/// Set an environment variable for panes created later in the current
+/// session (tmux `set-environment`). Pass `()` as the value to unset it.
+/// Panes that already run keep their environment.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_environment("AWS_PROFILE", "staging")
+/// ```
+fn set_environment(_: ActionApi, name: string, value: ?) -> Action;
+
+/// Set an environment variable for panes created later in every session
+/// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+/// session's own value wins over the global one.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_global_environment("EDITOR", "nvim")
+/// ```
+fn set_global_environment(_: ActionApi, name: string, value: ?) -> Action;
 
 /// Turn tmux-style `synchronize-panes` on or off for the active window.
 ///
@@ -777,7 +930,7 @@ fn id(node: NodeRef) -> int;
 /// Return the numeric session id.
 fn id(session: SessionRef) -> int;
 
-/// Return the zero-based tab index.
+/// Return the zero-based tab index, as `action.select_tab` takes it.
 fn index(tab: TabInfo) -> int;
 
 /// Return whether the tab is active.
@@ -840,6 +993,18 @@ fn node_id(buffer: BufferRef) -> ?;
 ///
 /// ReturnType: `int | ()`
 fn node_id(event: EventInfo) -> ?;
+
+/// Return the tab's window number: its index plus the base index set with
+/// `set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+/// the numbers match CLI targets such as `select-window -t work:2` and
+/// `action.select_window`.
+///
+/// # Example
+///
+/// ```rhai
+/// let label = `${tab.number()}:${tab.title()}`;
+/// ```
+fn number(tab: TabInfo) -> int;
 
 /// Return the parent node id, if any.
 ///

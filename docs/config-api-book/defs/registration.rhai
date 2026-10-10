@@ -122,6 +122,38 @@ fn cancel_selection(_: ActionApi) -> Action;
 /// Chain multiple actions into one composite action.
 fn chain(_: ActionApi, actions: array) -> Action;
 
+/// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+/// (`prefix s`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>S", action.choose_session());
+/// ```
+fn choose_session(_: ActionApi) -> Action;
+
+/// Open the picker on a tree of every session, window and pane, like
+/// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+/// expand and collapse, Enter switches to the selected item, `x` kills it
+/// after asking, `/` or typing other text filters, and `q`/Esc closes.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>T", action.choose_tree());
+/// ```
+fn choose_tree(_: ActionApi) -> Action;
+
+/// Open the picker with every session expanded to its windows, like tmux
+/// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>\"", action.choose_window());
+/// ```
+fn choose_window(_: ActionApi) -> Action;
+
 /// Clear any partially-entered key sequence.
 fn clear_pending_keys(_: ActionApi) -> Action;
 
@@ -138,6 +170,41 @@ fn close_node(_: ActionApi, node_id: int) -> Action;
 /// Close the currently focused view. Its buffer keeps running, detached;
 /// use `kill_view` to end it.
 fn close_view(_: ActionApi) -> Action;
+
+/// Open the command prompt (tmux `:`). Enter runs the typed line with the
+/// same commands and options as the `embers` CLI, such as
+/// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+/// commands without `-t` apply to the current session, window and pane.
+/// Up and Down browse earlier lines; Esc cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>:", action.command_prompt());
+/// ```
+fn command_prompt(_: ActionApi) -> Action;
+
+/// Open a prompt labelled `prompt` with `initial` typed (both may use
+/// formats); Enter runs `template` with `%%` replaced by the input as one
+/// word, like tmux `command-prompt -p prompt -I initial template`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+/// ```
+fn command_prompt_template(_: ActionApi, prompt: string, initial: string, template: string) -> Action;
+
+/// Open the command prompt with `initial` already typed, like tmux
+/// `command-prompt -I`. The text may use the formats `display_message`
+/// accepts, such as `#W`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_with("split-window -- ")
+/// ```
+fn command_prompt_with(_: ActionApi, initial: string) -> Action;
 
 /// Finalize the active search, keep the current match and cursor position, and leave search
 /// mode with the committed result in place.
@@ -240,6 +307,29 @@ fn detach_buffer(_: ActionApi) -> Action;
 
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
+
+/// Show a message in the status line for a few seconds, like tmux
+/// `display-message`. The text may use the format variables `#S` (session),
+/// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+/// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+/// for the focused pane; `##` is a literal `#`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("#S:#I #{pane_current_path}")
+/// ```
+fn display_message(_: ActionApi, message: string) -> Action;
+
+/// Show a message in the status line for `duration_ms` milliseconds, like
+/// tmux `display-message -d`. See `display_message(message)` for formats.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("saved", 1000)
+/// ```
+fn display_message(_: ActionApi, message: string, duration_ms: int) -> Action;
 
 /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
 /// following output and a cursor appears at the program's cursor; copy-mode
@@ -429,6 +519,26 @@ fn prev_session(_: ActionApi) -> Action;
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
 
+/// Prompt for a new name for the current session, starting from its
+/// current name (tmux `prefix $`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>$", action.rename_session_prompt());
+/// ```
+fn rename_session_prompt(_: ActionApi) -> Action;
+
+/// Prompt for a new name for the current window, starting from its current
+/// name (tmux `prefix ,`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>,", action.rename_window_prompt());
+/// ```
+fn rename_window_prompt(_: ActionApi) -> Action;
+
 /// Replace the focused node with a new tree.
 fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action;
 
@@ -465,6 +575,16 @@ fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
 fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
+
+/// Run a command line as if it was typed at the command prompt, like
+/// binding a tmux command. Output and errors are shown in the status line.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+/// ```
+fn run_command(_: ActionApi, command: string) -> Action;
 
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;
@@ -535,6 +655,17 @@ fn select_other_end(_: ActionApi) -> Action;
 /// Select a tab by index in a specific tabs node.
 fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action;
 
+/// Select a window (a root tab of the current session) by its number, which
+/// counts from the base index set with `set_base_index` (0 when unset), like
+/// tmux `select-window -t :N`.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>1", action.select_window(1));
+/// ```
+fn select_window(_: ActionApi, number: int) -> Action;
+
 /// Send a string of bytes to a specific buffer.
 fn send_bytes(_: ActionApi, buffer_id: int, bytes: string) -> Action;
 
@@ -561,6 +692,28 @@ fn send_keys(_: ActionApi, buffer_id: int, notation: string) -> Action;
 
 /// Send a key notation sequence to the focused buffer.
 fn send_keys_current(_: ActionApi, notation: string) -> Action;
+
+/// Set an environment variable for panes created later in the current
+/// session (tmux `set-environment`). Pass `()` as the value to unset it.
+/// Panes that already run keep their environment.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_environment("AWS_PROFILE", "staging")
+/// ```
+fn set_environment(_: ActionApi, name: string, value: ?) -> Action;
+
+/// Set an environment variable for panes created later in every session
+/// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+/// session's own value wins over the global one.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_global_environment("EDITOR", "nvim")
+/// ```
+fn set_global_environment(_: ActionApi, name: string, value: ?) -> Action;
 
 /// Turn tmux-style `synchronize-panes` on or off for the active window.
 ///
@@ -727,6 +880,54 @@ fn define_mode(mode_name: string, options: map) -> ();
 /// # rhai-autodocs:index:7
 fn on(event_name: string, callback: Fn) -> ();
 
+/// Choose which panes may write to the host terminal through tmux
+/// passthrough, like tmux's `allow-passthrough`.
+///
+/// Programs that run under tmux wrap sequences meant for the outer
+/// terminal, such as kitty graphics images or desktop notifications, as
+/// `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+/// terminal running the client, with its cursor at the pane's cursor so
+/// images land where the program put them. Kitty graphics commands sent
+/// without the wrapper are passed on the same way.
+///
+/// - `"on"` (the default): only from panes that are on screen.
+/// - `"all"`: from every pane in the client's session, on screen or not.
+///   Sequences from a pane that is not on screen are written without
+///   moving the cursor.
+/// - `"off"`: drop them.
+///
+/// # Example
+///
+/// ```rhai
+/// set_allow_passthrough("all");
+/// ```
+///
+/// # rhai-autodocs:index:10
+fn set_allow_passthrough(mode: string) -> ();
+
+/// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+///
+/// Windows are a session's root tabs. Their numbers are what
+/// `TabInfo.number()` gives tab bar formatters and what
+/// `action.select_window` takes. Windows are always numbered without gaps:
+/// closing one renumbers the windows after it, like tmux with
+/// `renumber-windows on`.
+///
+/// This setting covers the client and the commands it runs from the command
+/// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+/// instead; set that variable where the server and your shells start to use
+/// the same numbering everywhere. Without this call the client uses
+/// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+///
+/// # Example
+///
+/// ```rhai
+/// set_base_index(1);
+/// ```
+///
+/// # rhai-autodocs:index:9
+fn set_base_index(index: int) -> ();
+
 /// Choose whether programs in panes may set the system clipboard.
 ///
 /// When on (the default), an OSC 52 clipboard write from a program in a
@@ -764,7 +965,7 @@ fn set_clipboard(enabled: bool) -> ();
 /// set_detach_on_destroy("off");
 /// ```
 ///
-/// # rhai-autodocs:index:9
+/// # rhai-autodocs:index:12
 fn set_detach_on_destroy(value: string) -> ();
 
 /// Set the leader sequence used in binding notations.
@@ -777,6 +978,31 @@ fn set_detach_on_destroy(value: string) -> ();
 ///
 /// # rhai-autodocs:index:1
 fn set_leader(notation: string) -> ();
+
+/// Say what the terminal running the client supports, overriding what
+/// Embers detected when it attached.
+///
+/// Embers asks the terminal at attach and otherwise goes by `TERM` and
+/// `TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+/// named capability on (`true`) or off (`false`); capabilities not named
+/// stay as detected. Like tmux's `terminal-features`.
+///
+/// - `underline_styles`: double, curly, dotted and dashed underlines
+///   (`CSI 4:n m`). Without it every underline is plain.
+/// - `underline_color`: colored underlines (`CSI 58:...m`). Without it
+///   underlines take the text color.
+/// - `hyperlinks`: OSC 8 links. Without it links are plain text.
+/// - `passthrough`: sequences programs send for the terminal, such as
+///   images (see `set_allow_passthrough`). Without it they are dropped.
+///
+/// # Example
+///
+/// ```rhai
+/// set_terminal_features(#{ hyperlinks: true, passthrough: false });
+/// ```
+///
+/// # rhai-autodocs:index:11
+fn set_terminal_features(features: map) -> ();
 
 /// Remove a previously bound key sequence.
 ///

@@ -19,9 +19,11 @@ use super::error::ScriptError;
 use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
+use crate::host_terminal::TerminalFeatures;
+
 use super::types::{
-    DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor,
-    ScriptFunctionRef, ThemeSpec,
+    DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
+    RgbColor, ScriptFunctionRef, ThemeSpec,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -261,6 +263,9 @@ struct RegistrationState {
     hints: HintsSettings,
     theme: ThemeSpec,
     clipboard: Option<bool>,
+    base_index: Option<u32>,
+    passthrough: Option<PassthroughMode>,
+    terminal_features: TerminalFeatures,
     detach_on_destroy: DetachOnDestroy,
 }
 
@@ -366,6 +371,9 @@ impl RegistrationState {
             hints: self.hints,
             theme: self.theme,
             clipboard: self.clipboard.unwrap_or(true),
+            base_index: self.base_index,
+            passthrough: self.passthrough.unwrap_or_default(),
+            terminal_features: self.terminal_features,
             detach_on_destroy: self.detach_on_destroy,
         })
     }
@@ -803,6 +811,133 @@ mod registration_globals {
         Ok(())
     }
 
+    /// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+    ///
+    /// Windows are a session's root tabs. Their numbers are what
+    /// `TabInfo.number()` gives tab bar formatters and what
+    /// `action.select_window` takes. Windows are always numbered without gaps:
+    /// closing one renumbers the windows after it, like tmux with
+    /// `renumber-windows on`.
+    ///
+    /// This setting covers the client and the commands it runs from the command
+    /// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+    /// instead; set that variable where the server and your shells start to use
+    /// the same numbering everywhere. Without this call the client uses
+    /// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_base_index(1);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:9
+    #[rhai_fn(return_raw, global, name = "set_base_index")]
+    pub fn set_base_index(ctx: NativeCallContext, index: i64) -> RhaiResultOf<()> {
+        let index = u32::try_from(index)
+            .ok()
+            .filter(|index| *index <= crate::numbering::MAX_BASE_INDEX)
+            .ok_or_else(|| {
+                runtime_error(
+                    format!(
+                        "base index must be between 0 and {}",
+                        crate::numbering::MAX_BASE_INDEX
+                    ),
+                    ctx.call_position(),
+                )
+            })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .base_index = Some(index);
+        Ok(())
+    }
+
+    /// Choose which panes may write to the host terminal through tmux
+    /// passthrough, like tmux's `allow-passthrough`.
+    ///
+    /// Programs that run under tmux wrap sequences meant for the outer
+    /// terminal, such as kitty graphics images or desktop notifications, as
+    /// `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+    /// terminal running the client, with its cursor at the pane's cursor so
+    /// images land where the program put them. Kitty graphics commands sent
+    /// without the wrapper are passed on the same way.
+    ///
+    /// - `"on"` (the default): only from panes that are on screen.
+    /// - `"all"`: from every pane in the client's session, on screen or not.
+    ///   Sequences from a pane that is not on screen are written without
+    ///   moving the cursor.
+    /// - `"off"`: drop them.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_allow_passthrough("all");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:10
+    #[rhai_fn(return_raw, global, name = "set_allow_passthrough")]
+    pub fn set_allow_passthrough(ctx: NativeCallContext, mode: &str) -> RhaiResultOf<()> {
+        let mode = PassthroughMode::parse(mode).ok_or_else(|| {
+            runtime_error(
+                format!("allow-passthrough must be \"on\", \"off\" or \"all\", not \"{mode}\""),
+                ctx.call_position(),
+            )
+        })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .passthrough = Some(mode);
+        Ok(())
+    }
+
+    /// Say what the terminal running the client supports, overriding what
+    /// Embers detected when it attached.
+    ///
+    /// Embers asks the terminal at attach and otherwise goes by `TERM` and
+    /// `TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+    /// named capability on (`true`) or off (`false`); capabilities not named
+    /// stay as detected. Like tmux's `terminal-features`.
+    ///
+    /// - `underline_styles`: double, curly, dotted and dashed underlines
+    ///   (`CSI 4:n m`). Without it every underline is plain.
+    /// - `underline_color`: colored underlines (`CSI 58:...m`). Without it
+    ///   underlines take the text color.
+    /// - `hyperlinks`: OSC 8 links. Without it links are plain text.
+    /// - `passthrough`: sequences programs send for the terminal, such as
+    ///   images (see `set_allow_passthrough`). Without it they are dropped.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_terminal_features(#{ hyperlinks: true, passthrough: false });
+    /// ```
+    ///
+    /// # rhai-autodocs:index:11
+    #[rhai_fn(return_raw, global, name = "set_terminal_features")]
+    pub fn set_terminal_features(ctx: NativeCallContext, features: Map) -> RhaiResultOf<()> {
+        let registration = clone_active_registration(ctx.call_position())?;
+        let mut registration = registration.lock().expect("registration lock");
+        for (name, value) in features {
+            let enabled = value.as_bool().map_err(|_| {
+                runtime_error(
+                    format!("terminal feature '{name}' must be true or false"),
+                    ctx.call_position(),
+                )
+            })?;
+            if !registration.terminal_features.set(&name, enabled) {
+                return Err(runtime_error(
+                    format!(
+                        "unknown terminal feature '{name}'; expected one of {}",
+                        TerminalFeatures::NAMES.join(", ")
+                    ),
+                    ctx.call_position(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Choose where the client goes when the session it shows is destroyed,
     /// like tmux's `detach-on-destroy`. A session is destroyed when its last
     /// pane closes, because the pane's program exited or the pane was killed,
@@ -822,7 +957,7 @@ mod registration_globals {
     /// set_detach_on_destroy("off");
     /// ```
     ///
-    /// # rhai-autodocs:index:9
+    /// # rhai-autodocs:index:12
     #[rhai_fn(return_raw, global, name = "set_detach_on_destroy")]
     pub fn set_detach_on_destroy(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
         let Some(setting) = DetachOnDestroy::parse(value) else {

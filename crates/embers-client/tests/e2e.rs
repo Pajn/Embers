@@ -82,6 +82,7 @@ async fn create_buffer_with_command(
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer succeeds");
@@ -1497,6 +1498,294 @@ async fn osc52_from_pane_is_dropped_when_clipboard_is_off() {
         "expected no OSC 52 in {:?}",
         String::from_utf8_lossy(&output)
     );
+}
+
+/// What a client wrote to its host terminal after drawing a pane whose program
+/// sent a tmux passthrough sequence.
+struct PassthroughOutput {
+    /// Bytes written after the frame.
+    frame_output: Vec<u8>,
+    /// The 1-based host position of the pane's cell (row 3, column 5), or
+    /// `None` when the pane was not on screen.
+    pane_cursor: Option<(i32, i32)>,
+}
+
+/// Attach a configured client to a session whose pane runs `script` once it
+/// reads a line, trigger it, wait for the client to handle the passthrough
+/// event that marks the end of the script's output (`ESC ] 9 ; done BEL`),
+/// then draw a frame. With `hidden`, the pane is in a background window.
+async fn pane_passthrough_output(
+    config_source: &str,
+    script: &str,
+    hidden: bool,
+) -> PassthroughOutput {
+    pane_passthrough_output_on_host(
+        config_source,
+        script,
+        hidden,
+        embers_client::HostCapabilities::ALL,
+    )
+    .await
+}
+
+/// [`pane_passthrough_output`] for a client whose host terminal was detected
+/// to support `host`.
+async fn pane_passthrough_output_on_host(
+    config_source: &str,
+    script: &str,
+    hidden: bool,
+    host: embers_client::HostCapabilities,
+) -> PassthroughOutput {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "images",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "read _; {script}; printf '\\033Ptmux;\\033\\033]9;done\\007\\033\\\\'; sleep 5"
+            ),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "images".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add images tab succeeds");
+    if hidden {
+        let front = create_buffer(&mut connection, "front").await;
+        let _ = connection
+            .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+                request_id: new_request_id(),
+                session_id: session.session.id,
+                title: "front".to_owned(),
+                buffer_id: Some(front.id),
+                child_node_id: None,
+            }))
+            .await
+            .expect("add front tab succeeds");
+        let _ = connection
+            .request(&ClientMessage::Session(SessionRequest::SelectRootTab {
+                request_id: new_request_id(),
+                session_id: session.session.id,
+                index: 1,
+            }))
+            .await
+            .expect("select front tab succeeds");
+    }
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(config_dir.path().join("config.rhai"), config_source).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(host);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    // Draw once so the client knows its layout before the program writes.
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("first frame");
+    let _ = configured.drain_frame_output();
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("start the script");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "passthrough event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        if let Some(embers_protocol::ServerEvent::Passthrough(event)) = event
+            && event
+                .writes
+                .iter()
+                .any(|write| write.bytes == b"\x1b]9;done\x07")
+        {
+            break;
+        }
+    }
+    let _ = configured.drain_terminal_output();
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("frame after passthrough");
+    let frame_output = configured.drain_frame_output();
+
+    let model =
+        PresentationModel::project(configured.client().state(), session.session.id, viewport)
+            .expect("projection succeeds");
+    let pane_cursor = model
+        .leaves
+        .iter()
+        .find(|leaf| leaf.buffer_id == buffer.id)
+        .map(|leaf| (leaf.rect.origin.y + 1 + 2 + 1, leaf.rect.origin.x + 4 + 1));
+    assert_eq!(pane_cursor.is_none(), hidden, "pane visibility");
+    server.shutdown().await.expect("server shuts down");
+    PassthroughOutput {
+        frame_output,
+        pane_cursor,
+    }
+}
+
+/// A kitty graphics command wrapped for tmux, as image.nvim sends it under tmux:
+/// every ESC in the payload doubled.
+const WRAPPED_KITTY_IMAGE: &str =
+    "printf '\\033[3;5H\\033Ptmux;\\033\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\033\\\\\\033\\\\'";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_reaches_the_host_at_the_pane_cursor() {
+    let output = pane_passthrough_output("", WRAPPED_KITTY_IMAGE, false).await;
+    let (row, col) = output.pane_cursor.expect("pane on screen");
+    let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
+    assert!(
+        contains_subslice(&output.frame_output, expected.as_bytes()),
+        "expected {expected:?} in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+    // Unwrapped: no tmux introducer or doubled ESC reaches the host.
+    assert!(!contains_subslice(&output.frame_output, b"tmux;"));
+    assert!(!contains_subslice(&output.frame_output, b"\x1b\x1b"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_kitty_graphics_reach_the_host_at_the_pane_cursor() {
+    // Sent without the tmux wrapper, as a program that does not know it runs
+    // in a multiplexer would.
+    let script = "printf '\\033[3;5H\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\\\'";
+    let output = pane_passthrough_output("", script, false).await;
+    let (row, col) = output.pane_cursor.expect("pane on screen");
+    let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
+    assert!(
+        contains_subslice(&output.frame_output, expected.as_bytes()),
+        "expected {expected:?} in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_is_dropped_when_off() {
+    let output = pane_passthrough_output(
+        "set_allow_passthrough(\"off\");",
+        WRAPPED_KITTY_IMAGE,
+        false,
+    )
+    .await;
+    assert!(
+        output.frame_output.is_empty(),
+        "expected no output, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_needs_a_host_that_supports_it() {
+    use embers_client::HostCapabilities;
+
+    let output =
+        pane_passthrough_output_on_host("", WRAPPED_KITTY_IMAGE, false, HostCapabilities::NONE)
+            .await;
+    assert!(
+        output.frame_output.is_empty(),
+        "expected no output for an unsupported host, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+
+    // The config can say the host supports it after all.
+    let output = pane_passthrough_output_on_host(
+        "set_terminal_features(#{ passthrough: true });",
+        WRAPPED_KITTY_IMAGE,
+        false,
+        HostCapabilities::NONE,
+    )
+    .await;
+    assert!(contains_subslice(
+        &output.frame_output,
+        b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_from_a_hidden_pane_needs_all() {
+    let output = pane_passthrough_output("", WRAPPED_KITTY_IMAGE, true).await;
+    assert!(
+        output.frame_output.is_empty(),
+        "`on` forwards only from panes on screen, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+
+    let output =
+        pane_passthrough_output("set_allow_passthrough(\"all\");", WRAPPED_KITTY_IMAGE, true).await;
+    // Written as it is, in order, without moving the cursor: there is no pane
+    // on screen to put it in.
+    assert!(
+        contains_subslice(
+            &output.frame_output,
+            b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\\x1b]9;done\x07"
+        ),
+        "expected both writes in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+    assert!(!contains_subslice(&output.frame_output, b"H\x1b_G"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_tmux_passthrough_is_dropped() {
+    // One byte over the 4 MiB cap, then a small sequence that must still pass.
+    let script = format!(
+        "printf '\\033Ptmux;'; head -c {} /dev/zero | tr '\\0' x; printf '\\033\\\\'",
+        embers_core::MAX_PASSTHROUGH_BYTES + 1
+    );
+    let output = pane_passthrough_output("", &script, false).await;
+    assert!(
+        !contains_subslice(&output.frame_output, b"xxxx"),
+        "oversized payload was forwarded"
+    );
+    assert!(contains_subslice(&output.frame_output, b"\x1b]9;done\x07"));
 }
 
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {

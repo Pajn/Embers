@@ -1,40 +1,43 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, FloatGeometry, FloatingId, MuxError, NodeId,
-    Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
+    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
-    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent,
-    ServerResponse, SessionRequest, buffer_ids_in_subtree,
+    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, PassthroughEvent,
+    ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
+use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area};
 use crate::client::MuxClient;
+use crate::command_prompt::{CommandContext, CommandPrompt, CommandRunner, record_history};
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
+use crate::host_terminal::HostCapabilities;
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
-    SEARCH_MODE, SELECT_MODE, resolve_key,
+    PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
-    FloatingSize, MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
+    FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size};
 use crate::split_resize::SplitResize;
@@ -44,10 +47,32 @@ use crate::state::{
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
+/// How long `display-message` text stays in the status line unless the
+/// request gives its own time.
+pub const DEFAULT_DISPLAY_TIME: Duration = Duration::from_secs(3);
 const MAX_EXPANDED_ACTIONS: usize = 256;
 /// Most events `process_ready_events_timeout` handles before the caller gets
 /// to draw, so a flood of output cannot hold off input and frames for long.
 const MAX_EVENT_BATCH: usize = 256;
+/// Most passthrough bytes held for the next frame. Frames follow events
+/// promptly, so this only bounds a client that has stopped drawing.
+const MAX_PENDING_PASSTHROUGH_BYTES: usize = 32 * 1024 * 1024;
+
+/// Where on the host screen a passthrough write from `leaf` goes: the pane's
+/// `cursor`, clamped into the pane's content, which starts below its title row.
+/// `None` when the pane shows no content or that cell is off screen.
+fn passthrough_cursor(
+    leaf: &LeafFrame,
+    cursor: CursorPosition,
+    viewport: Size,
+) -> Option<(u16, u16)> {
+    let pty = leaf.pty_size()?;
+    let x = i64::from(leaf.rect.origin.x) + i64::from(cursor.col.min(pty.cols - 1));
+    let y = i64::from(leaf.rect.origin.y) + 1 + i64::from(cursor.row.min(pty.rows - 1));
+    let x = u16::try_from(x).ok().filter(|x| *x < viewport.width)?;
+    let y = u16::try_from(y).ok().filter(|y| *y < viewport.height)?;
+    Some((x, y))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
@@ -57,6 +82,13 @@ struct SearchPrompt {
     backward: bool,
     /// Mode to return to once the prompt is committed or cancelled.
     return_mode: String,
+}
+
+/// A `display-message` shown in the status line until `until`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusMessage {
+    text: String,
+    until: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,12 +132,27 @@ pub struct ConfiguredClient<T> {
     /// when it changes.
     reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
+    command_prompt: Option<CommandPrompt>,
+    /// Command lines run from the prompt, oldest first.
+    prompt_history: VecDeque<String>,
+    command_runner: Option<Arc<dyn CommandRunner>>,
+    chooser: Option<Chooser>,
+    status_message: Option<StatusMessage>,
     hints_node: Option<NodeId>,
     copy: CopyModeState,
     /// The divider being dragged with the mouse, from the press on it until
     /// the button is released.
     divider_drag: Option<DividerDrag>,
     terminal_output: VecDeque<Vec<u8>>,
+    /// Passthrough writes from panes, oldest first, waiting for the next frame.
+    pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
+    pending_passthrough_bytes: usize,
+    /// Host terminal output that must follow the frame `render_session` last
+    /// returned (see [`ConfiguredClient::drain_frame_output`]).
+    frame_output: Vec<u8>,
+    /// What the host terminal was detected to support, before config
+    /// overrides.
+    detected_host: HostCapabilities,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
     /// child), drained into `notifications` on the next input/event tick.
@@ -132,10 +179,19 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             search_prompt: None,
+            command_prompt: None,
+            prompt_history: VecDeque::new(),
+            command_runner: None,
+            chooser: None,
+            status_message: None,
             hints_node: None,
             copy: CopyModeState::default(),
             divider_drag: None,
             terminal_output: VecDeque::new(),
+            pending_passthrough: Vec::new(),
+            pending_passthrough_bytes: 0,
+            frame_output: Vec::new(),
+            detected_host: HostCapabilities::default(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
             exit_requested: false,
@@ -155,6 +211,31 @@ where
         self.socket_path = Some(socket_path);
     }
 
+    /// Install what runs command lines from the command prompt and
+    /// `action.run_command`. Without one, those report that commands are
+    /// unavailable.
+    pub fn set_command_runner(&mut self, runner: Arc<dyn CommandRunner>) {
+        self.command_runner = Some(runner);
+    }
+
+    /// The open session/window/pane picker, if any.
+    pub fn chooser(&self) -> Option<&Chooser> {
+        self.chooser.as_ref()
+    }
+
+    /// The open command prompt, if any.
+    pub fn command_prompt(&self) -> Option<&CommandPrompt> {
+        self.command_prompt.as_ref()
+    }
+
+    /// Where the terminal cursor belongs in the status line, as a display
+    /// column, while the command prompt is open.
+    pub fn status_cursor(&self) -> Option<u16> {
+        self.command_prompt
+            .as_ref()
+            .map(|prompt| u16::try_from(prompt.cursor_column()).unwrap_or(u16::MAX))
+    }
+
     pub fn client(&self) -> &MuxClient<T> {
         &self.client
     }
@@ -169,6 +250,17 @@ where
 
     pub fn notifications(&self) -> &[String] {
         &self.notifications
+    }
+
+    /// The window base index (tmux `base-index`): the config's
+    /// `set_base_index`, else `EMBERS_BASE_INDEX`, else `None` for numbering
+    /// from 0.
+    pub fn base_index(&self) -> Option<u32> {
+        self.config
+            .active_script()
+            .loaded_config()
+            .base_index
+            .or_else(crate::numbering::base_index_from_env)
     }
 
     /// The name of the active input mode (e.g. "normal", "hints").
@@ -187,8 +279,140 @@ where
         self.previous_session_id
     }
 
+    /// Show `text` in the status line for `duration` (tmux `display-message`).
+    /// Control characters are replaced, so the text cannot reach the host
+    /// terminal as escape sequences.
+    pub fn show_message(&mut self, text: &str, duration: Duration) {
+        let text = text
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect();
+        self.status_message = Some(StatusMessage {
+            text,
+            until: Instant::now() + duration,
+        });
+    }
+
+    /// The `display-message` text in the status line, if it has not expired.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message
+            .as_ref()
+            .filter(|message| message.until > Instant::now())
+            .map(|message| message.text.as_str())
+    }
+
+    /// Drop a `display-message` whose time is up. Returns `true` when one was
+    /// dropped, so the caller redraws the status line.
+    pub fn expire_status_message(&mut self) -> bool {
+        if self
+            .status_message
+            .as_ref()
+            .is_some_and(|message| message.until <= Instant::now())
+        {
+            self.status_message = None;
+            return true;
+        }
+        false
+    }
+
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
         self.terminal_output.drain(..).collect()
+    }
+
+    /// Host terminal output to write right after the frame `render_session`
+    /// returned, unlike [`ConfiguredClient::drain_terminal_output`], which goes
+    /// before it: passthrough sequences from programs in panes. Each one from a
+    /// pane on screen starts by moving the cursor to that pane's cursor, so the
+    /// caller puts its own cursor back afterwards. Empty when there is nothing
+    /// to write.
+    pub fn drain_frame_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.frame_output)
+    }
+
+    /// Record what detection found the host terminal supports. Until this is
+    /// called the client assumes it supports everything.
+    pub fn set_host_capabilities(&mut self, detected: HostCapabilities) {
+        self.detected_host = detected;
+    }
+
+    /// What the host terminal supports: what detection found, with the
+    /// config's `set_terminal_features` overrides applied.
+    pub fn host_capabilities(&self) -> HostCapabilities {
+        self.detected_host.with_overrides(
+            self.config
+                .active_script()
+                .loaded_config()
+                .terminal_features,
+        )
+    }
+
+    /// Which panes may write to the host terminal through passthrough: the
+    /// config's choice, or none when the host does not support passthrough.
+    fn passthrough_mode(&self) -> PassthroughMode {
+        if !self.host_capabilities().passthrough {
+            return PassthroughMode::Off;
+        }
+        self.config.active_script().loaded_config().passthrough
+    }
+
+    /// Hold passthrough writes from `buffer_id` for the next frame. The pane is
+    /// refreshed first, so that frame shows everything the program printed
+    /// before them.
+    async fn queue_passthrough(&mut self, event: &PassthroughEvent) {
+        if self.passthrough_mode() == PassthroughMode::Off || self.active_session_id.is_none() {
+            return;
+        }
+        let buffer_id = event.buffer_id;
+        if let Err(error) = self.client.refresh_buffer_snapshot(buffer_id).await {
+            warn!(%error, %buffer_id, "refreshing a pane for passthrough failed");
+        }
+        for write in &event.writes {
+            if self.pending_passthrough_bytes + write.bytes.len() > MAX_PENDING_PASSTHROUGH_BYTES {
+                warn!(%buffer_id, "too much passthrough waiting for a frame; dropping");
+                continue;
+            }
+            self.pending_passthrough_bytes += write.bytes.len();
+            self.pending_passthrough.push((buffer_id, write.clone()));
+        }
+    }
+
+    /// Turn the held passthrough writes into output for the frame drawn from
+    /// `presentation`. A write from a pane on screen goes to that pane's
+    /// cursor (tmux `allow-passthrough on`); one from a pane that is not is
+    /// written where the cursor is with `all`, and dropped otherwise.
+    fn flush_passthrough(&mut self, presentation: &PresentationModel) {
+        if self.pending_passthrough.is_empty() {
+            return;
+        }
+        let mode = self.passthrough_mode();
+        let pending = std::mem::take(&mut self.pending_passthrough);
+        self.pending_passthrough_bytes = 0;
+        let mut output = Vec::new();
+        for (buffer_id, write) in pending {
+            let cursor = presentation
+                .leaves
+                .iter()
+                .find(|leaf| leaf.buffer_id == buffer_id)
+                .and_then(|leaf| passthrough_cursor(leaf, write.cursor, presentation.viewport));
+            match (mode, cursor) {
+                (PassthroughMode::On | PassthroughMode::All, Some((x, y))) => {
+                    output.extend_from_slice(
+                        format!("\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1).as_bytes(),
+                    );
+                    output.extend_from_slice(&write.bytes);
+                }
+                (PassthroughMode::All, None) => output.extend_from_slice(&write.bytes),
+                _ => {}
+            }
+        }
+        if output.is_empty() {
+            return;
+        }
+        // Hide the cursor while it jumps around, and leave the pen at its
+        // default: the next frame assumes both.
+        self.frame_output.extend_from_slice(b"\x1b[?25l");
+        self.frame_output.extend_from_slice(&output);
+        self.frame_output.extend_from_slice(b"\x1b[0m");
     }
 
     /// Emit an OSC 2 window-title update naming the given session, so the host
@@ -221,9 +445,17 @@ where
             .get(&session_id)
             .map(|session| session.name.as_str())
             .unwrap_or("<missing>");
+        if let Some(prompt) = &self.command_prompt {
+            return prompt.display();
+        }
         if let Some(prompt) = &self.search_prompt {
             let prefix = if prompt.backward { '?' } else { '/' };
             return format!("[{session_name}] {prefix}{}", prompt.query);
+        }
+        if let Some(message) = &self.status_message
+            && message.until > Instant::now()
+        {
+            return message.text.clone();
         }
         match self.notifications.last() {
             Some(message) => format!("[{session_name}] {message}"),
@@ -247,6 +479,14 @@ where
         // legacy form up front so every downstream path — binding tokenization,
         // hints label matching, and search input — treats both encodings alike.
         let key = normalize_text_key(key);
+
+        if self.input_state.current_mode() == PROMPT_MODE {
+            return self.handle_prompt_key(session_id, key).await;
+        }
+
+        if self.input_state.current_mode() == TREE_MODE {
+            return self.handle_chooser_key(session_id, viewport, key).await;
+        }
 
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
@@ -374,6 +614,20 @@ where
     ) -> Result<()> {
         self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
+        if self.input_state.current_mode() == PROMPT_MODE {
+            if let Some(prompt) = &mut self.command_prompt {
+                prompt.insert(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
+        if self.input_state.current_mode() == TREE_MODE {
+            if let Some(chooser) = &mut self.chooser
+                && chooser.editing_filter
+            {
+                chooser.filter.push_str(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
         if self.input_state.current_mode() == SEARCH_MODE {
             return self.handle_search_paste(session_id, viewport, bytes).await;
         }
@@ -630,12 +884,18 @@ where
                 None => self.clear_active_session(),
             }
         }
+        if let ServerEvent::DisplayMessage(message) = event {
+            self.show_message(&message.message, display_duration(message.duration_ms));
+        }
         // A program in a pane set the clipboard (OSC 52): pass it on to the
         // host terminal unless the config turned that off.
         if let ServerEvent::Clipboard(clipboard) = event
             && self.config.active_script().loaded_config().clipboard
         {
             self.enqueue_osc52(clipboard.selection, &clipboard.text);
+        }
+        if let ServerEvent::Passthrough(passthrough) = event {
+            self.queue_passthrough(passthrough).await;
         }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
@@ -700,7 +960,8 @@ where
         let mut recorded_formatter_error = false;
         for tabs in &presentation.tab_bars {
             let bar_context =
-                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width);
+                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
+                    .with_base_index(self.base_index());
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
@@ -716,9 +977,22 @@ where
             }
         }
 
-        Ok(self
-            .renderer
-            .render_with_tab_bars(self.client.state(), &presentation, &custom_bars))
+        let mut grid =
+            self.renderer
+                .render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+        self.flush_passthrough(&presentation);
+        if let Some(chooser) = &mut self.chooser {
+            let rows = chooser.rows(self.client.state(), self.active_session_id, {
+                self.config
+                    .active_script()
+                    .loaded_config()
+                    .base_index
+                    .or_else(crate::numbering::base_index_from_env)
+            });
+            chooser.render(&mut grid, chooser_area(viewport), &rows);
+            grid.set_cursor(None);
+        }
+        Ok(grid)
     }
 
     pub fn reload_config(&mut self) -> Result<()> {
@@ -758,6 +1032,8 @@ where
         } else {
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
+            self.command_prompt = None;
+            self.chooser = None;
             // Also drop any active hints overlay so it can't outlive its mode.
             if let Some(node_id) = self.hints_node.take()
                 && let Some(state) = self.client.state_mut().view_state_mut(node_id)
@@ -951,6 +1227,64 @@ where
                 },
                 Action::RunShell { command } => {
                     self.spawn_run_shell(command, current_session_id);
+                    Ok(())
+                }
+                Action::SetEnvironment {
+                    global,
+                    name,
+                    value,
+                } => match (global, current_session_id) {
+                    (false, None) => Err(MuxError::invalid_input(
+                        "set_environment needs a current session",
+                    )),
+                    (global, session_id) => self
+                        .client
+                        .request_message(ClientMessage::Session(SessionRequest::SetEnvironment {
+                            request_id: self.client.next_request_id(),
+                            session_id: session_id.filter(|_| !global),
+                            name,
+                            value,
+                        }))
+                        .await
+                        .map(|_| ()),
+                },
+                Action::CommandPrompt {
+                    prompt,
+                    initial,
+                    template,
+                } => {
+                    let label =
+                        self.expand_format(current_session_id, prompt.as_deref().unwrap_or(":"));
+                    let initial = self.expand_format(current_session_id, &initial);
+                    // Return to copy mode when opened from it; the other
+                    // modes that read keys themselves are left for normal.
+                    let mode = self.input_state.current_mode();
+                    let return_mode =
+                        if mode == SEARCH_MODE || mode == HINTS_MODE || mode == PROMPT_MODE {
+                            NORMAL_MODE.to_owned()
+                        } else {
+                            mode.to_owned()
+                        };
+                    self.search_prompt = None;
+                    self.command_prompt =
+                        Some(CommandPrompt::new(label, initial, template, return_mode));
+                    self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::ChooseTree { scope } => {
+                    self.open_chooser(scope, current_session_id);
+                    Ok(())
+                }
+                Action::RunCommand { command } => {
+                    self.run_command_line(current_session_id, &command).await;
+                    Ok(())
+                }
+                Action::DisplayMessage {
+                    message,
+                    duration_ms,
+                } => {
+                    let text = self.expand_format(current_session_id, &message);
+                    self.show_message(&text, display_duration(duration_ms.unwrap_or(0)));
                     Ok(())
                 }
                 Action::EnterHints { action } => match (current_session_id, current_viewport) {
@@ -1468,6 +1802,38 @@ where
                     .await?;
                 self.client.resync_session(session_id).await
             }
+            Action::SelectWindow { number } => {
+                let count = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .map_or(1, |root| {
+                        root.tabs.as_ref().map_or(1, |tabs| tabs.tabs.len())
+                    });
+                let Some(index) = crate::numbering::window_position(
+                    number,
+                    count,
+                    self.base_index().unwrap_or(0),
+                ) else {
+                    self.record_notification(format_notification(
+                        NotifyLevel::Warn,
+                        &format!("no window {number}"),
+                    ));
+                    return Ok(());
+                };
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(index).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
             Action::NextTab { tabs_node_id } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
                 if tabs.tabs.is_empty() {
@@ -1947,7 +2313,7 @@ where
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
             TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
             TreeSpec::BufferSpawn(spec) => self
-                .create_buffer(spec, size())
+                .create_buffer(spec, size(), session_id)
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             TreeSpec::BufferEmpty => self
@@ -1959,6 +2325,7 @@ where
                         env: Default::default(),
                     },
                     size(),
+                    session_id,
                 )
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
@@ -1972,6 +2339,7 @@ where
         &self,
         spec: crate::scripting::BufferSpawnSpec,
         size: Option<PtySize>,
+        session_id: SessionId,
     ) -> Result<BufferId> {
         let response = self
             .client
@@ -1982,6 +2350,7 @@ where
                 cwd: spec.cwd,
                 env: spec.env,
                 size,
+                session_id: Some(session_id),
             }))
             .await?;
 
@@ -2327,6 +2696,8 @@ where
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Passthrough(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::DisplayMessage(_) => self.active_session_id,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -2588,6 +2959,10 @@ where
         }
         if let Some(socket_path) = &self.socket_path {
             process.env("EMBERS_SOCKET", socket_path);
+        }
+        // So `embers` commands the child runs number windows like this client.
+        if let Some(base_index) = self.base_index() {
+            process.env(crate::numbering::BASE_INDEX_ENV_VAR, base_index.to_string());
         }
 
         // Identify the command by its executable only. The full argument list
@@ -2889,6 +3264,294 @@ where
             .state_mut()
             .set_view_visible_lines(node_id, scroll_top_line, response.lines);
         Ok(())
+    }
+
+    /// Expand `template` as a format for the focused pane of `session_id`, or
+    /// leave it as is without a session.
+    fn expand_format(&self, session_id: Option<SessionId>, template: &str) -> String {
+        session_id
+            .or(self.active_session_id)
+            .and_then(|session_id| {
+                crate::format::FormatContext::from_state(
+                    self.client.state(),
+                    session_id,
+                    None,
+                    self.base_index(),
+                )
+            })
+            .map(|context| crate::format::expand_format(template, &context))
+            .unwrap_or_else(|| template.to_owned())
+    }
+
+    fn open_chooser(&mut self, scope: ChooserScope, session_id: Option<SessionId>) {
+        let mode = self.input_state.current_mode();
+        let return_mode = if [SEARCH_MODE, HINTS_MODE, PROMPT_MODE, TREE_MODE].contains(&mode) {
+            NORMAL_MODE.to_owned()
+        } else {
+            mode.to_owned()
+        };
+        self.search_prompt = None;
+        self.command_prompt = None;
+        self.chooser = Some(Chooser::open(
+            scope,
+            self.client.state(),
+            session_id.or(self.active_session_id),
+            self.base_index(),
+            return_mode,
+        ));
+        self.input_state.set_mode(TREE_MODE);
+    }
+
+    fn close_chooser(&mut self) {
+        if let Some(chooser) = self.chooser.take() {
+            self.input_state.set_mode(chooser.return_mode);
+        } else {
+            self.input_state.set_mode(NORMAL_MODE);
+        }
+    }
+
+    async fn handle_chooser_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        key: KeyEvent,
+    ) -> Result<()> {
+        let base_index = self.base_index();
+        let rows = match &self.chooser {
+            Some(chooser) => chooser.rows(self.client.state(), self.active_session_id, base_index),
+            None => {
+                self.input_state.set_mode(NORMAL_MODE);
+                return Ok(());
+            }
+        };
+        let chooser = self.chooser.as_mut().expect("checked chooser");
+
+        if let Some(item) = chooser.confirm_kill.take() {
+            if matches!(key, KeyEvent::Char('y' | 'Y')) {
+                self.kill_chooser_item(item).await;
+            }
+            return Ok(());
+        }
+
+        if chooser.editing_filter {
+            match key {
+                KeyEvent::Char(ch) => chooser.filter.push(ch),
+                KeyEvent::Bytes(bytes) => chooser.filter.push_str(&String::from_utf8_lossy(&bytes)),
+                KeyEvent::Backspace => {
+                    if chooser.filter.pop().is_none() {
+                        chooser.editing_filter = false;
+                    }
+                }
+                KeyEvent::Ctrl('u') => chooser.filter.clear(),
+                KeyEvent::Escape => {
+                    chooser.filter.clear();
+                    chooser.editing_filter = false;
+                }
+                KeyEvent::Up => chooser.move_by(&rows, -1),
+                KeyEvent::Down => chooser.move_by(&rows, 1),
+                // Enter ends filtering; a second Enter chooses.
+                KeyEvent::Enter | KeyEvent::Tab => chooser.editing_filter = false,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        let page = isize::try_from(chooser_area(viewport).size.height.saturating_sub(3).max(1))
+            .unwrap_or(1);
+        match key {
+            KeyEvent::Char('j') | KeyEvent::Down | KeyEvent::Ctrl('n') => chooser.move_by(&rows, 1),
+            KeyEvent::Char('k') | KeyEvent::Up | KeyEvent::Ctrl('p') => chooser.move_by(&rows, -1),
+            KeyEvent::PageDown | KeyEvent::Ctrl('d') => chooser.move_by(&rows, page),
+            KeyEvent::PageUp | KeyEvent::Ctrl('u') => chooser.move_by(&rows, -page),
+            KeyEvent::Char('g') | KeyEvent::Home => chooser.select_first(&rows),
+            KeyEvent::Char('G') | KeyEvent::End => chooser.select_last(&rows),
+            KeyEvent::Char('l' | '+') | KeyEvent::Right => chooser.expand(&rows),
+            KeyEvent::Char('h' | '-') | KeyEvent::Left => chooser.collapse(&rows),
+            KeyEvent::Char('/') => chooser.editing_filter = true,
+            KeyEvent::Char('x') => chooser.confirm_kill = chooser.selected(&rows),
+            KeyEvent::Escape if !chooser.filter.is_empty() => chooser.filter.clear(),
+            KeyEvent::Char('q') | KeyEvent::Escape | KeyEvent::Ctrl('c') => self.close_chooser(),
+            KeyEvent::Enter => {
+                let selected = chooser.selected(&rows);
+                self.close_chooser();
+                if let Some(item) = selected {
+                    self.choose_item(session_id, item).await?;
+                }
+            }
+            // Any other text starts a filter, so typing a name finds it.
+            KeyEvent::Char(ch) if !ch.is_control() => {
+                chooser.editing_filter = true;
+                chooser.filter.push(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Switch to the chosen session, window or pane, like Enter in tmux
+    /// `choose-tree`.
+    async fn choose_item(&mut self, session_id: SessionId, item: ChooserItem) -> Result<()> {
+        let target_session = item.session_id();
+        if target_session != session_id || self.active_session_id != Some(target_session) {
+            self.perform_session_switch(target_session).await?;
+        }
+        match item {
+            ChooserItem::Session(_) => Ok(()),
+            ChooserItem::Window(session_id, position) => {
+                let has_root_tabs = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .is_some_and(|root| root.tabs.is_some());
+                if !has_root_tabs {
+                    return Ok(());
+                }
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(position).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
+            ChooserItem::Pane(session_id, node_id) => self.focus_node(session_id, node_id).await,
+        }
+    }
+
+    /// Kill a picker item with the same commands as the CLI (`kill-session`,
+    /// `kill-window`, `kill-pane`), so it behaves exactly as they do.
+    async fn kill_chooser_item(&mut self, item: ChooserItem) {
+        let base_index = self.base_index().unwrap_or(0);
+        let argv: Vec<String> = match item {
+            ChooserItem::Session(_) => vec!["kill-session".to_owned()],
+            ChooserItem::Window(_, position) => vec![
+                "kill-window".to_owned(),
+                "-t".to_owned(),
+                crate::numbering::window_number(position, Some(base_index)).to_string(),
+            ],
+            ChooserItem::Pane(_, node_id) => {
+                vec!["kill-pane".to_owned(), "-t".to_owned(), node_id.to_string()]
+            }
+        };
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: Some(item.session_id()),
+            client_id: self.client.cached_client_id(),
+            // An explicit base index makes the window number unambiguous.
+            base_index: Some(base_index),
+        };
+        if let Err(error) = runner.run(argv, context).await {
+            self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME);
+        }
+    }
+
+    async fn handle_prompt_key(&mut self, session_id: SessionId, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.command_prompt.as_mut() else {
+            self.input_state.set_mode(NORMAL_MODE);
+            return Ok(());
+        };
+        let history = &self.prompt_history;
+        match key {
+            KeyEvent::Enter => return self.commit_command_prompt(session_id).await,
+            KeyEvent::Escape | KeyEvent::Ctrl('c') | KeyEvent::Ctrl('g') => {
+                let return_mode = prompt.return_mode.clone();
+                self.command_prompt = None;
+                self.input_state.set_mode(return_mode);
+            }
+            KeyEvent::Char(ch) => prompt.insert(ch.encode_utf8(&mut [0; 4])),
+            KeyEvent::Bytes(bytes) => prompt.insert(&String::from_utf8_lossy(&bytes)),
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => prompt.backspace(),
+            KeyEvent::Delete | KeyEvent::Ctrl('d') => prompt.delete(),
+            KeyEvent::Left | KeyEvent::Ctrl('b') => prompt.left(),
+            KeyEvent::Right | KeyEvent::Ctrl('f') => prompt.right(),
+            KeyEvent::Home | KeyEvent::Ctrl('a') => prompt.home(),
+            KeyEvent::End | KeyEvent::Ctrl('e') => prompt.end(),
+            KeyEvent::Ctrl('u') => prompt.kill_to_start(),
+            KeyEvent::Ctrl('k') => prompt.kill_to_end(),
+            KeyEvent::Ctrl('w') => prompt.delete_word(),
+            KeyEvent::Up | KeyEvent::Ctrl('p') => prompt.history_up(history),
+            KeyEvent::Down | KeyEvent::Ctrl('n') => prompt.history_down(history),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn commit_command_prompt(&mut self, session_id: SessionId) -> Result<()> {
+        let Some(prompt) = self.command_prompt.take() else {
+            return Ok(());
+        };
+        self.input_state.set_mode(prompt.return_mode.clone());
+        // Only lines typed as commands are worth recalling; rename prompts
+        // and other templates are not.
+        if prompt.template.is_none() {
+            record_history(&mut self.prompt_history, &prompt.input);
+        }
+        self.run_command_line(Some(session_id), &prompt.command_line())
+            .await;
+        Ok(())
+    }
+
+    /// Run `line` through the command runner and show its output, or its
+    /// error, in the status line.
+    async fn run_command_line(&mut self, session_id: Option<SessionId>, line: &str) {
+        let argv = match shell_words::split(line) {
+            Ok(argv) => argv,
+            Err(error) => {
+                self.show_message(&format!("{error}"), DEFAULT_DISPLAY_TIME);
+                return;
+            }
+        };
+        if argv.is_empty() {
+            return;
+        }
+        // The picker belongs to this client, so its commands open it here
+        // rather than going through the runner.
+        let scope = match argv[0].as_str() {
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-s") => {
+                Some(ChooserScope::Sessions)
+            }
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-w") => Some(ChooserScope::Windows),
+            "choose-tree" => Some(ChooserScope::Tree),
+            "choose-window" => Some(ChooserScope::Windows),
+            "choose-session" => Some(ChooserScope::Sessions),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            self.open_chooser(scope, session_id);
+            return;
+        }
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: session_id.or(self.active_session_id),
+            client_id: self.client.cached_client_id(),
+            base_index: self.base_index(),
+        };
+        match runner.run(argv, context).await {
+            Ok(output) => {
+                let output = output.lines().collect::<Vec<_>>().join("; ");
+                if !output.trim().is_empty() {
+                    self.show_message(&output, DEFAULT_DISPLAY_TIME);
+                }
+            }
+            Err(error) => self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME),
+        }
     }
 
     /// Open the search prompt. The prompt starts empty, as in vim and tmux;
@@ -4381,6 +5044,15 @@ fn prepend_actions_with_limit(
     Ok(())
 }
 
+/// A `display-message` time in milliseconds, 0 meaning the default.
+fn display_duration(duration_ms: u32) -> Duration {
+    if duration_ms == 0 {
+        DEFAULT_DISPLAY_TIME
+    } else {
+        Duration::from_millis(u64::from(duration_ms))
+    }
+}
+
 fn format_notification(level: NotifyLevel, message: &str) -> String {
     match level {
         NotifyLevel::Info => message.to_owned(),
@@ -4620,6 +5292,8 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
         ServerEvent::Clipboard(_) => "clipboard",
+        ServerEvent::DisplayMessage(_) => "display_message",
+        ServerEvent::Passthrough(_) => "passthrough",
     }
 }
 
@@ -4655,6 +5329,8 @@ fn event_info(
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Passthrough(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::DisplayMessage(_) => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;

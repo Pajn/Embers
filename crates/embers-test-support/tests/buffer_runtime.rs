@@ -37,6 +37,7 @@ async fn create_buffer_with_env(
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
                 .collect(),
             size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer request succeeds");
@@ -255,6 +256,7 @@ async fn create_request_size_is_the_size_the_command_starts_at() {
             cwd: None,
             env: Default::default(),
             size: Some(PtySize::new(97, 31)),
+            session_id: None,
         }))
         .await
         .expect("create buffer request succeeds");

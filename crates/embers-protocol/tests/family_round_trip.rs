@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
-    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, Size,
-    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PassthroughWrite, PtySize,
+    RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -89,6 +89,7 @@ fn client_message_families_round_trip() {
             cwd: Some("/tmp".to_owned()),
             env: std::collections::BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
             size: None,
+            session_id: None,
         }),
         ClientMessage::Buffer(BufferRequest::Create {
             request_id: RequestId(91),
@@ -97,6 +98,47 @@ fn client_message_families_round_trip() {
             cwd: None,
             env: Default::default(),
             size: Some(PtySize::new(100, 30)),
+            session_id: Some(SessionId(10)),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(92),
+            session_id: Some(SessionId(10)),
+            name: "EDITOR".to_owned(),
+            value: Some("nvim".to_owned()),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(93),
+            session_id: None,
+            name: "EMPTY".to_owned(),
+            value: Some(String::new()),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(94),
+            session_id: None,
+            name: "GONE".to_owned(),
+            value: None,
+        }),
+        ClientMessage::Session(SessionRequest::ShowEnvironment {
+            request_id: RequestId(95),
+            session_id: Some(SessionId(10)),
+        }),
+        ClientMessage::Session(SessionRequest::ShowEnvironment {
+            request_id: RequestId(96),
+            session_id: None,
+        }),
+        ClientMessage::Client(ClientRequest::DisplayMessage {
+            request_id: RequestId(97),
+            client_id: NonZeroU64::new(3),
+            session_id: None,
+            message: "hello".to_owned(),
+            duration_ms: 2000,
+        }),
+        ClientMessage::Client(ClientRequest::DisplayMessage {
+            request_id: RequestId(98),
+            client_id: None,
+            session_id: Some(SessionId(10)),
+            message: String::new(),
+            duration_ms: 0,
         }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
@@ -402,6 +444,7 @@ fn sizes_must_be_non_zero_in_both_directions() {
         cwd: None,
         env: Default::default(),
         size: Some(PtySize::new(80, 0)),
+        session_id: None,
     });
     encode_client_message(&create).expect_err("zero-row pty size is rejected");
 
@@ -443,6 +486,17 @@ fn server_envelope_families_round_trip() {
     let floating = snapshot.floating.clone();
 
     let envelopes = vec![
+        ServerEnvelope::Response(ServerResponse::Environment(EnvironmentResponse {
+            request_id: RequestId(97),
+            env: std::collections::BTreeMap::from([
+                ("EDITOR".to_owned(), "nvim".to_owned()),
+                ("EMPTY".to_owned(), String::new()),
+            ]),
+        })),
+        ServerEnvelope::Response(ServerResponse::Environment(EnvironmentResponse {
+            request_id: RequestId(98),
+            env: Default::default(),
+        })),
         ServerEnvelope::Response(ServerResponse::Pong(PingResponse {
             request_id: RequestId(30),
             payload: "pong".to_owned(),
@@ -634,6 +688,32 @@ fn server_envelope_families_round_trip() {
             buffer_id: BufferId(11),
             selection: ClipboardSelection::Primary,
             text: String::new(),
+        })),
+        ServerEnvelope::Event(ServerEvent::DisplayMessage(DisplayMessageEvent {
+            message: "[main] 1:editor".to_owned(),
+            duration_ms: 1500,
+        })),
+        ServerEnvelope::Event(ServerEvent::DisplayMessage(DisplayMessageEvent {
+            message: String::new(),
+            duration_ms: 0,
+        })),
+        ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+            buffer_id: BufferId(11),
+            writes: vec![
+                PassthroughWrite {
+                    bytes: b"\x1b_Gf=100;iVBORw0KGgo=\x1b\\".to_vec(),
+                    cursor: CursorPosition { row: 3, col: 7 },
+                },
+                // Arbitrary bytes, including ones that are not UTF-8.
+                PassthroughWrite {
+                    bytes: vec![0x1b, 0xff, 0x00, 0x9c],
+                    cursor: CursorPosition::default(),
+                },
+            ],
+        })),
+        ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+            buffer_id: BufferId(11),
+            writes: Vec::new(),
         })),
     ];
 
@@ -829,6 +909,6 @@ fn sample_buffer_record(
         exit_code,
         env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
         user_options: std::collections::BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]),
-        foreground_command: Some(vec!["nvim".to_owned(), "notes.txt".to_owned()]),
+        foreground_command: (!is_helper).then(|| vec!["vim".to_owned(), "notes.txt".to_owned()]),
     }
 }

@@ -7,6 +7,7 @@ use embers_core::{
 };
 use embers_protocol::NodeJoinPlacement;
 
+use crate::environment::EnvironmentStore;
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
@@ -74,6 +75,9 @@ pub struct ServerState {
     pub buffers: BTreeMap<BufferId, Buffer>,
     pub nodes: BTreeMap<NodeId, Node>,
     pub floating: BTreeMap<FloatingId, FloatingWindow>,
+    /// Global and per-session environments for new buffers
+    /// (`SessionRequest::SetEnvironment`).
+    pub environment: EnvironmentStore,
     /// The viewport most recently reported for any session, which new
     /// sessions start with.
     last_viewport: Option<Size>,
@@ -99,6 +103,7 @@ impl ServerState {
             buffers: BTreeMap::new(),
             nodes: BTreeMap::new(),
             floating: BTreeMap::new(),
+            environment: EnvironmentStore::default(),
             last_viewport: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(1),
@@ -188,6 +193,7 @@ impl ServerState {
             buffers,
             nodes,
             floating,
+            environment: EnvironmentStore::default(),
             last_viewport: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),

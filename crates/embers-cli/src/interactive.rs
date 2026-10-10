@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attributes};
 use embers_client::{
-    ConfigManager, ConfiguredClient, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, MouseModifiers, MuxClient, PanePlacement, RenderGrid, SocketTransport,
+    ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
+    KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+    MuxClient, PanePlacement, RenderGrid, SocketTransport, detect_host_capabilities,
     spawn_pty_size,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
@@ -49,11 +51,18 @@ pub async fn run(
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
     configured.set_socket_path(socket_path.clone());
+    configured.set_command_runner(std::sync::Arc::new(crate::PromptCommandRunner::new(
+        socket_path.clone(),
+    )));
     if let Some(session_id) = session_id {
         configured.emit_terminal_title(session_id);
     }
 
-    let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    let (mut terminal, host_replies) = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    configured.set_host_capabilities(detect_host_capabilities(
+        &host_replies,
+        &HostEnvironment::from_process(),
+    ));
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let _input_thread = spawn_input_thread(input_tx.clone())?;
     let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
@@ -86,10 +95,28 @@ pub async fn run(
                     .render_session(active_session_id, viewport)
                     .await?;
                 let status = configured.status_line(active_session_id, &socket_path);
-                terminal.render(&grid, terminal_size, Some(&status))?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some(&status),
+                    configured.status_cursor(),
+                    configured.host_capabilities(),
+                )?;
+                terminal.write_after_frame(
+                    &configured.drain_frame_output(),
+                    &grid,
+                    terminal_size,
+                    configured.status_cursor(),
+                )?;
             } else {
                 let grid = RenderGrid::new(viewport.width, viewport.height);
-                terminal.render(&grid, terminal_size, Some("detached"))?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some("detached"),
+                    None,
+                    configured.host_capabilities(),
+                )?;
             }
             dirty = false;
         }
@@ -193,6 +220,10 @@ pub async fn run(
             // now instead of waiting for the next input or server event.
             if configured.drain_background_notifications() {
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                dirty = true;
+            }
+            // A display-message whose time is up leaves the status line.
+            if configured.expire_status_message() {
                 dirty = true;
             }
             continue;
@@ -400,7 +431,7 @@ async fn ensure_root_window(
     let size = viewport.and_then(|viewport| {
         spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
     });
-    let buffer_id = create_buffer(client, &command, &title, size).await?;
+    let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client
         .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: client.next_request_id(),
@@ -446,6 +477,7 @@ async fn create_buffer(
     command: &[String],
     title: &str,
     size: Option<PtySize>,
+    session_id: SessionId,
 ) -> Result<embers_core::BufferId> {
     let response = client
         .request_message(ClientMessage::Buffer(BufferRequest::Create {
@@ -455,6 +487,7 @@ async fn create_buffer(
             cwd: None,
             env: Default::default(),
             size,
+            session_id: Some(session_id),
         }))
         .await?;
     match response {
@@ -626,6 +659,7 @@ fn read_escape_event(fd: libc::c_int) -> Result<TerminalEvent> {
     match next {
         b'[' => read_csi_event(fd),
         b'O' => read_ss3_event(fd),
+        b'P' | b'_' | b']' => read_string_event(fd, next),
         byte if byte.is_ascii() => Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(byte)))),
         other => {
             let mut bytes = vec![0x1b, other];
@@ -663,6 +697,35 @@ fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
         return Ok(TerminalEvent::Paste(read_bracketed_paste(fd)?));
     }
     Ok(parse_csi_event(&bytes).unwrap_or(TerminalEvent::Key(KeyEvent::Bytes(bytes))))
+}
+
+/// Longest DCS, APC or OSC reply read from the host terminal; the rest of a
+/// longer one arrives as ordinary input.
+const MAX_HOST_STRING_LEN: usize = 64 * 1024;
+
+/// Read a DCS (`ESC P`), APC (`ESC _`) or OSC (`ESC ]`) string. From the host
+/// terminal these are replies to queries a program in a pane sent through
+/// passthrough, such as a kitty graphics query, so they go to the focused pane
+/// whole rather than as keys. The same two bytes alone are Alt+P, Alt+_ and
+/// Alt+], which nothing follows within the continuation timeout.
+fn read_string_event(fd: libc::c_int, introducer: u8) -> Result<TerminalEvent> {
+    let Some(first) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? else {
+        return Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(introducer))));
+    };
+    let mut bytes = vec![0x1b, introducer, first];
+    while bytes.len() < MAX_HOST_STRING_LEN && !ends_control_string(&bytes, introducer) {
+        let Some(next) = read_optional_byte(fd, KEY_SEQUENCE_TIMEOUT)? else {
+            break;
+        };
+        bytes.push(next);
+    }
+    Ok(TerminalEvent::Key(KeyEvent::Bytes(bytes)))
+}
+
+/// Whether `bytes` ends with the string terminator `ESC \`, or BEL for OSC.
+fn ends_control_string(bytes: &[u8], introducer: u8) -> bool {
+    (bytes.len() >= 4 && bytes.ends_with(b"\x1b\\"))
+        || (introducer == b']' && bytes.ends_with(b"\x07"))
 }
 
 fn read_ss3_event(fd: libc::c_int) -> Result<TerminalEvent> {
@@ -1022,8 +1085,37 @@ struct TerminalGuard {
     mouse_capture_enabled: bool,
 }
 
+/// How long attaching waits for the host terminal to answer [`HOST_QUERIES`].
+/// Terminals answer at once, or after one round trip over SSH; the wait only
+/// runs out for a terminal that does not answer DA1 at all.
+const HOST_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Read the host terminal's replies to [`HOST_QUERIES`], up to and including
+/// the DA1 reply that ends them, or until [`HOST_REPLY_TIMEOUT`]. This runs
+/// before the input thread starts, so nothing else reads the input meanwhile;
+/// it reads one byte at a time to leave whatever follows the DA1 reply to the
+/// input thread. Keys typed before the replies arrive are dropped.
+fn read_host_replies(input_fd: libc::c_int) -> Result<HostReplies> {
+    let deadline = std::time::Instant::now() + HOST_REPLY_TIMEOUT;
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_HOST_REPLY_BYTES && !ends_with_device_attributes(&bytes) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match read_optional_byte(input_fd, remaining)? {
+            Some(byte) => bytes.push(byte),
+            None => break,
+        }
+    }
+    Ok(HostReplies::parse(&bytes))
+}
+
 impl TerminalGuard {
-    fn enter(mouse_capture_enabled: bool) -> Result<Self> {
+    /// Put the terminal in raw mode, switch to the alternate screen and ask
+    /// what the terminal supports (see [`HOST_QUERIES`]), returning its
+    /// replies.
+    fn enter(mouse_capture_enabled: bool) -> Result<(Self, HostReplies)> {
         let input_fd = io::stdin().as_raw_fd();
         let output_fd = io::stdout().as_raw_fd();
         if !is_tty(input_fd) || !is_tty(output_fd) {
@@ -1043,8 +1135,12 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        match write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))
-            .and_then(|()| stdout.flush())
+        match write!(
+            stdout,
+            "{}{HOST_QUERIES}",
+            terminal_enter_sequence(mouse_capture_enabled)
+        )
+        .and_then(|()| stdout.flush())
         {
             Ok(()) => {}
             Err(error) => {
@@ -1052,12 +1148,13 @@ impl TerminalGuard {
                 return Err(error.into());
             }
         }
-
-        Ok(Self {
+        let guard = Self {
             input_fd,
             original_mode,
             mouse_capture_enabled,
-        })
+        };
+        let replies = read_host_replies(input_fd)?;
+        Ok((guard, replies))
     }
 
     fn size(&self) -> Result<Size> {
@@ -1093,10 +1190,21 @@ impl TerminalGuard {
         Ok(())
     }
 
-    fn render(&self, grid: &RenderGrid, terminal_size: Size, status: Option<&str>) -> Result<()> {
+    /// Draw `grid` and the status line below it. With `status_cursor` (the
+    /// command prompt is open) the cursor goes to that column of the status
+    /// line instead of the grid's cursor. Only sequences `host` supports are
+    /// used.
+    fn render(
+        &self,
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status: Option<&str>,
+        status_cursor: Option<u16>,
+        host: HostCapabilities,
+    ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.ansi_lines() {
+        for line in grid.ansi_lines_for(host) {
             write!(stdout, "{line}\x1b[K\r\n")?;
         }
 
@@ -1106,19 +1214,62 @@ impl TerminalGuard {
         }
 
         write!(stdout, "\x1b[J")?;
-        if let Some(cursor) = grid.cursor() {
-            write!(
-                stdout,
-                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-                cursor_shape_code(cursor.shape),
-                cursor.y.saturating_add(1),
-                cursor.x.saturating_add(1)
-            )?;
-        } else {
-            write!(stdout, "\x1b[?25l")?;
-        }
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
         stdout.flush()?;
         Ok(())
+    }
+
+    /// Write what must follow the frame `render` just drew (passthrough
+    /// sequences from panes, which move the cursor), then put the cursor back
+    /// where the frame left it.
+    fn write_after_frame(
+        &self,
+        bytes: &[u8],
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status_cursor: Option<u16>,
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        stdout.write_all(bytes)?;
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+/// Place and show the cursor for a frame: in the status line while the command
+/// prompt is open (`status_cursor`), else at the grid's cursor, else hidden.
+fn write_cursor(
+    stdout: &mut impl Write,
+    grid: &RenderGrid,
+    terminal_size: Size,
+    status_cursor: Option<u16>,
+) -> io::Result<()> {
+    if let Some(column) = status_cursor
+        && terminal_size.height > grid.height()
+    {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(CursorShape::Beam),
+            terminal_size.height,
+            column
+                .min(terminal_size.width.saturating_sub(1))
+                .saturating_add(1)
+        )
+    } else if let Some(cursor) = grid.cursor() {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(cursor.shape),
+            cursor.y.saturating_add(1),
+            cursor.x.saturating_add(1)
+        )
+    } else {
+        write!(stdout, "\x1b[?25l")
     }
 }
 
@@ -1497,6 +1648,35 @@ mod tests {
             libc::close(read_fd);
         }
         result
+    }
+
+    #[test]
+    fn host_string_replies_reach_the_pane_whole() {
+        // Replies to a kitty graphics query, XTGETTCAP and an OSC colour query,
+        // as a host sends them back for a program in a pane.
+        let replies: [&[u8]; 3] = [
+            b"\x1b_Gi=31;OK\x1b\\",
+            b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\",
+            b"\x1b]11;rgb:0000/0000/0000\x07",
+        ];
+        with_pipe(&replies.concat(), |fd| {
+            for reply in replies {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Key(KeyEvent::Bytes(reply.to_vec())))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn alt_p_alone_stays_a_key() {
+        with_pipe(b"\x1bP", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Alt('P')))
+            );
+        });
     }
 
     #[test]

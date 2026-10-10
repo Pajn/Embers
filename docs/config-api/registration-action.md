@@ -94,6 +94,107 @@ Chain multiple actions into one composite action.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_session </h2>
+
+```rust,ignore
+fn choose_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_session" id="link-choose_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_session', 'Description')">
+Description
+</button>
+<button group="choose_session" id="link-choose_session-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_session', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_session" id="choose_session-Description" class="tabcontent"  style="display: block;" >
+Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+(`prefix s`). See `choose_tree` for the keys.
+</div>
+<div group="choose_session" id="choose_session-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>S", action.choose_session());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_tree </h2>
+
+```rust,ignore
+fn choose_tree(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_tree" id="link-choose_tree-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_tree', 'Description')">
+Description
+</button>
+<button group="choose_tree" id="link-choose_tree-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_tree', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_tree" id="choose_tree-Description" class="tabcontent"  style="display: block;" >
+Open the picker on a tree of every session, window and pane, like
+tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+expand and collapse, Enter switches to the selected item, `x` kills it
+after asking, `/` or typing other text filters, and `q`/Esc closes.
+</div>
+<div group="choose_tree" id="choose_tree-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>T", action.choose_tree());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_window </h2>
+
+```rust,ignore
+fn choose_window(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_window" id="link-choose_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_window', 'Description')">
+Description
+</button>
+<button group="choose_window" id="link-choose_window-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_window" id="choose_window-Description" class="tabcontent"  style="display: block;" >
+Open the picker with every session expanded to its windows, like tmux
+`choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+</div>
+<div group="choose_window" id="choose_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>\"", action.choose_window());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> clear_pending_keys </h2>
 
 ```rust,ignore
@@ -200,6 +301,110 @@ Description
 <div group="close_view" id="close_view-Description" class="tabcontent"  style="display: block;" >
 Close the currently focused view. Its buffer keeps running, detached;
 use `kill_view` to end it.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> command_prompt </h2>
+
+```rust,ignore
+fn command_prompt(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="command_prompt" id="link-command_prompt-Description"  class="tablinks active"
+    onclick="openTab(event, 'command_prompt', 'Description')">
+Description
+</button>
+<button group="command_prompt" id="link-command_prompt-Example"  class="tablinks"
+    onclick="openTab(event, 'command_prompt', 'Example')">
+Example
+</button>
+</div>
+
+<div group="command_prompt" id="command_prompt-Description" class="tabcontent"  style="display: block;" >
+Open the command prompt (tmux `:`). Enter runs the typed line with the
+same commands and options as the `embers` CLI, such as
+`split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+commands without `-t` apply to the current session, window and pane.
+Up and Down browse earlier lines; Esc cancels.
+</div>
+<div group="command_prompt" id="command_prompt-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>:", action.command_prompt());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> command_prompt_template </h2>
+
+```rust,ignore
+fn command_prompt_template(_: ActionApi, prompt: String, initial: String, template: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="command_prompt_template" id="link-command_prompt_template-Description"  class="tablinks active"
+    onclick="openTab(event, 'command_prompt_template', 'Description')">
+Description
+</button>
+<button group="command_prompt_template" id="link-command_prompt_template-Example"  class="tablinks"
+    onclick="openTab(event, 'command_prompt_template', 'Example')">
+Example
+</button>
+</div>
+
+<div group="command_prompt_template" id="command_prompt_template-Description" class="tabcontent"  style="display: block;" >
+Open a prompt labelled `prompt` with `initial` typed (both may use
+formats); Enter runs `template` with `%%` replaced by the input as one
+word, like tmux `command-prompt -p prompt -I initial template`.
+</div>
+<div group="command_prompt_template" id="command_prompt_template-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.command_prompt_template("(new window) ", "", "new-window --title %%")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> command_prompt_with </h2>
+
+```rust,ignore
+fn command_prompt_with(_: ActionApi, initial: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="command_prompt_with" id="link-command_prompt_with-Description"  class="tablinks active"
+    onclick="openTab(event, 'command_prompt_with', 'Description')">
+Description
+</button>
+<button group="command_prompt_with" id="link-command_prompt_with-Example"  class="tablinks"
+    onclick="openTab(event, 'command_prompt_with', 'Example')">
+Example
+</button>
+</div>
+
+<div group="command_prompt_with" id="command_prompt_with-Description" class="tabcontent"  style="display: block;" >
+Open the command prompt with `initial` already typed, like tmux
+`command-prompt -I`. The text may use the formats `display_message`
+accepts, such as `#W`.
+</div>
+<div group="command_prompt_with" id="command_prompt_with-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.command_prompt_with("split-window -- ")
+```
 </div>
 
 </div>
@@ -910,6 +1115,43 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description" class="tabcontent"  style="display: block;" >
 Detach a buffer by id.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> display_message </h2>
+
+```rust,ignore
+fn display_message(_: ActionApi, message: String) -> Action
+fn display_message(_: ActionApi, message: String, duration_ms: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="display_message" id="link-display_message-Description"  class="tablinks active"
+    onclick="openTab(event, 'display_message', 'Description')">
+Description
+</button>
+<button group="display_message" id="link-display_message-Example"  class="tablinks"
+    onclick="openTab(event, 'display_message', 'Example')">
+Example
+</button>
+</div>
+
+<div group="display_message" id="display_message-Description" class="tabcontent"  style="display: block;" >
+Show a message in the status line for a few seconds, like tmux
+`display-message`. The text may use the format variables `#S` (session),
+`#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+for the focused pane; `##` is a literal `#`.
+</div>
+<div group="display_message" id="display_message-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.display_message("#S:#I #{pane_current_path}")
+```
 </div>
 
 </div>
@@ -1975,6 +2217,72 @@ Select the previous tab in a specific tabs node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> rename_session_prompt </h2>
+
+```rust,ignore
+fn rename_session_prompt(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="rename_session_prompt" id="link-rename_session_prompt-Description"  class="tablinks active"
+    onclick="openTab(event, 'rename_session_prompt', 'Description')">
+Description
+</button>
+<button group="rename_session_prompt" id="link-rename_session_prompt-Example"  class="tablinks"
+    onclick="openTab(event, 'rename_session_prompt', 'Example')">
+Example
+</button>
+</div>
+
+<div group="rename_session_prompt" id="rename_session_prompt-Description" class="tabcontent"  style="display: block;" >
+Prompt for a new name for the current session, starting from its
+current name (tmux `prefix $`).
+</div>
+<div group="rename_session_prompt" id="rename_session_prompt-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>$", action.rename_session_prompt());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> rename_window_prompt </h2>
+
+```rust,ignore
+fn rename_window_prompt(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="rename_window_prompt" id="link-rename_window_prompt-Description"  class="tablinks active"
+    onclick="openTab(event, 'rename_window_prompt', 'Description')">
+Description
+</button>
+<button group="rename_window_prompt" id="link-rename_window_prompt-Example"  class="tablinks"
+    onclick="openTab(event, 'rename_window_prompt', 'Example')">
+Example
+</button>
+</div>
+
+<div group="rename_window_prompt" id="rename_window_prompt-Description" class="tabcontent"  style="display: block;" >
+Prompt for a new name for the current window, starting from its current
+name (tmux `prefix ,`).
+</div>
+<div group="rename_window_prompt" id="rename_window_prompt-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>,", action.rename_window_prompt());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> replace_current_with </h2>
 
 ```rust,ignore
@@ -2143,6 +2451,39 @@ Description
 
 <div group="reveal_buffer" id="reveal_buffer-Description" class="tabcontent"  style="display: block;" >
 Reveal a specific buffer by id.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> run_command </h2>
+
+```rust,ignore
+fn run_command(_: ActionApi, command: String) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="run_command" id="link-run_command-Description"  class="tablinks active"
+    onclick="openTab(event, 'run_command', 'Description')">
+Description
+</button>
+<button group="run_command" id="link-run_command-Example"  class="tablinks"
+    onclick="openTab(event, 'run_command', 'Example')">
+Example
+</button>
+</div>
+
+<div group="run_command" id="run_command-Description" class="tabcontent"  style="display: block;" >
+Run a command line as if it was typed at the command prompt, like
+binding a tmux command. Output and errors are shown in the status line.
+</div>
+<div group="run_command" id="run_command-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+```
 </div>
 
 </div>
@@ -2568,6 +2909,40 @@ Select a tab by index in a specific tabs node.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> select_window </h2>
+
+```rust,ignore
+fn select_window(_: ActionApi, number: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="select_window" id="link-select_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'select_window', 'Description')">
+Description
+</button>
+<button group="select_window" id="link-select_window-Example"  class="tablinks"
+    onclick="openTab(event, 'select_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="select_window" id="select_window-Description" class="tabcontent"  style="display: block;" >
+Select a window (a root tab of the current session) by its number, which
+counts from the base index set with `set_base_index` (0 when unset), like
+tmux `select-window -t :N`.
+</div>
+<div group="select_window" id="select_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>1", action.select_window(1));
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> send_bytes </h2>
 
 ```rust,ignore
@@ -2652,6 +3027,74 @@ Description
 
 <div group="send_keys_current" id="send_keys_current-Description" class="tabcontent"  style="display: block;" >
 Send a key notation sequence to the focused buffer.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_environment </h2>
+
+```rust,ignore
+fn set_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_environment" id="link-set_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_environment', 'Description')">
+Description
+</button>
+<button group="set_environment" id="link-set_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_environment" id="set_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in the current
+session (tmux `set-environment`). Pass `()` as the value to unset it.
+Panes that already run keep their environment.
+</div>
+<div group="set_environment" id="set_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_environment("AWS_PROFILE", "staging")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_global_environment </h2>
+
+```rust,ignore
+fn set_global_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_global_environment" id="link-set_global_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_global_environment', 'Description')">
+Description
+</button>
+<button group="set_global_environment" id="link-set_global_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_global_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_global_environment" id="set_global_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in every session
+(tmux `set-environment -g`). Pass `()` as the value to unset it. A
+session's own value wins over the global one.
+</div>
+<div group="set_global_environment" id="set_global_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_global_environment("EDITOR", "nvim")
+```
 </div>
 
 </div>

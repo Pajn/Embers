@@ -1,9 +1,10 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, Size,
-    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, Hyperlink, NodeId, PassthroughWrite,
+    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor,
+    WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -265,15 +266,34 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
             validate_required_session_id(*session_id, "session_request.session_id")?;
             validate_cells(viewport.width, viewport.height, "session_request.viewport")
         }
+        SessionRequest::SetEnvironment {
+            session_id, name, ..
+        } => {
+            validate_optional_session_id(*session_id, "session_request.session_id")?;
+            if name.is_empty() {
+                return Err(ProtocolError::InvalidMessage(
+                    "session_request.name must not be empty",
+                ));
+            }
+            Ok(())
+        }
+        SessionRequest::ShowEnvironment { session_id, .. } => {
+            validate_optional_session_id(*session_id, "session_request.session_id")
+        }
     }
 }
 
 fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
     match req {
-        BufferRequest::Create { size, .. } => match size {
-            Some(size) => validate_cells(size.cols, size.rows, "buffer_request.pty_size"),
-            None => Ok(()),
-        },
+        BufferRequest::Create {
+            size, session_id, ..
+        } => {
+            validate_optional_session_id(*session_id, "buffer_request.session_id")?;
+            match size {
+                Some(size) => validate_cells(size.cols, size.rows, "buffer_request.pty_size"),
+                None => Ok(()),
+            }
+        }
         BufferRequest::List { session_id, .. } => {
             validate_optional_session_id(*session_id, "buffer_request.session_id")
         }
@@ -421,6 +441,19 @@ fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
         }
         ClientRequest::Switch { session_id, .. } => {
             validate_required_session_id(*session_id, "client_request.session_id")
+        }
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => {
+            validate_optional_session_id(*session_id, "client_request.session_id")?;
+            if client_id.is_none() && session_id.is_none() {
+                return Err(ProtocolError::InvalidMessage(
+                    "display message requires a client_id or session_id",
+                ));
+            }
+            Ok(())
         }
     }
 }
@@ -930,6 +963,23 @@ fn encode_client_request<'a>(
             client_id.map(|id| id.get()).unwrap_or(0),
             (*session_id).into(),
         ),
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => (
+            fb::ClientOp::DisplayMessage,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            session_id.map_or(0, u64::from),
+        ),
+    };
+    let (message, duration_ms) = match req {
+        ClientRequest::DisplayMessage {
+            message,
+            duration_ms,
+            ..
+        } => (Some(builder.create_string(message)), *duration_ms),
+        _ => (None, 0),
     };
 
     let client_req = fb::ClientRequest::create(
@@ -938,6 +988,8 @@ fn encode_client_request<'a>(
             op,
             client_id,
             session_id,
+            message,
+            duration_ms,
         },
     );
 
@@ -1080,6 +1132,28 @@ fn encode_session_request<'a>(
             false,
             0,
         ),
+        SessionRequest::SetEnvironment {
+            session_id, name, ..
+        } => (
+            fb::SessionOp::SetEnvironment,
+            session_id.map_or(0, u64::from),
+            0,
+            0,
+            Some(name.as_str()),
+            None,
+            false,
+            0,
+        ),
+        SessionRequest::ShowEnvironment { session_id, .. } => (
+            fb::SessionOp::ShowEnvironment,
+            session_id.map_or(0, u64::from),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
     };
     let (viewport_cols, viewport_rows) = match req {
         SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
@@ -1096,6 +1170,12 @@ fn encode_session_request<'a>(
 
     let name = name_str.map(|s| builder.create_string(s));
     let title = title_str.map(|s| builder.create_string(s));
+    let env_value = match req {
+        SessionRequest::SetEnvironment {
+            value: Some(value), ..
+        } => Some(builder.create_string(value)),
+        _ => None,
+    };
     let session_req = fb::SessionRequest::create(
         builder,
         &fb::SessionRequestArgs {
@@ -1110,6 +1190,7 @@ fn encode_session_request<'a>(
             synchronize_panes,
             viewport_cols,
             viewport_rows,
+            env_value,
         },
     );
 
@@ -1151,11 +1232,12 @@ fn encode_buffer_request<'a>(
             command,
             cwd,
             env,
+            session_id,
             ..
         } => (
             fb::BufferOp::Create,
             0,
-            0,
+            session_id.map_or(0, u64::from),
             0,
             false,
             false,
@@ -1710,6 +1792,7 @@ fn validate_server_response(response: &ServerResponse) -> Result<(), ProtocolErr
             Ok(())
         }
         ServerResponse::Client(response) => validate_client_record(&response.client),
+        ServerResponse::Environment(_) => Ok(()),
         ServerResponse::BufferLocation(response) => {
             validate_buffer_location(&response.location, "buffer_location_response.location")
         }
@@ -1765,6 +1848,10 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         }
         ServerEvent::Clipboard(event) => {
             validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
+        }
+        ServerEvent::DisplayMessage(_) => Ok(()),
+        ServerEvent::Passthrough(event) => {
+            validate_required_buffer_id(event.buffer_id, "passthrough_event.buffer_id")
         }
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
@@ -3000,6 +3087,28 @@ fn encode_server_response<'a>(
                 },
             )
         }
+        ServerResponse::Environment(r) => {
+            let keys = r.env.keys().cloned().collect::<Vec<_>>();
+            let values = r.env.values().cloned().collect::<Vec<_>>();
+            let env_keys = create_string_vector(builder, &keys);
+            let env_values = create_string_vector(builder, &values);
+            let response = fb::EnvironmentResponse::create(
+                builder,
+                &fb::EnvironmentResponseArgs {
+                    env_keys: Some(env_keys),
+                    env_values: Some(env_values),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::EnvironmentResponse,
+                    environment_response: Some(response),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::Client(r) => {
             let client = encode_client_record(builder, &r.client);
             let response = fb::ClientResponse::create(
@@ -3356,6 +3465,59 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::Passthrough(e) => {
+            let writes = e
+                .writes
+                .iter()
+                .map(|write| {
+                    let data = builder.create_vector(&write.bytes);
+                    fb::PassthroughWrite::create(
+                        builder,
+                        &fb::PassthroughWriteArgs {
+                            data: Some(data),
+                            cursor_row: write.cursor.row,
+                            cursor_col: write.cursor.col,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let writes = builder.create_vector(&writes);
+            let event = fb::PassthroughEvent::create(
+                builder,
+                &fb::PassthroughEventArgs {
+                    buffer_id: e.buffer_id.into(),
+                    writes: Some(writes),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::PassthroughEvent,
+                    passthrough_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerEvent::DisplayMessage(e) => {
+            let message = builder.create_string(&e.message);
+            let event = fb::DisplayMessageEvent::create(
+                builder,
+                &fb::DisplayMessageEventArgs {
+                    message: Some(message),
+                    duration_ms: e.duration_ms,
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::DisplayMessageEvent,
+                    display_message_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -3427,6 +3589,7 @@ fn encode_buffer_record<'a>(
     let foreground_command = record
         .foreground_command
         .as_ref()
+        .filter(|command| !command.is_empty())
         .map(|command| create_string_vector(builder, command));
 
     let state = match record.state {
@@ -3809,6 +3972,24 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         },
                     }
                 }
+                fb::SessionOp::SetEnvironment => {
+                    let name = required(req.name(), "session_request.name")?;
+                    if name.is_empty() {
+                        return Err(ProtocolError::InvalidMessage(
+                            "session_request.name must not be empty",
+                        ));
+                    }
+                    SessionRequest::SetEnvironment {
+                        request_id,
+                        session_id: (req.session_id() != 0).then(|| SessionId(req.session_id())),
+                        name: name.to_owned(),
+                        value: req.env_value().map(str::to_owned),
+                    }
+                }
+                fb::SessionOp::ShowEnvironment => SessionRequest::ShowEnvironment {
+                    request_id,
+                    session_id: (req.session_id() != 0).then(|| SessionId(req.session_id())),
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };
             Ok(ClientMessage::Session(session_request))
@@ -3834,6 +4015,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         cwd: req.cwd().map(|c| c.to_owned()),
                         env,
                         size,
+                        session_id: (req.session_id() != 0).then(|| SessionId(req.session_id())),
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -4315,6 +4497,21 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         )?,
                     }
                 }
+                fb::ClientOp::DisplayMessage => {
+                    let session_id = (req.session_id() != 0).then(|| SessionId(req.session_id()));
+                    if client_id.is_none() && session_id.is_none() {
+                        return Err(ProtocolError::InvalidMessage(
+                            "display message requires a client_id or session_id",
+                        ));
+                    }
+                    ClientRequest::DisplayMessage {
+                        request_id,
+                        client_id,
+                        session_id,
+                        message: required(req.message(), "client_request.message")?.to_owned(),
+                        duration_ms: req.duration_ms(),
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
             };
             Ok(ClientMessage::Client(request))
@@ -4485,6 +4682,19 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 ClientsResponse {
                     request_id: RequestId(envelope.request_id()),
                     clients: clients_vec?,
+                },
+            )))
+        }
+        fb::MessageKind::EnvironmentResponse => {
+            let resp = required(envelope.environment_response(), "environment_response")?;
+            Ok(ServerEnvelope::Response(ServerResponse::Environment(
+                EnvironmentResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    env: decode_string_map(
+                        resp.env_keys(),
+                        resp.env_values(),
+                        "environment_response.env",
+                    )?,
                 },
             )))
         }
@@ -4726,6 +4936,42 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::PassthroughEvent => {
+            let event = required(envelope.passthrough_event(), "passthrough_event")?;
+            let writes = event
+                .writes()
+                .map(|writes| {
+                    writes
+                        .iter()
+                        .map(|write| PassthroughWrite {
+                            bytes: write
+                                .data()
+                                .map(|data| data.bytes().to_vec())
+                                .unwrap_or_default(),
+                            cursor: CursorPosition {
+                                row: write.cursor_row(),
+                                col: write.cursor_col(),
+                            },
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(ServerEnvelope::Event(ServerEvent::Passthrough(
+                PassthroughEvent {
+                    buffer_id: BufferId(event.buffer_id()),
+                    writes,
+                },
+            )))
+        }
+        fb::MessageKind::DisplayMessageEvent => {
+            let event = required(envelope.display_message_event(), "display_message_event")?;
+            Ok(ServerEnvelope::Event(ServerEvent::DisplayMessage(
+                DisplayMessageEvent {
+                    message: required(event.message(), "display_message_event.message")?.to_owned(),
+                    duration_ms: event.duration_ms(),
+                },
+            )))
+        }
         fb::MessageKind::ClientChangedEvent => {
             let event = required(envelope.client_changed_event(), "client_changed_event")?;
             let client = required(event.client(), "client_changed_event.client")?;
@@ -4808,6 +5054,10 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         record.user_option_values(),
         "buffer_record.user_options",
     )?;
+    let foreground_command = record
+        .foreground_command()
+        .map(|command| command.iter().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|command| !command.is_empty());
     let kind = match record.kind() {
         fb::BufferKindWire::Pty => BufferRecordKind::Pty,
         fb::BufferKindWire::Helper => BufferRecordKind::Helper,
@@ -4859,9 +5109,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         },
         env,
         user_options,
-        foreground_command: record
-            .foreground_command()
-            .map(|command| command.iter().map(str::to_owned).collect()),
+        foreground_command,
     };
     record
         .validate()

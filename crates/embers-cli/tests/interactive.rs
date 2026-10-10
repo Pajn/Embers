@@ -15,7 +15,8 @@ use embers_protocol::{
     VisibleSnapshotResponse,
 };
 use embers_test_support::{
-    PtyHarness, TestConnection, TestServer, acquire_test_lock, cargo_bin, cargo_bin_path,
+    BASIC_HOST, HostAnswer, PtyHarness, TestConnection, TestServer, acquire_test_lock, cargo_bin,
+    cargo_bin_path,
 };
 use filetime::FileTime;
 
@@ -269,6 +270,18 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// The socket_path should be the path to the socket - if a server needs to be
 /// spawned for it, the guard will clean it up.
 fn spawn_embers(args: &[&str], socket_path: PathBuf) -> (SpawnedEmbers, PtyHarness) {
+    spawn_embers_on_host(args, socket_path, BASIC_HOST)
+}
+
+/// [`spawn_embers`] in a terminal that answers queries as `answers` says. The
+/// client runs with `TERM=xterm-256color` and no `TERM_PROGRAM`, so what it
+/// detects depends on the answers alone, not on the terminal running the
+/// tests.
+fn spawn_embers_on_host(
+    args: &[&str],
+    socket_path: PathBuf,
+    answers: &'static [HostAnswer],
+) -> (SpawnedEmbers, PtyHarness) {
     let binary = cargo_bin_path("embers");
     let binary_dir = binary.parent().expect("binary dir");
     let started_server = !socket_path.exists() && !socket_path.with_extension("pid").exists();
@@ -278,16 +291,26 @@ fn spawn_embers(args: &[&str], socket_path: PathBuf) -> (SpawnedEmbers, PtyHarne
         std::env::var("PATH").unwrap_or_default()
     );
     let mut env_and_args = vec![
+        "-u".to_owned(),
+        "TERM_PROGRAM".to_owned(),
+        "TERM=xterm-256color".to_owned(),
         path,
         "SHELL=/bin/sh".to_owned(),
         binary.to_string_lossy().into_owned(),
     ];
     env_and_args.extend(args.iter().map(|arg| (*arg).to_owned()));
     let argv = env_and_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let harness = PtyHarness::spawn("/usr/bin/env", &argv, PtySize::new(80, 24))
+    let harness = PtyHarness::spawn_answering("/usr/bin/env", &argv, PtySize::new(80, 24), answers)
         .expect("spawn embers in pty");
     (SpawnedEmbers::new(socket_path, started_server), harness)
 }
+
+/// A host terminal that says it is Ghostty, which supports everything Embers
+/// emits.
+const GHOSTTY_HOST: &[HostAnswer] = &[
+    (b"\x1b[>0q", b"\x1bP>|ghostty 1.1.3\x1b\\"),
+    (b"\x1b[c", b"\x1b[?62;22c"),
+];
 
 async fn wait_for_socket(socket_path: &Path) {
     for _ in 0..FILE_WAIT_ATTEMPTS {
@@ -1480,6 +1503,278 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
     })
     .await;
     assert!(!restored.alternate_screen);
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+/// The 1-based `(row, column)` of the cursor move (`ESC [ row ; col H`) that
+/// ends right before `index` in `output`, if one does.
+fn cursor_move_before(output: &str, index: usize) -> Option<(u16, u16)> {
+    let head = output[..index].strip_suffix('H')?;
+    let start = head.rfind("\x1b[")?;
+    let (row, col) = head[start + 2..].split_once(';')?;
+    Some((row.parse().ok()?, col.parse().ok()?))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_cursor() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers_on_host(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+        GHOSTTY_HOST,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("focused shell settles");
+
+    // Move the pane cursor to row 3, column 5, then send a desktop
+    // notification wrapped for tmux, with its ESC doubled.
+    harness
+        .write_all("printf '\\033[3;5H\\033Ptmux;\\033\\033]9;embers-passthrough\\007\\033\\\\'\r")
+        .expect("run passthrough fixture");
+    let payload = "\x1b]9;embers-passthrough\x07";
+    let output = harness
+        .read_until_contains(payload, IO_TIMEOUT)
+        .expect("unwrapped payload reaches the host terminal");
+    let index = output.find(payload).expect("payload in output");
+    let (row, col) = cursor_move_before(&output, index)
+        .unwrap_or_else(|| panic!("no cursor move before the payload in {output:?}"));
+    // The only pane fills the width, so column 5 of the pane is column 5 of
+    // the screen; its content starts below the tab bar and its title row.
+    assert_eq!(col, 5);
+    assert!(row > 3, "row {row} is not below the pane's title");
+    assert!(
+        !output.contains("tmux;"),
+        "wrapper reached the host: {output:?}"
+    );
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
+/// Everything a live client wrote to a host terminal that answers queries as
+/// `answers` says, until a pane printed a curly underline in color and an
+/// OSC 8 link.
+async fn styled_output_on_host(answers: &'static [HostAnswer]) -> String {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers_on_host(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+        answers,
+    );
+    let mut output = harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    output.push_str(
+        &harness
+            .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+            .expect("focused shell settles"),
+    );
+    harness
+        .write_all(
+            "printf '\\033[4:3;58:5:1mwavy\\033[0m \\033]8;;https://example.com\\033\\\\link\\033]8;;\\033\\\\ CAPS-%s\\n' done\r",
+        )
+        .expect("print styled text");
+    output.push_str(
+        &harness
+            .read_until_contains("CAPS-done", IO_TIMEOUT)
+            .expect("styled text renders"),
+    );
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+    output
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capable_host_gets_underline_styles_colors_and_links() {
+    if !require_pty() {
+        return;
+    }
+    let output = styled_output_on_host(GHOSTTY_HOST).await;
+    // The client asked: XTVERSION, XTGETTCAP, then DA1.
+    assert!(
+        output.contains(embers_client::HOST_QUERIES),
+        "no queries in {output:?}"
+    );
+    // The pane's emulator gives the link an id, so match from the URI on.
+    for expected in [
+        "\x1b[4:3m",
+        "\x1b[58:5:1m",
+        ";https://example.com\x1b\\link\x1b]8;;\x1b\\",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing {expected:?} in {output:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_host_gets_plain_underlines_and_no_links() {
+    if !require_pty() {
+        return;
+    }
+    // Answers DA1 only, as a basic terminal does.
+    let output = styled_output_on_host(BASIC_HOST).await;
+    assert_degraded(&output);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_host_still_attaches_and_gets_the_plain_forms() {
+    if !require_pty() {
+        return;
+    }
+    // Answers nothing: the client waits out its timeout and carries on.
+    let output = styled_output_on_host(&[]).await;
+    assert_degraded(&output);
+}
+
+fn assert_degraded(output: &str) {
+    assert!(
+        output.contains("\x1b[4mwavy"),
+        "expected a plain underline in {output:?}"
+    );
+    for unexpected in ["\x1b[4:", "\x1b[58", "\x1b]8;"] {
+        assert!(
+            !output.contains(unexpected),
+            "{unexpected:?} leaked into {output:?}"
+        );
+    }
+    assert!(output.contains("link CAPS-done"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_prompt_picker_and_display_message_work_in_a_live_client() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"
+        bind("normal", "<M-:>", action.command_prompt());
+        bind("normal", "<M-w>", action.choose_window());
+        "#,
+    )
+    .expect("write config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+
+    // The prompt runs CLI commands against the client's session.
+    harness.write_all("\x1b:").expect("open command prompt");
+    harness
+        .write_all("rename-window prompt-renamed")
+        .expect("type command");
+    harness
+        .read_until_contains("rename-window prompt-renamed", IO_TIMEOUT)
+        .expect("prompt echoes the typed line");
+    harness.write_all("\r").expect("run command");
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let windows = stdout(&run_cli(&server, ["list-windows", "-t", "main"]));
+        if windows.contains("prompt-renamed") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "window was not renamed: {windows}"
+        );
+        tokio::time::sleep(FILE_WAIT_POLL).await;
+    }
+
+    harness.write_all("\x1bw").expect("open picker");
+    harness
+        .read_until_contains("choose-window", IO_TIMEOUT)
+        .expect("picker renders");
+    harness.write_all("q").expect("close picker");
+
+    run_cli(&server, ["display-message", "shown-from-cli"]);
+    harness
+        .read_until_contains("shown-from-cli", IO_TIMEOUT)
+        .expect("display-message reaches the status line");
 
     harness.write_all("\x11").expect("quit attached client");
     harness.wait().expect("client exits");

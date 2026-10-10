@@ -31,6 +31,7 @@ enum MessageKind : ubyte {
   ClientResponse = 34,
   BufferLocationResponse = 35,
   BufferWithLocationResponse = 36,
+  EnvironmentResponse = 37,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -44,6 +45,8 @@ enum MessageKind : ubyte {
   ClientChangedEvent = 49,
   BufferPipeChangedEvent = 50,
   ClipboardEvent = 51,
+  DisplayMessageEvent = 52,
+  PassthroughEvent = 53,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -70,6 +73,8 @@ enum SessionOp : ubyte {
   Rename = 8,
   SetRootTabSynchronizePanes = 9,
   SetViewport = 10,
+  SetEnvironment = 11,
+  ShowEnvironment = 12,
 }
 
 enum SynchronizePanesModeWire : ubyte {
@@ -137,6 +142,7 @@ enum ClientOp : ubyte {
   Get = 1,
   Detach = 2,
   Switch = 3,
+  DisplayMessage = 4,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -233,6 +239,8 @@ table SessionRequest {
   synchronize_panes:SynchronizePanesModeWire = Toggle (id: 8);
   viewport_cols:ushort = 0 (id: 9);
   viewport_rows:ushort = 0 (id: 10);
+  // SetEnvironment: the value to set; absent unsets `name`.
+  env_value:string (id: 11);
 }
 
 table BufferRequest {
@@ -318,6 +326,9 @@ table ClientRequest {
   op:ClientOp = List;
   client_id:ulong = 0;
   session_id:ulong = 0;
+  // DisplayMessage: the text to show and for how long (0 = client default).
+  message:string;
+  duration_ms:uint = 0;
 }
 
 table PingResponse {
@@ -500,6 +511,12 @@ table BufferWithLocationResponse {
   at_root_tab:bool = false (id: 2);
 }
 
+// The environment of one session, or the global environment.
+table EnvironmentResponse {
+  env_keys:[string];
+  env_values:[string];
+}
+
 table CursorState {
   row:ushort = 0;
   col:ushort = 0;
@@ -640,6 +657,29 @@ table ClipboardEvent {
   text:string;
 }
 
+// One sequence for the host terminal, the unwrapped payload of a tmux
+// passthrough (`ESC P tmux; ... ESC \`) or an unwrapped kitty graphics command,
+// with the pane cursor at the point it ended.
+table PassthroughWrite {
+  data:[ubyte];
+  cursor_row:ushort;
+  cursor_col:ushort;
+}
+
+// Passthrough sequences from a program in `buffer_id`, in order, sent only to
+// the clients currently showing that buffer's session.
+table PassthroughEvent {
+  buffer_id:ulong;
+  writes:[PassthroughWrite];
+}
+
+// A message for a client to show in its status line (`display-message`),
+// sent only to the clients the request named.
+table DisplayMessageEvent {
+  message:string;
+  duration_ms:uint = 0;
+}
+
 table SessionRenamedEvent {
   session_id:ulong;
   name:string;
@@ -693,6 +733,9 @@ table Envelope {
   buffer_with_location_response:BufferWithLocationResponse (id: 37);
   buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
   clipboard_event:ClipboardEvent (id: 39);
+  environment_response:EnvironmentResponse (id: 40);
+  display_message_event:DisplayMessageEvent (id: 41);
+  passthrough_event:PassthroughEvent (id: 42);
 }
 
 root_type Envelope;

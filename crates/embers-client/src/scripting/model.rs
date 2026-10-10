@@ -6,6 +6,7 @@ use embers_protocol::{
     SynchronizePanesMode,
 };
 
+use crate::chooser::ChooserScope;
 use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
@@ -29,6 +30,11 @@ pub enum Action {
     SelectTab {
         tabs_node_id: Option<NodeId>,
         index: usize,
+    },
+    /// tmux `select-window -t :N`: select the root tab numbered `number`,
+    /// counting from the configured base index.
+    SelectWindow {
+        number: u64,
     },
     NextTab {
         tabs_node_id: Option<NodeId>,
@@ -195,8 +201,40 @@ pub enum Action {
     RunShell {
         command: Vec<String>,
     },
+    /// tmux `set-environment [-g] [-u]`: set (or unset, when `value` is
+    /// `None`) a variable for panes created later in the current session, or
+    /// in every session when `global`.
+    SetEnvironment {
+        global: bool,
+        name: String,
+        value: Option<String>,
+    },
     EnterHints {
         action: Option<String>,
+    },
+    /// tmux `command-prompt`: open the prompt labelled `prompt` (`:` when
+    /// `None`) with `initial` text, both expanded as formats. On Enter the
+    /// input runs as a command line, or `template` does with `%%` replaced by
+    /// the quoted input.
+    CommandPrompt {
+        prompt: Option<String>,
+        initial: String,
+        template: Option<String>,
+    },
+    /// tmux `choose-tree`: open the session/window/pane picker.
+    ChooseTree {
+        scope: ChooserScope,
+    },
+    /// Run a command line as if typed at the command prompt.
+    RunCommand {
+        command: String,
+    },
+    /// tmux `display-message`: expand `message` as a format for the focused
+    /// pane and show it in the status line for `duration_ms` (the default
+    /// display time when `None`).
+    DisplayMessage {
+        message: String,
+        duration_ms: Option<u32>,
     },
 }
 

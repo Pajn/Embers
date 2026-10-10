@@ -43,6 +43,7 @@ async fn create_buffer(connection: &mut TestConnection, title: &str) -> BufferRe
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer request succeeds");

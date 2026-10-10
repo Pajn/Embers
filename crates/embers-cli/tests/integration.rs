@@ -1,4 +1,7 @@
 mod automation;
+mod command_prompt;
+mod display_message;
+mod environment;
 mod interactive;
 mod kill;
 mod layout_controls;
@@ -8,4 +11,5 @@ mod ping;
 mod popups;
 mod sessions;
 mod support;
+mod window_numbering;
 mod windows;

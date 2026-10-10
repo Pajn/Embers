@@ -8,21 +8,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    BufferId, ClipboardWrite, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine,
-    WireError, request_span,
+    BufferId, ClipboardWrite, ErrorCode, MuxError, PassthroughWrite, PtySize, RequestId, Result,
+    SnapshotLine, WireError, request_span,
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
     BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
-    ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent,
-    FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
-    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
-    SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
-    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
-    SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message, encode_server_envelope,
-    read_frame, write_frame_no_flush,
+    DisplayMessageEvent, EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest,
+    FloatingResponse, FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse,
+    PassthroughEvent, PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent,
+    ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent,
+    SessionCreatedEvent, SessionRenamedEvent, SessionRequest, SessionSnapshotResponse,
+    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -83,6 +84,34 @@ const MAX_USER_OPTION_VALUE_LEN: usize = 4096;
 /// fails the request. We stop adding records past this budget (kept comfortably
 /// under the frame cap to absorb estimation slack) rather than emit a dead frame.
 const BUFFERS_RESPONSE_BUDGET: usize = 7 * 1024 * 1024;
+
+/// Payload budget for one `PassthroughEvent`. One write is at most
+/// `MAX_PASSTHROUGH_BYTES` (4 MiB), so a lone write always fits; several
+/// smaller ones share an event up to this size, which leaves room for framing
+/// under the protocol frame cap (`MAX_FRAME_LEN`, 8 MiB).
+const PASSTHROUGH_EVENT_BUDGET: usize = 6 * 1024 * 1024;
+
+/// Split passthrough writes, in order, into groups that each fit one event.
+fn batch_passthrough_writes(writes: Vec<PassthroughWrite>) -> Vec<Vec<PassthroughWrite>> {
+    // Per-write cost of the cursor, vector entry and table overhead.
+    const WRITE_OVERHEAD: usize = 32;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0;
+    for write in writes {
+        let cost = write.bytes.len() + WRITE_OVERHEAD;
+        if !batch.is_empty() && batch_bytes + cost > PASSTHROUGH_EVENT_BUDGET {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = 0;
+        }
+        batch_bytes += cost;
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
 
 /// Conservative upper bound on a `BufferRecord`'s flatbuffers-encoded size, used
 /// to keep `BuffersResponse` under [`BUFFERS_RESPONSE_BUDGET`]. It overestimates
@@ -590,6 +619,22 @@ impl Runtime {
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
         let clipboard_tasks = self.state_tasks.clone();
+        let passthrough_tasks = self.state_tasks.clone();
+        // Passthrough writes must reach clients in the order the program sent
+        // them (an image is many sequences), so unlike the other callbacks they
+        // go through one task per runtime instead of a task per call. The task
+        // ends when the callbacks, and with them the sender, are dropped.
+        let (passthrough_tx, mut passthrough_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(BufferId, Vec<PassthroughWrite>, TaskTicket)>();
+        let passthrough_runtime = self.clone();
+        std::mem::drop(output_handle.spawn(async move {
+            while let Some((buffer_id, writes, task)) = passthrough_rx.recv().await {
+                passthrough_runtime
+                    .forward_passthrough(buffer_id, writes)
+                    .await;
+                drop(task);
+            }
+        }));
 
         BufferRuntimeCallbacks {
             on_output: Arc::new(move |buffer_id, update| {
@@ -615,6 +660,12 @@ impl Runtime {
                     let _task = task;
                     runtime.forward_clipboard(buffer_id, write).await;
                 }));
+            }),
+            on_passthrough: Arc::new(move |buffer_id, writes| {
+                let task = passthrough_tasks.enter();
+                if passthrough_tx.send((buffer_id, writes, task)).is_err() {
+                    debug!(%buffer_id, "dropping passthrough: forwarder stopped");
+                }
             }),
         }
     }
@@ -998,6 +1049,23 @@ impl Runtime {
                     ),
                 }
             }
+            ClientRequest::DisplayMessage {
+                request_id,
+                client_id,
+                session_id,
+                message,
+                duration_ms,
+            } => {
+                let event = ServerEvent::DisplayMessage(DisplayMessageEvent {
+                    message,
+                    duration_ms,
+                });
+                let response = match self.display_message(client_id, session_id, event).await {
+                    Ok(()) => ServerResponse::Ok(OkResponse { request_id }),
+                    Err(error) => mux_error_response(Some(request_id), error),
+                };
+                (response, Vec::new(), None)
+            }
             ClientRequest::Switch {
                 request_id,
                 client_id,
@@ -1209,6 +1277,47 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            SessionRequest::SetEnvironment {
+                request_id,
+                session_id,
+                name,
+                value,
+            } => {
+                if let Some(session_id) = session_id
+                    && let Err(error) = state.session(session_id)
+                {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                // Sessions are never reused, so forget the environments of
+                // closed ones here rather than when they close.
+                let ServerState {
+                    sessions,
+                    environment,
+                    ..
+                } = &mut *state;
+                environment.retain_sessions(|session_id| sessions.contains_key(&session_id));
+                match environment.set(session_id, &name, value) {
+                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            SessionRequest::ShowEnvironment {
+                request_id,
+                session_id,
+            } => {
+                if let Some(session_id) = session_id
+                    && let Err(error) = state.session(session_id)
+                {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                (
+                    ServerResponse::Environment(EnvironmentResponse {
+                        request_id,
+                        env: state.environment.get(session_id),
+                    }),
+                    Vec::new(),
+                )
+            }
         }
     }
 
@@ -1225,6 +1334,7 @@ impl Runtime {
                 cwd,
                 env,
                 size,
+                session_id,
             } => {
                 if command.is_empty() {
                     return (
@@ -1253,11 +1363,21 @@ impl Runtime {
                             Vec::new(),
                         );
                     }
+                    if let Some(session_id) = session_id
+                        && let Err(error) = state.session(session_id)
+                    {
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                    // The session's environment goes under the creator's own
+                    // variables and is recorded with the buffer, so a restored
+                    // pane gets it again.
+                    let mut buffer_env = state.environment.for_new_buffer(session_id);
+                    buffer_env.extend(env);
                     let buffer_id = state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
                         cwd.map(Into::into),
-                        env,
+                        buffer_env,
                     );
                     // Start the command at the size it will be drawn at, so it
                     // never sees the default size first.
@@ -3291,19 +3411,47 @@ impl Runtime {
     /// clients on other sessions are not. A write from a detached buffer, or
     /// one whose session no client is showing, is dropped.
     async fn forward_clipboard(&self, buffer_id: BufferId, write: ClipboardWrite) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
+            return;
+        };
+        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id,
+            selection: write.selection,
+            text: write.text,
+        }));
+        self.send_to_clients(&client_ids, event).await;
+    }
+
+    /// Send passthrough writes from `buffer_id` to the same clients as a
+    /// clipboard write. Each client decides from its own layout whether the
+    /// pane is on screen (tmux `allow-passthrough on`) or forwards the writes
+    /// anyway (`all`). The writes go out in order, in as few events as fit a
+    /// protocol frame.
+    async fn forward_passthrough(&self, buffer_id: BufferId, writes: Vec<PassthroughWrite>) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping passthrough: no client shows its session");
+            return;
+        };
+        for writes in batch_passthrough_writes(writes) {
+            let event = ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+                buffer_id,
+                writes,
+            }));
+            self.send_to_clients(&client_ids, event).await;
+        }
+    }
+
+    /// The clients whose current session contains `buffer_id`, or `None` when
+    /// the buffer is detached or no client shows its session.
+    async fn clients_showing_buffer_session(&self, buffer_id: BufferId) -> Option<BTreeSet<u64>> {
         let session_id = {
             let state = self.state.lock().await;
-            let Ok(buffer) = state.buffer(buffer_id) else {
-                return;
-            };
+            let buffer = state.buffer(buffer_id).ok()?;
             let BufferAttachment::Attached(node_id) = buffer.attachment else {
-                debug!(%buffer_id, "dropping clipboard write from a detached buffer");
-                return;
+                return None;
             };
-            match state.node(node_id) {
-                Ok(node) => node.session_id(),
-                Err(_) => return,
-            }
+            state.node(node_id).ok()?.session_id()
         };
         let client_ids: BTreeSet<u64> = self
             .clients
@@ -3313,18 +3461,50 @@ impl Runtime {
             .filter(|(_, client)| client.current_session_id == Some(session_id))
             .map(|(&client_id, _)| client_id)
             .collect();
-        if client_ids.is_empty() {
-            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
-            return;
-        }
+        (!client_ids.is_empty()).then_some(client_ids)
+    }
 
-        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
-            buffer_id,
-            selection: write.selection,
-            text: write.text,
-        }));
+    /// Send a `display-message` event to `client_id`, or to every client whose
+    /// current session is `session_id`. Fails when no such client exists, as
+    /// tmux does without a client to show the message on.
+    async fn display_message(
+        &self,
+        client_id: Option<std::num::NonZeroU64>,
+        session_id: Option<embers_core::SessionId>,
+        event: ServerEvent,
+    ) -> Result<()> {
+        let client_ids: BTreeSet<u64> = {
+            let clients = self.clients.lock().await;
+            match (client_id, session_id) {
+                (Some(client_id), _) => {
+                    if !clients.contains_key(&client_id.get()) {
+                        return Err(MuxError::not_found(format!("unknown client {client_id}")));
+                    }
+                    BTreeSet::from([client_id.get()])
+                }
+                (None, Some(session_id)) => clients
+                    .iter()
+                    .filter(|(_, client)| client.current_session_id == Some(session_id))
+                    .map(|(&client_id, _)| client_id)
+                    .collect(),
+                (None, None) => BTreeSet::new(),
+            }
+        };
+        if client_ids.is_empty() {
+            return Err(MuxError::not_found(
+                "no client is attached to show the message on",
+            ));
+        }
+        self.send_to_clients(&client_ids, ServerEnvelope::Event(event))
+            .await;
+        Ok(())
+    }
+
+    /// Send `event` once to each of `client_ids`, best effort: unlike
+    /// `broadcast`, a client too slow to take it misses it but stays attached.
+    async fn send_to_clients(&self, client_ids: &BTreeSet<u64>, event: ServerEnvelope) {
         // Events reach a client through its subscriptions; send through one per
-        // client so a client with several subscriptions still copies once.
+        // client so a client with several subscriptions gets it once.
         let mut delivered = BTreeSet::new();
         let subscriptions = self.subscriptions.lock().await;
         for subscription in subscriptions.values() {
@@ -3333,13 +3513,11 @@ impl Runtime {
             {
                 continue;
             }
-            // Best effort, unlike `broadcast`: a client too slow to take one
-            // clipboard write misses it but stays attached.
             if let Err(error) = subscription.sender.try_send(event.clone()) {
                 debug!(
                     connection_id = subscription.connection_id,
                     %error,
-                    "dropping clipboard write for client"
+                    "dropping event for slow client"
                 );
             }
         }
@@ -4515,6 +4693,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                     size: None,
+                    session_id: None,
                 },
             )
             .await;

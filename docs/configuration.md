@@ -19,6 +19,7 @@ config API (key bindings, modes, actions, themes, tab bars, hooks) see
 | `EMBERS_RESTORE` | on | server | Set to `0`, `off`, `false` or `no` to leave panes whose keeper is gone `Interrupted` instead of restoring them. |
 | `EMBERS_REMAIN_ON_EXIT` | `off` | server | Default of the `remain-on-exit` pane option for panes that do not set it: `on` keeps a pane whose program exited as a dead pane, `failed` only when it exited with a nonzero status. A pane's own option wins. |
 | `EMBERS_RESTORE_COMMANDS` | `vi vim nvim emacs man less more tail top htop irssi weechat mutt` | server | Programs run again when a pane is restored, separated by commas or spaces. Replaces the default; set but empty, no program is run again. |
+| `EMBERS_BASE_INDEX` | unset | client + CLI | Number of the first window, like tmux `base-index`. Overridden by `--base-index` on the CLI and by `set_base_index` in the Rhai config. See [`commands.md`](commands.md#window-numbering). |
 
 A limit set to `0`, empty, or an unparseable value is ignored, so the default
 applies.
@@ -195,6 +196,84 @@ This is the equivalent of tmux's `set-clipboard on`, and it is on by default.
 A program inside Embers only uses OSC 52 if it believes the terminal supports
 it; see [Terminal capabilities](#terminal-capabilities).
 
+## Passthrough
+
+Programs written for tmux send sequences meant for the outer terminal wrapped
+as `ESC P tmux; <sequence> ESC \`, with every ESC inside doubled. Image
+viewers (image.nvim, yazi, kitty graphics previewers) send images this way, and
+other programs send desktop notifications or titles. Embers accepts the same
+wrapper and writes the unwrapped sequence to the host terminal of each client
+showing the pane, like tmux with `set -g allow-passthrough on`, which is the
+default.
+
+- **Choosing which panes.** `set_allow_passthrough("on")` (the default)
+  forwards sequences from panes that are on screen in the client.
+  `set_allow_passthrough("all")` also forwards them from panes in hidden
+  windows of the client's session. `set_allow_passthrough("off")` drops them.
+  The setting also covers [unwrapped kitty graphics
+  commands](#images-without-the-tmux-wrapper). Nothing is forwarded to a host
+  terminal that is [not known to support passthrough](#the-host-terminal).
+- **Who receives them.** Like [clipboard writes](#clipboard-osc-52), the
+  server sends them only to clients whose current session contains the pane;
+  each client then checks whether the pane is on its screen. Sequences from a
+  detached buffer, or one whose session no client is showing, are dropped.
+- **Cursor.** Before writing a sequence from a pane on screen, the client moves
+  the host cursor to where the pane's cursor was when the program sent it,
+  translated to screen coordinates, and puts its own cursor back afterwards.
+  Sequences that draw at the cursor, such as a kitty graphics placement or a
+  sixel image, land where the program meant them to. A sequence from a pane
+  that is not on screen (with `all`) is written without moving the cursor.
+- **Order.** Sequences reach the host in the order the program sent them, each
+  after a frame that shows everything the program printed before it. See the
+  [render-source contract](render-source-contract.md#passthrough-sequences).
+- **Size.** A sequence over 4 MiB is dropped whole, since a truncated graphics
+  command would leave the host waiting for the rest of it. Large kitty images
+  are not affected: programs send them as many small chunks.
+- **Replies.** A host terminal's reply to a forwarded query (for example a
+  kitty graphics query) arrives as input and goes to the focused pane whole,
+  as under tmux.
+
+Images are not part of the pane's contents in Embers: they are not kept in
+snapshots or scrollback, and Embers does not move or redraw them. What a host
+terminal does with an image when Embers redraws the cells under it decides how
+long it stays:
+
+- **Kitty graphics with Unicode placeholders** (`U=1`) work best. The image is
+  transmitted through passthrough, and the placeholder cells the program prints
+  are ordinary text, so they are part of the pane, survive redraws and scroll
+  with the text.
+- **Kitty graphics placed at the cursor** live on the host's image layer,
+  apart from the text Embers redraws, but they do not follow the pane's text
+  when it scrolls, when the layout changes or when the window is switched. The
+  program has to place or delete them again, as image.nvim does when it
+  redraws.
+- **Sixel** images are cells, so the next frame Embers draws over those cells
+  erases them. They are only shown briefly.
+
+### Images without the tmux wrapper
+
+Programs decide whether to wrap sequences for tmux mostly from the `TMUX`
+environment variable, which Embers does not set. Programs that do not see it
+send their sequences unwrapped, as to a terminal of their own:
+
+- **Kitty graphics commands** (`ESC _ G ... ESC \`) are forwarded like wrapped
+  ones, with the same setting, cursor handling and size cap. The pane's
+  terminal emulator would drop them, and a program only sends them when it
+  believes the terminal shows images (often from `TERM_PROGRAM`, which panes
+  inherit from the environment the server started in), so passing them on is
+  what the program expects.
+- **Sixel** (`ESC P q ...`) is not forwarded. The emulator does not keep sixel
+  images, does not move its cursor past them as a sixel terminal would, and
+  does not report sixel support, so a program that checks first does not send
+  any. tmux 3.4 and later draws sixel images into its own screen instead;
+  Embers has no image store to do that. Wrapped sixel still goes through
+  passthrough, and is erased by the next frame as described above.
+- **Detection.** A program that asks the terminal whether it supports kitty
+  graphics (`a=q`) and then sends a device attributes query (DA1) gets the DA1
+  answer from Embers first, before the host's answer to the graphics query
+  comes back, and usually concludes there is no image support. The late
+  answer then arrives in the focused pane as input. tmux behaves the same way.
+
 ## Terminal capabilities
 
 Programs in panes see `TERM=xterm-256color` and `COLORTERM=truecolor` unless
@@ -221,7 +300,45 @@ Programs that read capabilities only from terminfo still see plain
 `xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
 that lists the capabilities and that is installed where the program runs.
 
-Embers always renders underline styles, underline colors and OSC 8 hyperlinks
-to the host terminal with the standard sequences (see
-[the render-source contract](render-source-contract.md)), so the host terminal
-must support them; Ghostty, kitty, WezTerm, foot and VTE-based terminals do.
+### The host terminal
+
+The terminal running the client is the host terminal. Underline styles,
+underline colors, OSC 8 hyperlinks and [passthrough](#passthrough) need
+sequences that not every host understands, and one that does not can draw them
+as garbage. So when the client attaches it finds out what the host supports
+and leaves out the rest: every underline becomes a plain one, underlines take
+the text color, links become plain text and passthrough is dropped.
+
+To find out, the client writes three queries together with the sequences that
+set up the screen and enable the kitty keyboard protocol, and reads the
+replies before it draws anything:
+
+- **XTVERSION** (`CSI > 0 q`) for the host's name.
+- **XTGETTCAP** for `Smulx` and `Setulc`, the terminfo capabilities for
+  underline styles and underline colors.
+- **DA1** (`CSI c`). Every terminal answers it, and terminals answer queries in
+  order, so its reply means every other reply has arrived. Terminals that do
+  not know the first two queries ignore them.
+
+If no DA1 reply arrives within a second the client goes on without one. Keys
+typed while it waits are dropped. Then:
+
+- A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
+  styles or underline colors.
+- A host Embers knows by name gets what it is known to support: Ghostty,
+  kitty, WezTerm, foot and Contour everything; iTerm2 hyperlinks and
+  passthrough; Alacritty underline styles, underline colors and hyperlinks.
+  The name comes from the XTVERSION reply, or without one from `TERM_PROGRAM`
+  or `TERM` (`xterm-ghostty`, `xterm-kitty`, `wezterm`, `foot`, `alacritty`).
+- Any other host gets the plain forms.
+
+There is no query for OSC 8, so hyperlinks depend on the host's name. When
+detection gets it wrong, `set_terminal_features` in the config file forces a
+capability on or off:
+
+```rhai
+set_terminal_features(#{ hyperlinks: true, passthrough: false });
+```
+
+The names are `underline_styles`, `underline_color`, `hyperlinks` and
+`passthrough`. Capabilities the call does not name stay as detected.

@@ -26,6 +26,7 @@ pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 clap.workspace = true
 embers-client.workspace = true

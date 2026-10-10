@@ -23,5 +23,5 @@ pub use model::{
 };
 pub use types::{
     BarSegment, BarSpec, BarTarget, DetachOnDestroy, LoadedConfig, ModeHooks, MouseSettings,
-    PaletteError, RgbColor, ScriptFunctionRef, StyleSpec, ThemeSpec,
+    PaletteError, PassthroughMode, RgbColor, ScriptFunctionRef, StyleSpec, ThemeSpec,
 };

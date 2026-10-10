@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, ClipboardWrite, Hyperlink, MuxError, PtySize, Result, SnapshotLine,
-    StyledRun, TerminalSnapshot,
+    ActivityState, BufferId, ClipboardWrite, CursorPosition, Hyperlink, MuxError, PassthroughWrite,
+    PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -102,6 +102,9 @@ pub struct BufferRuntimeStatus {
     /// `activity` only describes the latest chunk, so this is what tells a
     /// reader that a bell rang since it last looked.
     pub bell_sequence: u64,
+    /// Number of the latest passthrough write the keeper has queued. The poller
+    /// fetches the queued writes whenever this advances.
+    pub passthrough_sequence: u64,
     /// Command line of the job in the PTY's foreground when that is not the
     /// pane's own process, for example a program a shell is running.
     pub foreground_command: Option<Vec<String>>,
@@ -149,6 +152,10 @@ pub struct BufferRuntimeCallbacks {
     pub on_exit: Arc<dyn Fn(BufferId, Option<i32>) + Send + Sync>,
     /// A program in the buffer wrote to the clipboard with OSC 52.
     pub on_clipboard: Arc<dyn Fn(BufferId, ClipboardWrite) + Send + Sync>,
+    /// A program in the buffer sent sequences for the host terminal (tmux
+    /// passthrough), in the order it sent them. Called once per poll with
+    /// every write the poll fetched.
+    pub on_passthrough: Arc<dyn Fn(BufferId, Vec<PassthroughWrite>) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -198,12 +205,19 @@ enum KeeperRequest {
     /// reports a `clipboard_sequence`, which keepers without clipboard
     /// forwarding never do.
     Clipboard,
+    /// Take the queued passthrough writes numbered above `after`, oldest first;
+    /// writes up to `after` are dropped. Only sent once a status reply reports
+    /// a `passthrough_sequence`.
+    Passthrough {
+        after: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
 enum KeeperResponse {
     Status(KeeperStatus),
     Clipboard(Option<KeeperClipboard>),
+    Passthrough(Vec<KeeperPassthrough>),
     Snapshot(KeeperSnapshot),
     VisibleSnapshot(TerminalSnapshot),
     ScrollbackSlice(KeeperScrollbackSlice),
@@ -229,6 +243,9 @@ struct KeeperStatus {
     // asked for clipboard writes.
     #[serde(default)]
     clipboard_sequence: u64,
+    // Defaulted for keepers that predate passthrough forwarding.
+    #[serde(default)]
+    passthrough_sequence: u64,
     // Defaulted for keepers that predate foreground command reporting.
     #[serde(default)]
     foreground_command: Option<Vec<String>>,
@@ -245,6 +262,94 @@ struct KeeperStatus {
 struct KeeperClipboard {
     sequence: u64,
     write: ClipboardWrite,
+}
+
+/// A queued passthrough write. Unlike clipboard writes every one is kept, since
+/// image protocols send one image as many sequences.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct KeeperPassthrough {
+    sequence: u64,
+    /// Base64 in keeper JSON: a byte array would take up to four times the room.
+    #[serde(with = "base64_bytes")]
+    bytes: Vec<u8>,
+    cursor: CursorPosition,
+}
+
+/// Most passthrough bytes a keeper queues for the server. Past this the oldest
+/// writes are dropped, which bounds memory while no server is attached.
+const MAX_QUEUED_PASSTHROUGH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Most passthrough bytes one `Passthrough` reply carries (at least one write is
+/// always sent). Base64 grows it by a third, which stays inside the keeper
+/// frame cap (16 MiB); the poller asks again for the rest.
+const MAX_PASSTHROUGH_REPLY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Passthrough writes waiting for the server, oldest first, numbered from 1.
+#[derive(Debug, Default)]
+struct PassthroughQueue {
+    last_sequence: u64,
+    entries: VecDeque<KeeperPassthrough>,
+    bytes: usize,
+}
+
+impl PassthroughQueue {
+    fn push(&mut self, write: PassthroughWrite) {
+        self.last_sequence += 1;
+        self.bytes += write.bytes.len();
+        self.entries.push_back(KeeperPassthrough {
+            sequence: self.last_sequence,
+            bytes: write.bytes,
+            cursor: write.cursor,
+        });
+        while self.bytes > MAX_QUEUED_PASSTHROUGH_BYTES
+            && let Some(dropped) = self.entries.pop_front()
+        {
+            debug!(
+                sequence = dropped.sequence,
+                "passthrough queue full; dropping oldest write"
+            );
+            self.bytes -= dropped.bytes.len();
+        }
+    }
+
+    /// Remove and return the writes numbered above `after`, oldest first, up to
+    /// [`MAX_PASSTHROUGH_REPLY_BYTES`]. Writes up to `after` are dropped.
+    fn take_after(&mut self, after: u64) -> Vec<KeeperPassthrough> {
+        let mut taken = Vec::new();
+        let mut taken_bytes = 0;
+        while let Some(entry) = self.entries.front() {
+            if entry.sequence > after
+                && !taken.is_empty()
+                && taken_bytes + entry.bytes.len() > MAX_PASSTHROUGH_REPLY_BYTES
+            {
+                break;
+            }
+            let entry = self.entries.pop_front().expect("front entry exists");
+            self.bytes -= entry.bytes.len();
+            if entry.sequence > after {
+                taken_bytes += entry.bytes.len();
+                taken.push(entry);
+            }
+        }
+        taken
+    }
+}
+
+/// Serde helper that writes bytes as one base64 string.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -326,6 +431,9 @@ struct KeeperSurface {
     router: RawByteRouter,
     backend: Box<dyn TerminalBackend>,
     size: PtySize,
+    /// Passthrough writes the router took out of the output, kept under the
+    /// surface lock the read loop already holds.
+    passthrough: PassthroughQueue,
 }
 
 struct KeeperPipe {
@@ -666,6 +774,7 @@ impl KeeperConnection {
                 pipe: status.pipe,
                 cwd: status.cwd,
                 clipboard_sequence: status.clipboard_sequence,
+                passthrough_sequence: status.passthrough_sequence,
                 foreground_command: status.foreground_command,
                 bell_sequence: status.bell_sequence,
             }),
@@ -684,6 +793,32 @@ impl KeeperConnection {
                 other_kind = keeper_response_kind(&other)
             ))),
         }
+    }
+
+    fn passthrough(&mut self, after: u64) -> Result<Vec<KeeperPassthrough>> {
+        match self.request(KeeperRequest::Passthrough { after })? {
+            KeeperResponse::Passthrough(writes) => Ok(writes),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper passthrough response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    /// Fetch every passthrough write numbered above `after`, up to `latest`,
+    /// over as many requests as it takes.
+    fn passthrough_since(&mut self, after: u64, latest: u64) -> Result<Vec<KeeperPassthrough>> {
+        let mut writes = Vec::new();
+        let mut after = after;
+        while after < latest {
+            let batch = self.passthrough(after)?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            after = last.sequence;
+            writes.extend(batch);
+        }
+        Ok(writes)
     }
 
     fn write(&mut self, bytes: Vec<u8>) -> Result<()> {
@@ -813,15 +948,18 @@ impl KeeperSurface {
             router: RawByteRouter::default(),
             backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
             size,
+            passthrough: PassthroughQueue::default(),
         }
     }
 
     /// Ingest PTY output and return the resulting activity, any terminal replies
     /// the emulator generated (device-attribute / cursor-position / mode
     /// queries), and any clipboard write. The caller writes the replies back to
-    /// the PTY master.
+    /// the PTY master. Passthrough sequences are queued for the server.
     fn route_output(&mut self, bytes: &[u8]) -> BackendEvents {
-        self.router.route_output(self.backend.as_mut(), bytes);
+        for write in self.router.route_output(self.backend.as_mut(), bytes) {
+            self.passthrough.push(write);
+        }
         self.backend.take_events()
     }
 
@@ -1351,6 +1489,17 @@ fn handle_keeper_request(
             ),
             false,
         )),
+        KeeperRequest::Passthrough { after } => Ok((
+            KeeperResponse::Passthrough(
+                runtime
+                    .surface
+                    .lock()
+                    .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?
+                    .passthrough
+                    .take_after(after),
+            ),
+            false,
+        )),
     }
 }
 
@@ -1390,6 +1539,7 @@ impl KeeperRuntime {
             .map_or(0, |clipboard| clipboard.sequence);
         let title = surface.backend.metadata().title.clone();
         let reported_cwd = surface.router.reported_cwd();
+        let passthrough_sequence = surface.passthrough.last_sequence;
         drop(surface);
         let running = exit_code.is_none();
         // Prefer an OSC 7 report from the shell (handles ssh'd shells reporting
@@ -1427,6 +1577,7 @@ impl KeeperRuntime {
             pipe,
             cwd,
             clipboard_sequence,
+            passthrough_sequence,
             foreground_command,
             bell_sequence,
         })
@@ -1829,6 +1980,9 @@ fn spawn_status_poller(
             // Seed from the attach-time status so a reattaching server does not
             // replay a clipboard write that was already delivered (or dropped).
             let mut last_clipboard = initial.clipboard_sequence;
+            // Likewise for passthrough: what a keeper queued before this server
+            // attached was meant for a frame that is long gone.
+            let mut last_passthrough = initial.passthrough_sequence;
             let mut saw_exit = !initial.running;
             // The attaching server applies `initial` itself, foreground and bell
             // count included. Seed cwd as unknown (not `initial.cwd`) so the
@@ -1850,7 +2004,13 @@ fn spawn_status_poller(
                         } else {
                             None
                         };
-                        Ok((status, clipboard))
+                        let passthrough = if status.passthrough_sequence > last_passthrough {
+                            connection
+                                .passthrough_since(last_passthrough, status.passthrough_sequence)?
+                        } else {
+                            Vec::new()
+                        };
+                        Ok((status, clipboard, passthrough))
                     }) {
                         Ok(status) => status,
                         Err(error) => {
@@ -1862,7 +2022,7 @@ fn spawn_status_poller(
                     }
                 };
 
-                let (status, clipboard) = status;
+                let (status, clipboard, passthrough) = status;
                 if let Some(clipboard) = clipboard
                     && clipboard.sequence > last_clipboard
                 {
@@ -1873,6 +2033,26 @@ fn spawn_status_poller(
                 if let Some(update) = status_update_delta(&status, &last) {
                     (callbacks.on_output)(inner.buffer_id, update);
                     last = status.clone();
+                }
+
+                // After the output update, though clients do not rely on that
+                // order: a client refreshes the buffer itself before it draws
+                // the frame these writes follow.
+                // A fetch may return writes queued after the status reply.
+                last_passthrough = passthrough
+                    .last()
+                    .map_or(0, |write| write.sequence)
+                    .max(status.passthrough_sequence)
+                    .max(last_passthrough);
+                if !passthrough.is_empty() {
+                    let writes = passthrough
+                        .into_iter()
+                        .map(|write| PassthroughWrite {
+                            bytes: write.bytes,
+                            cursor: write.cursor,
+                        })
+                        .collect();
+                    (callbacks.on_passthrough)(inner.buffer_id, writes);
                 }
 
                 if !saw_exit && !status.running {
@@ -2396,6 +2576,7 @@ fn keeper_response_kind(response: &KeeperResponse) -> &'static str {
     match response {
         KeeperResponse::Status(_) => "status",
         KeeperResponse::Clipboard(_) => "clipboard",
+        KeeperResponse::Passthrough(_) => "passthrough",
         KeeperResponse::Snapshot(_) => "snapshot",
         KeeperResponse::VisibleSnapshot(_) => "visible_snapshot",
         KeeperResponse::ScrollbackSlice(_) => "scrollback_slice",
@@ -2545,6 +2726,7 @@ mod tests {
             cwd: cwd.map(std::path::PathBuf::from),
             clipboard_sequence: 0,
             bell_sequence: 0,
+            passthrough_sequence: 0,
             foreground_command: None,
         }
     }
@@ -2850,6 +3032,7 @@ mod tests {
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
+                on_passthrough: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2862,6 +3045,7 @@ mod tests {
                 cwd: None,
                 clipboard_sequence: 0,
                 bell_sequence: 0,
+                passthrough_sequence: 0,
                 foreground_command: None,
             },
         )
@@ -2910,6 +3094,7 @@ mod tests {
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
+                on_passthrough: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2928,6 +3113,7 @@ mod tests {
                 cwd: None,
                 clipboard_sequence: 0,
                 bell_sequence: 0,
+                passthrough_sequence: 0,
                 foreground_command: None,
             },
         )

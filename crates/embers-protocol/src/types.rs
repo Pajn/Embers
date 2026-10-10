@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, ClipboardSelection, CursorState, FloatGeometry, FloatingId, NodeId,
-    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
+    PassthroughWrite, PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +86,22 @@ pub enum SessionRequest {
         session_id: SessionId,
         viewport: Size,
     },
+    /// tmux `set-environment`: set `name` to `value`, or unset it when `value`
+    /// is `None`, in a session's environment, or in the global environment when
+    /// `session_id` is `None`. New buffers created for a session get the global
+    /// environment, then the session's, then their own `env`.
+    SetEnvironment {
+        request_id: RequestId,
+        session_id: Option<SessionId>,
+        name: String,
+        value: Option<String>,
+    },
+    /// tmux `show-environment`: a session's environment, or the global one when
+    /// `session_id` is `None`. Answered with `ServerResponse::Environment`.
+    ShowEnvironment {
+        request_id: RequestId,
+        session_id: Option<SessionId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +124,9 @@ impl SessionRequest {
             | Self::RenameRootTab { request_id, .. }
             | Self::CloseRootTab { request_id, .. }
             | Self::SetRootTabSynchronizePanes { request_id, .. }
-            | Self::SetViewport { request_id, .. } => *request_id,
+            | Self::SetViewport { request_id, .. }
+            | Self::SetEnvironment { request_id, .. }
+            | Self::ShowEnvironment { request_id, .. } => *request_id,
         }
     }
 }
@@ -124,6 +142,9 @@ pub enum BufferRequest {
         /// The PTY size to start the command at: the size the buffer will be
         /// drawn at once placed. `None` uses the server default.
         size: Option<PtySize>,
+        /// The session the buffer is created for. Its environment (see
+        /// `SessionRequest::SetEnvironment`) is applied under `env`.
+        session_id: Option<SessionId>,
     },
     List {
         request_id: RequestId,
@@ -624,6 +645,16 @@ pub enum ClientRequest {
         client_id: Option<NonZeroU64>,
         session_id: SessionId,
     },
+    /// tmux `display-message`: show `message` in the status line of
+    /// `client_id`, or of every client whose current session is `session_id`,
+    /// for `duration_ms` (0 for the client's default).
+    DisplayMessage {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+        session_id: Option<SessionId>,
+        message: String,
+        duration_ms: u32,
+    },
 }
 
 impl ClientRequest {
@@ -632,7 +663,8 @@ impl ClientRequest {
             Self::List { request_id }
             | Self::Get { request_id, .. }
             | Self::Detach { request_id, .. }
-            | Self::Switch { request_id, .. } => *request_id,
+            | Self::Switch { request_id, .. }
+            | Self::DisplayMessage { request_id, .. } => *request_id,
         }
     }
 }
@@ -936,6 +968,12 @@ pub struct BufferLocationResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentResponse {
+    pub request_id: RequestId,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferWithLocationResponse {
     pub(crate) request_id: RequestId,
     pub(crate) buffer: BufferRecord,
@@ -1075,6 +1113,7 @@ pub enum ServerResponse {
     Client(ClientResponse),
     BufferLocation(BufferLocationResponse),
     BufferWithLocation(BufferWithLocationResponse),
+    Environment(EnvironmentResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -1097,6 +1136,7 @@ impl ServerResponse {
             Self::Client(response) => Some(response.request_id),
             Self::BufferLocation(response) => Some(response.request_id),
             Self::BufferWithLocation(response) => Some(response.request_id()),
+            Self::Environment(response) => Some(response.request_id),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),
@@ -1163,6 +1203,25 @@ pub struct ClipboardEvent {
     pub text: String,
 }
 
+/// Sequences a program in a buffer sent for the host terminal (tmux
+/// passthrough and unwrapped kitty graphics commands), in order. Like [`ClipboardEvent`] it goes only to the clients
+/// whose current session contains the buffer; each decides from its own layout
+/// whether the pane is on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassthroughEvent {
+    pub buffer_id: BufferId,
+    pub writes: Vec<PassthroughWrite>,
+}
+
+/// A message to show in a client's status line (`display-message`). Sent only
+/// to the clients the request named, not broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMessageEvent {
+    pub message: String,
+    /// How long to show it; 0 for the client's default.
+    pub duration_ms: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRenamedEvent {
     pub session_id: SessionId,
@@ -1189,6 +1248,8 @@ pub enum ServerEvent {
     RenderInvalidated(RenderInvalidatedEvent),
     ClientChanged(ClientChangedEvent),
     Clipboard(ClipboardEvent),
+    DisplayMessage(DisplayMessageEvent),
+    Passthrough(PassthroughEvent),
 }
 
 impl ServerEvent {
@@ -1205,7 +1266,7 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
-            Self::Clipboard(_) => None,
+            Self::Clipboard(_) | Self::DisplayMessage(_) | Self::Passthrough(_) => None,
         }
     }
 
