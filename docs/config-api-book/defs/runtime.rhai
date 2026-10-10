@@ -536,6 +536,18 @@ fn move_node_after(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 /// Move a node before a sibling.
 fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 
+/// Add a window to the current session, after its last window, and
+/// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
+/// new tab is always a window, even when the focus is in nested tabs or
+/// the session has a single window.
+///
+/// # Example
+///
+/// ```rhai
+/// action.new_window("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+/// ```
+fn new_window(_: ActionApi, title: string, tree: TreeSpec) -> Action;
+
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
 

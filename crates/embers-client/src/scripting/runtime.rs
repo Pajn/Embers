@@ -1620,6 +1620,24 @@ mod documented_action_api {
         }
     }
 
+    /// Add a window to the current session, after its last window, and
+    /// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
+    /// new tab is always a window, even when the focus is in nested tabs or
+    /// the session has a single window.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.new_window("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+    /// ```
+    #[rhai_fn(name = "new_window")]
+    pub fn new_window(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
+        Action::NewWindow {
+            title: Some(title.to_owned()),
+            child: tree,
+        }
+    }
+
     /// Insert a tab before a specific tabs node.
     #[rhai_fn(return_raw, name = "insert_tab_before")]
     pub fn insert_tab_before(

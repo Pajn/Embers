@@ -2079,6 +2079,29 @@ where
                 .await?;
                 self.client.resync_all_sessions().await
             }
+            Action::NewWindow { title, child } => {
+                let buffer = self
+                    .resolve_tree_buffer(session_id, presentation, child, PanePlacement::RootTab)
+                    .await?;
+                let result = self
+                    .client
+                    .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        title: title.unwrap_or_else(|| "window".to_owned()),
+                        buffer_id: Some(buffer.id()),
+                        child_node_id: None,
+                    }))
+                    .await;
+                rollback_created_buffer_on_error(
+                    self,
+                    buffer.created_by_helper(),
+                    "new window",
+                    result,
+                )
+                .await?;
+                self.client.resync_all_sessions().await
+            }
             Action::ReplaceNode { node_id, tree } => {
                 let node_id = node_id
                     .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))

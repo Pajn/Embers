@@ -1995,6 +1995,41 @@ Move a node before a sibling.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> new_window </h2>
+
+```rust,ignore
+fn new_window(_: ActionApi, title: String, tree: TreeSpec) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="new_window" id="link-new_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'new_window', 'Description')">
+Description
+</button>
+<button group="new_window" id="link-new_window-Example"  class="tablinks"
+    onclick="openTab(event, 'new_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="new_window" id="new_window-Description" class="tabcontent"  style="display: block;" >
+Add a window to the current session, after its last window, and
+select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
+new tab is always a window, even when the focus is in nested tabs or
+the session has a single window.
+</div>
+<div group="new_window" id="new_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.new_window("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> next_current_tabs </h2>
 
 ```rust,ignore

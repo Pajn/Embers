@@ -71,6 +71,11 @@ pub enum Action {
         title: Option<String>,
         child: TreeSpec,
     },
+    /// Add a window (a root tab) to the current session, after the last one.
+    NewWindow {
+        title: Option<String>,
+        child: TreeSpec,
+    },
     OpenFloating {
         spec: FloatingSpec,
     },

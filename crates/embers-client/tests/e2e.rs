@@ -2678,6 +2678,103 @@ async fn action_created_panes_start_at_their_drawn_size() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_window_action_adds_a_window_in_the_given_directory() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workdir = tempdir.path().join("work");
+    std::fs::create_dir(&workdir).expect("create workdir");
+    // The pane reports its directory resolved, as on macOS where /tmp is a link.
+    let workdir = workdir.canonicalize().expect("canonical workdir");
+    let script = format!(
+        r#"
+            fn new_window(ctx) {{
+                action.new_window("work", tree.buffer_spawn(["/bin/sh"], #{{ cwd: "{}" }}))
+            }}
+            define_action("new-window", new_window);
+            bind("normal", "w", "new-window");
+        "#,
+        workdir.display()
+    );
+    std::fs::write(tempdir.path().join("config.rhai"), script).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    let windows = || {
+        stdout(&run_cli(&server, &["list-windows", "-t", "alpha"]))
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    configured
+        .handle_key(alpha, viewport, KeyEvent::Char('w'))
+        .await
+        .expect("action runs");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    let listed = windows();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed[1].contains("work"), "appended last: {listed:?}");
+    let buffer = newest_buffer(&mut connection, "alpha").await;
+    let shown = stdout(&run_cli(
+        &server,
+        &["buffer", "show", &buffer.0.to_string()],
+    ));
+    assert!(
+        shown.contains(&format!("cwd\t\"{}\"", workdir.display())),
+        "{shown}"
+    );
+
+    // With one window left the session is no longer tabbed; a new window
+    // still goes next to it rather than failing.
+    run_cli(&server, &["kill-window", "-t", "alpha:work"]);
+    assert_eq!(windows().len(), 1);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .handle_key(alpha, viewport, KeyEvent::Char('w'))
+        .await
+        .expect("action runs");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows().len(), 2);
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn most_recently_active_client_owns_the_pane_pty_size() {
     use embers_client::{ConfiguredClient, KeyEvent};
 
