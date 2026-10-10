@@ -2125,7 +2125,14 @@ impl Runtime {
 
         {
             let mut state = self.state.lock().await;
-            if let Err(error) = state.mark_buffer_running(buffer_id, status.pid) {
+            // The status poller starts with the runtime and may already have
+            // recorded the exit of a command that ended at once. The buffer was
+            // still created, so keep it as exited instead of failing creation.
+            let already_exited = state
+                .buffer(buffer_id)
+                .is_ok_and(|buffer| matches!(buffer.state, BufferState::Exited(_)));
+            if !already_exited && let Err(error) = state.mark_buffer_running(buffer_id, status.pid)
+            {
                 let _ = runtime.kill().await;
                 let _ = runtime.join_threads().await;
                 return Err(error);

@@ -105,3 +105,50 @@ async fn keeper_start_failure_is_reported_promptly() {
 
     handle.shutdown().await.expect("shutdown server");
 }
+
+/// A command that exits at once can have its exit recorded before buffer
+/// creation finishes; creation must still succeed and report the buffer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn creating_a_buffer_whose_command_exits_immediately_succeeds() {
+    init_test_tracing();
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let handle = Server::new(ServerConfig::new(socket_path.clone()))
+        .start()
+        .await
+        .expect("start server");
+
+    let mut workers = Vec::new();
+    for worker in 0..WORKERS {
+        let socket_path = socket_path.clone();
+        workers.push(tokio::spawn(async move {
+            let mut client = ProtocolClient::connect(&socket_path)
+                .await
+                .expect("connect client");
+            let mut failures = Vec::new();
+            for index in 0..BUFFERS_PER_WORKER {
+                let request_id = worker * BUFFERS_PER_WORKER + index + 1;
+                let response = client
+                    .request(&create_request(request_id, &["/bin/sh", "-c", "exit 0"]))
+                    .await
+                    .expect("create request round-trips");
+                if !matches!(response, ServerResponse::Buffer(_)) {
+                    failures.push(format!("{response:?}"));
+                }
+            }
+            failures
+        }));
+    }
+    let mut failures = Vec::new();
+    for worker in workers {
+        failures.extend(worker.await.expect("worker task"));
+    }
+
+    handle.shutdown().await.expect("shutdown server");
+    assert!(
+        failures.is_empty(),
+        "{} of {} creations failed: {failures:#?}",
+        failures.len(),
+        WORKERS * BUFFERS_PER_WORKER
+    );
+}
