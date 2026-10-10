@@ -580,3 +580,32 @@ async fn host_replies_skip_the_command_prompt_and_bindings() {
         vec![(FOCUSED_BUFFER_ID, KITTY_GRAPHICS_REPLY.to_vec())]
     );
 }
+
+#[tokio::test]
+async fn replies_to_the_attach_queries_are_swallowed_whenever_they_arrive() {
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(transport.clone(), demo_state(), "");
+
+    for reply in [
+        // XTVERSION
+        &b"\x1bP>|kitty(0.35.2)\x1b\\"[..],
+        // XTGETTCAP for Smulx and Setulc, found and not found
+        b"\x1bP1+r536d756c78=1b5b343a25703125646d\x1b\\",
+        b"\x1bP0+r536574756c63\x1b\\",
+        // DA1
+        b"\x1b[?62;22c",
+        // kitty keyboard flags
+        b"\x1b[?1u",
+    ] {
+        configured
+            .handle_host_reply(SESSION_ID, VIEWPORT, reply.to_vec())
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        transport.requests().is_empty(),
+        "attach-query replies reached the server: {:?}",
+        transport.requests()
+    );
+}

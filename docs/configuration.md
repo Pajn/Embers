@@ -331,7 +331,9 @@ replies before it draws anything:
   not know the first two queries ignore them.
 
 If no DA1 reply arrives within a second the client goes on without one. Keys
-typed while it waits are dropped. Then:
+typed while it waits are dropped. Replies to these queries that arrive later,
+and kitty keyboard protocol flag reports, are recognised and dropped whenever
+they come, rather than handed to a pane as [replies](#passthrough). Then:
 
 - A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
   styles or underline colors.

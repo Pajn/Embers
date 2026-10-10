@@ -27,7 +27,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
-use crate::host_terminal::HostCapabilities;
+use crate::host_terminal::{HostCapabilities, is_attach_query_reply};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
@@ -793,6 +793,8 @@ where
     /// string, or a CSI report), to the pane it is meant for. A reply is not
     /// typed input: it is never copied to synchronized panes, inserted into
     /// the command prompt or chooser filter, or matched against bindings.
+    /// Replies to the client's own attach queries are dropped whenever they
+    /// arrive (see [`is_attach_query_reply`]).
     ///
     /// The host only answers what it was sent, and the only queries that do
     /// not come from the client come from panes through passthrough, so a
@@ -804,6 +806,10 @@ where
         viewport: Size,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        if is_attach_query_reply(&bytes) {
+            debug!("dropped a reply to the attach queries");
+            return Ok(());
+        }
         self.set_active_view(session_id, viewport);
         let source = self
             .last_passthrough_buffer

@@ -180,6 +180,49 @@ pub fn ends_with_device_attributes(bytes: &[u8]) -> bool {
         .all(|byte| byte.is_ascii_digit() || *byte == b';')
 }
 
+/// The terminfo capabilities [`HOST_QUERIES`] asks XTGETTCAP about, hex encoded
+/// as in the query and its reply.
+const QUERIED_TERMCAPS: [&[u8]; 2] = [b"536d756c78", b"536574756c63"];
+
+/// Whether `reply`, one control sequence from the host terminal, answers one
+/// of the client's own queries rather than a pane's: XTVERSION, XTGETTCAP for
+/// the capabilities [`HOST_QUERIES`] asks about, DA1, or the kitty keyboard
+/// flags (the client owns the host's keyboard mode). These can arrive after
+/// attaching stopped waiting for them, and are dropped instead of being
+/// handed to a pane.
+pub fn is_attach_query_reply(reply: &[u8]) -> bool {
+    if let Some(body) = reply
+        .strip_prefix(b"\x1bP")
+        .and_then(|body| body.strip_suffix(b"\x1b\\"))
+    {
+        if body.starts_with(b">|") {
+            return true;
+        }
+        let Some(entries) = body
+            .strip_prefix(b"1+r")
+            .or_else(|| body.strip_prefix(b"0+r"))
+        else {
+            return false;
+        };
+        return entries.split(|&byte| byte == b';').all(|entry| {
+            let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
+            QUERIED_TERMCAPS
+                .iter()
+                .any(|queried| name.eq_ignore_ascii_case(queried))
+        });
+    }
+    let Some(body) = reply.strip_prefix(b"\x1b[?") else {
+        return false;
+    };
+    let Some((&final_byte, params)) = body.split_last() else {
+        return false;
+    };
+    matches!(final_byte, b'c' | b'u')
+        && params
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b';')
+}
+
 /// The parts of the client's environment that name the host terminal.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostEnvironment {
@@ -391,5 +434,40 @@ mod tests {
         assert!(!ends_with_device_attributes(b"abc"));
         assert!(!ends_with_device_attributes(b"\x1b[?62;x c"));
         assert!(ends_with_device_attributes(b"junk\x1b[?6c"));
+    }
+
+    #[test]
+    fn recognises_replies_to_the_attach_queries_only() {
+        for reply in [
+            &b"\x1bP>|ghostty 1.1.3\x1b\\"[..],
+            b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\",
+            b"\x1bP1+r536d756c78=00;536574756c63=00\x1b\\",
+            b"\x1bP0+r536574756c63\x1b\\",
+            b"\x1b[?62;22c",
+            b"\x1b[?c",
+            b"\x1b[?15u",
+        ] {
+            assert!(
+                is_attach_query_reply(reply),
+                "{:?}",
+                String::from_utf8_lossy(reply)
+            );
+        }
+        for other in [
+            // A kitty graphics reply and an OSC colour reply: for a pane.
+            &b"\x1b_Gi=31;OK\x1b\\"[..],
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+            // XTGETTCAP for a capability Embers did not ask about.
+            b"\x1bP1+r524742=383a383a38\x1b\\",
+            // A key report and a cursor position report.
+            b"\x1b[97;5u",
+            b"\x1b[3;5R",
+        ] {
+            assert!(
+                !is_attach_query_reply(other),
+                "{:?}",
+                String::from_utf8_lossy(other)
+            );
+        }
     }
 }

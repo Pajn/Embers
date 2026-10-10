@@ -86,7 +86,7 @@ So scripted terminal input uses the same protocol/runtime path as unmapped passt
 - paste uses `handle_paste`; if the focused buffer has bracketed paste enabled, Embers wraps the payload in `ESC [ 200~` / `ESC [ 201~`
 - focus events use `handle_focus_event`; they forward `ESC [ I` / `ESC [ O` only when the program requested focus reporting
 - mouse events use `handle_mouse`; they either drive local scroll/focus behavior or send encoded mouse bytes when mouse reporting is enabled. In panes without mouse reporting, left-button drags and double/triple clicks drive copy-mode selection instead; once a drag selection starts, its drag and release events stay with that pane until release
-- host terminal replies (DCS, APC and OSC strings, and CSI reports with a private marker) use `handle_host_reply`; they are not typed input, so they skip the current mode, bindings and synchronize-panes, and go only to the pane whose passthrough last reached the host, or the focused pane when there is none
+- host terminal replies (DCS, APC and OSC strings, and CSI reports with a private marker) use `handle_host_reply`; they are not typed input, so they skip the current mode, bindings and synchronize-panes, and go only to the pane whose passthrough last reached the host, or the focused pane when there is none. Replies to the client's own attach-time queries are dropped (see `docs/configuration.md#passthrough`)
 - input of any kind for a pane that refuses it, such as a dead pane kept by `remain-on-exit`, is dropped
 
 ## Code anchors
