@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bb2f21af.js";
+            window.path_to_searchindex_js = "searchindex-ed2e3ce3.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -572,6 +572,38 @@ Description
 <div group="commit_search" id="commit_search-Description" class="tabcontent" style="display: block;">
 Finalize the active search, keep the current match and cursor position, and leave search
 mode with the committed result in place.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> confirm </h2>
+
+<pre><code class="language-rust ignore">fn confirm(_: ActionApi, prompt: String, action: ?) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="confirm" id="link-confirm-Description" class="tablinks active" onclick="openTab(event, &#39;confirm&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="confirm" id="link-confirm-Example" class="tablinks" onclick="openTab(event, &#39;confirm&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="confirm" id="confirm-Description" class="tabcontent" style="display: block;">
+Ask before running `action`, like tmux `confirm-before`: `prompt` is
+shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+`action`, an action or an array of actions, runs only if the next key
+is `y`. Any other key cancels.
+</div>
+
+<div group="confirm" id="confirm-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+</code></pre>
 </div>
 
 </div>

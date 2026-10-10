@@ -16,6 +16,44 @@ use embers_protocol::{
 use crate::support::{FOCUSED_BUFFER_ID, SESSION_ID, demo_state};
 
 #[test]
+fn confirm_wraps_an_action_or_a_list_of_actions() {
+    let engine = load_engine(
+        r#"
+            fn kill(ctx) { action.confirm("kill? (y/n)", action.run_command("kill-pane")) }
+            fn several(ctx) {
+                action.confirm("go?", [action.focus_left(), action.run_command("kill-pane")])
+            }
+            define_action("kill", kill);
+            define_action("several", several);
+        "#,
+    );
+    let context = demo_context();
+    assert_eq!(
+        engine.run_named_action("kill", context.clone()).unwrap(),
+        vec![Action::Confirm {
+            prompt: "kill? (y/n)".to_owned(),
+            actions: vec![Action::RunCommand {
+                command: "kill-pane".to_owned(),
+            }],
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("several", context).unwrap(),
+        vec![Action::Confirm {
+            prompt: "go?".to_owned(),
+            actions: vec![
+                Action::FocusDirection {
+                    direction: NavigationDirection::Left,
+                },
+                Action::RunCommand {
+                    command: "kill-pane".to_owned(),
+                },
+            ],
+        }]
+    );
+}
+
+#[test]
 fn action_helpers_roundtrip_to_typed_actions() {
     let engine = load_engine(
         r#"

@@ -434,6 +434,41 @@ mode with the committed result in place.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> confirm </h2>
+
+```rust,ignore
+fn confirm(_: ActionApi, prompt: String, action: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="confirm" id="link-confirm-Description"  class="tablinks active"
+    onclick="openTab(event, 'confirm', 'Description')">
+Description
+</button>
+<button group="confirm" id="link-confirm-Example"  class="tablinks"
+    onclick="openTab(event, 'confirm', 'Example')">
+Example
+</button>
+</div>
+
+<div group="confirm" id="confirm-Description" class="tabcontent"  style="display: block;" >
+Ask before running `action`, like tmux `confirm-before`: `prompt` is
+shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+`action`, an action or an array of actions, runs only if the next key
+is `y`. Any other key cancels.
+</div>
+<div group="confirm" id="confirm-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> copy_back_to_indentation </h2>
 
 ```rust,ignore

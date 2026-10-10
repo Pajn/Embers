@@ -301,6 +301,7 @@ search prompt (`/`, `?`) keeps its own keys.
 | `action.rename_window_prompt()` | `prefix ,` |
 | `action.rename_session_prompt()` | `prefix $` |
 | `action.run_command(line)` | binding a command, such as `bind x kill-pane` |
+| `action.confirm(prompt, action)` | `confirm-before -p prompt command` |
 
 The prompt label and initial text may use formats, so `#W` starts the window
 rename prompt from the current name. In a template, `%%` is replaced by the
@@ -313,4 +314,16 @@ bind("normal", "<leader>,", action.rename_window_prompt());
 bind("normal", "<leader>$", action.rename_session_prompt());
 bind("normal", "<leader>x", action.run_command("kill-pane"));
 bind("normal", "<leader>N", action.command_prompt_template("(new session) ", "", "new-session %%"));
+```
+
+### Confirmation
+
+`action.confirm(prompt, action)` is tmux's `confirm-before`: it shows `prompt`
+in the status line, expanded as a format, and runs `action` (an action or an
+array of actions) only if the next key is `y`. Any other key cancels. tmux's
+default `x` and `&` bindings ask this way:
+
+```rhai
+bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+bind("normal", "<leader>&", action.confirm("kill-window #W? (y/n)", action.run_command("kill-window")));
 ```

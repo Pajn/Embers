@@ -156,6 +156,34 @@ async fn vi_status_keys_edit_in_normal_mode_and_escape_twice_cancels() {
 }
 
 #[tokio::test]
+async fn confirm_runs_its_action_only_after_y() {
+    let runner = Arc::new(RecordingRunner::default());
+    let (mut configured, _tempdir) = configured_with(
+        Some(runner.clone()),
+        r#"bind("normal", "<M-x>", action.confirm("kill-window #W? (y/n)", action.run_command("kill-window")));"#,
+    );
+
+    press(&mut configured, &[KeyEvent::Alt('x')]).await;
+    assert_eq!(configured.current_mode(), PROMPT_MODE);
+    assert_eq!(status(&configured), "kill-window workspace? (y/n)");
+    assert_eq!(
+        configured.status_cursor(),
+        Some("kill-window workspace? (y/n)".len() as u16)
+    );
+    // Any key other than y cancels, as in tmux.
+    press(&mut configured, &[KeyEvent::Char('n')]).await;
+    assert_eq!(configured.current_mode(), NORMAL_MODE);
+    assert_eq!(configured.status_cursor(), None);
+    press(&mut configured, &[KeyEvent::Alt('x'), KeyEvent::Escape]).await;
+    assert_eq!(configured.current_mode(), NORMAL_MODE);
+    assert!(runner.calls().is_empty());
+
+    press(&mut configured, &[KeyEvent::Alt('x'), KeyEvent::Char('y')]).await;
+    assert_eq!(configured.current_mode(), NORMAL_MODE);
+    assert_eq!(runner.argv(), [["kill-window"]]);
+}
+
+#[tokio::test]
 async fn editing_keys_and_escape() {
     let runner = Arc::new(RecordingRunner::default());
     let (mut configured, _tempdir) = configured(Some(runner.clone()));

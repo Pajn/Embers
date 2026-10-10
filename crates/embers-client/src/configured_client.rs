@@ -86,6 +86,16 @@ struct SearchPrompt {
     return_mode: String,
 }
 
+/// A `confirm-before` question waiting for its answer.
+struct PendingConfirm {
+    /// The question, as shown in the status line.
+    prompt: String,
+    /// What runs if the answer is `y`.
+    actions: Vec<Action>,
+    /// Mode to return to once answered.
+    return_mode: String,
+}
+
 /// A `display-message` shown in the status line until `until`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StatusMessage {
@@ -134,6 +144,8 @@ pub struct ConfiguredClient<T> {
     reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
     command_prompt: Option<CommandPrompt>,
+    /// An open `confirm-before` question, shown in the status line.
+    confirm: Option<PendingConfirm>,
     /// Command lines run from the prompt, oldest first.
     prompt_history: VecDeque<String>,
     command_runner: Option<Arc<dyn CommandRunner>>,
@@ -180,6 +192,7 @@ where
             reported_viewport: None,
             search_prompt: None,
             command_prompt: None,
+            confirm: None,
             prompt_history: VecDeque::new(),
             command_runner: None,
             chooser: None,
@@ -231,9 +244,12 @@ where
     /// Where the terminal cursor belongs in the status line, as a display
     /// column, while the command prompt is open.
     pub fn status_cursor(&self) -> Option<u16> {
-        self.command_prompt
-            .as_ref()
-            .map(|prompt| u16::try_from(prompt.cursor_column()).unwrap_or(u16::MAX))
+        let column = match (&self.command_prompt, &self.confirm) {
+            (Some(prompt), _) => prompt.cursor_column(),
+            (None, Some(confirm)) => UnicodeWidthStr::width(confirm.prompt.as_str()),
+            (None, None) => return None,
+        };
+        Some(u16::try_from(column).unwrap_or(u16::MAX))
     }
 
     pub fn client(&self) -> &MuxClient<T> {
@@ -448,6 +464,9 @@ where
         if let Some(prompt) = &self.command_prompt {
             return prompt.display();
         }
+        if let Some(confirm) = &self.confirm {
+            return confirm.prompt.clone();
+        }
         if let Some(prompt) = &self.search_prompt {
             let prefix = if prompt.backward { '?' } else { '/' };
             return format!("[{session_name}] {prefix}{}", prompt.query);
@@ -481,6 +500,11 @@ where
         let key = normalize_text_key(key);
 
         if self.input_state.current_mode() == PROMPT_MODE {
+            if let Some(confirm) = self.confirm.take() {
+                return self
+                    .answer_confirm(session_id, viewport, confirm, key)
+                    .await;
+            }
             return self.handle_prompt_key(session_id, key).await;
         }
 
@@ -1039,6 +1063,7 @@ where
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
             self.command_prompt = None;
+            self.confirm = None;
             self.chooser = None;
             // Also drop any active hints overlay so it can't outlive its mode.
             if let Some(node_id) = self.hints_node.take()
@@ -1279,6 +1304,25 @@ where
                             StatusKeys::Emacs => prompt,
                         },
                     );
+                    self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::Confirm { prompt, actions } => {
+                    let prompt = self.expand_format(current_session_id, &prompt);
+                    let mode = self.input_state.current_mode();
+                    let return_mode =
+                        if mode == SEARCH_MODE || mode == HINTS_MODE || mode == PROMPT_MODE {
+                            NORMAL_MODE.to_owned()
+                        } else {
+                            mode.to_owned()
+                        };
+                    self.search_prompt = None;
+                    self.command_prompt = None;
+                    self.confirm = Some(PendingConfirm {
+                        prompt,
+                        actions,
+                        return_mode,
+                    });
                     self.input_state.set_mode(PROMPT_MODE);
                     Ok(())
                 }
@@ -3336,6 +3380,7 @@ where
         };
         self.search_prompt = None;
         self.command_prompt = None;
+        self.confirm = None;
         self.chooser = Some(Chooser::open(
             scope,
             self.client.state(),
@@ -3498,6 +3543,23 @@ where
         if let Err(error) = runner.run(argv, context).await {
             self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME);
         }
+    }
+
+    /// Answer a `confirm-before` question: `y` runs its actions, any other
+    /// key cancels it, as in tmux.
+    async fn answer_confirm(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        confirm: PendingConfirm,
+        key: KeyEvent,
+    ) -> Result<()> {
+        self.input_state.set_mode(confirm.return_mode);
+        if key != KeyEvent::Char('y') {
+            return Ok(());
+        }
+        self.execute_actions(Some(session_id), Some(viewport), confirm.actions)
+            .await
     }
 
     async fn handle_prompt_key(&mut self, session_id: SessionId, key: KeyEvent) -> Result<()> {

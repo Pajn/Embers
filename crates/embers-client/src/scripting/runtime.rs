@@ -1050,6 +1050,40 @@ mod documented_action_api {
         with_call_position(ctx, || Ok(Action::Chain(parse_action_array(actions)?)))
     }
 
+    /// Ask before running `action`, like tmux `confirm-before`: `prompt` is
+    /// shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+    /// `action`, an action or an array of actions, runs only if the next key
+    /// is `y`. Any other key cancels.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+    /// ```
+    #[rhai_fn(return_raw, name = "confirm")]
+    pub fn confirm(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        prompt: &str,
+        action: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            let actions = if let Some(action) = action.clone().try_cast::<Action>() {
+                vec![action]
+            } else if let Some(actions) = action.try_cast::<Array>() {
+                parse_action_array(actions)?
+            } else {
+                return Err(runtime_error(
+                    "confirm expects an Action or an array of Actions",
+                ));
+            };
+            Ok(Action::Confirm {
+                prompt: prompt.to_owned(),
+                actions,
+            })
+        })
+    }
+
     /// Enter a specific input mode by name.
     #[rhai_fn(name = "enter_mode")]
     pub fn enter_mode(_: &mut ActionApi, mode: &str) -> Action {

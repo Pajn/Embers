@@ -259,6 +259,18 @@ fn command_prompt_with(_: ActionApi, initial: string) -> Action;
 /// mode with the committed result in place.
 fn commit_search(_: ActionApi) -> Action;
 
+/// Ask before running `action`, like tmux `confirm-before`: `prompt` is
+/// shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+/// `action`, an action or an array of actions, runs only if the next key
+/// is `y`. Any other key cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+/// ```
+fn confirm(_: ActionApi, prompt: string, action: ?) -> Action;
+
 /// Move to the first non-blank character of the line (`^`).
 fn copy_back_to_indentation(_: ActionApi) -> Action;
 

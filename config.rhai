@@ -154,8 +154,8 @@ for number in 1..10 {
     bind("normal", `<leader>${number}`, action.select_window(number));
 }
 bind("normal", "<leader>z", action.toggle_zoom_current_node());
-bind("normal", "<leader>x", action.run_command("kill-pane"));    // no confirmation
-bind("normal", "<leader>&", action.run_command("kill-window"));  // no confirmation
+bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+bind("normal", "<leader>&", action.confirm("kill-window #W? (y/n)", action.run_command("kill-window")));
 bind("normal", "<leader>:", action.command_prompt());
 bind("normal", "<leader>,", action.rename_window_prompt());
 bind("normal", "<leader>$", action.rename_session_prompt());

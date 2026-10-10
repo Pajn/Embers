@@ -74,6 +74,27 @@ fn example_config_binds_tmux_keys_to_their_actions() {
         ("normal", "<leader>h", named("visible-history")),
         ("normal", "<leader>H", named("full-history")),
         ("normal", "<leader>'", vec![Action::LastSession]),
+        // tmux's default `x` and `&` ask before killing.
+        (
+            "normal",
+            "<leader>x",
+            vec![Action::Confirm {
+                prompt: "kill-pane #D? (y/n)".to_owned(),
+                actions: vec![Action::RunCommand {
+                    command: "kill-pane".to_owned(),
+                }],
+            }],
+        ),
+        (
+            "normal",
+            "<leader>&",
+            vec![Action::Confirm {
+                prompt: "kill-window #W? (y/n)".to_owned(),
+                actions: vec![Action::RunCommand {
+                    command: "kill-window".to_owned(),
+                }],
+            }],
+        ),
         (
             "normal",
             "<leader>\"",

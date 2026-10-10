@@ -229,6 +229,12 @@ pub enum Action {
         initial: String,
         template: Option<String>,
     },
+    /// tmux `confirm-before`: show `prompt` (expanded as a format) in the
+    /// status line and run `actions` if the next key is `y`.
+    Confirm {
+        prompt: String,
+        actions: Vec<Action>,
+    },
     /// tmux `choose-tree`: open the session/window/pane picker.
     ChooseTree {
         scope: ChooserScope,

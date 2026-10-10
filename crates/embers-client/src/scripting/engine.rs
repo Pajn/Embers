@@ -444,7 +444,7 @@ fn validate_action_refs(
                     format!("binding references unknown action '{name}'"),
                 ));
             }
-            Action::Chain(actions) => {
+            Action::Chain(actions) | Action::Confirm { actions, .. } => {
                 validate_action_refs(source, position, named_actions, actions)?;
             }
             _ => {}
