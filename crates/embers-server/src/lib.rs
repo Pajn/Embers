@@ -22,7 +22,7 @@ pub use config::{
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
     BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, InterruptedBuffer, Node,
-    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    REMAIN_ON_EXIT_OPTION, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 pub use server::{Server, ServerHandle};
 pub use state::ServerState;

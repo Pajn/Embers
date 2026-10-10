@@ -83,7 +83,9 @@ While detached:
 
 Exited PTY buffers also remain capturable as long as the buffer record still exists and the
 server that saw the exit keeps running; the keeper exits once no server is attached, so after a
-server restart an exited buffer keeps its record but no longer has a capture source. Writes,
+server restart an exited buffer keeps its record but no longer has a capture source. By default
+the record itself is removed when the buffer exits (see "When a buffer's command exits" in
+`terminal-runtime.md`); `remain-on-exit` keeps it, and its captures, while it is shown. Writes,
 resizes, and kills must fail after exit, but capture reads continue to work. In practice callers
 should expect an error result rather than a silent no-op: writes and kills surface a conflict such
 as `buffer 12 has already exited`, while resize requests can fail with `buffer runtime has already

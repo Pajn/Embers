@@ -38,9 +38,31 @@ Killing a buffer targets the runtime, not the view tree.
 
 - the PTY child is terminated
 - the buffer transitions to `Exited`
-- if the buffer was still attached, it remains `Attached(NodeId)` until that view is later closed or replaced
-- capture remains available from the terminal backend snapshot state
-- the buffer record may later be cleaned up once it is detached
+- from there the buffer is cleaned up like any buffer whose command exited (see below)
+
+## When a buffer's command exits
+
+An exited buffer is cleaned up the way tmux closes a pane whose program exits (`remain-on-exit
+off`):
+
+- an attached buffer has its view closed and its record removed
+- a detached buffer has its record removed
+- once a buffer record is removed, its runtime handle is released and its keeper exits
+
+Captures keep working for as long as the record exists, so a buffer that should stay readable
+after its command exits has to be kept:
+
+- the `remain-on-exit` buffer option (`embers buffer set-option -t <pane> remain-on-exit on`)
+  keeps an attached exited buffer in its view as a dead pane, still capturable; `failed` keeps it
+  only when the command did not exit with status 0. Closing the dead pane's view removes the
+  record. The option does not keep a detached buffer.
+- a buffer that exits before it has ever been attached is kept: buffers are created detached and
+  attached by a later request, so a command that ends at once must not take its record with it.
+  Once attached it is cleaned up like any other exited buffer, so its pane closes right away
+  unless `remain-on-exit` is set.
+
+Cleanup runs when a buffer exits and after every request that can attach or detach a buffer.
+Helper buffers (history views) have no command and are not affected.
 
 ## Attachment and move semantics
 
@@ -92,7 +114,9 @@ The intended transition graph is:
 - `Running -> Exited` when the child process terminates normally or is explicitly killed
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
 - `Interrupted -> Running` when restore starts a fresh process for that buffer (see below)
-- `Exited -> cleaned up` when a detached exited buffer is removed from server state
+- `Exited -> cleaned up` when the exited buffer's record is removed from server state: at exit
+  (closing its view if it has one), or later when the view of a `remain-on-exit` dead pane closes
+  or a buffer that exited before it was first shown gets attached
 
 ## Keeper process lifetime
 

@@ -90,6 +90,24 @@ async fn create_buffer_with_command(
     }
 }
 
+/// Keep `buffer_id` in its pane after its command exits (`remain-on-exit on`),
+/// so a test can still render the output of a command that has finished.
+async fn remain_on_exit(connection: &mut TestConnection, buffer_id: BufferId) {
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id,
+            key: "remain-on-exit".to_owned(),
+            value: Some("on".to_owned()),
+        }))
+        .await
+        .expect("set remain-on-exit succeeds");
+    assert!(
+        matches!(response, ServerResponse::Buffer(_)),
+        "expected buffer response, got {response:?}"
+    );
+}
+
 async fn session_snapshot_by_name(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::List {
@@ -1135,6 +1153,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         ),
     )
     .await;
+    remain_on_exit(&mut connection, hidden_buffer.id).await;
     let fixture = create_hidden_tab_fixture_with_buffer(&mut connection, hidden_buffer).await;
 
     wait_for_visible_snapshot(
@@ -1208,6 +1227,7 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         ],
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),

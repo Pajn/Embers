@@ -764,20 +764,27 @@ impl Runtime {
                 Vec::new(),
                 None,
             ),
+            // These can attach or detach buffers, which can make an exited
+            // buffer due for cleanup (a dead pane closed, a buffer whose command
+            // exited before it was first shown now attached).
             ClientMessage::Session(request) => {
-                let (resp, events) = self.dispatch_session(request).await;
+                let (resp, mut events) = self.dispatch_session(request).await;
+                events.extend(self.dispose_exited_buffers().await);
                 (resp, events, None)
             }
             ClientMessage::Buffer(request) => {
-                let (resp, events) = self.dispatch_buffer(connection_id, request).await;
+                let (resp, mut events) = self.dispatch_buffer(connection_id, request).await;
+                events.extend(self.dispose_exited_buffers().await);
                 (resp, events, None)
             }
             ClientMessage::Node(request) => {
-                let (resp, events) = self.dispatch_node(request).await;
+                let (resp, mut events) = self.dispatch_node(request).await;
+                events.extend(self.dispose_exited_buffers().await);
                 (resp, events, None)
             }
             ClientMessage::Floating(request) => {
-                let (resp, events) = self.dispatch_floating(request).await;
+                let (resp, mut events) = self.dispatch_floating(request).await;
+                events.extend(self.dispose_exited_buffers().await);
                 (resp, events, None)
             }
             ClientMessage::Input(request) => {
@@ -3242,8 +3249,52 @@ impl Runtime {
             if let Some(pipe_event) = pipe_event {
                 events.push(ServerEvent::BufferPipeChanged(pipe_event));
             }
+            if !should_interrupt {
+                events.extend(self.dispose_exited_buffers().await);
+            }
             self.broadcast(events, &[]).await;
         }
+    }
+
+    /// Apply [`ServerState::dispose_exited_buffers`]: close the views of
+    /// exited buffers and remove their records, then release the runtimes of
+    /// the removed buffers so their keepers can exit. Returns the events that
+    /// describe the closed views.
+    async fn dispose_exited_buffers(&self) -> Vec<ServerEvent> {
+        let (removed, events) = {
+            let mut state = self.state.lock().await;
+            let disposed = state.dispose_exited_buffers();
+            let mut events = Vec::new();
+            for &session_id in &disposed.changed_sessions {
+                if !state.sessions.contains_key(&session_id) {
+                    continue;
+                }
+                events.push(ServerEvent::NodeChanged(NodeChangedEvent { session_id }));
+                if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                    events.push(ServerEvent::FocusChanged(focus_event));
+                }
+            }
+            (disposed.removed_buffers, events)
+        };
+        if removed.is_empty() {
+            return events;
+        }
+        self.mark_workspace_dirty();
+        let runtimes = {
+            let mut runtimes = self.buffer_runtimes.lock().await;
+            removed
+                .iter()
+                .filter_map(|buffer_id| runtimes.remove(buffer_id))
+                .collect::<Vec<_>>()
+        };
+        // Dropping the last handle closes the keeper connection; with its
+        // child gone and no server attached, the keeper then exits.
+        for runtime in runtimes {
+            if let Err(error) = runtime.join_threads().await {
+                debug!(%error, "failed to join runtime threads of a removed buffer");
+            }
+        }
+        events
     }
 
     async fn sync_buffer_runtime_status(
