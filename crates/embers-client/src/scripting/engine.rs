@@ -19,6 +19,8 @@ use super::error::ScriptError;
 use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
+use crate::host_terminal::TerminalFeatures;
+
 use super::types::{
     HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode, RgbColor,
     ScriptFunctionRef, ThemeSpec,
@@ -263,6 +265,7 @@ struct RegistrationState {
     clipboard: Option<bool>,
     base_index: Option<u32>,
     passthrough: Option<PassthroughMode>,
+    terminal_features: TerminalFeatures,
 }
 
 impl RegistrationState {
@@ -369,6 +372,7 @@ impl RegistrationState {
             clipboard: self.clipboard.unwrap_or(true),
             base_index: self.base_index,
             passthrough: self.passthrough.unwrap_or_default(),
+            terminal_features: self.terminal_features,
         })
     }
 }
@@ -882,6 +886,53 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .passthrough = Some(mode);
+        Ok(())
+    }
+
+    /// Say what the terminal running the client supports, overriding what
+    /// Embers detected when it attached.
+    ///
+    /// Embers asks the terminal at attach and otherwise goes by `TERM` and
+    /// `TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+    /// named capability on (`true`) or off (`false`); capabilities not named
+    /// stay as detected. Like tmux's `terminal-features`.
+    ///
+    /// - `underline_styles`: double, curly, dotted and dashed underlines
+    ///   (`CSI 4:n m`). Without it every underline is plain.
+    /// - `underline_color`: colored underlines (`CSI 58:...m`). Without it
+    ///   underlines take the text color.
+    /// - `hyperlinks`: OSC 8 links. Without it links are plain text.
+    /// - `passthrough`: sequences programs send for the terminal, such as
+    ///   images (see `set_allow_passthrough`). Without it they are dropped.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_terminal_features(#{ hyperlinks: true, passthrough: false });
+    /// ```
+    ///
+    /// # rhai-autodocs:index:11
+    #[rhai_fn(return_raw, global, name = "set_terminal_features")]
+    pub fn set_terminal_features(ctx: NativeCallContext, features: Map) -> RhaiResultOf<()> {
+        let registration = clone_active_registration(ctx.call_position())?;
+        let mut registration = registration.lock().expect("registration lock");
+        for (name, value) in features {
+            let enabled = value.as_bool().map_err(|_| {
+                runtime_error(
+                    format!("terminal feature '{name}' must be true or false"),
+                    ctx.call_position(),
+                )
+            })?;
+            if !registration.terminal_features.set(&name, enabled) {
+                return Err(runtime_error(
+                    format!(
+                        "unknown terminal feature '{name}'; expected one of {}",
+                        TerminalFeatures::NAMES.join(", ")
+                    ),
+                    ctx.call_position(),
+                ));
+            }
+        }
         Ok(())
     }
 }

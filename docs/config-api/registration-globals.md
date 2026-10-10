@@ -279,6 +279,53 @@ set_leader("<C-a>");
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
+
+```rust,ignore
+fn set_terminal_features(features: Map)
+```
+
+<div>
+<div class="tab">
+<button group="set_terminal_features" id="link-set_terminal_features-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_terminal_features', 'Description')">
+Description
+</button>
+<button group="set_terminal_features" id="link-set_terminal_features-Example"  class="tablinks"
+    onclick="openTab(event, 'set_terminal_features', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Description" class="tabcontent"  style="display: block;" >
+Say what the terminal running the client supports, overriding what
+Embers detected when it attached.
+
+Embers asks the terminal at attach and otherwise goes by `TERM` and
+`TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+named capability on (`true`) or off (`false`); capabilities not named
+stay as detected. Like tmux's `terminal-features`.
+
+- `underline_styles`: double, curly, dotted and dashed underlines
+  (`CSI 4:n m`). Without it every underline is plain.
+- `underline_color`: colored underlines (`CSI 58:...m`). Without it
+  underlines take the text color.
+- `hyperlinks`: OSC 8 links. Without it links are plain text.
+- `passthrough`: sequences programs send for the terminal, such as
+  images (see `set_allow_passthrough`). Without it they are dropped.
+</div>
+<div group="set_terminal_features" id="set_terminal_features-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_terminal_features(#{ hyperlinks: true, passthrough: false });
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> unbind </h2>
 
 ```rust,ignore

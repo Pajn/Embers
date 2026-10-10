@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attributes};
 use embers_client::{
-    ConfigManager, ConfiguredClient, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, MouseModifiers, MuxClient, PanePlacement, RenderGrid, SocketTransport,
+    ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
+    KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+    MuxClient, PanePlacement, RenderGrid, SocketTransport, detect_host_capabilities,
     spawn_pty_size,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
@@ -56,7 +58,11 @@ pub async fn run(
         configured.emit_terminal_title(session_id);
     }
 
-    let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    let (mut terminal, host_replies) = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    configured.set_host_capabilities(detect_host_capabilities(
+        &host_replies,
+        &HostEnvironment::from_process(),
+    ));
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let _input_thread = spawn_input_thread(input_tx.clone())?;
     let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
@@ -94,6 +100,7 @@ pub async fn run(
                     terminal_size,
                     Some(&status),
                     configured.status_cursor(),
+                    configured.host_capabilities(),
                 )?;
                 terminal.write_after_frame(
                     &configured.drain_frame_output(),
@@ -103,7 +110,13 @@ pub async fn run(
                 )?;
             } else {
                 let grid = RenderGrid::new(viewport.width, viewport.height);
-                terminal.render(&grid, terminal_size, Some("detached"), None)?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some("detached"),
+                    None,
+                    configured.host_capabilities(),
+                )?;
             }
             dirty = false;
         }
@@ -1033,8 +1046,37 @@ struct TerminalGuard {
     mouse_capture_enabled: bool,
 }
 
+/// How long attaching waits for the host terminal to answer [`HOST_QUERIES`].
+/// Terminals answer at once, or after one round trip over SSH; the wait only
+/// runs out for a terminal that does not answer DA1 at all.
+const HOST_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Read the host terminal's replies to [`HOST_QUERIES`], up to and including
+/// the DA1 reply that ends them, or until [`HOST_REPLY_TIMEOUT`]. This runs
+/// before the input thread starts, so nothing else reads the input meanwhile;
+/// it reads one byte at a time to leave whatever follows the DA1 reply to the
+/// input thread. Keys typed before the replies arrive are dropped.
+fn read_host_replies(input_fd: libc::c_int) -> Result<HostReplies> {
+    let deadline = std::time::Instant::now() + HOST_REPLY_TIMEOUT;
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_HOST_REPLY_BYTES && !ends_with_device_attributes(&bytes) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match read_optional_byte(input_fd, remaining)? {
+            Some(byte) => bytes.push(byte),
+            None => break,
+        }
+    }
+    Ok(HostReplies::parse(&bytes))
+}
+
 impl TerminalGuard {
-    fn enter(mouse_capture_enabled: bool) -> Result<Self> {
+    /// Put the terminal in raw mode, switch to the alternate screen and ask
+    /// what the terminal supports (see [`HOST_QUERIES`]), returning its
+    /// replies.
+    fn enter(mouse_capture_enabled: bool) -> Result<(Self, HostReplies)> {
         let input_fd = io::stdin().as_raw_fd();
         let output_fd = io::stdout().as_raw_fd();
         if !is_tty(input_fd) || !is_tty(output_fd) {
@@ -1054,8 +1096,12 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        match write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))
-            .and_then(|()| stdout.flush())
+        match write!(
+            stdout,
+            "{}{HOST_QUERIES}",
+            terminal_enter_sequence(mouse_capture_enabled)
+        )
+        .and_then(|()| stdout.flush())
         {
             Ok(()) => {}
             Err(error) => {
@@ -1063,12 +1109,13 @@ impl TerminalGuard {
                 return Err(error.into());
             }
         }
-
-        Ok(Self {
+        let guard = Self {
             input_fd,
             original_mode,
             mouse_capture_enabled,
-        })
+        };
+        let replies = read_host_replies(input_fd)?;
+        Ok((guard, replies))
     }
 
     fn size(&self) -> Result<Size> {
@@ -1106,17 +1153,19 @@ impl TerminalGuard {
 
     /// Draw `grid` and the status line below it. With `status_cursor` (the
     /// command prompt is open) the cursor goes to that column of the status
-    /// line instead of the grid's cursor.
+    /// line instead of the grid's cursor. Only sequences `host` supports are
+    /// used.
     fn render(
         &self,
         grid: &RenderGrid,
         terminal_size: Size,
         status: Option<&str>,
         status_cursor: Option<u16>,
+        host: HostCapabilities,
     ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.ansi_lines() {
+        for line in grid.ansi_lines_for(host) {
             write!(stdout, "{line}\x1b[K\r\n")?;
         }
 

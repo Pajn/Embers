@@ -22,7 +22,7 @@ Underlines keep their shape. `CellAttrs` has one exclusive flag per style — `U
 
 On the wire the fixed-size `StyledRunWire` struct is unchanged: the style flags fit in its existing `attrs` bits, and underline colors go in a sparse `underline_colors` vector on `StyledLine` with one 8-byte entry per run that sets a color. Frames from programs that never set an underline color are byte-identical to before. In keeper JSON a default `underline_color` is omitted.
 
-The client renderer re-emits these to the host terminal: `CSI 4 m` for a single underline, `CSI 4:n m` for the other styles, and `CSI 58:5:n m` or `CSI 58:2::r:g:b m` for the color. The host terminal must understand colon sub-parameters to draw them; Embers does not translate them for terminals that don't.
+The client renderer re-emits these to the host terminal: `CSI 4 m` for a single underline, `CSI 4:n m` for the other styles, and `CSI 58:5:n m` or `CSI 58:2::r:g:b m` for the color. The host terminal must understand colon sub-parameters to draw them. When the client has not found that the host does (see [The host terminal](configuration.md#the-host-terminal)), `RenderGrid::ansi_lines_for` sends every underline style as `CSI 4 m` and leaves out the color.
 
 ### Hyperlinks
 
@@ -30,7 +30,7 @@ OSC 8 hyperlinks survive from the pane to the host terminal, so links printed by
 
 Linked text counts as styled, so a line whose only styling is a link still has `runs`. On the wire, `StyledLine` gains a `links` vector and a `run_links` vector of `ushort` parallel to `runs`; both are absent unless a run on that line is linked, so link-free frames are unchanged. Keeper JSON omits `link` when zero and `links` when empty, and scrollback slices carry the tables in a parallel `links` field.
 
-The renderer keeps each link on the grid cell rather than in the cell style, so selection and search overlays keep it while anything drawn over the cell (borders, hint labels, popups) drops it. It emits `OSC 8 ; id=<id> ; <uri> ST` where a link starts and `OSC 8 ; ; ST` where it ends, and always closes an open link at the end of a row. Control characters are stripped from the id and URI, and `:`/`;` from the id, so pane content cannot end the sequence early and inject terminal input.
+The renderer keeps each link on the grid cell rather than in the cell style, so selection and search overlays keep it while anything drawn over the cell (borders, hint labels, popups) drops it. It emits `OSC 8 ; id=<id> ; <uri> ST` where a link starts and `OSC 8 ; ; ST` where it ends, and always closes an open link at the end of a row. Control characters are stripped from the id and URI, and `:`/`;` from the id, so pane content cannot end the sequence early and inject terminal input. For a host not known to support OSC 8 the renderer emits no OSC 8 at all, and linked text is plain text.
 
 ### Freshness expectations
 
@@ -44,7 +44,7 @@ The interactive client handles every event that has already arrived before it dr
 
 `PassthroughEvent` carries sequences a program sent for the host terminal (tmux passthrough and unwrapped kitty graphics commands), in order, each with the pane cursor at the point the program sent it. They are not part of any snapshot. See [Passthrough](configuration.md#passthrough) for the user-facing behavior and [the backend boundary](terminal-backend-boundary.md#passthrough) for how they reach the client.
 
-On the event the client refreshes the buffer's visible snapshot and holds the writes. When it next draws a session it turns them into output for right after that frame (`ConfiguredClient::drain_frame_output`, which is separate from the output written before a frame): for a pane in the frame, a cursor move to the pane's cursor in screen coordinates (the leaf's content origin below its title row, plus the cursor, clamped into the pane), then the sequence; for a pane not in the frame, the sequence alone with `allow-passthrough all`, nothing otherwise. The output hides the cursor first and resets the pen last, and the interactive client then puts the cursor back where the frame left it.
+On the event the client refreshes the buffer's visible snapshot and holds the writes. When it next draws a session it turns them into output for right after that frame (`ConfiguredClient::drain_frame_output`, which is separate from the output written before a frame): for a pane in the frame, a cursor move to the pane's cursor in screen coordinates (the leaf's content origin below its title row, plus the cursor, clamped into the pane), then the sequence; for a pane not in the frame, the sequence alone with `allow-passthrough all`, nothing otherwise. Nothing is written when the host terminal does not support passthrough. The output hides the cursor first and resets the pen last, and the interactive client then puts the cursor back where the frame left it.
 
 What the snapshot model can and cannot promise:
 

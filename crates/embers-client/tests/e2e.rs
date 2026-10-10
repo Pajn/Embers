@@ -1505,6 +1505,23 @@ async fn pane_passthrough_output(
     script: &str,
     hidden: bool,
 ) -> PassthroughOutput {
+    pane_passthrough_output_on_host(
+        config_source,
+        script,
+        hidden,
+        embers_client::HostCapabilities::ALL,
+    )
+    .await
+}
+
+/// [`pane_passthrough_output`] for a client whose host terminal was detected
+/// to support `host`.
+async fn pane_passthrough_output_on_host(
+    config_source: &str,
+    script: &str,
+    hidden: bool,
+    host: embers_client::HostCapabilities,
+) -> PassthroughOutput {
     use embers_client::ConfiguredClient;
 
     let server = TestServer::start().await.expect("server starts");
@@ -1566,6 +1583,7 @@ async fn pane_passthrough_output(
         .await
         .expect("client connects");
     let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(host);
     configured
         .client_mut()
         .subscribe(None)
@@ -1688,6 +1706,33 @@ async fn tmux_passthrough_is_dropped_when_off() {
         "expected no output, got {:?}",
         String::from_utf8_lossy(&output.frame_output)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_needs_a_host_that_supports_it() {
+    use embers_client::HostCapabilities;
+
+    let output =
+        pane_passthrough_output_on_host("", WRAPPED_KITTY_IMAGE, false, HostCapabilities::NONE)
+            .await;
+    assert!(
+        output.frame_output.is_empty(),
+        "expected no output for an unsupported host, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+
+    // The config can say the host supports it after all.
+    let output = pane_passthrough_output_on_host(
+        "set_terminal_features(#{ passthrough: true });",
+        WRAPPED_KITTY_IMAGE,
+        false,
+        HostCapabilities::NONE,
+    )
+    .await;
+    assert!(contains_subslice(
+        &output.frame_output,
+        b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -957,6 +957,31 @@ fn set_clipboard(enabled: bool) -> ();
 /// # rhai-autodocs:index:1
 fn set_leader(notation: string) -> ();
 
+/// Say what the terminal running the client supports, overriding what
+/// Embers detected when it attached.
+///
+/// Embers asks the terminal at attach and otherwise goes by `TERM` and
+/// `TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+/// named capability on (`true`) or off (`false`); capabilities not named
+/// stay as detected. Like tmux's `terminal-features`.
+///
+/// - `underline_styles`: double, curly, dotted and dashed underlines
+///   (`CSI 4:n m`). Without it every underline is plain.
+/// - `underline_color`: colored underlines (`CSI 58:...m`). Without it
+///   underlines take the text color.
+/// - `hyperlinks`: OSC 8 links. Without it links are plain text.
+/// - `passthrough`: sequences programs send for the terminal, such as
+///   images (see `set_allow_passthrough`). Without it they are dropped.
+///
+/// # Example
+///
+/// ```rhai
+/// set_terminal_features(#{ hyperlinks: true, passthrough: false });
+/// ```
+///
+/// # rhai-autodocs:index:11
+fn set_terminal_features(features: map) -> ();
+
 /// Remove a previously bound key sequence.
 ///
 /// # rhai-autodocs:index:5

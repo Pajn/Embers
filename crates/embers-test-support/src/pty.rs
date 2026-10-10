@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,14 @@ use portable_pty::{
 };
 
 const OUTPUT_TAIL_CHARS: usize = 2000;
+
+/// A query a harness answers like a terminal would, and its reply.
+pub type HostAnswer = (&'static [u8], &'static [u8]);
+
+/// What [`PtyHarness::spawn`] answers: device attributes (DA1), which every
+/// terminal answers, and nothing else, like a basic VT220.
+pub const BASIC_HOST: &[HostAnswer] = &[(b"\x1b[c", b"\x1b[?62;22c")];
+
 static PTY_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Checks if PTY devices are available on this system.
@@ -31,7 +39,7 @@ pub struct PtyHarness {
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     output_rx: Receiver<Vec<u8>>,
     reader_join: Option<thread::JoinHandle<()>>,
 }
@@ -78,7 +86,20 @@ impl PtyHarness {
         )))
     }
 
+    /// Spawn `command` on a PTY whose terminal answers like [`BASIC_HOST`].
     pub fn spawn(command: &str, args: &[&str], size: PtySize) -> Result<Self> {
+        Self::spawn_answering(command, args, size, BASIC_HOST)
+    }
+
+    /// Spawn `command` on a PTY whose terminal writes each reply in `answers`
+    /// back when the program writes the matching query, in the order the
+    /// queries appear, the way a terminal answers.
+    pub fn spawn_answering(
+        command: &str,
+        args: &[&str],
+        size: PtySize,
+        answers: &'static [HostAnswer],
+    ) -> Result<Self> {
         let mut command_builder = CommandBuilder::new(command);
         for arg in args {
             command_builder.arg(arg);
@@ -89,10 +110,12 @@ impl PtyHarness {
             .master
             .try_clone_reader()
             .map_err(|error| MuxError::pty(error.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|error| MuxError::pty(error.to_string()))?;
+        let writer = Arc::new(Mutex::new(
+            pair.master
+                .take_writer()
+                .map_err(|error| MuxError::pty(error.to_string()))?,
+        ));
+        let answer_writer = writer.clone();
         let mut child = pair
             .slave
             .spawn_command(command_builder)
@@ -102,10 +125,12 @@ impl PtyHarness {
             .name("pty-reader".to_owned())
             .spawn(move || {
                 let mut buffer = [0_u8; 1024];
+                let mut recent = Vec::new();
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(read) => {
+                            answer_queries(&mut recent, &buffer[..read], answers, &answer_writer);
                             if tx.send(buffer[..read].to_vec()).is_err() {
                                 break;
                             }
@@ -136,8 +161,12 @@ impl PtyHarness {
     }
 
     pub fn write_all(&mut self, input: &str) -> Result<()> {
-        self.writer.write_all(input.as_bytes())?;
-        self.writer.flush()?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| MuxError::pty("pty writer lock poisoned"))?;
+        writer.write_all(input.as_bytes())?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -215,6 +244,46 @@ impl Drop for PtyHarness {
             let _ = join.join();
         }
     }
+}
+
+/// Answer the queries in `chunk` (or straddling `recent`, the end of the
+/// previous chunks) that `answers` covers, in the order they appear.
+fn answer_queries(
+    recent: &mut Vec<u8>,
+    chunk: &[u8],
+    answers: &[HostAnswer],
+    writer: &Mutex<Box<dyn Write + Send>>,
+) {
+    if answers.is_empty() {
+        return;
+    }
+    let carried = recent.len();
+    recent.extend_from_slice(chunk);
+    let mut found = Vec::new();
+    for (query, reply) in answers {
+        for (start, window) in recent.windows(query.len()).enumerate() {
+            // Only queries that end in this chunk; earlier ones were answered.
+            if window == *query && start + query.len() > carried {
+                found.push((start, *reply));
+            }
+        }
+    }
+    found.sort_by_key(|(start, _)| *start);
+    if !found.is_empty()
+        && let Ok(mut writer) = writer.lock()
+    {
+        for (_, reply) in found {
+            let _ = writer.write_all(reply);
+        }
+        let _ = writer.flush();
+    }
+    let longest = answers
+        .iter()
+        .map(|(query, _)| query.len())
+        .max()
+        .unwrap_or(1);
+    let keep = longest.saturating_sub(1).min(recent.len());
+    recent.drain(..recent.len() - keep);
 }
 
 fn tail_excerpt(output: &str) -> String {

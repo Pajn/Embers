@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f3caf7fe.js";
+            window.path_to_searchindex_js = "searchindex-15d91604.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -413,6 +413,49 @@ Set the leader sequence used in binding notations.
 
 <div group="set_leader" id="set_leader-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_leader("&lt;C-a&gt;");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
+
+<pre><code class="language-rust ignore">fn set_terminal_features(features: Map)</code></pre>
+<div>
+<div class="tab">
+<button group="set_terminal_features" id="link-set_terminal_features-Description" class="tablinks active" onclick="openTab(event, &#39;set_terminal_features&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_terminal_features" id="link-set_terminal_features-Example" class="tablinks" onclick="openTab(event, &#39;set_terminal_features&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Description" class="tabcontent" style="display: block;">
+Say what the terminal running the client supports, overriding what
+Embers detected when it attached.
+<p>Embers asks the terminal at attach and otherwise goes by <code>TERM</code> and
+<code>TERM_PROGRAM</code>, and leaves out what it cannot confirm. This sets each
+named capability on (<code>true</code>) or off (<code>false</code>); capabilities not named
+stay as detected. Like tmux’s <code>terminal-features</code>.</p>
+<ul>
+<li><code>underline_styles</code>: double, curly, dotted and dashed underlines
+(<code>CSI 4:n m</code>). Without it every underline is plain.</li>
+<li><code>underline_color</code>: colored underlines (<code>CSI 58:...m</code>). Without it
+underlines take the text color.</li>
+<li><code>hyperlinks</code>: OSC 8 links. Without it links are plain text.</li>
+<li><code>passthrough</code>: sequences programs send for the terminal, such as
+images (see <code>set_allow_passthrough</code>). Without it they are dropped.</li>
+</ul>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_terminal_features(#{ hyperlinks: true, passthrough: false });
 </code></pre>
 </div>
 

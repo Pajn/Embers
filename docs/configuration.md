@@ -174,7 +174,8 @@ default.
   `set_allow_passthrough("all")` also forwards them from panes in hidden
   windows of the client's session. `set_allow_passthrough("off")` drops them.
   The setting also covers [unwrapped kitty graphics
-  commands](#images-without-the-tmux-wrapper).
+  commands](#images-without-the-tmux-wrapper). Nothing is forwarded to a host
+  terminal that is [not known to support passthrough](#the-host-terminal).
 - **Who receives them.** Like [clipboard writes](#clipboard-osc-52), the
   server sends them only to clients whose current session contains the pane;
   each client then checks whether the pane is on its screen. Sequences from a
@@ -262,7 +263,45 @@ Programs that read capabilities only from terminfo still see plain
 `xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
 that lists the capabilities and that is installed where the program runs.
 
-Embers always renders underline styles, underline colors and OSC 8 hyperlinks
-to the host terminal with the standard sequences (see
-[the render-source contract](render-source-contract.md)), so the host terminal
-must support them; Ghostty, kitty, WezTerm, foot and VTE-based terminals do.
+### The host terminal
+
+The terminal running the client is the host terminal. Underline styles,
+underline colors, OSC 8 hyperlinks and [passthrough](#passthrough) need
+sequences that not every host understands, and one that does not can draw them
+as garbage. So when the client attaches it finds out what the host supports
+and leaves out the rest: every underline becomes a plain one, underlines take
+the text color, links become plain text and passthrough is dropped.
+
+To find out, the client writes three queries together with the sequences that
+set up the screen and enable the kitty keyboard protocol, and reads the
+replies before it draws anything:
+
+- **XTVERSION** (`CSI > 0 q`) for the host's name.
+- **XTGETTCAP** for `Smulx` and `Setulc`, the terminfo capabilities for
+  underline styles and underline colors.
+- **DA1** (`CSI c`). Every terminal answers it, and terminals answer queries in
+  order, so its reply means every other reply has arrived. Terminals that do
+  not know the first two queries ignore them.
+
+If no DA1 reply arrives within a second the client goes on without one. Keys
+typed while it waits are dropped. Then:
+
+- A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
+  styles or underline colors.
+- A host Embers knows by name gets what it is known to support: Ghostty,
+  kitty, WezTerm, foot and Contour everything; iTerm2 hyperlinks and
+  passthrough; Alacritty underline styles, underline colors and hyperlinks.
+  The name comes from the XTVERSION reply, or without one from `TERM_PROGRAM`
+  or `TERM` (`xterm-ghostty`, `xterm-kitty`, `wezterm`, `foot`, `alacritty`).
+- Any other host gets the plain forms.
+
+There is no query for OSC 8, so hyperlinks depend on the host's name. When
+detection gets it wrong, `set_terminal_features` in the config file forces a
+capability on or off:
+
+```rhai
+set_terminal_features(#{ hyperlinks: true, passthrough: false });
+```
+
+The names are `underline_styles`, `underline_color`, `hyperlinks` and
+`passthrough`. Capabilities the call does not name stay as detected.

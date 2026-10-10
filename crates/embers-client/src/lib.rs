@@ -8,6 +8,7 @@ pub mod copy_mode;
 pub mod format;
 pub mod grid;
 pub mod hints;
+pub mod host_terminal;
 pub mod input;
 pub mod numbering;
 pub mod presentation;
@@ -34,6 +35,10 @@ pub use controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseMod
 pub use format::{FormatContext, expand_format};
 pub use grid::{
     BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor, UnderlineStyle,
+};
+pub use host_terminal::{
+    HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies, TerminalFeatures,
+    detect_host_capabilities,
 };
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,

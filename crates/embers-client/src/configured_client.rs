@@ -27,6 +27,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
+use crate::host_terminal::HostCapabilities;
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
@@ -149,6 +150,9 @@ pub struct ConfiguredClient<T> {
     /// Host terminal output that must follow the frame `render_session` last
     /// returned (see [`ConfiguredClient::drain_frame_output`]).
     frame_output: Vec<u8>,
+    /// What the host terminal was detected to support, before config
+    /// overrides.
+    detected_host: HostCapabilities,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
     /// child), drained into `notifications` on the next input/event tick.
@@ -184,6 +188,7 @@ where
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
             frame_output: Vec::new(),
+            detected_host: HostCapabilities::default(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
         }
@@ -313,8 +318,29 @@ where
         std::mem::take(&mut self.frame_output)
     }
 
-    /// Which panes may write to the host terminal through passthrough.
+    /// Record what detection found the host terminal supports. Until this is
+    /// called the client assumes it supports everything.
+    pub fn set_host_capabilities(&mut self, detected: HostCapabilities) {
+        self.detected_host = detected;
+    }
+
+    /// What the host terminal supports: what detection found, with the
+    /// config's `set_terminal_features` overrides applied.
+    pub fn host_capabilities(&self) -> HostCapabilities {
+        self.detected_host.with_overrides(
+            self.config
+                .active_script()
+                .loaded_config()
+                .terminal_features,
+        )
+    }
+
+    /// Which panes may write to the host terminal through passthrough: the
+    /// config's choice, or none when the host does not support passthrough.
     fn passthrough_mode(&self) -> PassthroughMode {
+        if !self.host_capabilities().passthrough {
+            return PassthroughMode::Off;
+        }
         self.config.active_script().loaded_config().passthrough
     }
 

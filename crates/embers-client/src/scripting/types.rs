@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use rhai::AST;
 use thiserror::Error;
 
+use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
 
 use super::model::Action;
@@ -181,6 +182,8 @@ pub struct LoadedConfig {
     /// Which panes may write to the host terminal through tmux passthrough
     /// (`set_allow_passthrough`). `On` by default.
     pub passthrough: PassthroughMode,
+    /// Host terminal capabilities forced on or off (`set_terminal_features`).
+    pub terminal_features: TerminalFeatures,
 }
 
 impl LoadedConfig {
@@ -219,6 +222,7 @@ impl fmt::Debug for LoadedConfig {
             .field("clipboard", &self.clipboard)
             .field("base_index", &self.base_index)
             .field("passthrough", &self.passthrough)
+            .field("terminal_features", &self.terminal_features)
             .finish()
     }
 }
