@@ -1302,3 +1302,111 @@ async fn restore_only_restarts_buffers_shown_in_the_layout() {
     handle.shutdown().await.expect("shutdown restarted server");
     stop_keepers(&config, &[(shown, restored_pid)]).await;
 }
+
+/// The inode of the workspace file, which every save replaces by renaming a
+/// new file over it.
+fn workspace_inode(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|metadata| metadata.ino())
+}
+
+#[tokio::test]
+async fn a_pane_spamming_its_title_does_not_spam_the_disk() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let workspace_path = config.workspace_path.clone();
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+    let session_id = request_session_snapshot(
+        &mut client,
+        SessionRequest::Create {
+            request_id: RequestId(1201),
+            name: "main".to_owned(),
+        },
+    )
+    .await
+    .snapshot
+    .session
+    .id;
+    // Sets a new title every 10 ms, and prints, as a progress display does.
+    let buffer_id = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(1202),
+            title: Some("spam".to_owned()),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "i=0; while :; do i=$((i+1)); printf '\\033]2;title %s\\007%s\\n' $i $i; \
+                 sleep 0.01; done"
+                    .to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer
+    .id;
+    show_buffer(&mut client, RequestId(1203), session_id, buffer_id).await;
+    let pid = wait_for_running_buffer(&mut client, RequestId(1204), buffer_id)
+        .await
+        .pid
+        .expect("buffer pid");
+    wait_for_saved_workspace(&workspace_path, "a changed title", |contents| {
+        contents.contains("\"title ")
+    })
+    .await;
+
+    // Count saves over three seconds of title changes.
+    let mut saves = 0;
+    let mut inode = workspace_inode(&workspace_path);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        sleep(Duration::from_millis(5)).await;
+        let current = workspace_inode(&workspace_path);
+        if current != inode {
+            saves += 1;
+            inode = current;
+        }
+    }
+    assert!(
+        (1..=4).contains(&saves),
+        "the workspace was saved {saves} times in three seconds of title changes"
+    );
+
+    // A layout change is still saved promptly.
+    let _ = request_session_snapshot(
+        &mut client,
+        SessionRequest::Rename {
+            request_id: RequestId(1205),
+            session_id,
+            name: "renamed".to_owned(),
+        },
+    )
+    .await;
+    let renamed_at = Instant::now();
+    wait_for_saved_workspace(&workspace_path, "the rename", |contents| {
+        contents.contains("\"renamed\"")
+    })
+    .await;
+    assert!(
+        renamed_at.elapsed() < Duration::from_millis(800),
+        "a rename took {:?} to be saved",
+        renamed_at.elapsed()
+    );
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    stop_keepers(&config, &[(buffer_id, pid)]).await;
+}

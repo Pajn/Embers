@@ -72,7 +72,9 @@ directories are created with `0700` permissions.
 
 The server saves sessions, layout and buffer records to `<socket>.workspace.json`
 whenever they change, batching bursts of changes into one atomic write, so a
-crash or SIGKILL of the server loses at most the last moment of changes.
+crash or SIGKILL of the server loses at most the last moment of changes: 100 ms
+of layout changes, and 1.5 s of pane title, directory and foreground command
+changes, which programs can make many times a second.
 
 On startup, panes whose runtime keeper is still alive are reattached. Panes whose
 keeper is gone, as after a reboot, are restored (detached buffers, which are in

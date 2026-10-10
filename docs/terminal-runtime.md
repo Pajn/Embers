@@ -227,12 +227,19 @@ The workspace is saved whenever it changes, not only on a clean shutdown:
 - a buffer exiting
 - server startup, once keepers are reattached or restored
 
-Saves are batched: the first change starts a short timer (100 ms) and one write covers every change
-made before it fires. Output and activity alone never trigger a save. A write whose contents match
-the previous one is skipped. Each write goes to a temp file next to the workspace file, is fsynced,
-renamed over it, and the directory is fsynced, so a crash leaves either the previous file or the new
-one. A crash or SIGKILL of the server therefore loses at most the changes of the last batch. A clean
-shutdown writes the final state once more; `kill-server` deletes the workspace file instead.
+Saves are batched: the first change starts a timer and one write covers every change made before it
+fires. The timer is short (100 ms) for changes to sessions, layout and buffers, and longer (1.5 s)
+for a buffer's title, working directory or foreground command, which programs can change many times
+a second (a progress display in the title, a prompt that sets it). The timer is not restarted by
+later changes, so a pane that never stops changing its title is still saved, once per 1.5 s; a
+layout change during the longer wait is saved within 100 ms as usual. Output alone never triggers a
+save. Buffer activity is saved, but a write is skipped when nothing but activity changed since the
+last one; output sequence numbers are not saved, since they only mean something to the keeper that
+produced them. The state is copied under the server's state lock and encoded and written outside
+it. Each write goes to a temp file next to the workspace file, is fsynced, renamed over it, and the
+directory is fsynced, so a crash leaves either the previous file or the new one. A crash or SIGKILL
+of the server therefore loses at most the changes of the last batch. A clean shutdown writes the
+final state once more; `kill-server` deletes the workspace file instead.
 
 ## Restore after keepers are gone
 

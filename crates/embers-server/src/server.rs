@@ -36,7 +36,10 @@ use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
     IS_VIM_OPTION, Node,
 };
-use crate::persist::{encode_workspace, load_workspace, write_workspace};
+use crate::persist::{
+    PersistedWorkspace, encode_persisted_workspace, load_workspace, same_saved_state,
+    write_workspace,
+};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
@@ -64,6 +67,12 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 /// it writes the workspace file. Changes made meanwhile land in the same write,
 /// so a burst costs one write, and a crash loses at most this much.
 const WORKSPACE_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// [`WORKSPACE_SAVE_DELAY`] for changes to a buffer's title, working directory
+/// or foreground command. Programs change these continuously (a progress
+/// display in the title, a shell prompt that sets it), and losing the last
+/// moment of them in a crash costs little.
+const WORKSPACE_METADATA_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// How long a connection gets to write the shutdown notice to its client when
 /// the server stops, before it is closed anyway.
@@ -455,9 +464,13 @@ struct Runtime {
     /// Signalled whenever the workspace changes in a way worth saving; the
     /// workspace saver batches these into one write.
     workspace_dirty: Notify,
-    /// The bytes last written to the workspace file. Held across a whole save so
-    /// saves never interleave, and used to skip writing identical contents.
-    last_saved_workspace: Mutex<Option<Vec<u8>>>,
+    /// Signalled when only buffer metadata (title, working directory,
+    /// foreground command) changed; saved after a longer delay.
+    workspace_metadata_dirty: Notify,
+    /// The workspace last written to the workspace file. Held across a whole
+    /// save so saves never interleave, and used to skip writing a workspace
+    /// that has not changed in a way worth saving (see [`same_saved_state`]).
+    last_saved_workspace: Mutex<Option<PersistedWorkspace>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
@@ -555,6 +568,7 @@ impl Runtime {
                 ..RestoreConfig::default()
             },
             workspace_dirty: Notify::new(),
+            workspace_metadata_dirty: Notify::new(),
             last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
@@ -569,41 +583,73 @@ impl Runtime {
 }
 
 impl Runtime {
+    /// Write the workspace file unless it already holds the current state.
+    /// Only a snapshot of the state is taken under the state lock; encoding
+    /// and the write happen outside it.
     async fn persist_workspace(&self) -> Result<()> {
         let mut last_saved = self.last_saved_workspace.lock().await;
-        let bytes = encode_workspace(&*self.state.lock().await)?;
-        if last_saved.as_deref() == Some(bytes.as_slice()) {
+        let persisted = self.state.lock().await.to_persisted();
+        if last_saved
+            .as_ref()
+            .is_some_and(|saved| same_saved_state(saved, &persisted))
+        {
             return Ok(());
         }
         let path = self.workspace_path.clone();
-        let bytes =
-            tokio::task::spawn_blocking(move || write_workspace(&path, &bytes).map(|()| bytes))
-                .await
-                .map_err(|error| MuxError::internal(error.to_string()))??;
-        *last_saved = Some(bytes);
+        let persisted = tokio::task::spawn_blocking(move || {
+            write_workspace(&path, &encode_persisted_workspace(&persisted)?).map(|()| persisted)
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))??;
+        *last_saved = Some(persisted);
         Ok(())
     }
 
-    /// Ask the workspace saver to write the workspace soon.
+    /// Ask the workspace saver to write the workspace soon: a change to the
+    /// layout, sessions or buffers, saved within [`WORKSPACE_SAVE_DELAY`].
     fn mark_workspace_dirty(&self) {
         self.workspace_dirty.notify_one();
     }
 
+    /// Ask the workspace saver to write the workspace eventually: a change to
+    /// a buffer's title, working directory or foreground command, which
+    /// programs can make many times a second. These are saved within
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`], so a burst of them costs one write.
+    fn mark_workspace_metadata_dirty(&self) {
+        self.workspace_metadata_dirty.notify_one();
+    }
+
     /// Saves the workspace after changes, so a crash or SIGKILL of the server
-    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of them. Stops at
-    /// shutdown, which writes the final state itself.
+    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of layout changes and
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`] of title, directory and foreground
+    /// command changes. The wait starts at the first change and is not
+    /// extended by later ones, so a pane that never stops changing its title
+    /// is still saved regularly. Stops at shutdown, which writes the final
+    /// state itself.
     fn spawn_workspace_saver(self: &Arc<Self>) -> JoinHandle<()> {
         let runtime = self.clone();
         let mut shutdown = self.shutdown.subscribe();
         tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    () = runtime.workspace_dirty.notified() => {}
+                let delay = tokio::select! {
+                    () = runtime.workspace_dirty.notified() => WORKSPACE_SAVE_DELAY,
+                    () = runtime.workspace_metadata_dirty.notified() => {
+                        WORKSPACE_METADATA_SAVE_DELAY
+                    }
                     () = wait_for_shutdown(&mut shutdown) => return,
-                }
-                tokio::select! {
-                    () = tokio::time::sleep(WORKSPACE_SAVE_DELAY) => {}
-                    () = wait_for_shutdown(&mut shutdown) => return,
+                };
+                let mut deadline = tokio::time::Instant::now() + delay;
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline) => break,
+                        // A layout change during a long wait is saved as
+                        // promptly as any other.
+                        () = runtime.workspace_dirty.notified() => {
+                            deadline = deadline
+                                .min(tokio::time::Instant::now() + WORKSPACE_SAVE_DELAY);
+                        }
+                        () = wait_for_shutdown(&mut shutdown) => return,
+                    }
                 }
                 if let Err(error) = runtime.persist_workspace().await {
                     warn!(%error, "failed to save workspace");
@@ -3451,7 +3497,7 @@ impl Runtime {
             (render_invalidated, pipe_event, workspace_changed)
         };
         if workspace_changed {
-            self.mark_workspace_dirty();
+            self.mark_workspace_metadata_dirty();
         }
 
         let mut events = Vec::new();
