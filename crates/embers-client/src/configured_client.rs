@@ -5826,6 +5826,17 @@ mod tests {
                 mods: ctrl_shift,
             }
         );
+        // `<C-T>` names the same key.
+        assert_eq!(
+            crate::input::parse_key_sequence("<C-T>").unwrap(),
+            vec![
+                key_event_to_token(KeyEvent::Key {
+                    code: KeyCode::Char('t'),
+                    mods: ctrl_shift,
+                })
+                .unwrap()
+            ]
+        );
     }
 
     #[test]

@@ -941,6 +941,13 @@ fn bind(mode: string, notation: string, action: Action) -> ();
 /// overload for a named action registered with `define_action`, or an array to chain multiple
 /// actions in sequence.
 ///
+/// A notation is a sequence of keys: plain characters, and names or modified keys in angle
+/// brackets, such as `<Enter>`, `<C-a>`, `<M-h>`, `<S-Left>`, `<C-S-Tab>` or `<F5>`
+/// (`C` Ctrl, `M` or `A` Alt, `S` Shift, `D` Super). As in tmux, an uppercase letter is the
+/// shifted key: `<M-H>` is Alt+Shift+h and `<C-H>` is Ctrl+Shift+h, the same as `<C-S-h>`.
+/// Legacy terminals send the same bytes for Ctrl+Shift+h as for Ctrl+h, so `<C-H>` and other
+/// Ctrl+Shift bindings only fire from a host terminal with the kitty keyboard protocol.
+///
 /// # Example
 ///
 /// ```rhai

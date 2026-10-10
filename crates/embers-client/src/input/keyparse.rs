@@ -195,7 +195,10 @@ fn parse_modified_token(token: &str) -> Result<KeyToken, KeyParseError> {
     }
 
     // Preserve the legacy single-modifier character tokens so existing bindings
-    // and encodings are unchanged.
+    // and encodings are unchanged. An uppercase letter means the shifted key,
+    // for Ctrl as for Alt: `<C-H>` is Ctrl+Shift+h. Legacy host terminals send
+    // the same byte for Ctrl+Shift+h as for Ctrl+h, so only a host with the
+    // kitty keyboard protocol can produce it.
     if let KeyCode::Char(ch) = code {
         if mods
             == (Modifiers {
@@ -203,7 +206,11 @@ fn parse_modified_token(token: &str) -> Result<KeyToken, KeyParseError> {
                 ..Modifiers::NONE
             })
         {
-            return Ok(KeyToken::Ctrl(ch.to_ascii_lowercase()));
+            if ch.is_ascii_uppercase() {
+                mods.shift = true;
+            } else {
+                return Ok(KeyToken::Ctrl(ch));
+            }
         }
         if mods
             == (Modifiers {
@@ -287,6 +294,35 @@ mod tests {
         assert_eq!(
             parse_key_sequence("<M-h>").unwrap(),
             vec![KeyToken::Alt('h')]
+        );
+    }
+
+    #[test]
+    fn ctrl_with_an_uppercase_letter_is_ctrl_shift() {
+        // Like `<M-H>`, `<C-H>` is the shifted key: Ctrl+Shift+h, which a
+        // kitty-protocol host reports apart from Ctrl+h.
+        let ctrl_shift_h = vec![KeyToken::Key {
+            code: KeyCode::Char('h'),
+            mods: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        }];
+        assert_eq!(parse_key_sequence("<C-H>").unwrap(), ctrl_shift_h);
+        assert_eq!(parse_key_sequence("<C-S-h>").unwrap(), ctrl_shift_h);
+        assert_eq!(
+            parse_key_sequence("<C-h>").unwrap(),
+            vec![KeyToken::Ctrl('h')]
+        );
+        assert_ne!(
+            parse_key_sequence("<C-H>").unwrap(),
+            parse_key_sequence("<C-h>").unwrap()
+        );
+        // Only letters have a case; other keys are unchanged.
+        assert_eq!(
+            parse_key_sequence("<C-\\>").unwrap(),
+            vec![KeyToken::Ctrl('\\')]
         );
     }
 

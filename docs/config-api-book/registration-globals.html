@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6c418d2d.js";
+            window.path_to_searchindex_js = "searchindex-6bbd9dee.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -198,6 +198,12 @@ Bind a key notation to an [`Action`], a string action name, or an array of actio
 <p>Use the <code>Action</code> overload for inline builders such as <code>action.focus_left()</code>, the string
 overload for a named action registered with <code>define_action</code>, or an array to chain multiple
 actions in sequence.</p>
+<p>A notation is a sequence of keys: plain characters, and names or modified keys in angle
+brackets, such as <code>&lt;Enter&gt;</code>, <code>&lt;C-a&gt;</code>, <code>&lt;M-h&gt;</code>, <code>&lt;S-Left&gt;</code>, <code>&lt;C-S-Tab&gt;</code> or <code>&lt;F5&gt;</code>
+(<code>C</code> Ctrl, <code>M</code> or <code>A</code> Alt, <code>S</code> Shift, <code>D</code> Super). As in tmux, an uppercase letter is the
+shifted key: <code>&lt;M-H&gt;</code> is Alt+Shift+h and <code>&lt;C-H&gt;</code> is Ctrl+Shift+h, the same as <code>&lt;C-S-h&gt;</code>.
+Legacy terminals send the same bytes for Ctrl+Shift+h as for Ctrl+h, so <code>&lt;C-H&gt;</code> and other
+Ctrl+Shift bindings only fire from a host terminal with the kitty keyboard protocol.</p>
 </div>
 
 <div group="bind" id="bind-Example" class="tabcontent" style="display: none;">
