@@ -110,11 +110,16 @@ pub struct MouseSettings {
     pub click_forward: bool,
     pub wheel_scroll: bool,
     pub wheel_forward: bool,
+    pub drag_resize: bool,
 }
 
 impl MouseSettings {
     pub const fn capture_enabled(self) -> bool {
-        self.click_focus || self.click_forward || self.wheel_scroll || self.wheel_forward
+        self.click_focus
+            || self.click_forward
+            || self.wheel_scroll
+            || self.wheel_forward
+            || self.drag_resize
     }
 }
 

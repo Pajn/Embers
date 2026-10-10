@@ -103,10 +103,12 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                         TabRecord {
                             title: "shell".to_owned(),
                             child_id: HIDDEN_ROOT_LEAF_ID,
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "workspace".to_owned(),
                             child_id: ROOT_SPLIT_ID,
+                            synchronize_panes: false,
                         },
                     ],
                 }),
@@ -139,10 +141,12 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                         TabRecord {
                             title: "build".to_owned(),
                             child_id: HIDDEN_NESTED_LEAF_ID,
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "logs-long-title".to_owned(),
                             child_id: FOCUSED_LEAF_ID,
+                            synchronize_panes: false,
                         },
                     ],
                 }),

@@ -21,8 +21,8 @@ use embers_protocol::{
     RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
     SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
-    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
-    write_frame_no_flush,
+    SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message, encode_server_envelope,
+    read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1102,6 +1102,24 @@ impl Runtime {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            SessionRequest::SetRootTabSynchronizePanes {
+                request_id,
+                session_id,
+                index,
+                mode,
+            } => {
+                let enabled = match mode {
+                    SynchronizePanesMode::Toggle => None,
+                    SynchronizePanesMode::On => Some(true),
+                    SynchronizePanesMode::Off => Some(false),
+                };
+                match protocol_tab_index(index).and_then(|index| {
+                    state.set_root_tab_synchronize_panes(session_id, index, enabled)
+                }) {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
         }
     }
 

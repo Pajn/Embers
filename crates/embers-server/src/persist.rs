@@ -493,10 +493,7 @@ pub fn restored_node(node: PersistedNode) -> Node {
             parent: parent.map(NodeId),
             tabs: tabs
                 .into_iter()
-                .map(|tab| TabEntry {
-                    title: tab.title,
-                    child: NodeId(tab.child),
-                })
+                .map(|tab| TabEntry::new(tab.title, NodeId(tab.child)))
                 .collect(),
             active,
             last_focused_descendant: last_focused_descendant.map(NodeId),

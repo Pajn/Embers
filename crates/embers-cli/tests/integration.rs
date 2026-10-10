@@ -1,5 +1,6 @@
 mod automation;
 mod interactive;
+mod layout_controls;
 mod panes;
 mod persistence;
 mod ping;
