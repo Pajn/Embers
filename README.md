@@ -81,8 +81,8 @@ EMBERS_SOCKET=/tmp/my-embers.sock embers attach
 Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`
-- `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`
-- `pane`: `split-window`, `list-panes`, `select-pane`, `resize-pane`, `send-keys`, `capture-pane`, `kill-pane`
+- `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`, `synchronize-panes`
+- `pane`: `split-window`, `list-panes`, `select-pane`, `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
@@ -144,6 +144,8 @@ Run with an explicit config while developing:
 embers --config ./config.rhai
 ```
 
+Pane resizing, zoom, dragging split dividers with the mouse, `synchronize-panes`, and a smart-splits.nvim setup are described in [`docs/layout-controls.md`](docs/layout-controls.md).
+
 The generated config API reference lives in [`docs/config-api`](docs/config-api/index.md), with a rendered mdBook copy in [`docs/config-api-book`](docs/config-api-book/index.html).
 
 Operational configuration (socket path, logging, and resource limits via
@@ -194,6 +196,7 @@ The docs directory contains design notes that are useful when changing behavior:
 - [`docs/terminal-backend-boundary.md`](docs/terminal-backend-boundary.md): server/backend responsibility boundary
 - [`docs/terminal-capture-model.md`](docs/terminal-capture-model.md): terminal capture and snapshot model
 - [`docs/input-routing.md`](docs/input-routing.md): input routing model
+- [`docs/layout-controls.md`](docs/layout-controls.md): pane resizing, divider dragging, and synchronize-panes
 - [`docs/activity-bell-policy.md`](docs/activity-bell-policy.md): activity and bell state policy
 - [`docs/render-source-contract.md`](docs/render-source-contract.md): rendering source-of-truth contract
 

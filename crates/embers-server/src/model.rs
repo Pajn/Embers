@@ -334,6 +334,9 @@ pub struct TabsNode {
 pub struct TabEntry {
     pub title: String,
     pub child: NodeId,
+    /// tmux `synchronize-panes` for the window this tab holds. Only set on
+    /// root tabs; the client fans typed input out to the window's panes.
+    pub synchronize_panes: bool,
 }
 
 impl TabEntry {
@@ -341,6 +344,7 @@ impl TabEntry {
         Self {
             title: title.into(),
             child,
+            synchronize_panes: false,
         }
     }
 }

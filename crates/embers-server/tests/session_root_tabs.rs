@@ -181,3 +181,55 @@ fn closing_root_tabs_can_collapse_root_and_closing_root_resets_to_empty_tabs() {
 
     state.validate().expect("empty root tabs remain valid");
 }
+
+#[test]
+fn root_tabs_track_synchronize_panes_per_window() {
+    let mut state = ServerState::new();
+    let session_id = state.create_session("main");
+    for title in ["one", "two"] {
+        let buffer = state.create_buffer(title, vec!["/bin/sh".to_owned()], None);
+        state
+            .add_root_tab_from_buffer(session_id, title, buffer)
+            .expect("add root tab");
+    }
+    assert!(
+        root_tabs(&state, session_id)
+            .tabs
+            .iter()
+            .all(|tab| !tab.synchronize_panes)
+    );
+
+    assert!(
+        state
+            .set_root_tab_synchronize_panes(session_id, 1, None)
+            .expect("toggle on")
+    );
+    let tabs = root_tabs(&state, session_id);
+    assert!(!tabs.tabs[0].synchronize_panes);
+    assert!(tabs.tabs[1].synchronize_panes);
+
+    assert!(
+        !state
+            .set_root_tab_synchronize_panes(session_id, 1, None)
+            .expect("toggle off")
+    );
+    assert!(
+        state
+            .set_root_tab_synchronize_panes(session_id, 0, Some(true))
+            .expect("set on")
+    );
+    assert!(
+        state
+            .set_root_tab_synchronize_panes(session_id, 0, Some(true))
+            .expect("setting on again keeps it on")
+    );
+    assert!(root_tabs(&state, session_id).tabs[0].synchronize_panes);
+
+    state
+        .set_root_tab_synchronize_panes(session_id, 2, Some(true))
+        .expect_err("out of range window index is rejected");
+
+    state
+        .validate()
+        .expect("synchronize-panes keeps state valid");
+}
