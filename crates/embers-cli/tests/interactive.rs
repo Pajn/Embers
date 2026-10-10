@@ -1539,10 +1539,23 @@ async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_curs
         ],
     );
 
+    // Passthrough is off unless the config turns it on.
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let config_path = config_dir.path().join("config.rhai");
+    fs::write(&config_path, "set_allow_passthrough(\"on\");").expect("write config");
+    let config_arg = config_path.to_string_lossy().into_owned();
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
     let socket_path = server.socket_path().to_path_buf();
     let (_spawned, mut harness) = spawn_embers_on_host(
-        &["attach", "--socket", &socket_arg, "-t", "main"],
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
         socket_path,
         GHOSTTY_HOST,
     );

@@ -205,17 +205,26 @@ Programs written for tmux send sequences meant for the outer terminal wrapped
 as `ESC P tmux; <sequence> ESC \`, with every ESC inside doubled. Image
 viewers (image.nvim, yazi, kitty graphics previewers) send images this way, and
 other programs send desktop notifications or titles. Embers accepts the same
-wrapper and writes the unwrapped sequence to the host terminal of each client
-showing the pane, like tmux with `set -g allow-passthrough on`, which is the
-default.
+wrapper and, once passthrough is turned on, writes the unwrapped sequence to
+the host terminal of each client showing the pane, like tmux with
+`set -g allow-passthrough on`.
 
-- **Choosing which panes.** `set_allow_passthrough("on")` (the default)
-  forwards sequences from panes that are on screen in the client.
-  `set_allow_passthrough("all")` also forwards them from panes in hidden
-  windows of the client's session. `set_allow_passthrough("off")` drops them.
-  The setting also covers [unwrapped kitty graphics
-  commands](#images-without-the-tmux-wrapper). Nothing is forwarded to a host
-  terminal that is [not known to support passthrough](#the-host-terminal).
+```rhai
+set_allow_passthrough("on");
+```
+
+- **Off by default.** As in tmux, passthrough is off unless the config turns
+  it on. With it on, any program on screen, or `cat` of an untrusted file, can
+  write raw sequences to the host terminal, bypassing `set_clipboard(false)`
+  and the filtering Embers applies to what panes print.
+- **Choosing which panes.** `set_allow_passthrough("on")` forwards sequences
+  from panes that are on screen in the client. `set_allow_passthrough("all")`
+  also forwards them from panes in hidden windows of the client's session.
+  `set_allow_passthrough("off")`, the default, drops them. The setting also
+  covers [unwrapped kitty graphics
+  commands](#images-without-the-tmux-wrapper). Turning it on does not force
+  it: nothing is forwarded to a host terminal that is [not known to support
+  passthrough](#the-host-terminal).
 - **Who receives them.** Like [clipboard writes](#clipboard-osc-52), the
   server sends them only to clients whose current session contains the pane;
   each client then checks whether the pane is on its screen. Sequences from a
@@ -317,7 +326,9 @@ underline colors, OSC 8 hyperlinks and [passthrough](#passthrough) need
 sequences that not every host understands, and one that does not can draw them
 as garbage. So when the client attaches it finds out what the host supports
 and leaves out the rest: every underline becomes a plain one, underlines take
-the text color, links become plain text and passthrough is dropped.
+the text color, links become plain text and passthrough is dropped. Detection
+only decides whether passthrough is possible; it is still off until the
+config turns it on with `set_allow_passthrough`.
 
 To find out, the client writes three queries together with the sequences that
 set up the screen and enable the kitty keyboard protocol, and reads the

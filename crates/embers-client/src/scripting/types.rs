@@ -164,13 +164,15 @@ pub struct HintsSettings {
 }
 
 /// Which panes may write to the host terminal through tmux passthrough
-/// (`set_allow_passthrough`), like tmux's `allow-passthrough`.
+/// (`set_allow_passthrough`), like tmux's `allow-passthrough`. Off by default,
+/// as in tmux: passthrough lets any program on screen write raw sequences to
+/// the host terminal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PassthroughMode {
     /// Drop passthrough sequences.
+    #[default]
     Off,
     /// Forward them from panes that are on screen.
-    #[default]
     On,
     /// Forward them from every pane in the client's session, on screen or not.
     All,
@@ -208,7 +210,7 @@ pub struct LoadedConfig {
     /// Number of the first window (`set_base_index`), if the config set one.
     pub base_index: Option<u32>,
     /// Which panes may write to the host terminal through tmux passthrough
-    /// (`set_allow_passthrough`). `On` by default.
+    /// (`set_allow_passthrough`). `Off` by default.
     pub passthrough: PassthroughMode,
     /// Host terminal capabilities forced on or off (`set_terminal_features`).
     pub terminal_features: TerminalFeatures,

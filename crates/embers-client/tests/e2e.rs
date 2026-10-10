@@ -1677,9 +1677,12 @@ async fn pane_passthrough_output_on_host(
 const WRAPPED_KITTY_IMAGE: &str =
     "printf '\\033[3;5H\\033Ptmux;\\033\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\033\\\\\\033\\\\'";
 
+/// Config that turns passthrough on; it is off by default.
+const PASSTHROUGH_ON: &str = "set_allow_passthrough(\"on\");";
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_passthrough_reaches_the_host_at_the_pane_cursor() {
-    let output = pane_passthrough_output("", WRAPPED_KITTY_IMAGE, false).await;
+    let output = pane_passthrough_output(PASSTHROUGH_ON, WRAPPED_KITTY_IMAGE, false).await;
     let (row, col) = output.pane_cursor.expect("pane on screen");
     let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
     assert!(
@@ -1697,7 +1700,7 @@ async fn raw_kitty_graphics_reach_the_host_at_the_pane_cursor() {
     // Sent without the tmux wrapper, as a program that does not know it runs
     // in a multiplexer would.
     let script = "printf '\\033[3;5H\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\\\'";
-    let output = pane_passthrough_output("", script, false).await;
+    let output = pane_passthrough_output(PASSTHROUGH_ON, script, false).await;
     let (row, col) = output.pane_cursor.expect("pane on screen");
     let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
     assert!(
@@ -1709,26 +1712,28 @@ async fn raw_kitty_graphics_reach_the_host_at_the_pane_cursor() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_passthrough_is_dropped_when_off() {
-    let output = pane_passthrough_output(
-        "set_allow_passthrough(\"off\");",
-        WRAPPED_KITTY_IMAGE,
-        false,
-    )
-    .await;
-    assert!(
-        output.frame_output.is_empty(),
-        "expected no output, got {:?}",
-        String::from_utf8_lossy(&output.frame_output)
-    );
+    // Off is the default, as in tmux.
+    for config in ["", "set_allow_passthrough(\"off\");"] {
+        let output = pane_passthrough_output(config, WRAPPED_KITTY_IMAGE, false).await;
+        assert!(
+            output.frame_output.is_empty(),
+            "expected no output with {config:?}, got {:?}",
+            String::from_utf8_lossy(&output.frame_output)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_passthrough_needs_a_host_that_supports_it() {
     use embers_client::HostCapabilities;
 
-    let output =
-        pane_passthrough_output_on_host("", WRAPPED_KITTY_IMAGE, false, HostCapabilities::NONE)
-            .await;
+    let output = pane_passthrough_output_on_host(
+        PASSTHROUGH_ON,
+        WRAPPED_KITTY_IMAGE,
+        false,
+        HostCapabilities::NONE,
+    )
+    .await;
     assert!(
         output.frame_output.is_empty(),
         "expected no output for an unsupported host, got {:?}",
@@ -1737,7 +1742,7 @@ async fn tmux_passthrough_needs_a_host_that_supports_it() {
 
     // The config can say the host supports it after all.
     let output = pane_passthrough_output_on_host(
-        "set_terminal_features(#{ passthrough: true });",
+        "set_allow_passthrough(\"on\"); set_terminal_features(#{ passthrough: true });",
         WRAPPED_KITTY_IMAGE,
         false,
         HostCapabilities::NONE,
@@ -1751,7 +1756,7 @@ async fn tmux_passthrough_needs_a_host_that_supports_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_passthrough_from_a_hidden_pane_needs_all() {
-    let output = pane_passthrough_output("", WRAPPED_KITTY_IMAGE, true).await;
+    let output = pane_passthrough_output(PASSTHROUGH_ON, WRAPPED_KITTY_IMAGE, true).await;
     assert!(
         output.frame_output.is_empty(),
         "`on` forwards only from panes on screen, got {:?}",
@@ -1780,7 +1785,7 @@ async fn oversized_tmux_passthrough_is_dropped() {
         "printf '\\033Ptmux;'; head -c {} /dev/zero | tr '\\0' x; printf '\\033\\\\'",
         embers_core::MAX_PASSTHROUGH_BYTES + 1
     );
-    let output = pane_passthrough_output("", &script, false).await;
+    let output = pane_passthrough_output(PASSTHROUGH_ON, &script, false).await;
     assert!(
         !contains_subslice(&output.frame_output, b"xxxx"),
         "oversized payload was forwarded"

@@ -15,9 +15,9 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - A session/window/pane picker, a command prompt that runs the CLI's commands,
   `display-message` and session environments, as in tmux (see
   [`docs/commands.md`](docs/commands.md))
-- OSC 52 clipboard writes and tmux-style passthrough (`ESC P tmux; ... ESC \`) from programs in
-  panes to the outer terminal, for images and notifications (see
-  [`docs/configuration.md`](docs/configuration.md#passthrough))
+- OSC 52 clipboard writes and opt-in tmux-style passthrough (`ESC P tmux; ... ESC \`, off by
+  default as in tmux) from programs in panes to the outer terminal, for images and notifications
+  (see [`docs/configuration.md`](docs/configuration.md#passthrough))
 - Underline styles and colors, OSC 8 hyperlinks and passthrough sent only to outer terminals that
   support them, detected when the client attaches (see
   [`docs/configuration.md`](docs/configuration.md#the-host-terminal))
