@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, ClipboardSelection, CursorState, FloatGeometry, FloatingId, NodeId,
-    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
+    PassthroughWrite, PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1202,6 +1202,16 @@ pub struct ClipboardEvent {
     pub text: String,
 }
 
+/// Sequences a program in a buffer sent for the host terminal (tmux
+/// passthrough), in order. Like [`ClipboardEvent`] it goes only to the clients
+/// whose current session contains the buffer; each decides from its own layout
+/// whether the pane is on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassthroughEvent {
+    pub buffer_id: BufferId,
+    pub writes: Vec<PassthroughWrite>,
+}
+
 /// A message to show in a client's status line (`display-message`). Sent only
 /// to the clients the request named, not broadcast.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1238,6 +1248,7 @@ pub enum ServerEvent {
     ClientChanged(ClientChangedEvent),
     Clipboard(ClipboardEvent),
     DisplayMessage(DisplayMessageEvent),
+    Passthrough(PassthroughEvent),
 }
 
 impl ServerEvent {
@@ -1254,7 +1265,7 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
-            Self::Clipboard(_) | Self::DisplayMessage(_) => None,
+            Self::Clipboard(_) | Self::DisplayMessage(_) | Self::Passthrough(_) => None,
         }
     }
 

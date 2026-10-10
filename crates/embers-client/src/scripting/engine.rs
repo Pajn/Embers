@@ -20,7 +20,8 @@ use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
 use super::types::{
-    HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
+    HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode, RgbColor,
+    ScriptFunctionRef, ThemeSpec,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -261,6 +262,7 @@ struct RegistrationState {
     theme: ThemeSpec,
     clipboard: Option<bool>,
     base_index: Option<u32>,
+    passthrough: Option<PassthroughMode>,
 }
 
 impl RegistrationState {
@@ -366,6 +368,7 @@ impl RegistrationState {
             theme: self.theme,
             clipboard: self.clipboard.unwrap_or(true),
             base_index: self.base_index,
+            passthrough: self.passthrough.unwrap_or_default(),
         })
     }
 }
@@ -841,6 +844,43 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .base_index = Some(index);
+        Ok(())
+    }
+
+    /// Choose which panes may write to the host terminal through tmux
+    /// passthrough, like tmux's `allow-passthrough`.
+    ///
+    /// Programs that run under tmux wrap sequences meant for the outer
+    /// terminal, such as kitty graphics images or desktop notifications, as
+    /// `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+    /// terminal running the client, with its cursor at the pane's cursor so
+    /// images land where the program put them.
+    ///
+    /// - `"on"` (the default): only from panes that are on screen.
+    /// - `"all"`: from every pane in the client's session, on screen or not.
+    ///   Sequences from a pane that is not on screen are written without
+    ///   moving the cursor.
+    /// - `"off"`: drop them.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_allow_passthrough("all");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:10
+    #[rhai_fn(return_raw, global, name = "set_allow_passthrough")]
+    pub fn set_allow_passthrough(ctx: NativeCallContext, mode: &str) -> RhaiResultOf<()> {
+        let mode = PassthroughMode::parse(mode).ok_or_else(|| {
+            runtime_error(
+                format!("allow-passthrough must be \"on\", \"off\" or \"all\", not \"{mode}\""),
+                ctx.call_position(),
+            )
+        })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .passthrough = Some(mode);
         Ok(())
     }
 }

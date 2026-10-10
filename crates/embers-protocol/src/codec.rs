@@ -1,9 +1,10 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, Size,
-    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, Hyperlink, NodeId, PassthroughWrite,
+    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor,
+    WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -1849,6 +1850,9 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
             validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
         }
         ServerEvent::DisplayMessage(_) => Ok(()),
+        ServerEvent::Passthrough(event) => {
+            validate_required_buffer_id(event.buffer_id, "passthrough_event.buffer_id")
+        }
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
             validate_optional_session_id(
@@ -3461,6 +3465,40 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::Passthrough(e) => {
+            let writes = e
+                .writes
+                .iter()
+                .map(|write| {
+                    let data = builder.create_vector(&write.bytes);
+                    fb::PassthroughWrite::create(
+                        builder,
+                        &fb::PassthroughWriteArgs {
+                            data: Some(data),
+                            cursor_row: write.cursor.row,
+                            cursor_col: write.cursor.col,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let writes = builder.create_vector(&writes);
+            let event = fb::PassthroughEvent::create(
+                builder,
+                &fb::PassthroughEventArgs {
+                    buffer_id: e.buffer_id.into(),
+                    writes: Some(writes),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::PassthroughEvent,
+                    passthrough_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
         ServerEvent::DisplayMessage(e) => {
             let message = builder.create_string(&e.message);
             let event = fb::DisplayMessageEvent::create(
@@ -4895,6 +4933,33 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                     buffer_id: BufferId(event.buffer_id()),
                     selection,
                     text: event.text().unwrap_or_default().to_owned(),
+                },
+            )))
+        }
+        fb::MessageKind::PassthroughEvent => {
+            let event = required(envelope.passthrough_event(), "passthrough_event")?;
+            let writes = event
+                .writes()
+                .map(|writes| {
+                    writes
+                        .iter()
+                        .map(|write| PassthroughWrite {
+                            bytes: write
+                                .data()
+                                .map(|data| data.bytes().to_vec())
+                                .unwrap_or_default(),
+                            cursor: CursorPosition {
+                                row: write.cursor_row(),
+                                col: write.cursor_col(),
+                            },
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(ServerEnvelope::Event(ServerEvent::Passthrough(
+                PassthroughEvent {
+                    buffer_id: BufferId(event.buffer_id()),
+                    writes,
                 },
             )))
         }

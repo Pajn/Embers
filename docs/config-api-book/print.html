@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-58f41fbb.js";
+            window.path_to_searchindex_js = "searchindex-045c40c3.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -351,6 +351,48 @@ Description
 
 <div group="on" id="on-Description" class="tabcontent" style="display: block;">
 Attach a callback to an emitted event such as `buffer_bell`.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_allow_passthrough </h2>
+
+<pre><code class="language-rust ignore">fn set_allow_passthrough(mode: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Description" class="tablinks active" onclick="openTab(event, &#39;set_allow_passthrough&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Example" class="tablinks" onclick="openTab(event, &#39;set_allow_passthrough&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Description" class="tabcontent" style="display: block;">
+Choose which panes may write to the host terminal through tmux
+passthrough, like tmux's `allow-passthrough`.
+<p>Programs that run under tmux wrap sequences meant for the outer
+terminal, such as kitty graphics images or desktop notifications, as
+<code>ESC P tmux; ... ESC \</code>. Embers unwraps them and writes them to the
+terminal running the client, with its cursor at the pane’s cursor so
+images land where the program put them.</p>
+<ul>
+<li><code>"on"</code> (the default): only from panes that are on screen.</li>
+<li><code>"all"</code>: from every pane in the client’s session, on screen or not.
+Sequences from a pane that is not on screen are written without
+moving the cursor.</li>
+<li><code>"off"</code>: drop them.</li>
+</ul>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_allow_passthrough("all");
+</code></pre>
 </div>
 
 </div>

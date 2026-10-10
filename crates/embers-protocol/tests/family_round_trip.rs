@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
-    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PtySize, RequestId, SessionId, Size,
-    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, NodeId, PassthroughWrite, PtySize,
+    RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
 };
 use embers_protocol::*;
 
@@ -696,6 +696,24 @@ fn server_envelope_families_round_trip() {
         ServerEnvelope::Event(ServerEvent::DisplayMessage(DisplayMessageEvent {
             message: String::new(),
             duration_ms: 0,
+        })),
+        ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+            buffer_id: BufferId(11),
+            writes: vec![
+                PassthroughWrite {
+                    bytes: b"\x1b_Gf=100;iVBORw0KGgo=\x1b\\".to_vec(),
+                    cursor: CursorPosition { row: 3, col: 7 },
+                },
+                // Arbitrary bytes, including ones that are not UTF-8.
+                PassthroughWrite {
+                    bytes: vec![0x1b, 0xff, 0x00, 0x9c],
+                    cursor: CursorPosition::default(),
+                },
+            ],
+        })),
+        ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+            buffer_id: BufferId(11),
+            writes: Vec::new(),
         })),
     ];
 

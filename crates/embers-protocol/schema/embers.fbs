@@ -46,6 +46,7 @@ enum MessageKind : ubyte {
   BufferPipeChangedEvent = 50,
   ClipboardEvent = 51,
   DisplayMessageEvent = 52,
+  PassthroughEvent = 53,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -656,6 +657,21 @@ table ClipboardEvent {
   text:string;
 }
 
+// One sequence from a tmux passthrough (`ESC P tmux; ... ESC \`), unwrapped,
+// with the pane cursor at the point it ended.
+table PassthroughWrite {
+  data:[ubyte];
+  cursor_row:ushort;
+  cursor_col:ushort;
+}
+
+// Passthrough sequences from a program in `buffer_id`, in order, sent only to
+// the clients currently showing that buffer's session.
+table PassthroughEvent {
+  buffer_id:ulong;
+  writes:[PassthroughWrite];
+}
+
 // A message for a client to show in its status line (`display-message`),
 // sent only to the clients the request named.
 table DisplayMessageEvent {
@@ -718,6 +734,7 @@ table Envelope {
   clipboard_event:ClipboardEvent (id: 39);
   environment_response:EnvironmentResponse (id: 40);
   display_message_event:DisplayMessageEvent (id: 41);
+  passthrough_event:PassthroughEvent (id: 42);
 }
 
 root_type Envelope;

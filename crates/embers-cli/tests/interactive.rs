@@ -1398,6 +1398,78 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
     server.shutdown().await.expect("shutdown server");
 }
 
+/// The 1-based `(row, column)` of the cursor move (`ESC [ row ; col H`) that
+/// ends right before `index` in `output`, if one does.
+fn cursor_move_before(output: &str, index: usize) -> Option<(u16, u16)> {
+    let head = output[..index].strip_suffix('H')?;
+    let start = head.rfind("\x1b[")?;
+    let (row, col) = head[start + 2..].split_once(';')?;
+    Some((row.parse().ok()?, col.parse().ok()?))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_cursor() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+    harness
+        .write_all("stty -echo\r")
+        .expect("disable shell echo in focused pane");
+    harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("focused shell settles");
+
+    // Move the pane cursor to row 3, column 5, then send a desktop
+    // notification wrapped for tmux, with its ESC doubled.
+    harness
+        .write_all("printf '\\033[3;5H\\033Ptmux;\\033\\033]9;embers-passthrough\\007\\033\\\\'\r")
+        .expect("run passthrough fixture");
+    let payload = "\x1b]9;embers-passthrough\x07";
+    let output = harness
+        .read_until_contains(payload, IO_TIMEOUT)
+        .expect("unwrapped payload reaches the host terminal");
+    let index = output.find(payload).expect("payload in output");
+    let (row, col) = cursor_move_before(&output, index)
+        .unwrap_or_else(|| panic!("no cursor move before the payload in {output:?}"));
+    // The only pane fills the width, so column 5 of the pane is column 5 of
+    // the screen; its content starts below the tab bar and its title row.
+    assert_eq!(col, 5);
+    assert!(row > 3, "row {row} is not below the pane's title");
+    assert!(
+        !output.contains("tmux;"),
+        "wrapper reached the host: {output:?}"
+    );
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_prompt_picker_and_display_message_work_in_a_live_client() {
     let _guard = acquire_test_lock().await.expect("acquire test lock");

@@ -114,6 +114,52 @@ Attach a callback to an emitted event such as `buffer_bell`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_allow_passthrough </h2>
+
+```rust,ignore
+fn set_allow_passthrough(mode: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_allow_passthrough', 'Description')">
+Description
+</button>
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Example"  class="tablinks"
+    onclick="openTab(event, 'set_allow_passthrough', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Description" class="tabcontent"  style="display: block;" >
+Choose which panes may write to the host terminal through tmux
+passthrough, like tmux's `allow-passthrough`.
+
+Programs that run under tmux wrap sequences meant for the outer
+terminal, such as kitty graphics images or desktop notifications, as
+`ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+terminal running the client, with its cursor at the pane's cursor so
+images land where the program put them.
+
+- `"on"` (the default): only from panes that are on screen.
+- `"all"`: from every pane in the client's session, on screen or not.
+  Sequences from a pane that is not on screen are written without
+  moving the cursor.
+- `"off"`: drop them.
+</div>
+<div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_allow_passthrough("all");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_base_index </h2>
 
 ```rust,ignore

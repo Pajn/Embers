@@ -15,6 +15,9 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - A session/window/pane picker, a command prompt that runs the CLI's commands,
   `display-message` and session environments, as in tmux (see
   [`docs/commands.md`](docs/commands.md))
+- OSC 52 clipboard writes and tmux-style passthrough (`ESC P tmux; ... ESC \`) from programs in
+  panes to the outer terminal, for images and notifications (see
+  [`docs/configuration.md`](docs/configuration.md#passthrough))
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
 - FlatBuffers protocol shared by the client and server crates

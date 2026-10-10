@@ -334,7 +334,8 @@ where
             }
             ServerEvent::BufferPipeChanged(_)
             | ServerEvent::Clipboard(_)
-            | ServerEvent::DisplayMessage(_) => Ok(()),
+            | ServerEvent::DisplayMessage(_)
+            | ServerEvent::Passthrough(_) => Ok(()),
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_) => Ok(()),

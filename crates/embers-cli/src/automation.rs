@@ -297,6 +297,13 @@ fn event_value(event: &ServerEvent) -> Value {
             "selection": event.selection.osc52_parameter().to_string(),
             "bytes": event.text.len(),
         }),
+        // Like clipboard text, the passthrough payloads are left out.
+        ServerEvent::Passthrough(event) => json!({
+            "type": "passthrough",
+            "buffer_id": u64::from(event.buffer_id),
+            "writes": event.writes.len(),
+            "bytes": event.writes.iter().map(|write| write.bytes.len()).sum::<usize>(),
+        }),
     }
 }
 

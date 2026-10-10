@@ -8,13 +8,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, FloatGeometry, FloatingId, MuxError, NodeId,
-    Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
+    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
-    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent,
-    ServerResponse, SessionRequest, buffer_ids_in_subtree,
+    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, PassthroughEvent,
+    ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
@@ -36,7 +36,7 @@ use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
+    MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size};
 use crate::split_resize::SplitResize;
@@ -53,6 +53,25 @@ const MAX_EXPANDED_ACTIONS: usize = 256;
 /// Most events `process_ready_events_timeout` handles before the caller gets
 /// to draw, so a flood of output cannot hold off input and frames for long.
 const MAX_EVENT_BATCH: usize = 256;
+/// Most passthrough bytes held for the next frame. Frames follow events
+/// promptly, so this only bounds a client that has stopped drawing.
+const MAX_PENDING_PASSTHROUGH_BYTES: usize = 32 * 1024 * 1024;
+
+/// Where on the host screen a passthrough write from `leaf` goes: the pane's
+/// `cursor`, clamped into the pane's content, which starts below its title row.
+/// `None` when the pane shows no content or that cell is off screen.
+fn passthrough_cursor(
+    leaf: &LeafFrame,
+    cursor: CursorPosition,
+    viewport: Size,
+) -> Option<(u16, u16)> {
+    let pty = leaf.pty_size()?;
+    let x = i64::from(leaf.rect.origin.x) + i64::from(cursor.col.min(pty.cols - 1));
+    let y = i64::from(leaf.rect.origin.y) + 1 + i64::from(cursor.row.min(pty.rows - 1));
+    let x = u16::try_from(x).ok().filter(|x| *x < viewport.width)?;
+    let y = u16::try_from(y).ok().filter(|y| *y < viewport.height)?;
+    Some((x, y))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
@@ -124,6 +143,12 @@ pub struct ConfiguredClient<T> {
     /// the button is released.
     divider_drag: Option<DividerDrag>,
     terminal_output: VecDeque<Vec<u8>>,
+    /// Passthrough writes from panes, oldest first, waiting for the next frame.
+    pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
+    pending_passthrough_bytes: usize,
+    /// Host terminal output that must follow the frame `render_session` last
+    /// returned (see [`ConfiguredClient::drain_frame_output`]).
+    frame_output: Vec<u8>,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
     /// child), drained into `notifications` on the next input/event tick.
@@ -156,6 +181,9 @@ where
             copy: CopyModeState::default(),
             divider_drag: None,
             terminal_output: VecDeque::new(),
+            pending_passthrough: Vec::new(),
+            pending_passthrough_bytes: 0,
+            frame_output: Vec::new(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
         }
@@ -273,6 +301,81 @@ where
 
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
         self.terminal_output.drain(..).collect()
+    }
+
+    /// Host terminal output to write right after the frame `render_session`
+    /// returned, unlike [`ConfiguredClient::drain_terminal_output`], which goes
+    /// before it: passthrough sequences from programs in panes. Each one from a
+    /// pane on screen starts by moving the cursor to that pane's cursor, so the
+    /// caller puts its own cursor back afterwards. Empty when there is nothing
+    /// to write.
+    pub fn drain_frame_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.frame_output)
+    }
+
+    /// Which panes may write to the host terminal through passthrough.
+    fn passthrough_mode(&self) -> PassthroughMode {
+        self.config.active_script().loaded_config().passthrough
+    }
+
+    /// Hold passthrough writes from `buffer_id` for the next frame. The pane is
+    /// refreshed first, so that frame shows everything the program printed
+    /// before them.
+    async fn queue_passthrough(&mut self, event: &PassthroughEvent) {
+        if self.passthrough_mode() == PassthroughMode::Off || self.active_session_id.is_none() {
+            return;
+        }
+        let buffer_id = event.buffer_id;
+        if let Err(error) = self.client.refresh_buffer_snapshot(buffer_id).await {
+            warn!(%error, %buffer_id, "refreshing a pane for passthrough failed");
+        }
+        for write in &event.writes {
+            if self.pending_passthrough_bytes + write.bytes.len() > MAX_PENDING_PASSTHROUGH_BYTES {
+                warn!(%buffer_id, "too much passthrough waiting for a frame; dropping");
+                continue;
+            }
+            self.pending_passthrough_bytes += write.bytes.len();
+            self.pending_passthrough.push((buffer_id, write.clone()));
+        }
+    }
+
+    /// Turn the held passthrough writes into output for the frame drawn from
+    /// `presentation`. A write from a pane on screen goes to that pane's
+    /// cursor (tmux `allow-passthrough on`); one from a pane that is not is
+    /// written where the cursor is with `all`, and dropped otherwise.
+    fn flush_passthrough(&mut self, presentation: &PresentationModel) {
+        if self.pending_passthrough.is_empty() {
+            return;
+        }
+        let mode = self.passthrough_mode();
+        let pending = std::mem::take(&mut self.pending_passthrough);
+        self.pending_passthrough_bytes = 0;
+        let mut output = Vec::new();
+        for (buffer_id, write) in pending {
+            let cursor = presentation
+                .leaves
+                .iter()
+                .find(|leaf| leaf.buffer_id == buffer_id)
+                .and_then(|leaf| passthrough_cursor(leaf, write.cursor, presentation.viewport));
+            match (mode, cursor) {
+                (PassthroughMode::On | PassthroughMode::All, Some((x, y))) => {
+                    output.extend_from_slice(
+                        format!("\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1).as_bytes(),
+                    );
+                    output.extend_from_slice(&write.bytes);
+                }
+                (PassthroughMode::All, None) => output.extend_from_slice(&write.bytes),
+                _ => {}
+            }
+        }
+        if output.is_empty() {
+            return;
+        }
+        // Hide the cursor while it jumps around, and leave the pen at its
+        // default: the next frame assumes both.
+        self.frame_output.extend_from_slice(b"\x1b[?25l");
+        self.frame_output.extend_from_slice(&output);
+        self.frame_output.extend_from_slice(b"\x1b[0m");
     }
 
     /// Emit an OSC 2 window-title update naming the given session, so the host
@@ -746,6 +849,9 @@ where
         {
             self.enqueue_osc52(clipboard.selection, &clipboard.text);
         }
+        if let ServerEvent::Passthrough(passthrough) = event {
+            self.queue_passthrough(passthrough).await;
+        }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
             && self.active_session_id == Some(renamed.session_id)
@@ -829,6 +935,7 @@ where
         let mut grid =
             self.renderer
                 .render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+        self.flush_passthrough(&presentation);
         if let Some(chooser) = &mut self.chooser {
             let rows = chooser.rows(self.client.state(), self.active_session_id, {
                 self.config
@@ -2541,6 +2648,7 @@ where
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Passthrough(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::DisplayMessage(_) => self.active_session_id,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
@@ -5092,6 +5200,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::ClientChanged(_) => "client_changed",
         ServerEvent::Clipboard(_) => "clipboard",
         ServerEvent::DisplayMessage(_) => "display_message",
+        ServerEvent::Passthrough(_) => "passthrough",
     }
 }
 
@@ -5127,6 +5236,7 @@ fn event_info(
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Passthrough(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::DisplayMessage(_) => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;

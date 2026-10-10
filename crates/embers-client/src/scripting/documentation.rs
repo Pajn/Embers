@@ -37,6 +37,7 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
             "on",
             "set_clipboard",
             "set_base_index",
+            "set_allow_passthrough",
         ],
     },
     PageSpec {

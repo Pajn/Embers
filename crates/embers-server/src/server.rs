@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    BufferId, ClipboardWrite, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine,
-    WireError, request_span,
+    BufferId, ClipboardWrite, ErrorCode, MuxError, PassthroughWrite, PtySize, RequestId, Result,
+    SnapshotLine, WireError, request_span,
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
@@ -18,11 +18,12 @@ use embers_protocol::{
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
     DisplayMessageEvent, EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest,
     FloatingResponse, FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse,
-    PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse,
-    ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent,
-    SessionRenamedEvent, SessionRequest, SessionSnapshotResponse, SessionsResponse,
-    SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode, VisibleSnapshotResponse,
-    decode_client_message, encode_server_envelope, read_frame, write_frame_no_flush,
+    PassthroughEvent, PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent,
+    ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent,
+    SessionCreatedEvent, SessionRenamedEvent, SessionRequest, SessionSnapshotResponse,
+    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -82,6 +83,34 @@ const MAX_USER_OPTION_VALUE_LEN: usize = 4096;
 /// fails the request. We stop adding records past this budget (kept comfortably
 /// under the frame cap to absorb estimation slack) rather than emit a dead frame.
 const BUFFERS_RESPONSE_BUDGET: usize = 7 * 1024 * 1024;
+
+/// Payload budget for one `PassthroughEvent`. One write is at most
+/// `MAX_PASSTHROUGH_BYTES` (4 MiB), so a lone write always fits; several
+/// smaller ones share an event up to this size, which leaves room for framing
+/// under the protocol frame cap (`MAX_FRAME_LEN`, 8 MiB).
+const PASSTHROUGH_EVENT_BUDGET: usize = 6 * 1024 * 1024;
+
+/// Split passthrough writes, in order, into groups that each fit one event.
+fn batch_passthrough_writes(writes: Vec<PassthroughWrite>) -> Vec<Vec<PassthroughWrite>> {
+    // Per-write cost of the cursor, vector entry and table overhead.
+    const WRITE_OVERHEAD: usize = 32;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0;
+    for write in writes {
+        let cost = write.bytes.len() + WRITE_OVERHEAD;
+        if !batch.is_empty() && batch_bytes + cost > PASSTHROUGH_EVENT_BUDGET {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = 0;
+        }
+        batch_bytes += cost;
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
 
 /// Conservative upper bound on a `BufferRecord`'s flatbuffers-encoded size, used
 /// to keep `BuffersResponse` under [`BUFFERS_RESPONSE_BUDGET`]. It overestimates
@@ -585,6 +614,22 @@ impl Runtime {
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
         let clipboard_tasks = self.state_tasks.clone();
+        let passthrough_tasks = self.state_tasks.clone();
+        // Passthrough writes must reach clients in the order the program sent
+        // them (an image is many sequences), so unlike the other callbacks they
+        // go through one task per runtime instead of a task per call. The task
+        // ends when the callbacks, and with them the sender, are dropped.
+        let (passthrough_tx, mut passthrough_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(BufferId, Vec<PassthroughWrite>, TaskTicket)>();
+        let passthrough_runtime = self.clone();
+        std::mem::drop(output_handle.spawn(async move {
+            while let Some((buffer_id, writes, task)) = passthrough_rx.recv().await {
+                passthrough_runtime
+                    .forward_passthrough(buffer_id, writes)
+                    .await;
+                drop(task);
+            }
+        }));
 
         BufferRuntimeCallbacks {
             on_output: Arc::new(move |buffer_id, update| {
@@ -610,6 +655,12 @@ impl Runtime {
                     let _task = task;
                     runtime.forward_clipboard(buffer_id, write).await;
                 }));
+            }),
+            on_passthrough: Arc::new(move |buffer_id, writes| {
+                let task = passthrough_tasks.enter();
+                if passthrough_tx.send((buffer_id, writes, task)).is_err() {
+                    debug!(%buffer_id, "dropping passthrough: forwarder stopped");
+                }
             }),
         }
     }
@@ -3323,19 +3374,47 @@ impl Runtime {
     /// clients on other sessions are not. A write from a detached buffer, or
     /// one whose session no client is showing, is dropped.
     async fn forward_clipboard(&self, buffer_id: BufferId, write: ClipboardWrite) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
+            return;
+        };
+        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id,
+            selection: write.selection,
+            text: write.text,
+        }));
+        self.send_to_clients(&client_ids, event).await;
+    }
+
+    /// Send passthrough writes from `buffer_id` to the same clients as a
+    /// clipboard write. Each client decides from its own layout whether the
+    /// pane is on screen (tmux `allow-passthrough on`) or forwards the writes
+    /// anyway (`all`). The writes go out in order, in as few events as fit a
+    /// protocol frame.
+    async fn forward_passthrough(&self, buffer_id: BufferId, writes: Vec<PassthroughWrite>) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping passthrough: no client shows its session");
+            return;
+        };
+        for writes in batch_passthrough_writes(writes) {
+            let event = ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+                buffer_id,
+                writes,
+            }));
+            self.send_to_clients(&client_ids, event).await;
+        }
+    }
+
+    /// The clients whose current session contains `buffer_id`, or `None` when
+    /// the buffer is detached or no client shows its session.
+    async fn clients_showing_buffer_session(&self, buffer_id: BufferId) -> Option<BTreeSet<u64>> {
         let session_id = {
             let state = self.state.lock().await;
-            let Ok(buffer) = state.buffer(buffer_id) else {
-                return;
-            };
+            let buffer = state.buffer(buffer_id).ok()?;
             let BufferAttachment::Attached(node_id) = buffer.attachment else {
-                debug!(%buffer_id, "dropping clipboard write from a detached buffer");
-                return;
+                return None;
             };
-            match state.node(node_id) {
-                Ok(node) => node.session_id(),
-                Err(_) => return,
-            }
+            state.node(node_id).ok()?.session_id()
         };
         let client_ids: BTreeSet<u64> = self
             .clients
@@ -3345,17 +3424,7 @@ impl Runtime {
             .filter(|(_, client)| client.current_session_id == Some(session_id))
             .map(|(&client_id, _)| client_id)
             .collect();
-        if client_ids.is_empty() {
-            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
-            return;
-        }
-
-        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
-            buffer_id,
-            selection: write.selection,
-            text: write.text,
-        }));
-        self.send_to_clients(&client_ids, event).await;
+        (!client_ids.is_empty()).then_some(client_ids)
     }
 
     /// Send a `display-message` event to `client_id`, or to every client whose

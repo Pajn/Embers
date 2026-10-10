@@ -13,8 +13,8 @@ use alacritty_terminal::vte::ansi::{
 };
 use embers_core::{
     ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
-    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, PtySize, SnapshotLine, StyledRun, TermColor,
-    TerminalModes, TerminalSnapshot,
+    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, MAX_PASSTHROUGH_BYTES, PassthroughWrite,
+    PtySize, SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
 };
 use tracing::debug;
 
@@ -88,6 +88,8 @@ pub trait TerminalBackend: Send {
     /// calls this right after ingesting the query's final byte, so the reply
     /// reflects the state at that point in the stream.
     fn answer_query(&mut self, query: &TerminalQuery);
+    /// Where the cursor is on the screen, whether or not it is shown.
+    fn cursor_position(&self) -> CursorPosition;
 }
 
 /// A DCS query intercepted by [`RawByteRouter`] for the backend to answer.
@@ -105,6 +107,7 @@ pub enum TerminalQuery {
 pub struct RawByteRouter {
     osc7: Osc7Scanner,
     queries: DcsQueryScanner,
+    passthrough: PassthroughScanner,
 }
 
 impl RawByteRouter {
@@ -125,7 +128,38 @@ impl RawByteRouter {
     /// A second scanner picks out the DCS queries alacritty leaves unanswered
     /// (DECRQSS and XTGETTCAP). Output is split after each one so the backend
     /// answers it with the state as of that byte.
-    pub fn route_output(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
+    ///
+    /// Before either, tmux passthrough sequences (`ESC P tmux; ... ESC \`) are
+    /// taken out of the stream: the backend never sees them, and each one
+    /// comes back unwrapped with the cursor position the backend had reached
+    /// at that point, for the keeper to forward to clients.
+    pub fn route_output(
+        &mut self,
+        backend: &mut dyn TerminalBackend,
+        bytes: &[u8],
+    ) -> Vec<PassthroughWrite> {
+        let mut writes = Vec::new();
+        let mut forward = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            if let Some(payload) = self.passthrough.step(byte, &mut forward) {
+                // Everything before the sequence reaches the backend first, so
+                // the cursor is where the program left it.
+                self.ingest(backend, &forward);
+                forward.clear();
+                writes.push(PassthroughWrite {
+                    bytes: payload,
+                    cursor: backend.cursor_position(),
+                });
+            }
+        }
+        self.ingest(backend, &forward);
+        writes
+    }
+
+    fn ingest(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         self.osc7.feed(bytes);
         let mut start = 0;
         for (index, &byte) in bytes.iter().enumerate() {
@@ -264,8 +298,8 @@ impl Osc7Scanner {
 /// Streaming scanner for the DCS queries the router answers on the emulator's
 /// behalf: DECRQSS (`ESC P $ q <setting> ESC \`) and XTGETTCAP
 /// (`ESC P + q <hex names> ESC \`). Like [`Osc7Scanner`] it keeps state across
-/// read chunks; any other DCS (sixel, tmux passthrough, ...) is skipped without
-/// buffering.
+/// read chunks; any other DCS (sixel, ...) is skipped without buffering. It
+/// never sees tmux passthrough, which [`PassthroughScanner`] removes first.
 #[derive(Clone, Debug, Default)]
 struct DcsQueryScanner {
     state: DcsState,
@@ -374,6 +408,133 @@ impl DcsQueryScanner {
             }
         }
         None
+    }
+}
+
+/// What follows `ESC P` in a tmux passthrough sequence.
+const TMUX_PASSTHROUGH_PREFIX: &[u8] = b"tmux;";
+
+/// Streaming scanner that takes tmux passthrough sequences
+/// (`ESC P tmux; <payload> ESC \`) out of PTY output. Inside the payload every
+/// ESC is doubled, so `ESC ESC` stands for one ESC and `ESC \` ends the
+/// sequence; like tmux, an ESC followed by anything else is dropped.
+///
+/// Bytes that might begin a passthrough (`ESC`, `ESC P`, `ESC P tm`, ...) are
+/// held back until it is clear whether they do, possibly across read chunks,
+/// so the backend never sees part of one. Everything else passes through
+/// unchanged and in order.
+#[derive(Clone, Debug, Default)]
+struct PassthroughScanner {
+    state: PassthroughState,
+    /// Bytes held back while they might still begin a passthrough.
+    held: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PassthroughState {
+    #[default]
+    Ground,
+    /// Holding an ESC.
+    Escape,
+    /// Holding `ESC P` and this many bytes of [`TMUX_PASSTHROUGH_PREFIX`].
+    Prefix(usize),
+    /// Inside a passthrough, collecting its payload.
+    Collect,
+    /// Inside a passthrough and saw ESC.
+    CollectEscape,
+    /// Inside a passthrough over [`MAX_PASSTHROUGH_BYTES`], dropping it.
+    Discard,
+    /// Inside a dropped passthrough and saw ESC.
+    DiscardEscape,
+}
+
+impl PassthroughScanner {
+    /// Advance by one byte. Bytes meant for the backend are appended to
+    /// `forward`; returns the unwrapped payload when `byte` ends a passthrough.
+    fn step(&mut self, byte: u8, forward: &mut Vec<u8>) -> Option<Vec<u8>> {
+        const ESC: u8 = 0x1b;
+        match self.state {
+            PassthroughState::Ground => {
+                if byte == ESC {
+                    self.held.push(byte);
+                    self.state = PassthroughState::Escape;
+                } else {
+                    forward.push(byte);
+                }
+            }
+            PassthroughState::Escape => {
+                if byte != b'P' {
+                    return self.release_and_step(byte, forward);
+                }
+                self.held.push(byte);
+                self.state = PassthroughState::Prefix(0);
+            }
+            PassthroughState::Prefix(matched) => {
+                if byte != TMUX_PASSTHROUGH_PREFIX[matched] {
+                    return self.release_and_step(byte, forward);
+                }
+                if matched + 1 == TMUX_PASSTHROUGH_PREFIX.len() {
+                    self.held.clear();
+                    self.payload.clear();
+                    self.state = PassthroughState::Collect;
+                } else {
+                    self.held.push(byte);
+                    self.state = PassthroughState::Prefix(matched + 1);
+                }
+            }
+            PassthroughState::Collect => {
+                if byte == ESC {
+                    self.state = PassthroughState::CollectEscape;
+                } else {
+                    self.collect(byte);
+                }
+            }
+            PassthroughState::CollectEscape => {
+                if byte == b'\\' {
+                    self.state = PassthroughState::Ground;
+                    return Some(std::mem::take(&mut self.payload));
+                }
+                // `ESC ESC` is an escaped ESC; tmux drops an ESC before
+                // anything else.
+                self.state = PassthroughState::Collect;
+                self.collect(byte);
+            }
+            PassthroughState::Discard => {
+                if byte == ESC {
+                    self.state = PassthroughState::DiscardEscape;
+                }
+            }
+            PassthroughState::DiscardEscape => {
+                self.state = if byte == b'\\' {
+                    PassthroughState::Ground
+                } else {
+                    PassthroughState::Discard
+                };
+            }
+        }
+        None
+    }
+
+    fn collect(&mut self, byte: u8) {
+        if self.payload.len() >= MAX_PASSTHROUGH_BYTES {
+            debug!(
+                limit = MAX_PASSTHROUGH_BYTES,
+                "dropping oversized passthrough sequence"
+            );
+            self.payload = Vec::new();
+            self.state = PassthroughState::Discard;
+        } else {
+            self.payload.push(byte);
+        }
+    }
+
+    /// The held bytes turned out not to begin a passthrough: hand them to the
+    /// backend and look at `byte` afresh, since it may begin a sequence itself.
+    fn release_and_step(&mut self, byte: u8, forward: &mut Vec<u8>) -> Option<Vec<u8>> {
+        forward.append(&mut self.held);
+        self.state = PassthroughState::Ground;
+        self.step(byte, forward)
     }
 }
 
@@ -958,6 +1119,14 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             .extend_from_slice(reply.as_bytes());
     }
 
+    fn cursor_position(&self) -> CursorPosition {
+        let point = self.term.grid().cursor.point;
+        CursorPosition {
+            row: u16::try_from(point.line.0).unwrap_or(0),
+            col: u16::try_from(point.column.0).unwrap_or(u16::MAX),
+        }
+    }
+
     fn take_damage(&mut self) -> BackendDamage {
         let damage = match self.term.damage() {
             TermDamage::Full => BackendDamage::Full,
@@ -1148,8 +1317,9 @@ mod tests {
     };
     use crate::config::DEFAULT_MAX_SCROLLBACK_LINES;
     use embers_core::{
-        ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorShape, PtySize,
-        SnapshotLine, TermColor, TerminalSnapshot,
+        ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
+        MAX_PASSTHROUGH_BYTES, PassthroughWrite, PtySize, SnapshotLine, TermColor,
+        TerminalSnapshot,
     };
 
     fn backend(size: PtySize) -> AlacrittyTerminalBackend {
@@ -1217,6 +1387,15 @@ mod tests {
 
         fn answer_query(&mut self, query: &TerminalQuery) {
             self.queries.push((self.ingested.len(), query.clone()));
+        }
+
+        /// The column is the number of bytes ingested so far, so tests can
+        /// tell where in the stream a cursor was read.
+        fn cursor_position(&self) -> CursorPosition {
+            CursorPosition {
+                row: 0,
+                col: u16::try_from(self.ingested.len()).unwrap_or(u16::MAX),
+            }
         }
 
         fn take_damage(&mut self) -> BackendDamage {
@@ -1786,6 +1965,128 @@ mod tests {
             backend.ingested.len(),
             b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\\x1bPq#0;2;0;0;0\x1b\\c".len()
         );
+    }
+
+    /// `payload` wrapped for tmux passthrough, with every ESC doubled.
+    fn tmux_wrap(payload: &[u8]) -> Vec<u8> {
+        let mut wrapped = b"\x1bPtmux;".to_vec();
+        for &byte in payload {
+            if byte == 0x1b {
+                wrapped.push(0x1b);
+            }
+            wrapped.push(byte);
+        }
+        wrapped.extend_from_slice(b"\x1b\\");
+        wrapped
+    }
+
+    const KITTY_IMAGE: &[u8] = b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\";
+
+    #[test]
+    fn router_unwraps_tmux_passthrough_and_keeps_it_from_the_backend() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        let mut output = b"ab".to_vec();
+        output.extend(tmux_wrap(KITTY_IMAGE));
+        output.extend_from_slice(b"cd");
+
+        let writes = router.route_output(&mut backend, &output);
+
+        assert_eq!(
+            writes,
+            vec![PassthroughWrite {
+                bytes: KITTY_IMAGE.to_vec(),
+                cursor: CursorPosition { row: 0, col: 2 },
+            }]
+        );
+        assert_eq!(backend.ingested, b"abcd");
+    }
+
+    #[test]
+    fn router_reassembles_passthrough_split_at_every_byte() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        let mut output = b"a".to_vec();
+        output.extend(tmux_wrap(b"\x1b]9;done\x07"));
+        output.extend(tmux_wrap(KITTY_IMAGE));
+        output.extend_from_slice(b"\x1b[1mb");
+
+        let mut writes = Vec::new();
+        for byte in &output {
+            writes.extend(router.route_output(&mut backend, std::slice::from_ref(byte)));
+        }
+
+        let payloads: Vec<_> = writes.iter().map(|write| write.bytes.clone()).collect();
+        assert_eq!(
+            payloads,
+            vec![b"\x1b]9;done\x07".to_vec(), KITTY_IMAGE.to_vec()]
+        );
+        assert_eq!(writes[0].cursor.col, 1);
+        assert_eq!(backend.ingested, b"a\x1b[1mb");
+    }
+
+    #[test]
+    fn router_leaves_other_dcs_sequences_to_the_backend() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // A sixel image, a DCS that starts like the tmux prefix but is not it,
+        // and a DECRQSS query, which must still be answered.
+        let output = b"\x1bPq#0;2;0;0;0\x1b\\\x1bPtmx\x1b\\\x1b\x1bP$qm\x1b\\";
+
+        let writes = router.route_output(&mut backend, output);
+
+        assert!(writes.is_empty());
+        assert_eq!(backend.ingested, output);
+        assert_eq!(
+            backend.queries,
+            vec![(output.len(), TerminalQuery::RequestSetting(b"m".to_vec()))]
+        );
+    }
+
+    #[test]
+    fn router_drops_oversized_passthrough_whole() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        let mut output = b"a".to_vec();
+        output.extend(tmux_wrap(&vec![b'x'; MAX_PASSTHROUGH_BYTES + 1]));
+        output.push(b'b');
+        output.extend(tmux_wrap(b"\x1b]9;small\x07"));
+
+        let writes = router.route_output(&mut backend, &output);
+
+        // Nothing of the oversized one is forwarded or reaches the backend, and
+        // the scanner recovers for the next sequence.
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].bytes, b"\x1b]9;small\x07");
+        assert_eq!(backend.ingested, b"ab");
+
+        // Exactly at the cap still goes through.
+        let writes =
+            router.route_output(&mut backend, &tmux_wrap(&vec![b'y'; MAX_PASSTHROUGH_BYTES]));
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].bytes.len(), MAX_PASSTHROUGH_BYTES);
+    }
+
+    #[test]
+    fn passthrough_records_the_emulated_cursor_and_never_touches_the_screen() {
+        let mut backend = backend(PtySize::new(20, 4));
+        let mut router = RawByteRouter::default();
+        let _ = backend.take_damage();
+
+        // The payload carries a clear-screen that must not run in the pane.
+        let mut output = b"keep\x1b[3;5H".to_vec();
+        output.extend(tmux_wrap(b"\x1b[2J\x1b]9;hi\x07"));
+        let writes = router.route_output(&mut backend, &output);
+
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].cursor, CursorPosition { row: 2, col: 4 });
+        assert_eq!(first_line(&backend, PtySize::new(20, 4)).text, "keep");
+        // Hiding the cursor (as Neovim does while it draws) keeps its position.
+        let writes = router.route_output(
+            &mut backend,
+            &[b"\x1b[?25l".as_slice(), &tmux_wrap(b"x")].concat(),
+        );
+        assert_eq!(writes[0].cursor, CursorPosition { row: 2, col: 4 });
     }
 
     #[test]

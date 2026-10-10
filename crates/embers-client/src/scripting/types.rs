@@ -134,6 +134,30 @@ pub struct HintsSettings {
     pub patterns: Vec<String>,
 }
 
+/// Which panes may write to the host terminal through tmux passthrough
+/// (`set_allow_passthrough`), like tmux's `allow-passthrough`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PassthroughMode {
+    /// Drop passthrough sequences.
+    Off,
+    /// Forward them from panes that are on screen.
+    #[default]
+    On,
+    /// Forward them from every pane in the client's session, on screen or not.
+    All,
+}
+
+impl PassthroughMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,
@@ -154,6 +178,9 @@ pub struct LoadedConfig {
     pub clipboard: bool,
     /// Number of the first window (`set_base_index`), if the config set one.
     pub base_index: Option<u32>,
+    /// Which panes may write to the host terminal through tmux passthrough
+    /// (`set_allow_passthrough`). `On` by default.
+    pub passthrough: PassthroughMode,
 }
 
 impl LoadedConfig {
@@ -191,6 +218,7 @@ impl fmt::Debug for LoadedConfig {
             .field("theme", &self.theme)
             .field("clipboard", &self.clipboard)
             .field("base_index", &self.base_index)
+            .field("passthrough", &self.passthrough)
             .finish()
     }
 }

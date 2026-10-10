@@ -880,6 +880,30 @@ fn define_mode(mode_name: string, options: map) -> ();
 /// # rhai-autodocs:index:7
 fn on(event_name: string, callback: Fn) -> ();
 
+/// Choose which panes may write to the host terminal through tmux
+/// passthrough, like tmux's `allow-passthrough`.
+///
+/// Programs that run under tmux wrap sequences meant for the outer
+/// terminal, such as kitty graphics images or desktop notifications, as
+/// `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+/// terminal running the client, with its cursor at the pane's cursor so
+/// images land where the program put them.
+///
+/// - `"on"` (the default): only from panes that are on screen.
+/// - `"all"`: from every pane in the client's session, on screen or not.
+///   Sequences from a pane that is not on screen are written without
+///   moving the cursor.
+/// - `"off"`: drop them.
+///
+/// # Example
+///
+/// ```rhai
+/// set_allow_passthrough("all");
+/// ```
+///
+/// # rhai-autodocs:index:10
+fn set_allow_passthrough(mode: string) -> ();
+
 /// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
 ///
 /// Windows are a session's root tabs. Their numbers are what

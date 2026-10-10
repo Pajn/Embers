@@ -40,6 +40,19 @@ For event handling, the client also refreshes the affected `BufferRecord` before
 
 The interactive client handles every event that has already arrived before it draws the next frame, rather than one event per frame, so a layout change is never queued behind a busy pane's output. Within such a batch only the last `RenderInvalidated` of each buffer is handled (and its hooks dispatched once), since it refreshes to the same latest snapshot the earlier ones would have.
 
+### Passthrough sequences
+
+`PassthroughEvent` carries sequences a program sent for the host terminal (tmux passthrough), in order, each with the pane cursor at the point the program sent it. They are not part of any snapshot. See [Passthrough](configuration.md#passthrough) for the user-facing behavior and [the backend boundary](terminal-backend-boundary.md#passthrough) for how they reach the client.
+
+On the event the client refreshes the buffer's visible snapshot and holds the writes. When it next draws a session it turns them into output for right after that frame (`ConfiguredClient::drain_frame_output`, which is separate from the output written before a frame): for a pane in the frame, a cursor move to the pane's cursor in screen coordinates (the leaf's content origin below its title row, plus the cursor, clamped into the pane), then the sequence; for a pane not in the frame, the sequence alone with `allow-passthrough all`, nothing otherwise. The output hides the cursor first and resets the pen last, and the interactive client then puts the cursor back where the frame left it.
+
+What the snapshot model can and cannot promise:
+
+- Writes from one pane reach the host in the order the program sent them: the keeper queues them in order, the server forwards them through one task per buffer, and the client writes each frame's batch in order.
+- A write is written after a frame that shows everything the program printed before it, because the client refreshes the pane after the keeper has taken the write out of the stream. The same frame may also show output the program printed after it; there is no frame of exactly the state at the write.
+- The cursor position is exact: the keeper records it at the write's point in the stream, not from the snapshot.
+- Writes are not replayed: a redraw, a resize, a window switch or a second client attaching later does not see them again.
+
 ### Metadata synchronization
 
 Visible snapshots may carry title and mode changes that affect UI immediately. Buffer metadata still lives on the durable `BufferRecord`, so activity, bell state, and detached-buffer discovery remain queryable even when a buffer is hidden.

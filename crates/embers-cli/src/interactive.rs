@@ -95,6 +95,12 @@ pub async fn run(
                     Some(&status),
                     configured.status_cursor(),
                 )?;
+                terminal.write_after_frame(
+                    &configured.drain_frame_output(),
+                    &grid,
+                    terminal_size,
+                    configured.status_cursor(),
+                )?;
             } else {
                 let grid = RenderGrid::new(viewport.width, viewport.height);
                 terminal.render(&grid, terminal_size, Some("detached"), None)?;
@@ -601,6 +607,7 @@ fn read_escape_event(fd: libc::c_int) -> Result<TerminalEvent> {
     match next {
         b'[' => read_csi_event(fd),
         b'O' => read_ss3_event(fd),
+        b'P' | b'_' | b']' => read_string_event(fd, next),
         byte if byte.is_ascii() => Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(byte)))),
         other => {
             let mut bytes = vec![0x1b, other];
@@ -638,6 +645,35 @@ fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
         return Ok(TerminalEvent::Paste(read_bracketed_paste(fd)?));
     }
     Ok(parse_csi_event(&bytes).unwrap_or(TerminalEvent::Key(KeyEvent::Bytes(bytes))))
+}
+
+/// Longest DCS, APC or OSC reply read from the host terminal; the rest of a
+/// longer one arrives as ordinary input.
+const MAX_HOST_STRING_LEN: usize = 64 * 1024;
+
+/// Read a DCS (`ESC P`), APC (`ESC _`) or OSC (`ESC ]`) string. From the host
+/// terminal these are replies to queries a program in a pane sent through
+/// passthrough, such as a kitty graphics query, so they go to the focused pane
+/// whole rather than as keys. The same two bytes alone are Alt+P, Alt+_ and
+/// Alt+], which nothing follows within the continuation timeout.
+fn read_string_event(fd: libc::c_int, introducer: u8) -> Result<TerminalEvent> {
+    let Some(first) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? else {
+        return Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(introducer))));
+    };
+    let mut bytes = vec![0x1b, introducer, first];
+    while bytes.len() < MAX_HOST_STRING_LEN && !ends_control_string(&bytes, introducer) {
+        let Some(next) = read_optional_byte(fd, KEY_SEQUENCE_TIMEOUT)? else {
+            break;
+        };
+        bytes.push(next);
+    }
+    Ok(TerminalEvent::Key(KeyEvent::Bytes(bytes)))
+}
+
+/// Whether `bytes` ends with the string terminator `ESC \`, or BEL for OSC.
+fn ends_control_string(bytes: &[u8], introducer: u8) -> bool {
+    (bytes.len() >= 4 && bytes.ends_with(b"\x1b\\"))
+        || (introducer == b']' && bytes.ends_with(b"\x07"))
 }
 
 fn read_ss3_event(fd: libc::c_int) -> Result<TerminalEvent> {
@@ -1090,31 +1126,62 @@ impl TerminalGuard {
         }
 
         write!(stdout, "\x1b[J")?;
-        if let Some(column) = status_cursor
-            && terminal_size.height > grid.height()
-        {
-            write!(
-                stdout,
-                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-                cursor_shape_code(CursorShape::Beam),
-                terminal_size.height,
-                column
-                    .min(terminal_size.width.saturating_sub(1))
-                    .saturating_add(1)
-            )?;
-        } else if let Some(cursor) = grid.cursor() {
-            write!(
-                stdout,
-                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-                cursor_shape_code(cursor.shape),
-                cursor.y.saturating_add(1),
-                cursor.x.saturating_add(1)
-            )?;
-        } else {
-            write!(stdout, "\x1b[?25l")?;
-        }
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
         stdout.flush()?;
         Ok(())
+    }
+
+    /// Write what must follow the frame `render` just drew (passthrough
+    /// sequences from panes, which move the cursor), then put the cursor back
+    /// where the frame left it.
+    fn write_after_frame(
+        &self,
+        bytes: &[u8],
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status_cursor: Option<u16>,
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        stdout.write_all(bytes)?;
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+/// Place and show the cursor for a frame: in the status line while the command
+/// prompt is open (`status_cursor`), else at the grid's cursor, else hidden.
+fn write_cursor(
+    stdout: &mut impl Write,
+    grid: &RenderGrid,
+    terminal_size: Size,
+    status_cursor: Option<u16>,
+) -> io::Result<()> {
+    if let Some(column) = status_cursor
+        && terminal_size.height > grid.height()
+    {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(CursorShape::Beam),
+            terminal_size.height,
+            column
+                .min(terminal_size.width.saturating_sub(1))
+                .saturating_add(1)
+        )
+    } else if let Some(cursor) = grid.cursor() {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(cursor.shape),
+            cursor.y.saturating_add(1),
+            cursor.x.saturating_add(1)
+        )
+    } else {
+        write!(stdout, "\x1b[?25l")
     }
 }
 
@@ -1493,6 +1560,35 @@ mod tests {
             libc::close(read_fd);
         }
         result
+    }
+
+    #[test]
+    fn host_string_replies_reach_the_pane_whole() {
+        // Replies to a kitty graphics query, XTGETTCAP and an OSC colour query,
+        // as a host sends them back for a program in a pane.
+        let replies: [&[u8]; 3] = [
+            b"\x1b_Gi=31;OK\x1b\\",
+            b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\",
+            b"\x1b]11;rgb:0000/0000/0000\x07",
+        ];
+        with_pipe(&replies.concat(), |fd| {
+            for reply in replies {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::Key(KeyEvent::Bytes(reply.to_vec())))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn alt_p_alone_stays_a_key() {
+        with_pipe(b"\x1bP", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Alt('P')))
+            );
+        });
     }
 
     #[test]
