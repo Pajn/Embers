@@ -222,7 +222,9 @@ every interrupted PTY buffer then gets a fresh keeper:
 The allowlist matches the program name of the command line and defaults to tmux-resurrect's: `vi`,
 `vim`, `nvim`, `emacs`, `man`, `less`, `more`, `tail`, `top`, `htop`, `irssi`, `weechat`, `mutt`.
 The foreground job is the PTY's foreground process group, read by the keeper; it is only recorded
-while it differs from the buffer's own process, so a shell at its prompt has none.
+while it differs from the buffer's own process, so a shell at its prompt has none. The keeper
+reads the group leader's command line again whenever the leader runs a different executable, so a
+job read between the shell's fork and the program's exec is corrected once the program starts.
 
 Restore can be turned off and the allowlist replaced through environment variables (see
 `docs/configuration.md`). With restore off, such buffers stay `Interrupted`. `Exited` buffers are

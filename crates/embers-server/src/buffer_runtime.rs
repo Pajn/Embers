@@ -305,7 +305,7 @@ struct KeeperRuntime {
     pid: Option<u32>,
     /// The last foreground process group leader and its command line, so the
     /// command line is only looked up when the foreground job changes.
-    foreground: Mutex<Option<(u32, Option<Vec<String>>)>>,
+    foreground: Mutex<Option<ForegroundCache>>,
 }
 
 struct KeeperSurface {
@@ -1425,14 +1425,7 @@ impl KeeperRuntime {
             return None;
         }
         let mut cached = self.foreground.lock().ok()?;
-        if let Some((cached_leader, command)) = cached.as_ref()
-            && *cached_leader == leader
-        {
-            return command.clone();
-        }
-        let command = resolve_pid_argv(leader).filter(|argv| !argv.is_empty());
-        *cached = Some((leader, command.clone()));
-        command
+        lookup_foreground_command(&mut cached, leader, resolve_pid_exe, resolve_pid_argv)
     }
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
@@ -1910,6 +1903,85 @@ fn resolve_pid_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+/// The command line cached for a foreground process group leader, keyed by
+/// the leader's pid and the executable it ran when the command line was read.
+struct ForegroundCache {
+    leader: u32,
+    exe: PathBuf,
+    command: Vec<String>,
+}
+
+/// Command line of the foreground process group `leader`, read through
+/// `argv` unless `cache` already holds it.
+///
+/// A shell forks a job's process and the child then execs the program, so the
+/// same pid first shows the shell's arguments and then the program's. The
+/// cache is therefore keyed by the pid together with the executable `exe`
+/// reports, which changes on exec. A command line is only cached when the
+/// executable was the same before and after reading it, so a read that races
+/// an exec is done again on the next lookup, and failed reads (a process in
+/// the middle of exec may have unreadable arguments) are never cached.
+fn lookup_foreground_command(
+    cache: &mut Option<ForegroundCache>,
+    leader: u32,
+    exe: impl Fn(u32) -> Option<PathBuf>,
+    argv: impl Fn(u32) -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let exe_before = exe(leader);
+    if let (Some(cached), Some(exe_before)) = (cache.as_ref(), exe_before.as_ref())
+        && cached.leader == leader
+        && cached.exe == *exe_before
+    {
+        return Some(cached.command.clone());
+    }
+    let command = argv(leader).filter(|argv| !argv.is_empty());
+    *cache = match (exe_before, &command) {
+        (Some(exe_before), Some(command)) if exe(leader).as_ref() == Some(&exe_before) => {
+            Some(ForegroundCache {
+                leader,
+                exe: exe_before,
+                command: command.clone(),
+            })
+        }
+        _ => None,
+    };
+    command
+}
+
+/// Path of the executable a running process runs, which changes when it
+/// execs a new program.
+#[cfg(target_os = "linux")]
+fn resolve_pid_exe(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_pid_exe(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // Safety: `buffer` holds `PROC_PIDPATHINFO_MAXSIZE` writable bytes, the
+    // size `proc_pidpath` is told it may write; it returns the length written.
+    let written = unsafe {
+        libc::proc_pidpath(
+            libc::c_int::try_from(pid).ok()?,
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            libc::PROC_PIDPATHINFO_MAXSIZE as u32,
+        )
+    };
+    let written = usize::try_from(written)
+        .ok()
+        .filter(|written| *written > 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buffer[..written],
+    )))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resolve_pid_exe(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
 /// Resolve the argument vector of a running process by pid.
 #[cfg(target_os = "linux")]
 fn resolve_pid_argv(pid: u32) -> Option<Vec<String>> {
@@ -2350,6 +2422,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
@@ -2517,6 +2590,73 @@ mod tests {
             Some(Some(vec!["vim".to_owned(), "notes.txt".to_owned()]))
         );
         assert!(update.cwd.is_none());
+    }
+
+    /// A process a shell forked for a job, seen before and after it execs the
+    /// job's program: the same pid with a new executable and arguments.
+    struct ExecingProcess {
+        execed: std::cell::Cell<bool>,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl ExecingProcess {
+        fn exe(&self) -> Option<PathBuf> {
+            Some(PathBuf::from(if self.execed.get() {
+                "/usr/bin/tail"
+            } else {
+                "/bin/sh"
+            }))
+        }
+
+        fn argv(&self) -> Option<Vec<String>> {
+            self.reads.set(self.reads.get() + 1);
+            Some(if self.execed.get() {
+                vec!["tail".to_owned(), "-f".to_owned(), "log".to_owned()]
+            } else {
+                vec!["/bin/sh".to_owned()]
+            })
+        }
+    }
+
+    #[test]
+    fn foreground_command_is_read_again_after_the_leader_execs() {
+        let process = ExecingProcess {
+            execed: std::cell::Cell::new(false),
+            reads: std::cell::Cell::new(0),
+        };
+        let mut cache = None;
+        let mut lookup = || {
+            super::lookup_foreground_command(&mut cache, 42, |_| process.exe(), |_| process.argv())
+        };
+        let tail = Some(vec!["tail".to_owned(), "-f".to_owned(), "log".to_owned()]);
+
+        // Read between fork and exec: still the shell's own arguments.
+        assert_eq!(lookup(), Some(vec!["/bin/sh".to_owned()]));
+        process.execed.set(true);
+        assert_eq!(lookup(), tail);
+        // Once the program is the same, the cached command line is reused.
+        let reads = process.reads.get();
+        assert_eq!(lookup(), tail);
+        assert_eq!(process.reads.get(), reads);
+    }
+
+    #[test]
+    fn foreground_command_lookup_failures_are_not_cached() {
+        let failing = std::cell::Cell::new(true);
+        let mut cache = None;
+        let mut lookup = || {
+            super::lookup_foreground_command(
+                &mut cache,
+                42,
+                |_| Some(PathBuf::from("/usr/bin/tail")),
+                |_| (!failing.get()).then(|| vec!["tail".to_owned()]),
+            )
+        };
+
+        // The arguments of a process in the middle of exec may be unreadable.
+        assert_eq!(lookup(), None);
+        failing.set(false);
+        assert_eq!(lookup(), Some(vec!["tail".to_owned()]));
     }
 
     #[test]
