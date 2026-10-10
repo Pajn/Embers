@@ -3337,7 +3337,7 @@ where
             match key {
                 KeyEvent::Char(ch) => chooser.filter.push(ch),
                 KeyEvent::Bytes(bytes) => chooser.filter.push_str(&String::from_utf8_lossy(&bytes)),
-                KeyEvent::Backspace => {
+                KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
                     if chooser.filter.pop().is_none() {
                         chooser.editing_filter = false;
                     }
@@ -3607,7 +3607,7 @@ where
                 }
                 Ok(())
             }
-            KeyEvent::Backspace => {
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
                 if let Some(prompt) = &mut self.search_prompt {
                     prompt.query.pop();
                 }
@@ -3760,7 +3760,7 @@ where
                 self.cancel_hints(node_id);
                 Ok(())
             }
-            KeyEvent::Backspace => {
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
                 if let Some(state) = self
                     .client
                     .state_mut()

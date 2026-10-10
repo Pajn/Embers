@@ -398,6 +398,12 @@ async fn typing_filters_and_q_closes() {
     assert!(!text.contains("demo: 2 windows"), "{text}");
     assert!(text.contains("filter: oth"), "{text}");
 
+    // Backspace and C-h (what a host without the kitty protocol may send for
+    // it) both delete a character, as in tmux's prompts.
+    press(&mut configured, &[KeyEvent::Backspace, KeyEvent::Ctrl('h')]).await;
+    assert_eq!(configured.chooser().unwrap().filter, "o");
+    press(&mut configured, &[KeyEvent::Char('t'), KeyEvent::Char('h')]).await;
+
     // Enter ends filtering; Esc then clears the filter; q closes.
     press(&mut configured, &[KeyEvent::Enter, KeyEvent::Escape]).await;
     assert_eq!(configured.chooser().unwrap().filter, "");

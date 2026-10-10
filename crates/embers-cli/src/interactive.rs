@@ -640,7 +640,9 @@ fn read_terminal_event(fd: libc::c_int) -> Result<Option<TerminalEvent>> {
     let event = match first {
         b'\r' | b'\n' => TerminalEvent::Key(KeyEvent::Enter),
         b'\t' => TerminalEvent::Key(KeyEvent::Tab),
-        0x7f | 0x08 => TerminalEvent::Key(KeyEvent::Backspace),
+        // DEL is Backspace and BS is Ctrl+H, as tmux reads them, so `<C-h>`
+        // bindings work without the kitty keyboard protocol.
+        0x7f => TerminalEvent::Key(KeyEvent::Backspace),
         0x1b => read_escape_event(fd)?,
         0x00 | 0x01..=0x1a | 0x1c..=0x1f => TerminalEvent::Key(KeyEvent::Ctrl(
             char::from(first | 0x40).to_ascii_lowercase(),
@@ -1731,6 +1733,22 @@ mod tests {
             assert_eq!(
                 read_terminal_event(fd).unwrap(),
                 Some(TerminalEvent::Key(KeyEvent::Ctrl('_')))
+            );
+        });
+    }
+
+    #[test]
+    fn decodes_backspace_and_ctrl_h_like_tmux() {
+        // DEL is Backspace; BS is Ctrl+H, so `<C-h>` bindings fire on hosts
+        // without the kitty keyboard protocol.
+        with_pipe(&[0x7f, 0x08], |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Backspace))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('h')))
             );
         });
     }

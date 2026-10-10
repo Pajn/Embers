@@ -342,6 +342,41 @@ async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
 }
 
 #[tokio::test]
+async fn unmapped_ctrl_h_and_backspace_reach_the_buffer_as_their_own_bytes() {
+    for (key, bytes) in [
+        (KeyEvent::Ctrl('h'), b"\x08".as_slice()),
+        (KeyEvent::Backspace, b"\x7f".as_slice()),
+    ] {
+        let transport = FakeTransport::default();
+        let state = demo_state();
+        push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+        let client = MuxClient::new(transport.clone());
+        let (config, _tempdir) = manager_from_source("");
+        let mut configured = ConfiguredClient::new(client, config);
+        *configured.client_mut().state_mut() = state;
+
+        configured
+            .handle_key(
+                SESSION_ID,
+                Size {
+                    width: 80,
+                    height: 20,
+                },
+                key.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            transport.requests(),
+            expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, bytes),
+            "{key:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn leader_prefix_waits_without_forwarding_input() {
     let client = MuxClient::new(FakeTransport::default());
     let (config, _tempdir) = manager_from_source(
