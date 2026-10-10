@@ -2133,8 +2133,8 @@ where
     /// buffers whose size changed (see `PtySizeSync` for the multi-client
     /// policy). The server answers with `RenderInvalidated`, which triggers the
     /// redraw at the new size. A failed resize (e.g. the buffer exited
-    /// meanwhile) only leaves that PTY at its old size, so it is logged rather
-    /// than returned.
+    /// meanwhile) only leaves that PTY at its old size, so it is logged and
+    /// left for a later sync to retry rather than returned.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
         let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
@@ -2149,6 +2149,7 @@ where
                 .await;
             if let Err(error) = result {
                 warn!("failed to resize buffer {buffer_id}: {error}");
+                self.pty_sizes.resize_failed(buffer_id);
             }
         }
         Ok(())

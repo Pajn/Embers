@@ -67,6 +67,10 @@ When several clients show the same buffer, the most recently active client wins:
 buffer when its own wanted size changes (attach, layout change, outer-terminal resize) or after
 local input, never merely because another client resized it. Hidden buffers keep their last size.
 
+A failed resize is retried on a later frame, at most once a second, while the buffer is still a
+visible running PTY. The retry is dropped if another client resized the buffer in the meantime, so
+it never takes a size back that a successful request would have left alone.
+
 ## Detached buffer policy
 
 Detached PTY buffers keep the last assigned `pty_size` until another explicit resize arrives.
