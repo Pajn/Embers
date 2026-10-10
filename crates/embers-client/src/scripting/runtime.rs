@@ -1348,13 +1348,36 @@ mod documented_action_api {
         })
     }
 
-    /// Close the currently focused floating window.
+    /// Close the currently focused floating window. Its buffers keep running,
+    /// detached; use `kill_floating` to end them.
     #[rhai_fn(name = "close_floating")]
     pub fn close_floating(_: &mut ActionApi) -> Action {
         Action::CloseFloating { floating_id: None }
     }
 
-    /// Close a floating window by id.
+    /// Close the currently focused floating window and end the programs of the
+    /// buffers it shows, like tmux's `kill-pane` for a popup.
+    #[rhai_fn(name = "kill_floating")]
+    pub fn kill_floating(_: &mut ActionApi) -> Action {
+        Action::KillFloating { floating_id: None }
+    }
+
+    /// Close a floating window by id and end the programs of the buffers it
+    /// shows.
+    #[rhai_fn(return_raw, name = "kill_floating_id")]
+    pub fn kill_floating_id(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        floating_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::KillFloating {
+                floating_id: Some(parse_floating_id(floating_id)?),
+            })
+        })
+    }
+
+    /// Close a floating window by id. Its buffers keep running, detached.
     #[rhai_fn(return_raw, name = "close_floating_id")]
     pub fn close_floating_id(
         ctx: NativeCallContext,
@@ -1368,13 +1391,14 @@ mod documented_action_api {
         })
     }
 
-    /// Close the currently focused view.
+    /// Close the currently focused view. Its buffer keeps running, detached;
+    /// use `kill_view` to end it.
     #[rhai_fn(name = "close_view")]
     pub fn close_view(_: &mut ActionApi) -> Action {
         Action::CloseView { node_id: None }
     }
 
-    /// Close a view by node id.
+    /// Close a view by node id. The buffers it shows keep running, detached.
     #[rhai_fn(return_raw, name = "close_node")]
     pub fn close_node(
         ctx: NativeCallContext,
@@ -1383,6 +1407,29 @@ mod documented_action_api {
     ) -> RhaiResultOf<Action> {
         with_call_position(ctx, || {
             Ok(Action::CloseView {
+                node_id: Some(parse_node_id(node_id)?),
+            })
+        })
+    }
+
+    /// Close the currently focused view and end its buffer's program, like
+    /// tmux's `kill-pane`.
+    #[rhai_fn(name = "kill_view")]
+    pub fn kill_view(_: &mut ActionApi) -> Action {
+        Action::KillView { node_id: None }
+    }
+
+    /// Close a view by node id and end the programs of the buffers it shows. On
+    /// a split or tabs node this ends every pane in it, like tmux's
+    /// `kill-window`.
+    #[rhai_fn(return_raw, name = "kill_node")]
+    pub fn kill_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::KillView {
                 node_id: Some(parse_node_id(node_id)?),
             })
         })

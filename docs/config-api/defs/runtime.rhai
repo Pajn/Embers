@@ -173,16 +173,18 @@ fn chain(_: ActionApi, actions: array) -> Action;
 /// Clear any partially-entered key sequence.
 fn clear_pending_keys(_: ActionApi) -> Action;
 
-/// Close the currently focused floating window.
+/// Close the currently focused floating window. Its buffers keep running,
+/// detached; use `kill_floating` to end them.
 fn close_floating(_: ActionApi) -> Action;
 
-/// Close a floating window by id.
+/// Close a floating window by id. Its buffers keep running, detached.
 fn close_floating_id(_: ActionApi, floating_id: int) -> Action;
 
-/// Close a view by node id.
+/// Close a view by node id. The buffers it shows keep running, detached.
 fn close_node(_: ActionApi, node_id: int) -> Action;
 
-/// Close the currently focused view.
+/// Close the currently focused view. Its buffer keeps running, detached;
+/// use `kill_view` to end it.
 fn close_view(_: ActionApi) -> Action;
 
 /// Finalize the active search, keep the current match and cursor position, and leave search
@@ -279,6 +281,23 @@ fn kill_buffer(_: ActionApi) -> Action;
 
 /// Kill a buffer by id.
 fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action;
+
+/// Close the currently focused floating window and end the programs of the
+/// buffers it shows, like tmux's `kill-pane` for a popup.
+fn kill_floating(_: ActionApi) -> Action;
+
+/// Close a floating window by id and end the programs of the buffers it
+/// shows.
+fn kill_floating_id(_: ActionApi, floating_id: int) -> Action;
+
+/// Close a view by node id and end the programs of the buffers it shows. On
+/// a split or tabs node this ends every pane in it, like tmux's
+/// `kill-window`.
+fn kill_node(_: ActionApi, node_id: int) -> Action;
+
+/// Close the currently focused view and end its buffer's program, like
+/// tmux's `kill-pane`.
+fn kill_view(_: ActionApi) -> Action;
 
 /// Switch back to the previously active session (tmux `switch-client -l`).
 fn last_session(_: ActionApi) -> Action;

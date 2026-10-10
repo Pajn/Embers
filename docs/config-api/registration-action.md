@@ -130,7 +130,8 @@ Description
 </div>
 
 <div group="close_floating" id="close_floating-Description" class="tabcontent"  style="display: block;" >
-Close the currently focused floating window.
+Close the currently focused floating window. Its buffers keep running,
+detached; use `kill_floating` to end them.
 </div>
 
 </div>
@@ -152,7 +153,7 @@ Description
 </div>
 
 <div group="close_floating_id" id="close_floating_id-Description" class="tabcontent"  style="display: block;" >
-Close a floating window by id.
+Close a floating window by id. Its buffers keep running, detached.
 </div>
 
 </div>
@@ -174,7 +175,7 @@ Description
 </div>
 
 <div group="close_node" id="close_node-Description" class="tabcontent"  style="display: block;" >
-Close a view by node id.
+Close a view by node id. The buffers it shows keep running, detached.
 </div>
 
 </div>
@@ -196,7 +197,8 @@ Description
 </div>
 
 <div group="close_view" id="close_view-Description" class="tabcontent"  style="display: block;" >
-Close the currently focused view.
+Close the currently focused view. Its buffer keeps running, detached;
+use `kill_view` to end it.
 </div>
 
 </div>
@@ -760,6 +762,99 @@ Description
 
 <div group="kill_buffer_id" id="kill_buffer_id-Description" class="tabcontent"  style="display: block;" >
 Kill a buffer by id.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> kill_floating </h2>
+
+```rust,ignore
+fn kill_floating(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="kill_floating" id="link-kill_floating-Description"  class="tablinks active"
+    onclick="openTab(event, 'kill_floating', 'Description')">
+Description
+</button>
+</div>
+
+<div group="kill_floating" id="kill_floating-Description" class="tabcontent"  style="display: block;" >
+Close the currently focused floating window and end the programs of the
+buffers it shows, like tmux's `kill-pane` for a popup.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> kill_floating_id </h2>
+
+```rust,ignore
+fn kill_floating_id(_: ActionApi, floating_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="kill_floating_id" id="link-kill_floating_id-Description"  class="tablinks active"
+    onclick="openTab(event, 'kill_floating_id', 'Description')">
+Description
+</button>
+</div>
+
+<div group="kill_floating_id" id="kill_floating_id-Description" class="tabcontent"  style="display: block;" >
+Close a floating window by id and end the programs of the buffers it
+shows.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> kill_node </h2>
+
+```rust,ignore
+fn kill_node(_: ActionApi, node_id: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="kill_node" id="link-kill_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'kill_node', 'Description')">
+Description
+</button>
+</div>
+
+<div group="kill_node" id="kill_node-Description" class="tabcontent"  style="display: block;" >
+Close a view by node id and end the programs of the buffers it shows. On
+a split or tabs node this ends every pane in it, like tmux's
+`kill-window`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> kill_view </h2>
+
+```rust,ignore
+fn kill_view(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="kill_view" id="link-kill_view-Description"  class="tablinks active"
+    onclick="openTab(event, 'kill_view', 'Description')">
+Description
+</button>
+</div>
+
+<div group="kill_view" id="kill_view-Description" class="tabcontent"  style="display: block;" >
+Close the currently focused view and end its buffer's program, like
+tmux's `kill-pane`.
 </div>
 
 </div>

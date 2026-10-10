@@ -40,6 +40,25 @@ Killing a buffer targets the runtime, not the view tree.
 - the buffer transitions to `Exited`
 - from there the buffer is cleaned up like any buffer whose command exited (see below)
 
+## Kill commands
+
+The protocol keeps the two operations apart: closing a view (`NodeRequest::Close`,
+`SessionRequest::CloseRootTab`, `SessionRequest::Close`, `FloatingRequest::Close`) only detaches
+buffers, and `BufferRequest::Kill` only ends a buffer's program. The user-facing kill commands
+combine them, the way tmux users expect `kill-pane` to end the program in the pane:
+
+- `kill-pane`, `kill-window`, `kill-session` and `kill-popup` close the view, then kill every
+  buffer it showed that is still detached and running. A buffer that something attached again in
+  between is shown elsewhere and keeps running. The killed buffers exit and are then removed.
+- `--detach` on any of them only closes the view, so its buffers keep running detached and can be
+  listed and attached again (`list-buffers --detached`, `attach-buffer`).
+
+The config API offers the same choice: `action.kill_view()` / `action.kill_node(id)` and
+`action.kill_floating()` / `action.kill_floating_id(id)` close and kill, while
+`action.close_view()`, `action.close_node(id)`, `action.close_floating()` and
+`action.close_floating_id(id)` only detach. `action.kill_buffer()` kills a buffer's program and
+leaves its view to close when the buffer exits.
+
 ## When a buffer's command exits
 
 An exited buffer is cleaned up the way tmux closes a pane whose program exits (`remain-on-exit

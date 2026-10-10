@@ -804,6 +804,39 @@ pub struct SessionSnapshot {
     pub floating: Vec<FloatingRecord>,
 }
 
+/// Buffers shown in the subtree of `nodes` rooted at `root`, including `root`
+/// itself when it is a buffer view, in node order.
+pub fn buffer_ids_in_subtree<'a>(
+    nodes: impl IntoIterator<Item = &'a NodeRecord>,
+    root: NodeId,
+) -> Vec<BufferId> {
+    let nodes = nodes.into_iter().collect::<Vec<_>>();
+    let parents = nodes
+        .iter()
+        .map(|node| (node.id, node.parent_id))
+        .collect::<BTreeMap<_, _>>();
+    let in_subtree = |mut node_id: NodeId| {
+        // Bounded by the node count, so a malformed parent cycle cannot hang.
+        for _ in 0..=parents.len() {
+            if node_id == root {
+                return true;
+            }
+            match parents.get(&node_id).copied().flatten() {
+                Some(parent) => node_id = parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let view = node.buffer_view.as_ref()?;
+            in_subtree(node.id).then_some(view.buffer_id)
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OkResponse {
     pub request_id: RequestId,

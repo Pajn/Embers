@@ -37,5 +37,5 @@ pub use types::{
     SessionCreatedEvent, SessionRecord, SessionRenamedEvent, SessionRequest, SessionSnapshot,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SplitRecord, SubscribeRequest,
     SubscriptionAckResponse, SynchronizePanesMode, TabRecord, TabsRecord, UnsubscribeRequest,
-    VisibleSnapshotResponse,
+    VisibleSnapshotResponse, buffer_ids_in_subtree,
 };

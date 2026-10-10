@@ -2728,3 +2728,157 @@ async fn detached_client_changed_unzoom_actions_require_current_session_context(
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().expect("all requests consumed");
 }
+
+/// Queue the response to a buffer `Get` sent after a kill action closed the
+/// buffer's view: detached and still running.
+fn push_detached_running_buffer(
+    transport: &FakeTransport,
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+) {
+    let mut response = buffer_response_from_state(state, buffer_id, RequestId(0));
+    response.buffer.attachment_node_id = None;
+    response.buffer.state = BufferRecordState::Running;
+    transport.push_response(ServerResponse::Buffer(response));
+}
+
+fn kill_requests(buffer_id: BufferId, get_id: u64) -> [ClientMessage; 2] {
+    [
+        ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+            request_id: RequestId(get_id),
+            buffer_id,
+        }),
+        ClientMessage::Buffer(embers_protocol::BufferRequest::Kill {
+            request_id: RequestId(get_id + 1),
+            buffer_id,
+            force: false,
+        }),
+    ]
+}
+
+async fn press_bound_action(configured: &mut ConfiguredClient<FakeTransport>, key: char) {
+    // The resync after the action has no queued responses and fails; only the
+    // requests the action itself sends matter here.
+    let _ = configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl(key),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn kill_view_closes_the_view_and_kills_its_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    push_detached_running_buffer(&transport, &state, FOCUSED_BUFFER_ID);
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_pane(ctx) { action.kill_view() }
+            define_action("kill-pane", kill_pane);
+            bind("normal", "<C-x>", "kill-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Node(NodeRequest::Close {
+        request_id: RequestId(1),
+        node_id: FOCUSED_LEAF_ID,
+    })];
+    expected.extend(kill_requests(FOCUSED_BUFFER_ID, 2));
+    assert_eq!(requests[..expected.len()], expected[..]);
+}
+
+#[tokio::test]
+async fn close_view_only_detaches_its_buffer() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn close_pane(ctx) { action.close_view() }
+            define_action("close-pane", close_pane);
+            bind("normal", "<C-x>", "close-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    assert_eq!(
+        requests[0],
+        ClientMessage::Node(NodeRequest::Close {
+            request_id: RequestId(1),
+            node_id: FOCUSED_LEAF_ID,
+        })
+    );
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Kill { .. })
+        )),
+        "close_view must not kill: {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn kill_floating_closes_the_popup_and_kills_its_buffers() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    push_detached_running_buffer(&transport, &state, BufferId(5));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+    push_detached_running_buffer(&transport, &state, BufferId(6));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(5),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_popup(ctx) { action.kill_floating_id(90) }
+            define_action("kill-popup", kill_popup);
+            bind("normal", "<C-x>", "kill-popup");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Floating(
+        embers_protocol::FloatingRequest::Close {
+            request_id: RequestId(1),
+            floating_id: embers_core::FloatingId(90),
+        },
+    )];
+    expected.extend(kill_requests(BufferId(5), 2));
+    expected.extend(kill_requests(BufferId(6), 4));
+    assert_eq!(requests[..expected.len()], expected[..]);
+}

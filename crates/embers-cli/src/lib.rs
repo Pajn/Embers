@@ -25,11 +25,11 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
-    BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason, BufferRequest,
-    BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord, FloatingRequest,
-    FloatingResponse, NodeBreakDestination, NodeJoinPlacement, NodeRequest, PingRequest,
-    ProtocolClient, ServerResponse, SessionRecord, SessionRequest, SessionSnapshot,
-    SnapshotResponse, SynchronizePanesMode,
+    BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason,
+    BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest,
+    FloatingRecord, FloatingRequest, FloatingResponse, NodeBreakDestination, NodeJoinPlacement,
+    NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord, SessionRequest,
+    SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
 };
 use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -127,11 +127,15 @@ pub enum Command {
         target: String,
     },
     #[command(name = "kill-session")]
+    /// Close a session and end the programs in its panes and popups.
     KillSession {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "rename-session")]
     RenameSession {
@@ -198,9 +202,13 @@ pub enum Command {
         title: String,
     },
     #[command(name = "kill-window")]
+    /// Close a window and end the programs in its panes.
     KillWindow {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "split-window")]
     SplitWindow {
@@ -267,9 +275,13 @@ pub enum Command {
         target: Option<String>,
     },
     #[command(name = "kill-pane")]
+    /// Close a pane and end its program.
     KillPane {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the program running as a detached buffer instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "display-popup")]
     DisplayPopup {
@@ -289,9 +301,13 @@ pub enum Command {
         command: Vec<String>,
     },
     #[command(name = "kill-popup")]
+    /// Close a popup and end the programs in it.
     KillPopup {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
     },
 }
 
@@ -472,15 +488,29 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             connection.resolve_session_record(Some(&target)).await?;
             Ok(String::new())
         }
-        Command::KillSession { target, force } => {
-            let session = connection.resolve_session_record(target.as_deref()).await?;
+        Command::KillSession {
+            target,
+            force,
+            detach,
+        } => {
+            let snapshot = connection
+                .resolve_session_snapshot(target.as_deref())
+                .await?;
+            let shown = snapshot
+                .buffers
+                .iter()
+                .map(|buffer| buffer.id)
+                .collect::<Vec<_>>();
             connection
                 .request(ClientMessage::Session(SessionRequest::Close {
                     request_id: new_request_id(),
-                    session_id: session.id,
+                    session_id: snapshot.session.id,
                     force,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
         Command::RenameSession { target, name } => {
@@ -991,8 +1021,9 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .is_some_and(|tab| tab.synchronize_panes);
             Ok(if enabled { "on" } else { "off" }.to_owned())
         }
-        Command::KillWindow { target } => {
+        Command::KillWindow { target, detach } => {
             let window = connection.resolve_window(target.as_deref()).await?;
+            let shown = buffer_ids_in_subtree(&window.snapshot.nodes, window.child_id);
             connection
                 .request(ClientMessage::Session(SessionRequest::CloseRootTab {
                     request_id: new_request_id(),
@@ -1000,6 +1031,9 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     index: window.index,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
         Command::SplitWindow {
@@ -1164,7 +1198,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let snapshot = expect_capture(response, "capture-pane")?;
             Ok(snapshot.lines.join("\n"))
         }
-        Command::KillPane { target } => {
+        Command::KillPane { target, detach } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
             connection
                 .request(ClientMessage::Node(NodeRequest::Close {
@@ -1172,6 +1206,11 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     node_id: pane.leaf_id,
                 }))
                 .await?;
+            if !detach {
+                connection
+                    .kill_detached_buffers(vec![pane.buffer_id])
+                    .await?;
+            }
             Ok(String::new())
         }
         Command::DisplayPopup {
@@ -1217,14 +1256,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             .await?;
             Ok(popup.id.to_string())
         }
-        Command::KillPopup { target } => {
+        Command::KillPopup { target, detach } => {
             let popup = connection.resolve_popup(target.as_deref()).await?;
+            let snapshot = connection.session_snapshot(popup.session_id).await?;
+            let shown = buffer_ids_in_subtree(&snapshot.nodes, popup.root_node_id);
             connection
                 .request(ClientMessage::Floating(FloatingRequest::Close {
                     request_id: new_request_id(),
                     floating_id: popup.id,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
     }
@@ -1694,6 +1738,41 @@ impl CliConnection {
                 "unexpected response to list-clients: {other:?}"
             ))),
         }
+    }
+
+    /// End the programs of buffers whose views a kill command just closed.
+    /// Each is detached by then; one that is attached again by the time it is
+    /// checked is shown somewhere else and keeps running, and one whose program
+    /// already ended needs nothing.
+    async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
+        for buffer_id in buffer_ids {
+            let buffer = match self
+                .request(ClientMessage::Buffer(BufferRequest::Get {
+                    request_id: new_request_id(),
+                    buffer_id,
+                }))
+                .await
+            {
+                Ok(ServerResponse::Buffer(response)) => response.buffer,
+                Ok(_) | Err(MuxError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            if buffer.attachment_node_id.is_some() || buffer.state != BufferRecordState::Running {
+                continue;
+            }
+            match self
+                .request(ClientMessage::Buffer(BufferRequest::Kill {
+                    request_id: new_request_id(),
+                    buffer_id,
+                    force: false,
+                }))
+                .await
+            {
+                Ok(_) | Err(MuxError::NotFound(_) | MuxError::Conflict(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn session_snapshot(&mut self, session_id: SessionId) -> Result<SessionSnapshot> {
