@@ -238,3 +238,96 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
     assert_eq!(restored.state, BufferRecordState::Exited);
     handle.shutdown().await.expect("shutdown restarted server");
 }
+
+#[tokio::test]
+async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_the_exit() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let release = tempdir.path().join("release");
+    let config = ServerConfig::new(socket_path.clone());
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    // The command exits with a known code once the test creates `release`, so
+    // it is still running at shutdown and exits only while no server is up.
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(401),
+            title: Some("finishes".to_owned()),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                r#"while [ ! -e "$1" ]; do sleep 0.05; done; exit 3"#.to_owned(),
+                "sh".to_owned(),
+                release.to_str().expect("utf-8 temp path").to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(402), buffer.id).await;
+    let child_pid = running.pid.expect("running buffer reports its pid");
+    let keeper_pid = parent_pid(child_pid).filter(|&pid| pid != std::process::id());
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    std::fs::write(&release, b"").expect("release the command");
+    assert!(
+        wait_for_process_exit(child_pid, Duration::from_secs(10)).await,
+        "command {child_pid} still running after it was released"
+    );
+    // Restore runs a pane's shell command again, so withdraw the release: a
+    // resurrected command would now keep running instead of exiting 3.
+    std::fs::remove_file(&release).expect("withdraw the release");
+
+    // No server has seen the exit yet, so the keeper must stay reachable for
+    // the next one. Give it several socket-check intervals to (wrongly) leave.
+    sleep(Duration::from_millis(1500)).await;
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            process_alive(keeper_pid),
+            "keeper {keeper_pid} exited before any server saw its child exit"
+        );
+    }
+
+    // The restarted server reattaches and learns how the command ended rather
+    // than treating the pane as interrupted and starting a fresh shell in it.
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(403),
+            buffer_id: buffer.id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(restored.state, BufferRecordState::Exited);
+    assert_eq!(restored.exit_code, Some(3));
+
+    // Now that a server has seen the exit, the keeper leaves once it is gone.
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after a server saw its child exit"
+        );
+    }
+}
