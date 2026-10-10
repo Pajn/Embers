@@ -78,6 +78,12 @@ const WORKSPACE_METADATA_SAVE_DELAY: std::time::Duration = std::time::Duration::
 /// the server stops, before it is closed anyway.
 const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Test hook: while the file this variable names exists, the workspace saver
+/// skips its saves (and with them the exit acknowledgements that follow a
+/// save). Tests use it to stand in for a crash that lands between the server
+/// learning of a change and saving it.
+const HOLD_WORKSPACE_SAVES_ENV_VAR: &str = "EMBERS_TEST_HOLD_WORKSPACE_SAVES";
+
 /// How long a restored shell gets to print its prompt before the command it
 /// should run again is typed into it anyway.
 const RESTORED_SHELL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -182,6 +188,8 @@ impl Server {
             self.config.limits.clone(),
         );
         runtime.restore = self.config.restore.clone();
+        runtime.hold_saves_while =
+            std::env::var_os(HOLD_WORKSPACE_SAVES_ENV_VAR).map(PathBuf::from);
         let runtime = Arc::new(runtime);
         runtime.restore_buffer_runtimes().await?;
         // Clean up buffers that are done: exited while the server was away, or
@@ -317,7 +325,14 @@ impl Server {
                     Err(error) => Err(error.into()),
                 };
             }
-            if let Err(error) = runtime.persist_workspace().await {
+            let persisted = runtime.persist_workspace().await;
+            // Keepers the final save did not release stay up for the next server.
+            runtime
+                .unsaved_exits
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+            if let Err(error) = persisted {
                 error!(%error, "failed to persist workspace during shutdown");
                 return Err(error);
             }
@@ -455,12 +470,18 @@ struct Runtime {
     state: Mutex<ServerState>,
     buffer_runtimes: Mutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     buffer_shutdown_intents: StdMutex<BTreeSet<BufferId>>,
+    /// Runtimes whose keeper waits to hear that the workspace no longer needs
+    /// it (see [`Runtime::await_saved_exit`]). Each is told once a save that
+    /// records this has completed.
+    unsaved_exits: StdMutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     socket_path: PathBuf,
     workspace_path: PathBuf,
     runtime_dir: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     limits: ResourceLimits,
     restore: RestoreConfig,
+    /// See [`HOLD_WORKSPACE_SAVES_ENV_VAR`].
+    hold_saves_while: Option<PathBuf>,
     /// Signalled whenever the workspace changes in a way worth saving; the
     /// workspace saver batches these into one write.
     workspace_dirty: Notify,
@@ -556,6 +577,7 @@ impl Runtime {
             state: Mutex::new(state),
             buffer_runtimes: Mutex::new(BTreeMap::new()),
             buffer_shutdown_intents: StdMutex::new(BTreeSet::new()),
+            unsaved_exits: StdMutex::new(BTreeMap::new()),
             socket_path,
             workspace_path,
             runtime_dir,
@@ -567,6 +589,7 @@ impl Runtime {
                 enabled: false,
                 ..RestoreConfig::default()
             },
+            hold_saves_while: None,
             workspace_dirty: Notify::new(),
             workspace_metadata_dirty: Notify::new(),
             last_saved_workspace: Mutex::new(None),
@@ -583,26 +606,114 @@ impl Runtime {
 }
 
 impl Runtime {
-    /// Write the workspace file unless it already holds the current state.
-    /// Only a snapshot of the state is taken under the state lock; encoding
-    /// and the write happen outside it.
+    /// Write the workspace file unless it already holds the current state,
+    /// then tell the keepers this save released (see
+    /// [`Self::await_saved_exit`]) that they are no longer needed. Only a
+    /// snapshot of the state is taken under the state lock; encoding and the
+    /// write happen outside it.
     async fn persist_workspace(&self) -> Result<()> {
         let mut last_saved = self.last_saved_workspace.lock().await;
-        let persisted = self.state.lock().await.to_persisted();
-        if last_saved
+        let (persisted, released) = {
+            let state = self.state.lock().await;
+            (state.to_persisted(), self.exits_recorded_in(&state))
+        };
+        if !last_saved
             .as_ref()
             .is_some_and(|saved| same_saved_state(saved, &persisted))
         {
-            return Ok(());
+            let path = self.workspace_path.clone();
+            let persisted = tokio::task::spawn_blocking(move || {
+                write_workspace(&path, &encode_persisted_workspace(&persisted)?).map(|()| persisted)
+            })
+            .await
+            .map_err(|error| MuxError::internal(error.to_string()))??;
+            *last_saved = Some(persisted);
         }
-        let path = self.workspace_path.clone();
-        let persisted = tokio::task::spawn_blocking(move || {
-            write_workspace(&path, &encode_persisted_workspace(&persisted)?).map(|()| persisted)
-        })
-        .await
-        .map_err(|error| MuxError::internal(error.to_string()))??;
-        *last_saved = Some(persisted);
+        drop(last_saved);
+        self.acknowledge_saved_exits(released).await;
         Ok(())
+    }
+
+    /// Hold on to `runtime` until a saved workspace no longer needs its keeper,
+    /// then tell the keeper so (`ExitRecorded`). A keeper whose child has
+    /// exited stays alive for the next server until then: if this server
+    /// crashed after reading the exit but before saving it, a restart would
+    /// otherwise find no keeper, take the pane for interrupted and run its
+    /// command again.
+    ///
+    /// Call this once the buffer is marked exited or its record stops
+    /// referring to the keeper (removed, or its socket path cleared), and
+    /// mark the workspace dirty.
+    fn await_saved_exit(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
+        self.unsaved_exits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(buffer_id, runtime);
+    }
+
+    /// The buffers in [`Self::unsaved_exits`] whose keeper `state`, about to be
+    /// saved, no longer needs: the buffer is exited, gone, or no longer refers
+    /// to a keeper. Exited buffers never run again, so a later state cannot
+    /// undo this.
+    fn exits_recorded_in(&self, state: &ServerState) -> Vec<BufferId> {
+        self.unsaved_exits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .copied()
+            .filter(|buffer_id| {
+                state.buffers.get(buffer_id).is_none_or(|buffer| {
+                    matches!(buffer.state, BufferState::Exited(_))
+                        || buffer.runtime_socket_path().is_none()
+                })
+            })
+            .collect()
+    }
+
+    /// Tell the keepers of `buffer_ids` that a completed save no longer needs
+    /// them.
+    async fn acknowledge_saved_exits(&self, buffer_ids: Vec<BufferId>) {
+        let runtimes: Vec<_> = {
+            let mut unsaved = self
+                .unsaved_exits
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            buffer_ids
+                .into_iter()
+                .filter_map(|buffer_id| {
+                    unsaved
+                        .remove(&buffer_id)
+                        .map(|runtime| (buffer_id, runtime))
+                })
+                .collect()
+        };
+        for (buffer_id, runtime) in runtimes {
+            if let Err(error) = runtime.acknowledge_exit_recorded().await {
+                debug!(%buffer_id, %error, "failed to tell keeper its exit was saved");
+            }
+        }
+    }
+
+    /// Register `runtime` as `buffer_id`'s. Its status poller is already
+    /// running, so the buffer may have exited (or its record gone) before
+    /// this, when [`Self::record_buffer_exit`] could not find the runtime yet;
+    /// such a runtime waits for a save here instead.
+    async fn insert_buffer_runtime(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
+        self.buffer_runtimes
+            .lock()
+            .await
+            .insert(buffer_id, runtime.clone());
+        let exited = self
+            .state
+            .lock()
+            .await
+            .buffers
+            .get(&buffer_id)
+            .is_none_or(|buffer| matches!(buffer.state, BufferState::Exited(_)));
+        if exited {
+            self.await_saved_exit(buffer_id, runtime);
+            self.mark_workspace_dirty();
+        }
     }
 
     /// Ask the workspace saver to write the workspace soon: a change to the
@@ -650,6 +761,13 @@ impl Runtime {
                         }
                         () = wait_for_shutdown(&mut shutdown) => return,
                     }
+                }
+                if runtime
+                    .hold_saves_while
+                    .as_deref()
+                    .is_some_and(Path::exists)
+                {
+                    continue;
                 }
                 if let Err(error) = runtime.persist_workspace().await {
                     warn!(%error, "failed to save workspace");
@@ -789,6 +907,9 @@ impl Runtime {
                                     buffer.id,
                                     buffer_pid_hint(&buffer.state),
                                 );
+                                drop(state);
+                                let _ = runtime.join_threads().await;
+                                self.await_saved_exit(buffer.id, runtime);
                                 continue;
                             }
                         }
@@ -798,7 +919,7 @@ impl Runtime {
                         state.set_buffer_runtime_socket_path(buffer.id, Some(socket_path.clone()));
                     apply_runtime_status(&mut state, buffer.id, &status);
                     drop(state);
-                    self.buffer_runtimes.lock().await.insert(buffer.id, runtime);
+                    self.insert_buffer_runtime(buffer.id, runtime).await;
                 }
                 Err(error) => {
                     debug!(
@@ -2635,12 +2756,16 @@ impl Runtime {
         )
         .await?;
         // The caller drops the buffer record on error, so stop the keeper too
-        // rather than leave it running with nothing referring to it.
+        // rather than leave it running with nothing referring to it. The
+        // record only refers to the keeper once it is marked running, so the
+        // next save releases a keeper given up on before that.
         let status = match runtime.status().await {
             Ok(status) => status,
             Err(error) => {
                 let _ = runtime.kill().await;
                 let _ = runtime.join_threads().await;
+                self.await_saved_exit(buffer_id, runtime);
+                self.mark_workspace_dirty();
                 return Err(error);
             }
         };
@@ -2655,8 +2780,11 @@ impl Runtime {
                 .is_ok_and(|buffer| matches!(buffer.state, BufferState::Exited(_)));
             if !already_exited && let Err(error) = state.mark_buffer_running(buffer_id, status.pid)
             {
+                drop(state);
                 let _ = runtime.kill().await;
                 let _ = runtime.join_threads().await;
+                self.await_saved_exit(buffer_id, runtime);
+                self.mark_workspace_dirty();
                 return Err(error);
             }
             state.set_buffer_runtime_socket_path(
@@ -2670,7 +2798,7 @@ impl Runtime {
             apply_runtime_status(&mut state, buffer_id, &status);
         }
 
-        self.buffer_runtimes.lock().await.insert(buffer_id, runtime);
+        self.insert_buffer_runtime(buffer_id, runtime).await;
         Ok(())
     }
 
@@ -3732,6 +3860,16 @@ impl Runtime {
                 }
             }
         };
+        if !should_interrupt {
+            // Whether this marked the buffer exited or found its record already
+            // gone, the next save no longer needs the keeper. Look the runtime
+            // up only now: one registered after the lookup above sees the
+            // buffer exited (see `insert_buffer_runtime`).
+            if let Some(runtime) = self.buffer_runtimes.lock().await.get(&buffer_id).cloned() {
+                self.await_saved_exit(buffer_id, runtime);
+            }
+            self.mark_workspace_dirty();
+        }
 
         if updated && pipe_changed && !should_interrupt {
             match runtime {
@@ -3845,7 +3983,8 @@ impl Runtime {
 
     /// Apply [`ServerState::dispose_exited_buffers`]: close the views of
     /// exited buffers and remove their records, then release the runtimes of
-    /// the removed buffers so their keepers can exit. Adds the events that
+    /// the removed buffers once a save records the removal, so their keepers
+    /// can exit (see [`Self::await_saved_exit`]). Adds the events that
     /// describe the closed views to `events`, and destroys sessions whose last
     /// pane this closed.
     async fn dispose_exited_buffers(&self, events: &mut Vec<ServerEvent>) {
@@ -3873,15 +4012,22 @@ impl Runtime {
             let mut runtimes = self.buffer_runtimes.lock().await;
             removed
                 .iter()
-                .filter_map(|buffer_id| runtimes.remove(buffer_id))
+                .filter_map(|&buffer_id| {
+                    runtimes
+                        .remove(&buffer_id)
+                        .map(|runtime| (buffer_id, runtime))
+                })
                 .collect::<Vec<_>>()
         };
-        // Dropping the last handle closes the keeper connection; with its
-        // child gone and no server attached, the keeper then exits.
-        for runtime in runtimes {
+        // Until a save without the record has completed, a crash would leave
+        // it saved as running, so the keeper waits to be told. Dropping the
+        // last handle after that closes the keeper connection; with its child
+        // gone and no server attached, the keeper then exits.
+        for (buffer_id, runtime) in runtimes {
             if let Err(error) = runtime.join_threads().await {
                 debug!(%error, "failed to join runtime threads of a removed buffer");
             }
+            self.await_saved_exit(buffer_id, runtime);
         }
     }
 
@@ -3911,8 +4057,9 @@ impl Runtime {
     }
 
     /// Detach from every buffer runtime. With `kill` (kill-server) each keeper
-    /// is also told to end its program and exit; otherwise keepers keep
-    /// running so a restarted server can reattach.
+    /// is also told to end its program and exit, including those of removed
+    /// buffers still waiting for a save (see [`Self::await_saved_exit`]);
+    /// otherwise keepers keep running so a restarted server can reattach.
     async fn shutdown_runtimes(&self, kill: bool) {
         let runtimes: Vec<_> = {
             let runtimes = self.buffer_runtimes.lock().await;
@@ -3924,16 +4071,22 @@ impl Runtime {
                 .iter()
                 .map(|(&buffer_id, runtime)| {
                     shutdown_intents.insert(buffer_id);
-                    runtime.clone()
+                    (buffer_id, runtime.clone())
                 })
                 .collect()
         };
         if kill {
+            let mut keepers = std::mem::take(
+                &mut *self
+                    .unsaved_exits
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            keepers.extend(runtimes.iter().cloned());
             // Keepers stop concurrently: each may wait out a grace period for a
             // program that ignores SIGHUP.
             let mut terminations = tokio::task::JoinSet::new();
-            for runtime in &runtimes {
-                let runtime = runtime.clone();
+            for runtime in keepers.into_values() {
                 terminations.spawn(async move {
                     if let Err(error) = runtime.terminate().await {
                         debug!(%error, "failed to terminate buffer runtime");
@@ -3942,7 +4095,7 @@ impl Runtime {
             }
             while terminations.join_next().await.is_some() {}
         }
-        for runtime in runtimes {
+        for (_, runtime) in runtimes {
             if let Err(error) = runtime.join_threads().await {
                 debug!(%error, "failed to join buffer runtime threads during shutdown");
             }

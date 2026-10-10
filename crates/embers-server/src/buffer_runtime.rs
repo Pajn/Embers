@@ -211,6 +211,11 @@ enum KeeperRequest {
     Passthrough {
         after: u64,
     },
+    /// The server has saved a workspace that no longer needs this keeper: the
+    /// buffer is recorded as exited, or its record no longer refers to the
+    /// keeper. Once its child has exited and no server is attached, the keeper
+    /// may exit.
+    ExitRecorded,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -421,10 +426,11 @@ struct KeeperRuntime {
     bell_sequence: AtomicU64,
     clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
-    /// Set once a status reply saying the child is no longer running has been
-    /// written to a client. Until then no server has learned how the child
-    /// ended, so the keeper must stay reachable for the next one to reattach.
-    exit_reported: AtomicBool,
+    /// Set once a server reports, with `KeeperRequest::ExitRecorded`, that its
+    /// saved workspace no longer needs this keeper. Until then a server that
+    /// read the child's exit may have crashed before saving it, so the keeper
+    /// must stay reachable for the next one to reattach and read it again.
+    exit_recorded: AtomicBool,
     pid: Option<u32>,
     /// The last foreground process group leader and its command line, so the
     /// command line is only looked up when the foreground job changes.
@@ -676,6 +682,23 @@ impl BufferRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
+    /// Tell the keeper the server has saved a workspace that no longer needs
+    /// it: the buffer is recorded as exited, or its record no longer refers to
+    /// this keeper. Only send this after that save has completed; the keeper
+    /// may then exit once its child has and the server disconnects.
+    pub async fn acknowledge_exit_recorded(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.exit_recorded()
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
     pub async fn start_pipe(
         &self,
         command: Vec<String>,
@@ -902,6 +925,16 @@ impl KeeperConnection {
             // A keeper that predates `Shutdown` rejects it; ending its child is
             // enough, since it exits once its child has and no server is left.
             Err(_) => self.kill(),
+        }
+    }
+
+    fn exit_recorded(&mut self) -> Result<()> {
+        match self.request(KeeperRequest::ExitRecorded)? {
+            KeeperResponse::Ok => Ok(()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper exit-recorded response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
         }
     }
 
@@ -1340,7 +1373,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         bell_sequence: AtomicU64::new(0),
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
-        exit_reported: AtomicBool::new(false),
+        exit_recorded: AtomicBool::new(false),
         pid,
         foreground: Mutex::new(None),
     });
@@ -1358,21 +1391,21 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     // Keepers intentionally outlive the server so a restarted server can
     // reattach through the socket. While no server is attached, the keeper
     // exits once there is nothing left to reattach to: its child has exited and
-    // a server has been sent a status reporting that, or its socket was removed
-    // or replaced so no server can ever reach it again. In the latter case it
-    // stops the child instead of leaving it running unreachable. A child that
-    // exits while no server is attached keeps the keeper alive until a server
-    // reattaches and reads the exit, so a restart sees the pane as exited
-    // rather than interrupted.
+    // a server has saved that (see `KeeperRequest::ExitRecorded`), or its
+    // socket was removed or replaced so no server can ever reach it again. In
+    // the latter case it stops the child instead of leaving it running
+    // unreachable. Until a server has saved the exit the keeper stays, so a
+    // restart reads the exit and sees the pane as exited rather than
+    // interrupted, even if the server that first read it crashed.
     // The socket is listening and the child is running: from here on a server
     // can connect at any time.
     readiness.report(Ok(()));
     loop {
         if !wait_for_keeper_client(&listener, KEEPER_SOCKET_CHECK_INTERVAL)? {
-            if runtime.exit_reported.load(Ordering::Acquire) {
+            if runtime.exit_recorded.load(Ordering::Acquire) && runtime.child_exited() {
                 debug!(
                     socket_path = %cli.socket_path.display(),
-                    "runtime keeper child exit was reported and no server is attached; exiting"
+                    "runtime keeper child exit was recorded and no server is attached; exiting"
                 );
                 let _ = wait_join.join();
                 return Ok(());
@@ -1433,11 +1466,6 @@ fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) ->
         };
         if write_message(stream, &response).is_err() {
             return Ok(false);
-        }
-        // Status is the only reply servers learn the child's exit from, so
-        // record the exit as reported only once such a reply was written.
-        if matches!(&response, KeeperResponse::Status(status) if !status.running) {
-            runtime.exit_reported.store(true, Ordering::Release);
         }
         if terminate {
             return Ok(true);
@@ -1509,10 +1537,21 @@ fn handle_keeper_request(
             ),
             false,
         )),
+        KeeperRequest::ExitRecorded => {
+            runtime.exit_recorded.store(true, Ordering::Release);
+            Ok((KeeperResponse::Ok, false))
+        }
     }
 }
 
 impl KeeperRuntime {
+    fn child_exited(&self) -> bool {
+        self.exit_code
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
     fn ensure_running(&self) -> Result<()> {
         if self
             .exit_code
@@ -3174,5 +3213,93 @@ mod tests {
             status.stop_reason,
             Some(BufferRuntimePipeStopReason::WriteFailed)
         );
+    }
+
+    /// Run a keeper on a thread of this process for `command` and wait until
+    /// it is ready, returning its socket path and a receiver that yields once
+    /// the keeper has returned.
+    fn start_in_process_keeper(
+        dir: &std::path::Path,
+        command: &[&str],
+    ) -> (std::path::PathBuf, mpsc::Receiver<()>) {
+        let socket_path = dir.join("keeper.sock");
+        let cli = super::RuntimeKeeperCli {
+            socket_path: socket_path.clone(),
+            command: command.iter().map(|part| (*part).to_owned()).collect(),
+            cwd: None,
+            env: BTreeMap::new(),
+            size: embers_core::PtySize::new(80, 24),
+        };
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut readiness = super::KeeperReadiness::Channel(Some(ready_tx));
+            let _ = super::serve_runtime_keeper(cli, &mut readiness);
+            let _ = done_tx.send(());
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("keeper reports readiness")
+            .expect("keeper starts");
+        (socket_path, done_rx)
+    }
+
+    fn wait_for_exited_status(socket_path: &std::path::Path) -> BufferRuntimeStatus {
+        let stream = super::connect_to_keeper(socket_path).expect("connect to keeper");
+        let mut connection = KeeperConnection { stream };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = connection.status().expect("keeper status");
+            if !status.running {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "keeper child never exited");
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn keeper_retires_only_once_its_exit_is_acknowledged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket_path, done) = start_in_process_keeper(dir.path(), &["/bin/sh", "-c", "exit 3"]);
+
+        // A server that read the exit but went away before recording it.
+        let status = wait_for_exited_status(&socket_path);
+        assert_eq!(status.exit_code, Some(3));
+        assert!(
+            done.recv_timeout(Duration::from_millis(1500)).is_err(),
+            "keeper retired although no server acknowledged recording the exit"
+        );
+
+        // The next server reads the exit again, records it and acknowledges.
+        let status = wait_for_exited_status(&socket_path);
+        assert_eq!(status.exit_code, Some(3));
+        let mut stream = super::connect_to_keeper(&socket_path).expect("reconnect to keeper");
+        super::write_message(&mut stream, &super::KeeperRequest::ExitRecorded)
+            .expect("send acknowledgement");
+        assert!(matches!(
+            read_message::<super::KeeperResponse>(&mut stream),
+            Ok(Some(super::KeeperResponse::Ok))
+        ));
+        drop(stream);
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("keeper should retire once its exit was acknowledged and the server left");
+        assert!(!socket_path.exists(), "a retired keeper removes its socket");
+    }
+
+    #[test]
+    fn keeper_rejects_unknown_requests_and_keeps_serving() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket_path, _done) =
+            start_in_process_keeper(dir.path(), &["/bin/sh", "-c", "sleep 30"]);
+        let mut stream = super::connect_to_keeper(&socket_path).expect("connect to keeper");
+        super::write_message(&mut stream, &"NoSuchRequest").expect("send unknown request");
+        assert!(matches!(
+            read_message::<super::KeeperResponse>(&mut stream),
+            Ok(Some(super::KeeperResponse::Error { .. }))
+        ));
+        let mut connection = KeeperConnection { stream };
+        assert!(connection.status().expect("status after error").running);
+        connection.kill().expect("kill child");
     }
 }

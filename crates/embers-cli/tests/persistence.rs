@@ -6,10 +6,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
-use embers_core::BufferId;
-use embers_server::ServerConfig;
+use embers_core::{BufferId, RequestId};
+use embers_protocol::{
+    BufferRecord, BufferRecordState, BufferRequest, ClientMessage, ProtocolClient, ServerResponse,
+};
+use embers_server::{REMAIN_ON_EXIT_OPTION, ServerConfig};
 use embers_test_support::{acquire_test_lock, cargo_bin, cargo_bin_path};
 use tokio::time::{Instant, sleep};
+
+/// Test hook: while the file this names exists, the server does not save its
+/// workspace on its own, which stands in for a crash landing between reading
+/// a change and saving it.
+const HOLD_SAVES_ENV_VAR: &str = "EMBERS_TEST_HOLD_WORKSPACE_SAVES";
 
 /// A `__serve` process started directly, so the test can SIGKILL it.
 struct ServeProcess {
@@ -106,6 +114,65 @@ async fn kill_keepers(socket_path: &Path) {
         assert!(Instant::now() < deadline, "keepers survived SIGKILL");
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+async fn buffer_request(socket_path: &Path, request: BufferRequest) -> ServerResponse {
+    let mut client = ProtocolClient::connect(socket_path)
+        .await
+        .expect("connect protocol client");
+    client
+        .request(&ClientMessage::Buffer(request))
+        .await
+        .expect("buffer request is answered")
+}
+
+/// The server's record of `buffer_id`, or `None` once it has none.
+async fn buffer_record(socket_path: &Path, buffer_id: BufferId) -> Option<BufferRecord> {
+    match buffer_request(
+        socket_path,
+        BufferRequest::Get {
+            request_id: RequestId(1),
+            buffer_id,
+        },
+    )
+    .await
+    {
+        ServerResponse::Buffer(response) => Some(response.buffer),
+        ServerResponse::Error(_) => None,
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+}
+
+/// The workspace file's record of `buffer_id`.
+fn saved_buffer(workspace_path: &Path, buffer_id: BufferId) -> Option<serde_json::Value> {
+    let contents = fs::read_to_string(workspace_path).ok()?;
+    let workspace: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    workspace["buffers"]
+        .as_array()?
+        .iter()
+        .find(|buffer| buffer["id"].as_u64() == Some(buffer_id.0))
+        .cloned()
+}
+
+/// The state the workspace file records for `buffer_id`, e.g. `"running"`.
+fn saved_buffer_state(workspace_path: &Path, buffer_id: BufferId) -> Option<String> {
+    saved_buffer(workspace_path, buffer_id)?["state"]["kind"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn keeper_running(socket_path: &Path, buffer_id: BufferId) -> bool {
+    let keeper_socket = ServerConfig::new(socket_path.to_path_buf()).keeper_socket_path(buffer_id);
+    let pattern = format!(
+        "__runtime-keeper --keeper-socket {} ",
+        keeper_socket.display()
+    );
+    !Command::new("pgrep")
+        .args(["-f", &pattern])
+        .output()
+        .expect("run pgrep")
+        .stdout
+        .is_empty()
 }
 
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -254,6 +321,138 @@ async fn killed_panes_whose_keepers_are_gone_stay_gone() {
         "killed panes came back:\n{buffers}"
     );
     assert!(buffers.contains("attached"), "{buffers}");
+
+    server.kill();
+    kill_keepers(&socket_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panes_that_exited_just_before_a_server_crash_are_not_resurrected() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let root = tempfile::Builder::new()
+        .prefix("emb")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let root_path = root.path().canonicalize().expect("canonical tempdir");
+    let socket_path = root_path.join("s.sock");
+    let release = root_path.join("release");
+    let hold = root_path.join("hold");
+    let workspace_path = ServerConfig::new(socket_path.clone()).workspace_path;
+
+    let server = ServeProcess::start_with_env(
+        &socket_path,
+        &[(HOLD_SAVES_ENV_VAR, hold.to_str().expect("utf-8 temp path"))],
+    )
+    .await;
+    cli(&socket_path, &["new-session", "main"]);
+    cli(&socket_path, &["new-window", "-t", "main", "--", "/bin/sh"]);
+    // Two panes whose commands exit 3 once the test creates `release`: one
+    // remains on exit as a dead pane, the other is cleaned up.
+    let waits_then_exits = [
+        "/bin/sh",
+        "-c",
+        r#"while [ ! -e "$1" ]; do sleep 0.05; done; exit 3"#,
+        "sh",
+        release.to_str().expect("utf-8 temp path"),
+    ];
+    let mut split = vec!["split-window", "--"];
+    split.extend(waits_then_exits);
+    let kept_pane = cli(&socket_path, &split).trim().to_owned();
+    let removed_pane = cli(&socket_path, &split).trim().to_owned();
+    let panes = cli(&socket_path, &["list-panes"]);
+    let buffer_of = |pane: &str| {
+        panes
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                (fields.next() == Some(pane)).then(|| fields.next().map(str::to_owned))
+            })
+            .flatten()
+            .map(|id| BufferId(id.parse().expect("numeric buffer id")))
+            .expect("pane is listed")
+    };
+    let kept = buffer_of(&kept_pane);
+    let removed = buffer_of(&removed_pane);
+    match buffer_request(
+        &socket_path,
+        BufferRequest::SetUserOption {
+            request_id: RequestId(2),
+            buffer_id: kept,
+            key: REMAIN_ON_EXIT_OPTION.to_owned(),
+            value: Some("on".to_owned()),
+        },
+    )
+    .await
+    {
+        ServerResponse::Buffer(_) => {}
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+    wait_until(
+        "both panes to be saved running, one remaining on exit",
+        || {
+            [kept, removed].iter().all(|&buffer_id| {
+                saved_buffer_state(&workspace_path, buffer_id).as_deref() == Some("running")
+            }) && saved_buffer(&workspace_path, kept).is_some_and(|buffer| {
+                buffer["user_options"][REMAIN_ON_EXIT_OPTION].as_str() == Some("on")
+            })
+        },
+    )
+    .await;
+
+    // Hold saves, then let the commands exit and wait until the server has
+    // read both exits (keeping one dead pane, removing the other): it now
+    // knows, but has not saved either.
+    fs::write(&hold, b"").expect("hold workspace saves");
+    fs::write(&release, b"").expect("release the commands");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let kept_exited = buffer_record(&socket_path, kept)
+            .await
+            .is_some_and(|record| record.state == BufferRecordState::Exited);
+        if kept_exited && buffer_record(&socket_path, removed).await.is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server never saw the commands exit"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+    for buffer_id in [kept, removed] {
+        assert_eq!(
+            saved_buffer_state(&workspace_path, buffer_id).as_deref(),
+            Some("running"),
+            "the exit of buffer {buffer_id} must not have been saved before the crash"
+        );
+    }
+
+    server.kill();
+    // Restore reruns a pane's command, so withdraw the release: a resurrected
+    // command would keep running instead of exiting 3. Then give the keepers
+    // several socket-check intervals to (wrongly) leave.
+    fs::remove_file(&release).expect("withdraw the release");
+    fs::remove_file(&hold).expect("stop holding saves");
+    sleep(Duration::from_millis(1500)).await;
+    assert!(keeper_running(&socket_path, kept));
+    assert!(keeper_running(&socket_path, removed));
+
+    // The restarted server reattaches to both keepers and learns how the
+    // commands ended instead of running them again.
+    let server = ServeProcess::start(&socket_path).await;
+    let restored = buffer_record(&socket_path, kept)
+        .await
+        .expect("the dead pane is kept");
+    assert_eq!(restored.state, BufferRecordState::Exited);
+    assert_eq!(restored.exit_code, Some(3));
+    assert!(
+        buffer_record(&socket_path, removed).await.is_none(),
+        "the exited pane without remain-on-exit came back"
+    );
+    // Once its removal is saved, the removed pane's keeper is released.
+    wait_until("the removed pane's keeper to exit", || {
+        !keeper_running(&socket_path, removed)
+    })
+    .await;
 
     server.kill();
     kill_keepers(&socket_path).await;
