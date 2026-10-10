@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use embers_core::{BufferId, FloatingId, NodeId, SessionId, SplitDirection};
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+    SynchronizePanesMode,
 };
 
 use crate::input::KeySequence;
@@ -97,6 +98,15 @@ pub enum Action {
     },
     ToggleZoomNode {
         node_id: Option<NodeId>,
+    },
+    /// tmux `resize-pane -L/-R/-U/-D <cells>` on the focused pane.
+    ResizePane {
+        direction: NavigationDirection,
+        cells: u16,
+    },
+    /// tmux `synchronize-panes` for the active window.
+    SetSynchronizePanes {
+        mode: SynchronizePanesMode,
     },
     SwapSiblingNodes {
         first_node_id: Option<NodeId>,

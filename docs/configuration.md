@@ -16,6 +16,8 @@ config API (key bindings, modes, actions, themes, tab bars, hooks) see
 | `EMBERS_MAX_SESSIONS` | `256` | server | Ceiling on concurrently live sessions. |
 | `EMBERS_MAX_BUFFERS` | `2048` | server | Ceiling on concurrently live buffers. Each buffer owns a PTY-backed child process plus scrollback, so this is the dominant resource bound. |
 | `EMBERS_MAX_SCROLLBACK_LINES` | `10000` | server | Scrollback lines retained per buffer. |
+| `EMBERS_RESTORE` | on | server | Set to `0`, `off`, `false` or `no` to leave panes whose keeper is gone `Interrupted` instead of restoring them. |
+| `EMBERS_RESTORE_COMMANDS` | `vi vim nvim emacs man less more tail top htop irssi weechat mutt` | server | Programs run again when a pane is restored, separated by commas or spaces. Replaces the default; set but empty, no program is run again. |
 
 A limit set to `0`, empty, or an unparseable value is ignored, so the default
 applies.
@@ -45,6 +47,33 @@ keeper socket that would not fit in the derived directory goes in
 server socket path, so each server keeps a stable directory of its own. Any
 server socket path that can itself be bound therefore works. Keeper socket
 directories are created with `0700` permissions.
+
+## Workspace persistence and restore
+
+The server saves sessions, layout and buffer records to `<socket>.workspace.json`
+whenever they change, batching bursts of changes into one atomic write, so a
+crash or SIGKILL of the server loses at most the last moment of changes.
+
+On startup, panes whose runtime keeper is still alive are reattached. Panes whose
+keeper is gone, as after a reboot, are restored: a fresh shell starts in the
+pane's last known working directory, in the same place in the layout and with
+the same title. Terminal contents and scrollback are not restored. If the pane's
+last foreground program is on the allowlist (`EMBERS_RESTORE_COMMANDS`), it is
+run again in that shell; anything else is not, since re-running an arbitrary
+command could repeat its side effects.
+
+```sh
+# Run only editors and ssh again
+EMBERS_RESTORE_COMMANDS="vim nvim ssh" embers
+# Never restart panes whose keeper is gone
+EMBERS_RESTORE=off embers
+```
+
+These are read by the server when it starts, before any client connects, so they
+are environment variables rather than Rhai config settings. Set them where the
+server is launched; a server started by `embers` inherits that command's
+environment. See [`terminal-runtime.md`](terminal-runtime.md) for exactly what is
+saved and when.
 
 ## Logging
 

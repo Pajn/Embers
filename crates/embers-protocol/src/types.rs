@@ -64,6 +64,21 @@ pub enum SessionRequest {
         session_id: SessionId,
         index: u32,
     },
+    /// Turn tmux-style `synchronize-panes` on, off, or flip it for a window
+    /// (a root tab).
+    SetRootTabSynchronizePanes {
+        request_id: RequestId,
+        session_id: SessionId,
+        index: u32,
+        mode: SynchronizePanesMode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SynchronizePanesMode {
+    Toggle,
+    On,
+    Off,
 }
 
 impl SessionRequest {
@@ -77,7 +92,8 @@ impl SessionRequest {
             | Self::AddRootTab { request_id, .. }
             | Self::SelectRootTab { request_id, .. }
             | Self::RenameRootTab { request_id, .. }
-            | Self::CloseRootTab { request_id, .. } => *request_id,
+            | Self::CloseRootTab { request_id, .. }
+            | Self::SetRootTabSynchronizePanes { request_id, .. } => *request_id,
         }
     }
 }
@@ -738,6 +754,9 @@ pub struct SplitRecord {
 pub struct TabRecord {
     pub title: String,
     pub child_id: NodeId,
+    /// Whether input typed into one pane of this window goes to all of its
+    /// panes. Only meaningful on root tabs.
+    pub synchronize_panes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

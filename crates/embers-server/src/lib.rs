@@ -5,6 +5,7 @@ mod buffer_runtime;
 mod config;
 mod persist;
 mod protocol;
+mod restore;
 mod runtime_dir;
 mod server;
 mod terminal_backend;
@@ -14,7 +15,10 @@ pub use buffer_runtime::{
     BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeKeeperCli,
     run_runtime_keeper,
 };
-pub use config::{ResourceLimits, SOCKET_ENV_VAR, ServerConfig};
+pub use config::{
+    DEFAULT_RESTORE_COMMANDS, RESTORE_COMMANDS_ENV_VAR, RESTORE_ENV_VAR, ResourceLimits,
+    RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
+};
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
     BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, InterruptedBuffer, Node,

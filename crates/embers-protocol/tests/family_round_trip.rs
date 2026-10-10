@@ -53,6 +53,24 @@ fn client_message_families_round_trip() {
             session_id: SessionId(10),
             index: 2,
         }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 1,
+            mode: SynchronizePanesMode::Toggle,
+        }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 0,
+            mode: SynchronizePanesMode::On,
+        }),
+        ClientMessage::Session(SessionRequest::SetRootTabSynchronizePanes {
+            request_id: RequestId(9),
+            session_id: SessionId(10),
+            index: 0,
+            mode: SynchronizePanesMode::Off,
+        }),
         ClientMessage::Buffer(BufferRequest::Create {
             request_id: RequestId(10),
             title: Some("shell".to_owned()),
@@ -636,10 +654,12 @@ fn sample_snapshot() -> SessionSnapshot {
                         TabRecord {
                             title: "logs".to_owned(),
                             child_id: NodeId(23),
+                            synchronize_panes: false,
                         },
                         TabRecord {
                             title: "shell".to_owned(),
                             child_id: NodeId(24),
+                            synchronize_panes: true,
                         },
                     ],
                 }),

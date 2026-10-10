@@ -36,5 +36,6 @@ pub use types::{
     ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent,
     SessionCreatedEvent, SessionRecord, SessionRenamedEvent, SessionRequest, SessionSnapshot,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SplitRecord, SubscribeRequest,
-    SubscriptionAckResponse, TabRecord, TabsRecord, UnsubscribeRequest, VisibleSnapshotResponse,
+    SubscriptionAckResponse, SynchronizePanesMode, TabRecord, TabsRecord, UnsubscribeRequest,
+    VisibleSnapshotResponse,
 };

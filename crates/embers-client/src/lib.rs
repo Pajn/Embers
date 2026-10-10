@@ -10,6 +10,7 @@ mod pty_sizes;
 pub mod renderer;
 pub mod scripting;
 pub mod socket_transport;
+pub mod split_resize;
 pub mod state;
 pub mod testing;
 pub mod transport;
@@ -31,8 +32,8 @@ pub use input::{
     SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence, resolve_key,
 };
 pub use presentation::{
-    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, TabItem,
-    TabsFrame,
+    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,
+    TabItem, TabsFrame,
 };
 pub use renderer::Renderer;
 pub use scripting::{
@@ -43,6 +44,7 @@ pub use scripting::{
     TabSpec, TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
+pub use split_resize::{SplitResize, drawn_viewport};
 pub use state::{
     BufferViewState, ClientState, HintMatch, HintsState, SearchMatch, SearchState, SelectionKind,
     SelectionPoint, SelectionState,
