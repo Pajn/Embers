@@ -24,6 +24,14 @@ On the wire the fixed-size `StyledRunWire` struct is unchanged: the style flags 
 
 The client renderer re-emits these to the host terminal: `CSI 4 m` for a single underline, `CSI 4:n m` for the other styles, and `CSI 58:5:n m` or `CSI 58:2::r:g:b m` for the color. The host terminal must understand colon sub-parameters to draw them; Embers does not translate them for terminals that don't.
 
+### Hyperlinks
+
+OSC 8 hyperlinks survive from the pane to the host terminal, so links printed by programs (`ls --hyperlink`, compilers, `gh`, Neovim plugins) stay clickable. Each `SnapshotLine` carries a `links` table of `Hyperlink { id, uri }`, and each run's `link` field is `0` for no link or a 1-based index into that table (`SnapshotLine::link` resolves it). The table is per line rather than per snapshot so lines stay self-contained when they are sliced out of scrollback; a link wrapped across lines appears in each line's table and keeps its `id`, which the host terminal uses to treat the pieces as one link.
+
+Linked text counts as styled, so a line whose only styling is a link still has `runs`. On the wire, `StyledLine` gains a `links` vector and a `run_links` vector of `ushort` parallel to `runs`; both are absent unless a run on that line is linked, so link-free frames are unchanged. Keeper JSON omits `link` when zero and `links` when empty, and scrollback slices carry the tables in a parallel `links` field.
+
+The renderer keeps each link on the grid cell rather than in the cell style, so selection and search overlays keep it while anything drawn over the cell (borders, hint labels, popups) drops it. It emits `OSC 8 ; id=<id> ; <uri> ST` where a link starts and `OSC 8 ; ; ST` where it ends, and always closes an open link at the end of a row. Control characters are stripped from the id and URI, and `:`/`;` from the id, so pane content cannot end the sequence early and inject terminal input.
+
 ### Freshness expectations
 
 `RenderInvalidated` means the visible snapshot for that buffer may be stale. The client refreshes invalidated visible leaves (leaf nodes in the layout tree corresponding to visible buffers) before rendering and then updates the display so updated titles, alternate-screen flags, and visible lines are used together.

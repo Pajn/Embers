@@ -4,14 +4,14 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::{Cell, Flags, LineLength};
+use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink as AlacrittyHyperlink, LineLength};
 use alacritty_terminal::term::{Config, LineDamageBounds, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{
     self, Color as AnsiColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use embers_core::{
-    ActivityState, CellAttrs, CursorPosition, CursorShape, CursorState, PtySize, SnapshotLine,
-    StyledRun, TermColor, TerminalModes, TerminalSnapshot,
+    ActivityState, CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, PtySize,
+    SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -423,6 +423,7 @@ impl AlacrittyTerminalBackend {
         let mut text = String::new();
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut styled = false;
+        let mut links = LineLinks::default();
 
         for column in 0..content_len {
             let cell = &row[Column(column)];
@@ -435,6 +436,7 @@ impl AlacrittyTerminalBackend {
             let bg = map_color(cell.bg);
             let attrs = map_attrs(flags);
             let underline_color = cell.underline_color().map_or(TermColor::Default, map_color);
+            let link = links.index_of(cell.hyperlink());
 
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
@@ -446,6 +448,7 @@ impl AlacrittyTerminalBackend {
                 || bg != TermColor::Default
                 || attrs != CellAttrs::empty()
                 || underline_color != TermColor::Default
+                || link != 0
             {
                 styled = true;
             }
@@ -455,7 +458,8 @@ impl AlacrittyTerminalBackend {
                     if last.fg == fg
                         && last.bg == bg
                         && last.attrs == attrs
-                        && last.underline_color == underline_color =>
+                        && last.underline_color == underline_color
+                        && last.link == link =>
                 {
                     last.len += byte_len;
                 }
@@ -465,6 +469,7 @@ impl AlacrittyTerminalBackend {
                     bg,
                     attrs,
                     underline_color,
+                    link,
                 }),
             }
         }
@@ -475,7 +480,11 @@ impl AlacrittyTerminalBackend {
             runs.clear();
         }
 
-        SnapshotLine { text, runs }
+        SnapshotLine {
+            text,
+            runs,
+            links: links.table,
+        }
     }
 
     fn cursor_state(&self) -> Option<CursorState> {
@@ -650,6 +659,45 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         };
         self.term.reset_damage();
         damage
+    }
+}
+
+/// Per-line hyperlink table built during the row walk.
+#[derive(Default)]
+struct LineLinks {
+    table: Vec<Hyperlink>,
+    /// The emulator link most recently resolved and its index, so the cells of
+    /// one link (the common case) skip the table search.
+    last: Option<(AlacrittyHyperlink, u16)>,
+}
+
+impl LineLinks {
+    /// 1-based index of `link` in this line's table (`0` for no link), adding
+    /// it on first sight.
+    fn index_of(&mut self, link: Option<AlacrittyHyperlink>) -> u16 {
+        let Some(link) = link else {
+            return 0;
+        };
+        if let Some((last, index)) = &self.last
+            && *last == link
+        {
+            return *index;
+        }
+        let mapped = Hyperlink {
+            id: Some(link.id().to_owned()),
+            uri: link.uri().to_owned(),
+        };
+        let index = match self.table.iter().position(|known| *known == mapped) {
+            Some(position) => position + 1,
+            None => {
+                self.table.push(mapped);
+                self.table.len()
+            }
+        };
+        // A row holds at most `u16::MAX` cells, so the index always fits.
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        self.last = Some((link, index));
+        index
     }
 }
 
@@ -974,6 +1022,48 @@ mod tests {
         assert_eq!(line.runs[1].underline_color, TermColor::Indexed(12));
         assert_eq!(line.runs[2].underline_color, TermColor::Default);
         assert!(line.runs[2].attrs.contains(CellAttrs::CURLY_UNDERLINE));
+    }
+
+    #[test]
+    fn osc8_hyperlinks_become_per_line_link_table() {
+        let size = PtySize::new(20, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(
+            b"\x1b]8;id=a;https://a.example\x1b\\one\x1b]8;;\x1b\\ \
+              \x1b]8;;https://b.example\x07two\x1b]8;;\x07 \
+              \x1b]8;id=a;https://a.example\x1b\\three\x1b]8;;\x1b\\",
+        );
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "one two three");
+        assert_eq!(line.links.len(), 2, "a repeated link is listed once");
+        assert_eq!(line.links[0].id.as_deref(), Some("a"));
+        assert_eq!(line.links[0].uri, "https://a.example");
+        assert_eq!(line.links[1].uri, "https://b.example");
+
+        let spans: Vec<_> = line.runs.iter().map(|run| (run.len, run.link)).collect();
+        assert_eq!(spans, vec![(3, 1), (1, 0), (3, 2), (1, 0), (5, 1)]);
+        assert_eq!(
+            line.link(&line.runs[4]).map(|link| link.uri.as_str()),
+            Some("https://a.example")
+        );
+        // Linked text with otherwise default styling is still a styled line.
+        assert!(line.runs.iter().all(|run| run.attrs == CellAttrs::empty()));
+    }
+
+    #[test]
+    fn plain_lines_carry_no_link_table() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        backend.ingest_bytes(b"\x1b[31mred\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert!(line.links.is_empty());
+        assert!(line.runs.iter().all(|run| run.link == 0));
     }
 
     #[test]

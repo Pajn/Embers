@@ -125,6 +125,25 @@ pub struct StyledRun {
     /// keeper JSON and travels sparsely on the wire.
     #[serde(default, skip_serializing_if = "TermColor::is_default")]
     pub underline_color: TermColor,
+    /// OSC 8 hyperlink covering this run: `0` for none, otherwise a 1-based
+    /// index into the owning line's [`SnapshotLine::links`]. Use
+    /// [`SnapshotLine::link`] to resolve it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub link: u16,
+}
+
+fn is_zero(value: &u16) -> bool {
+    *value == 0
+}
+
+/// An OSC 8 hyperlink as the program in the pane declared it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Hyperlink {
+    /// The `id=` parameter, which lets a terminal treat separate spans (for
+    /// example a link wrapped across lines) as one link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub uri: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +154,11 @@ pub struct SnapshotLine {
     /// serialize `SnapshotLine` without a `runs` field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<StyledRun>,
+    /// Hyperlinks referenced by `runs[..].link`, each listed once per line. The
+    /// table is per line (not per snapshot) so a line stays self-contained when
+    /// it is sliced out of scrollback or moved between views.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Hyperlink>,
 }
 
 impl SnapshotLine {
@@ -143,7 +167,15 @@ impl SnapshotLine {
         Self {
             text: text.into(),
             runs: Vec::new(),
+            links: Vec::new(),
         }
+    }
+
+    /// The hyperlink covering `run`, if any. An index outside `links` resolves
+    /// to `None`.
+    pub fn link(&self, run: &StyledRun) -> Option<&Hyperlink> {
+        let index = usize::from(run.link).checked_sub(1)?;
+        self.links.get(index)
     }
 }
 
@@ -221,6 +253,7 @@ mod tests {
                     bg: TermColor::Default,
                     attrs,
                     underline_color: TermColor::Default,
+                    link: 0,
                 },
                 StyledRun {
                     len: 1,
@@ -232,8 +265,10 @@ mod tests {
                     bg: TermColor::Indexed(4),
                     attrs: CellAttrs::empty(),
                     underline_color: TermColor::Default,
+                    link: 0,
                 },
             ],
+            links: Vec::new(),
         };
 
         let json = serde_json::to_string(&line).unwrap();

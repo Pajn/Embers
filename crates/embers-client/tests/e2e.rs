@@ -1341,6 +1341,21 @@ async fn undercurl_and_underline_color_reach_client_ansi_lines() {
     assert!(plain.contains("DIAG"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc8_hyperlink_reaches_client_ansi_lines() {
+    let (ansi, plain) = render_pane_output(
+        "printf '\\033]8;id=doc;https://example.com/doc\\033\\\\DOCLINK\\033]8;;\\033\\\\ after\\n'; sleep 2",
+        "DOCLINK",
+    )
+    .await;
+
+    assert!(
+        ansi.contains("\x1b]8;id=doc;https://example.com/doc\x1b\\DOCLINK\x1b]8;;\x1b\\ after"),
+        "expected an OSC 8 span around the link text in client output:\n{ansi:?}"
+    );
+    assert!(plain.contains("DOCLINK after"));
+}
+
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

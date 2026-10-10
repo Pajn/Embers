@@ -1,6 +1,7 @@
 use std::fmt::Write;
+use std::sync::Arc;
 
-use embers_core::{CellAttrs, CursorShape, Rect, SnapshotLine, StyledRun, TermColor};
+use embers_core::{CellAttrs, CursorShape, Hyperlink, Rect, SnapshotLine, StyledRun, TermColor};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -129,6 +130,10 @@ struct Cell {
     text: String,
     style: CellStyle,
     continuation: bool,
+    /// OSC 8 hyperlink from pane content. Lives on the cell rather than in
+    /// [`CellStyle`] so overlays that restyle content keep the link, while
+    /// anything drawn over the cell (borders, labels, popups) drops it.
+    link: Option<Arc<Hyperlink>>,
 }
 
 impl Default for Cell {
@@ -137,6 +142,7 @@ impl Default for Cell {
             text: " ".to_owned(),
             style: CellStyle::default(),
             continuation: false,
+            link: None,
         }
     }
 }
@@ -147,6 +153,7 @@ impl Cell {
             text: fill.to_string(),
             style: CellStyle::default(),
             continuation: false,
+            link: None,
         }
     }
 }
@@ -204,6 +211,17 @@ impl RenderGrid {
     }
 
     pub fn put_str_styled(&mut self, x: u16, y: u16, text: &str, style: CellStyle) {
+        self.put_str_linked(x, y, text, style, None);
+    }
+
+    fn put_str_linked(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        style: CellStyle,
+        link: Option<&Arc<Hyperlink>>,
+    ) {
         if y >= self.height || x >= self.width {
             return;
         }
@@ -222,7 +240,7 @@ impl RenderGrid {
             }
 
             self.clear_overlapping_cells(x_pos, y, width);
-            self.set_cell(x_pos, y, grapheme, style, width);
+            self.set_cell(x_pos, y, grapheme, style, width, link);
             x_pos = x_pos.saturating_add(width);
         }
     }
@@ -232,7 +250,8 @@ impl RenderGrid {
     ///
     /// Mirrors [`truncate`]'s column budget: when the text is wider than `width`,
     /// it draws up to `width - 1` columns then a default-styled `~` marker.
-    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked.
+    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked. Linked
+    /// runs keep their OSC 8 hyperlink on the drawn cells.
     pub fn put_snapshot_line(&mut self, x: u16, y: u16, width: u16, line: &SnapshotLine) {
         if width == 0 || y >= self.height || x >= self.width {
             return;
@@ -244,6 +263,9 @@ impl RenderGrid {
         } else {
             width
         };
+
+        // Shared once per line so each linked cell holds a cheap handle.
+        let links: Vec<Arc<Hyperlink>> = line.links.iter().cloned().map(Arc::new).collect();
 
         let mut column = 0_u16;
         let mut byte_offset = 0_usize;
@@ -257,12 +279,16 @@ impl RenderGrid {
             let run = runs.run_at(byte_offset);
             let style = run.map(style_for_run).unwrap_or_default();
             let hidden = run.is_some_and(|run| run.attrs.contains(CellAttrs::HIDDEN));
+            let link = run
+                .and_then(|run| usize::from(run.link).checked_sub(1))
+                .and_then(|index| links.get(index));
 
             let draw_x = x.saturating_add(column);
             if hidden {
-                self.put_str_styled(draw_x, y, &" ".repeat(usize::from(grapheme_width)), style);
+                let blank = " ".repeat(usize::from(grapheme_width));
+                self.put_str_linked(draw_x, y, &blank, style, link);
             } else {
-                self.put_str_styled(draw_x, y, grapheme, style);
+                self.put_str_linked(draw_x, y, grapheme, style, link);
             }
 
             column = column.saturating_add(grapheme_width);
@@ -441,17 +467,27 @@ impl RenderGrid {
                 let end = start + usize::from(self.width);
                 let mut output = String::new();
                 let mut current_style = CellStyle::default();
+                let mut current_link: Option<&Arc<Hyperlink>> = None;
                 for cell in &self.cells[start..end] {
                     if cell.continuation {
                         continue;
                     }
                     write_style_transition(&mut output, current_style, cell.style);
                     current_style = cell.style;
+                    if cell.link.as_ref() != current_link {
+                        current_link = cell.link.as_ref();
+                        write_hyperlink(&mut output, current_link.map(Arc::as_ref));
+                    }
                     if cell.text.is_empty() {
                         output.push(' ');
                     } else {
                         output.push_str(&cell.text);
                     }
+                }
+                // Links never span rows: the next row (or the status line)
+                // must not inherit one.
+                if current_link.is_some() {
+                    write_hyperlink(&mut output, None);
                 }
                 if !current_style.is_plain() {
                     output.push_str("\x1b[0m");
@@ -482,12 +518,21 @@ impl RenderGrid {
         }
     }
 
-    fn set_cell(&mut self, x: u16, y: u16, grapheme: &str, style: CellStyle, width: u16) {
+    fn set_cell(
+        &mut self,
+        x: u16,
+        y: u16,
+        grapheme: &str,
+        style: CellStyle,
+        width: u16,
+        link: Option<&Arc<Hyperlink>>,
+    ) {
         let idx = self.index(x, y);
         self.cells[idx] = Cell {
             text: grapheme.to_owned(),
             style,
             continuation: false,
+            link: link.cloned(),
         };
 
         for offset in 1..width {
@@ -496,6 +541,7 @@ impl RenderGrid {
                 text: String::new(),
                 style,
                 continuation: true,
+                link: link.cloned(),
             };
         }
     }
@@ -662,6 +708,30 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     }
 }
 
+/// Open an OSC 8 hyperlink, or close the current one when `link` is `None`.
+///
+/// The id and URI come from programs in panes, so control characters are
+/// dropped before they reach the host terminal: a stray BEL or ESC would end
+/// the sequence early and let the rest run as terminal input. The id also
+/// loses `:` and `;`, which delimit OSC 8 parameters.
+fn write_hyperlink(output: &mut String, link: Option<&Hyperlink>) {
+    output.push_str("\x1b]8;");
+    if let Some(link) = link {
+        if let Some(id) = link.id.as_deref().filter(|id| !id.is_empty()) {
+            output.push_str("id=");
+            output.extend(
+                id.chars()
+                    .filter(|ch| !ch.is_control() && *ch != ':' && *ch != ';'),
+            );
+        }
+        output.push(';');
+        output.extend(link.uri.chars().filter(|ch| !ch.is_control()));
+    } else {
+        output.push(';');
+    }
+    output.push_str("\x1b\\");
+}
+
 fn clamp_i32_to_u16(value: i32) -> u16 {
     value.clamp(0, i32::from(u16::MAX)) as u16
 }
@@ -718,7 +788,9 @@ mod tests {
                 bg: TermColor::Default,
                 attrs: CellAttrs(attrs),
                 underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         }
     }
 
@@ -759,6 +831,7 @@ mod tests {
                     bg: TermColor::Default,
                     attrs: CellAttrs(CellAttrs::HIDDEN),
                     underline_color: TermColor::Default,
+                    link: 0,
                 },
                 StyledRun {
                     len: 1,
@@ -766,8 +839,10 @@ mod tests {
                     bg: TermColor::Default,
                     attrs: CellAttrs::empty(),
                     underline_color: TermColor::Default,
+                    link: 0,
                 },
             ],
+            links: Vec::new(),
         };
         grid.put_snapshot_line(0, 0, 4, &line);
 

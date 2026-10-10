@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, MuxError, PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
+    ActivityState, BufferId, Hyperlink, MuxError, PtySize, Result, SnapshotLine, StyledRun,
+    TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -218,18 +219,25 @@ pub struct KeeperScrollbackSlice {
     /// styling, and a short/empty inner vec means that line is plain.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub styles: Vec<Vec<StyledRun>>,
+    /// Parallel per-line hyperlink tables referenced by `styles`, kept separate
+    /// for the same compatibility reason. Empty when no line carries a link.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Vec<Hyperlink>>,
 }
 
 impl KeeperScrollbackSlice {
-    /// Zip `lines` and `styles` back into styled snapshot lines. A missing or
-    /// short `styles` entry yields a plain line, so old keepers degrade to text.
+    /// Zip `lines`, `styles` and `links` back into styled snapshot lines. A
+    /// missing or short `styles`/`links` entry yields a plain or link-free line,
+    /// so old keepers degrade to text.
     pub fn into_snapshot_lines(self) -> Vec<SnapshotLine> {
         let mut styles = self.styles.into_iter();
+        let mut links = self.links.into_iter();
         self.lines
             .into_iter()
             .map(|text| SnapshotLine {
                 text,
                 runs: styles.next().unwrap_or_default(),
+                links: links.next().unwrap_or_default(),
             })
             .collect()
     }
@@ -731,20 +739,34 @@ impl KeeperSurface {
             .capture_scrollback_slice(start_line, line_count);
         let mut lines = Vec::with_capacity(slice.lines.len());
         let mut styles = Vec::with_capacity(slice.lines.len());
+        let mut links = Vec::with_capacity(slice.lines.len());
         for line in slice.lines {
             lines.push(line.text);
             styles.push(line.runs);
+            links.push(line.links);
         }
 
         // Styles are best-effort: a large `line_count` could produce a styled
         // payload big enough to blow the keeper JSON (16 MiB) or client frame
         // (8 MiB) caps. If the estimated styling exceeds the budget, ship plain
-        // text — the text always survives.
+        // text — the text always survives. Link tables count at their URI and
+        // id length, since one long URI can outweigh many runs.
         let run_count: usize = styles.iter().map(Vec::len).sum();
-        if run_count.saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES) > MAX_STYLE_PAYLOAD_BYTES
+        let link_bytes: usize = links
+            .iter()
+            .flatten()
+            .map(|link| link.uri.len() + link.id.as_ref().map_or(0, String::len))
+            .sum();
+        if run_count
+            .saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES)
+            .saturating_add(link_bytes)
+            > MAX_STYLE_PAYLOAD_BYTES
             || styles.iter().all(Vec::is_empty)
         {
             styles.clear();
+        }
+        if styles.is_empty() || links.iter().all(Vec::is_empty) {
+            links.clear();
         }
 
         KeeperScrollbackSlice {
@@ -752,6 +774,7 @@ impl KeeperSurface {
             total_lines: slice.total_lines,
             lines,
             styles,
+            links,
         }
     }
 }
@@ -1916,6 +1939,23 @@ mod tests {
         KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
         spawn_status_poller, status_update_delta,
     };
+
+    #[test]
+    fn scrollback_slice_carries_hyperlinks_through_keeper_json() {
+        let mut surface = super::KeeperSurface::new(embers_core::PtySize::new(20, 2));
+        let _ = surface.route_output(b"\x1b]8;id=x;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+
+        let slice = surface.capture_scrollback_slice(0, 1);
+        let json = serde_json::to_string(&slice).expect("serialize slice");
+        let decoded: super::KeeperScrollbackSlice =
+            serde_json::from_str(&json).expect("deserialize slice");
+        let lines = decoded.into_snapshot_lines();
+
+        assert_eq!(lines[0].text, "link");
+        let link = lines[0].link(&lines[0].runs[0]).expect("run is linked");
+        assert_eq!(link.uri, "https://example.com");
+        assert_eq!(link.id.as_deref(), Some("x"));
+    }
 
     fn status_with_cwd(sequence: u64, cwd: Option<&str>) -> BufferRuntimeStatus {
         BufferRuntimeStatus {

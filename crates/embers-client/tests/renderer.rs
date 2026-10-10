@@ -3,7 +3,8 @@ use embers_client::{
     SelectionState,
 };
 use embers_core::{
-    CellAttrs, CursorPosition, CursorShape, CursorState, Size, SnapshotLine, StyledRun, TermColor,
+    CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
+    TermColor,
 };
 
 use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
@@ -18,7 +19,9 @@ fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
             bg: TermColor::Default,
             attrs: CellAttrs(attrs),
             underline_color: TermColor::Default,
+            link: 0,
         }],
+        links: Vec::new(),
     }
 }
 
@@ -379,6 +382,7 @@ fn renders_underline_styles_with_colon_subparameters() {
                 ..StyledRun::default()
             })
             .collect(),
+        links: Vec::new(),
     };
     let ansi = render_focused_with_lines(vec![line])
         .ansi_lines()
@@ -415,6 +419,67 @@ fn renders_underline_color() {
     assert!(
         ansi.contains("\x1b[58:5:3m"),
         "expected indexed underline color in {ansi:?}"
+    );
+}
+
+fn linked_line(text: &str, linked_len: u32, link: Hyperlink) -> SnapshotLine {
+    SnapshotLine {
+        text: text.to_owned(),
+        runs: vec![
+            StyledRun {
+                len: linked_len,
+                link: 1,
+                ..StyledRun::default()
+            },
+            StyledRun {
+                len: text.len() as u32 - linked_len,
+                ..StyledRun::default()
+            },
+        ],
+        links: vec![link],
+    }
+}
+
+#[test]
+fn renders_osc8_hyperlinks_and_closes_them() {
+    let grid = render_focused_with_lines(vec![linked_line(
+        "docs here",
+        4,
+        Hyperlink {
+            id: Some("d1".to_owned()),
+            uri: "https://example.com/docs".to_owned(),
+        },
+    )]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b]8;id=d1;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ here"),
+        "expected an OSC 8 span around the linked text in {ansi:?}"
+    );
+    // Every opened link is closed on its own row.
+    for line in grid.ansi_lines() {
+        assert_eq!(
+            line.matches("\x1b]8;id=").count() + line.matches("\x1b]8;;http").count(),
+            line.matches("\x1b]8;;\x1b\\").count(),
+            "unbalanced OSC 8 in {line:?}"
+        );
+    }
+}
+
+#[test]
+fn osc8_emission_strips_control_characters() {
+    // A URI cannot smuggle a terminator or a new escape sequence to the host.
+    let grid = render_focused_with_lines(vec![linked_line(
+        "x",
+        1,
+        Hyperlink {
+            id: Some("a;b:c".to_owned()),
+            uri: "https://e.com/\x07\x1b]0;pwned\x1b\\".to_owned(),
+        },
+    )]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b]8;id=abc;https://e.com/]0;pwned\\\x1b\\x"),
+        "expected sanitized OSC 8 in {ansi:?}"
     );
 }
 

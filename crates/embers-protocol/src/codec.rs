@@ -2,8 +2,8 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, CellAttrs, CursorShape, CursorState, ErrorCode, FloatGeometry,
-    FloatingId, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection, StyledRun,
-    TermColor, WireError,
+    FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, SnapshotLine, SplitDirection,
+    StyledRun, TermColor, WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -508,12 +508,15 @@ fn encode_styled_lines<'a>(
             let runs = builder.create_vector(&runs);
             let underline_colors =
                 encode_underline_colors(&line.runs).map(|colors| builder.create_vector(&colors));
+            let (links, run_links) = encode_line_links(builder, line);
             fb::StyledLine::create(
                 builder,
                 &fb::StyledLineArgs {
                     line_index: u32::try_from(index).unwrap_or(u32::MAX),
                     runs: Some(runs),
                     underline_colors,
+                    links,
+                    run_links,
                 },
             )
         })
@@ -537,6 +540,34 @@ fn encode_styled_run(run: &StyledRun) -> fb::StyledRunWire {
         bg_b,
         run.attrs.bits(),
     )
+}
+
+type HyperlinksOffset<'a> = flatbuffers::WIPOffset<
+    flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<fb::HyperlinkWire<'a>>>,
+>;
+type RunLinksOffset<'a> = flatbuffers::WIPOffset<flatbuffers::Vector<'a, u16>>;
+
+/// A line's hyperlink table plus the per-run link indexes, or `(None, None)`
+/// when no run is linked.
+fn encode_line_links<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    line: &SnapshotLine,
+) -> (Option<HyperlinksOffset<'a>>, Option<RunLinksOffset<'a>>) {
+    if line.links.is_empty() || line.runs.iter().all(|run| run.link == 0) {
+        return (None, None);
+    }
+    let links: Vec<_> = line
+        .links
+        .iter()
+        .map(|link| {
+            let id = link.id.as_deref().map(|id| builder.create_string(id));
+            let uri = builder.create_string(&link.uri);
+            fb::HyperlinkWire::create(builder, &fb::HyperlinkWireArgs { id, uri: Some(uri) })
+        })
+        .collect();
+    let links = builder.create_vector(&links);
+    let run_links: Vec<u16> = line.runs.iter().map(|run| run.link).collect();
+    (Some(links), Some(builder.create_vector(&run_links)))
 }
 
 /// Sparse underline colors for a line's runs: one entry per run whose underline
@@ -577,7 +608,8 @@ fn decode_styled_lines(
     texts: Vec<String>,
     styles: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::StyledLine<'_>>>>,
 ) -> Vec<SnapshotLine> {
-    let mut per_line: Vec<Vec<StyledRun>> = vec![Vec::new(); texts.len()];
+    let mut per_line: Vec<(Vec<StyledRun>, Vec<Hyperlink>)> =
+        vec![(Vec::new(), Vec::new()); texts.len()];
     if let Some(styles) = styles {
         for entry in styles.iter() {
             let index = entry.line_index() as usize;
@@ -592,7 +624,8 @@ fn decode_styled_lines(
                             decode_term_color(color.kind(), color.r(), color.g(), color.b());
                     }
                 }
-                per_line[index] = decoded;
+                let links = decode_line_links(&entry, &mut decoded);
+                per_line[index] = (decoded, links);
             }
         }
     }
@@ -600,13 +633,36 @@ fn decode_styled_lines(
     texts
         .into_iter()
         .zip(per_line)
-        .map(|(text, runs)| {
+        .map(|(text, (runs, links))| {
             let covered: u64 = runs.iter().map(|run| u64::from(run.len)).sum();
             if runs.is_empty() || covered == text.len() as u64 {
-                SnapshotLine { text, runs }
+                SnapshotLine { text, runs, links }
             } else {
                 SnapshotLine::plain(text)
             }
+        })
+        .collect()
+}
+
+/// Decode a line's hyperlink table onto its already-decoded runs. A `run_links`
+/// vector that does not match `runs` in length is ignored, leaving the line
+/// unlinked; an index past the table stays on the run and resolves to nothing
+/// through [`SnapshotLine::link`].
+fn decode_line_links(entry: &fb::StyledLine<'_>, runs: &mut [StyledRun]) -> Vec<Hyperlink> {
+    let (Some(links), Some(run_links)) = (entry.links(), entry.run_links()) else {
+        return Vec::new();
+    };
+    if run_links.len() != runs.len() {
+        return Vec::new();
+    }
+    for (run, link) in runs.iter_mut().zip(run_links.iter()) {
+        run.link = link;
+    }
+    links
+        .iter()
+        .map(|link| Hyperlink {
+            id: link.id().map(str::to_owned),
+            uri: link.uri().unwrap_or_default().to_owned(),
         })
         .collect()
 }
@@ -618,6 +674,7 @@ fn decode_styled_run(run: &fb::StyledRunWire) -> StyledRun {
         bg: decode_term_color(run.bg_kind(), run.bg_r(), run.bg_g(), run.bg_b()),
         attrs: CellAttrs(run.attrs()),
         underline_color: TermColor::Default,
+        link: 0,
     }
 }
 
@@ -6413,6 +6470,7 @@ mod tests {
                         bg: TermColor::Default,
                         attrs: CellAttrs(CellAttrs::BOLD),
                         underline_color: TermColor::Default,
+                        link: 0,
                     },
                     StyledRun {
                         len: 1,
@@ -6420,8 +6478,10 @@ mod tests {
                         bg: TermColor::Indexed(4),
                         attrs: CellAttrs::empty(),
                         underline_color: TermColor::Default,
+                        link: 0,
                     },
                 ],
+                links: Vec::new(),
             },
             SnapshotLine::plain("plain"),
         ]);
@@ -6440,7 +6500,9 @@ mod tests {
                 bg: TermColor::Default,
                 attrs: CellAttrs::empty(),
                 underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         };
         let envelope = styled_visible(vec![
             SnapshotLine::plain("first"),
@@ -6460,6 +6522,79 @@ mod tests {
     }
 
     #[test]
+    fn hyperlinks_round_trip_and_stay_off_link_free_lines() {
+        let linked = SnapshotLine {
+            text: "go here".to_owned(),
+            runs: vec![
+                StyledRun {
+                    len: 3,
+                    link: 2,
+                    ..StyledRun::default()
+                },
+                StyledRun {
+                    len: 4,
+                    link: 1,
+                    ..StyledRun::default()
+                },
+            ],
+            links: vec![
+                embers_core::Hyperlink {
+                    id: Some("x".to_owned()),
+                    uri: "https://example.com/x".to_owned(),
+                },
+                embers_core::Hyperlink {
+                    id: None,
+                    uri: "file:///tmp/a;b".to_owned(),
+                },
+            ],
+        };
+        let colored = SnapshotLine {
+            text: "red".to_owned(),
+            runs: vec![StyledRun {
+                len: 3,
+                fg: TermColor::Indexed(1),
+                ..StyledRun::default()
+            }],
+            links: Vec::new(),
+        };
+        let envelope = styled_visible(vec![linked, colored]);
+        assert_eq!(round_trip(&envelope), envelope);
+
+        let bytes = encode_server_envelope(&envelope).expect("encode succeeds");
+        let decoded = flatbuffers::root::<fb::Envelope>(&bytes).expect("valid envelope");
+        let styles = decoded
+            .visible_snapshot_response()
+            .and_then(|resp| resp.styles())
+            .expect("styles present");
+        assert_eq!(styles.get(0).links().map(|links| links.len()), Some(2));
+        assert!(styles.get(1).links().is_none());
+        assert!(styles.get(1).run_links().is_none());
+    }
+
+    #[test]
+    fn decode_drops_links_that_do_not_match_runs() {
+        // A link index past the table resolves to nothing rather than failing.
+        let envelope = styled_visible(vec![SnapshotLine {
+            text: "ab".to_owned(),
+            runs: vec![StyledRun {
+                len: 2,
+                link: 5,
+                ..StyledRun::default()
+            }],
+            links: vec![embers_core::Hyperlink {
+                id: None,
+                uri: "https://example.com".to_owned(),
+            }],
+        }]);
+        let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = round_trip(&envelope)
+        else {
+            panic!("expected visible snapshot");
+        };
+        assert_eq!(resp.lines[0].text, "ab");
+        assert_eq!(resp.lines[0].link(&resp.lines[0].runs[0]), None);
+    }
+
+    #[test]
     fn underline_style_and_color_round_trip_sparsely() {
         let curly_red = StyledRun {
             len: 2,
@@ -6467,6 +6602,7 @@ mod tests {
             bg: TermColor::Default,
             attrs: CellAttrs(CellAttrs::CURLY_UNDERLINE),
             underline_color: TermColor::Rgb { r: 255, g: 0, b: 0 },
+            link: 0,
         };
         let dotted = StyledRun {
             len: 1,
@@ -6474,6 +6610,7 @@ mod tests {
             bg: TermColor::Default,
             attrs: CellAttrs(CellAttrs::DOTTED_UNDERLINE),
             underline_color: TermColor::Default,
+            link: 0,
         };
         let indexed = StyledRun {
             len: 1,
@@ -6481,15 +6618,18 @@ mod tests {
             bg: TermColor::Default,
             attrs: CellAttrs(CellAttrs::DASHED_UNDERLINE),
             underline_color: TermColor::Indexed(12),
+            link: 0,
         };
         let envelope = styled_visible(vec![
             SnapshotLine {
                 text: "abcd".to_owned(),
                 runs: vec![curly_red, dotted, indexed],
+                links: Vec::new(),
             },
             SnapshotLine {
                 text: "x".to_owned(),
                 runs: vec![dotted],
+                links: Vec::new(),
             },
         ]);
         assert_eq!(round_trip(&envelope), envelope);
@@ -6521,7 +6661,9 @@ mod tests {
                 bg: TermColor::Default,
                 attrs: CellAttrs::empty(),
                 underline_color: TermColor::Default,
+                link: 0,
             }],
+            links: Vec::new(),
         }]);
         let decoded = round_trip(&envelope);
         if let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = decoded {
