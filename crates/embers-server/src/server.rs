@@ -2112,7 +2112,16 @@ impl Runtime {
             self.buffer_runtime_callbacks(),
         )
         .await?;
-        let status = runtime.status().await?;
+        // The caller drops the buffer record on error, so stop the keeper too
+        // rather than leave it running with nothing referring to it.
+        let status = match runtime.status().await {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = runtime.kill().await;
+                let _ = runtime.join_threads().await;
+                return Err(error);
+            }
+        };
 
         {
             let mut state = self.state.lock().await;

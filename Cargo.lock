@@ -653,6 +653,7 @@ name = "embers-test-support"
 version = "0.2.0"
 dependencies = [
  "assert_cmd",
+ "base64",
  "embers-core",
  "embers-protocol",
  "embers-server",
