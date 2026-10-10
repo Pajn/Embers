@@ -211,6 +211,15 @@ impl RenderGrid {
         self.cursor = cursor.filter(|cursor| cursor.x < self.width && cursor.y < self.height);
     }
 
+    /// The style of the cell at `x`, `y`, if it is inside the grid.
+    pub fn cell_style(&self, x: u16, y: u16) -> Option<CellStyle> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let index = usize::from(y) * usize::from(self.width) + usize::from(x);
+        self.cells.get(index).map(|cell| cell.style)
+    }
+
     pub fn put_char(&mut self, x: u16, y: u16, ch: char) {
         self.put_char_styled(x, y, ch, CellStyle::default());
     }

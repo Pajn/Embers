@@ -59,6 +59,22 @@ dividers underneath them.
 
 The built-in config turns this on; `mouse.set_drag_resize(false)` turns it off.
 
+## Divider colors
+
+Dividers between panes are drawn dim by default. Like tmux's
+`pane-border-style` and `pane-active-border-style`, the theme can color them,
+with the cells along the focused pane's edges in a color of their own:
+
+```rhai
+theme.set_pane_border_color("brightblack");
+theme.set_pane_active_border_color("magenta");
+```
+
+Colors are `"#RRGGBB"` or one of the sixteen ANSI names, `"black"` to
+`"white"` and `"brightblack"` to `"brightwhite"`, which follow the host
+terminal's color scheme. Without an active color the cells next to the focused
+pane take the other color. Popup frames are not affected.
+
 ## Synchronize panes
 
 While `synchronize-panes` is on for a window (a root tab), input typed into

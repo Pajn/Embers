@@ -290,9 +290,7 @@ for mode in ["copy", "select"] {
 // pane title or program, cut to 24 characters. The right side shows the
 // focused pane's directory.
 //
-// Not available: the tab bar is always at the top (status-position bottom),
-// and pane borders take no colours (pane-border-style and
-// pane-active-border-style); the focused pane's title is drawn bold.
+// Not available: the tab bar is always at the top (status-position bottom).
 theme.set_palette(#{
     base: "#303446",
     surface: "#51576d",
@@ -300,6 +298,11 @@ theme.set_palette(#{
     accent: "#ca9ee6",
     urgent: "#e78284"
 });
+
+// pane-active-border-style fg=magenta, pane-border-style fg=brightblack: the
+// dividers next to the focused pane in magenta, the others in bright black.
+theme.set_pane_active_border_color("magenta");
+theme.set_pane_border_color("brightblack");
 
 // The last two components of a path: /home/me/src/app -> src/app.
 fn short_path(path) {

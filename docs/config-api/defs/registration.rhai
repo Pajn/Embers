@@ -861,6 +861,34 @@ fn set_wheel_scroll(mouse: MouseApi, value: bool) -> ();
 /// # rhai-autodocs:index:21
 fn set_palette(theme: ThemeApi, palette: map) -> ();
 
+/// Color the divider cells next to the focused pane, like tmux's
+/// `pane-active-border-style fg=...`. Takes the same colors as
+/// `set_pane_border_color`. Without it they are drawn like the others.
+///
+/// # Example
+///
+/// ```rhai
+/// theme.set_pane_active_border_color("magenta");
+/// ```
+///
+/// # rhai-autodocs:index:21
+fn set_pane_active_border_color(theme: ThemeApi, color: string) -> ();
+
+/// Color the dividers between panes, except next to the focused pane,
+/// like tmux's `pane-border-style fg=...`. Takes `"#RRGGBB"` or one of
+/// the sixteen ANSI color names (`"black"` to `"white"` and
+/// `"brightblack"` to `"brightwhite"`), which follow the terminal's color
+/// scheme. Without it dividers are drawn dim.
+///
+/// # Example
+///
+/// ```rhai
+/// theme.set_pane_border_color("brightblack");
+/// ```
+///
+/// # rhai-autodocs:index:21
+fn set_pane_border_color(theme: ThemeApi, color: string) -> ();
+
 /// Register the function used to format the tab bar.
 ///
 /// # rhai-autodocs:index:20

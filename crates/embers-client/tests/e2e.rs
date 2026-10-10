@@ -188,7 +188,7 @@ async fn render_session(
         },
     )
     .expect("projection succeeds");
-    Renderer.render(client.state(), &model).render()
+    Renderer::default().render(client.state(), &model).render()
 }
 
 async fn poll_for_tab_activity(
@@ -1342,7 +1342,7 @@ async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
         },
     )
     .expect("projection succeeds");
-    let grid = Renderer.render(client.state(), &model);
+    let grid = Renderer::default().render(client.state(), &model);
     let rendered = (grid.ansi_lines().join("\n"), grid.render());
 
     server.shutdown().await.expect("server shuts down");

@@ -122,7 +122,6 @@ pub struct ConfiguredClient<T> {
     client: MuxClient<T>,
     config: ConfigManager,
     input_state: InputState,
-    renderer: Renderer,
     notifications: Vec<String>,
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
@@ -171,7 +170,6 @@ where
             client,
             config,
             input_state: InputState::default(),
-            renderer: Renderer,
             notifications: Vec::new(),
             active_session_id: None,
             previous_session_id: None,
@@ -977,9 +975,15 @@ where
             }
         }
 
+        let renderer = Renderer::new(
+            self.config
+                .active_script()
+                .loaded_config()
+                .theme
+                .pane_borders,
+        );
         let mut grid =
-            self.renderer
-                .render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+            renderer.render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
         self.flush_passthrough(&presentation);
         if let Some(chooser) = &mut self.chooser {
             let rows = chooser.rows(self.client.state(), self.active_session_id, {

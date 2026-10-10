@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-3c28c966.js";
+            window.path_to_searchindex_js = "searchindex-91493e2b.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -190,6 +190,70 @@ Description
 
 <div group="set_palette" id="set_palette-Description" class="tabcontent" style="display: block;">
 Add named colors to the theme palette.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_pane_active_border_color </h2>
+
+<pre><code class="language-rust ignore">fn set_pane_active_border_color(theme: ThemeApi, color: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_pane_active_border_color" id="link-set_pane_active_border_color-Description" class="tablinks active" onclick="openTab(event, &#39;set_pane_active_border_color&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_pane_active_border_color" id="link-set_pane_active_border_color-Example" class="tablinks" onclick="openTab(event, &#39;set_pane_active_border_color&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_pane_active_border_color" id="set_pane_active_border_color-Description" class="tabcontent" style="display: block;">
+Color the divider cells next to the focused pane, like tmux's
+`pane-active-border-style fg=...`. Takes the same colors as
+`set_pane_border_color`. Without it they are drawn like the others.
+</div>
+
+<div group="set_pane_active_border_color" id="set_pane_active_border_color-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">theme.set_pane_active_border_color("magenta");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_pane_border_color </h2>
+
+<pre><code class="language-rust ignore">fn set_pane_border_color(theme: ThemeApi, color: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_pane_border_color" id="link-set_pane_border_color-Description" class="tablinks active" onclick="openTab(event, &#39;set_pane_border_color&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_pane_border_color" id="link-set_pane_border_color-Example" class="tablinks" onclick="openTab(event, &#39;set_pane_border_color&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_pane_border_color" id="set_pane_border_color-Description" class="tabcontent" style="display: block;">
+Color the dividers between panes, except next to the focused pane,
+like tmux's `pane-border-style fg=...`. Takes `"#RRGGBB"` or one of
+the sixteen ANSI color names (`"black"` to `"white"` and
+`"brightblack"` to `"brightwhite"`), which follow the terminal's color
+scheme. Without it dividers are drawn dim.
+</div>
+
+<div group="set_pane_border_color" id="set_pane_border_color-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">theme.set_pane_border_color("brightblack");
+</code></pre>
 </div>
 
 </div>

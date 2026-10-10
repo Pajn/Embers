@@ -246,7 +246,7 @@ The docs directory contains design notes that are useful when changing behavior:
 - [`docs/terminal-backend-boundary.md`](docs/terminal-backend-boundary.md): server/backend responsibility boundary
 - [`docs/terminal-capture-model.md`](docs/terminal-capture-model.md): terminal capture and snapshot model
 - [`docs/input-routing.md`](docs/input-routing.md): input routing model
-- [`docs/layout-controls.md`](docs/layout-controls.md): pane resizing, divider dragging, and synchronize-panes
+- [`docs/layout-controls.md`](docs/layout-controls.md): pane resizing, divider dragging and colors, and synchronize-panes
 - [`docs/activity-bell-policy.md`](docs/activity-bell-policy.md): activity and bell state policy
 - [`docs/render-source-contract.md`](docs/render-source-contract.md): rendering source-of-truth contract
 

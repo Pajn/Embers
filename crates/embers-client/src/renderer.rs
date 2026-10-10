@@ -6,11 +6,20 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
-use crate::scripting::{BarSegment, BarSpec};
+use crate::scripting::{BarSegment, BarSpec, PaneBorderColors};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Renderer;
+pub struct Renderer {
+    /// Divider colors from the theme.
+    pub pane_borders: PaneBorderColors,
+}
+
+impl Renderer {
+    pub fn new(pane_borders: PaneBorderColors) -> Self {
+        Self { pane_borders }
+    }
+}
 
 /// Follow-output viewport positioning shared by the renderer and the hints scan
 /// so overlays align with drawn content.
@@ -104,12 +113,16 @@ impl Renderer {
             self.render_leaf(state, grid, leaf);
         }
 
+        let focused = model
+            .focused_leaf()
+            .filter(|leaf| leaf.floating_id == floating_id)
+            .map(|leaf| leaf.rect);
         for divider in model
             .dividers
             .iter()
             .filter(|divider| divider.floating_id == floating_id)
         {
-            self.render_divider(grid, divider);
+            self.render_divider(grid, divider, focused);
         }
 
         for tabs in model
@@ -370,20 +383,41 @@ impl Renderer {
         }
     }
 
-    fn render_divider(&self, grid: &mut RenderGrid, divider: &DividerFrame) {
+    /// Draw a divider, coloring the cells that border `focused`, the focused
+    /// pane's rect, with the active border color.
+    fn render_divider(&self, grid: &mut RenderGrid, divider: &DividerFrame, focused: Option<Rect>) {
         if divider.rect.size.width == 0 || divider.rect.size.height == 0 {
             return;
         }
 
-        let x = clamp_i32_to_u16(divider.rect.origin.x);
-        let y = clamp_i32_to_u16(divider.rect.origin.y);
-        match divider.direction {
-            embers_core::SplitDirection::Horizontal => {
-                grid.draw_hline_styled(x, y, divider.rect.size.width, '-', divider_style());
-            }
-            embers_core::SplitDirection::Vertical => {
-                grid.draw_vline_styled(x, y, divider.rect.size.height, '|', divider_style());
-            }
+        let rect = divider.rect;
+        let (ch, cells) = match divider.direction {
+            embers_core::SplitDirection::Horizontal => ('-', rect.size.width),
+            embers_core::SplitDirection::Vertical => ('|', rect.size.height),
+        };
+        for offset in 0..cells {
+            let (x, y) = match divider.direction {
+                embers_core::SplitDirection::Horizontal => {
+                    (rect.origin.x + i32::from(offset), rect.origin.y)
+                }
+                embers_core::SplitDirection::Vertical => {
+                    (rect.origin.x, rect.origin.y + i32::from(offset))
+                }
+            };
+            let active = focused.is_some_and(|pane| borders(pane, divider.direction, x, y));
+            let color = if active {
+                self.pane_borders.active.or(self.pane_borders.inactive)
+            } else {
+                self.pane_borders.inactive
+            };
+            let style = match color {
+                Some(color) => CellStyle {
+                    fg: Some(color),
+                    ..CellStyle::default()
+                },
+                None => divider_style(),
+            };
+            grid.put_char_styled(clamp_i32_to_u16(x), clamp_i32_to_u16(y), ch, style);
         }
     }
 
@@ -706,6 +740,23 @@ fn leaf_title_style(focused: bool) -> CellStyle {
         CellStyle::default().with_bold()
     } else {
         CellStyle::default()
+    }
+}
+
+/// Whether the divider cell at `x`, `y` lies along an edge of `pane`: beside
+/// it for a vertical divider, above or below it for a horizontal one.
+fn borders(pane: Rect, direction: embers_core::SplitDirection, x: i32, y: i32) -> bool {
+    let left = pane.origin.x;
+    let top = pane.origin.y;
+    let right = left + i32::from(pane.size.width);
+    let bottom = top + i32::from(pane.size.height);
+    match direction {
+        embers_core::SplitDirection::Vertical => {
+            (x == left - 1 || x == right) && (top..bottom).contains(&y)
+        }
+        embers_core::SplitDirection::Horizontal => {
+            (y == top - 1 || y == bottom) && (left..right).contains(&x)
+        }
     }
 }
 

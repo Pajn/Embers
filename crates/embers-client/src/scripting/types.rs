@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use rhai::AST;
 use thiserror::Error;
 
+use crate::grid::TerminalColor;
 use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
 
@@ -58,6 +59,47 @@ impl RgbColor {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSpec {
     pub palette: BTreeMap<String, RgbColor>,
+    /// Colors of the dividers between panes.
+    pub pane_borders: PaneBorderColors,
+}
+
+/// Colors of the dividers between panes, like tmux's `pane-border-style` and
+/// `pane-active-border-style`. A divider cell next to the focused pane takes
+/// `active`, every other one `inactive`; an unset color leaves the cells dim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneBorderColors {
+    pub active: Option<TerminalColor>,
+    pub inactive: Option<TerminalColor>,
+}
+
+/// The sixteen ANSI color names, as tmux spells them, with their palette
+/// indexes. They follow the host terminal's color scheme.
+const ANSI_COLOR_NAMES: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "brightblack",
+    "brightred",
+    "brightgreen",
+    "brightyellow",
+    "brightblue",
+    "brightmagenta",
+    "brightcyan",
+    "brightwhite",
+];
+
+/// Parse a color given as `#RRGGBB` or as one of the sixteen ANSI color
+/// names (`magenta`, `brightblack`, ...).
+pub fn parse_terminal_color(value: &str) -> Result<TerminalColor, PaletteError> {
+    if let Some(index) = ANSI_COLOR_NAMES.iter().position(|name| *name == value) {
+        return Ok(TerminalColor::Indexed(index as u8));
+    }
+    RgbColor::parse(value).map(|color| TerminalColor::Rgb(color.into()))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

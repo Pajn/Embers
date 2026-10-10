@@ -298,6 +298,44 @@ fn tab_bar_formatters_read_the_pane_each_tab_shows() {
 }
 
 #[test]
+fn theme_sets_pane_border_colors() {
+    use embers_client::{Color, PaneBorderColors, TerminalColor};
+
+    let harness = ScriptHarness::load(
+        r##"
+            theme.set_pane_border_color("brightblack");
+            theme.set_pane_active_border_color("#ca9ee6");
+        "##,
+    )
+    .unwrap();
+    assert_eq!(
+        harness.engine().loaded_config().theme.pane_borders,
+        PaneBorderColors {
+            inactive: Some(TerminalColor::Indexed(8)),
+            active: Some(TerminalColor::Rgb(Color {
+                red: 0xca,
+                green: 0x9e,
+                blue: 0xe6,
+            })),
+        }
+    );
+
+    // Both default to unset, which keeps the dim dividers.
+    let plain = ScriptHarness::load("").unwrap();
+    assert_eq!(
+        plain.engine().loaded_config().theme.pane_borders,
+        PaneBorderColors::default()
+    );
+
+    for bad in [
+        r#"theme.set_pane_border_color("mauve");"#,
+        r##"theme.set_pane_active_border_color("#12");"##,
+    ] {
+        assert!(ScriptHarness::load(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn harness_rejects_empty_notation_without_panicking() {
     let mut harness = ScriptHarness::load("").unwrap();
 

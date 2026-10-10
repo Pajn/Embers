@@ -41,7 +41,7 @@ fn render_focused_with_lines(lines: Vec<SnapshotLine>) -> embers_client::RenderG
         },
     )
     .expect("projection succeeds");
-    Renderer.render(&state, &presentation)
+    Renderer::default().render(&state, &presentation)
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn renders_hint_labels_over_matches() {
         },
     )
     .expect("projection succeeds");
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     let rendered = grid.render();
     // The label 'a' is drawn over the first cell of the match (the URL's 'h'),
     // leaving the rest of the matched text in place.
@@ -95,7 +95,7 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
 
     let grid = renderer.render(&state, &presentation);
 
@@ -121,6 +121,53 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
 }
 
 #[test]
+fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
+    use embers_client::{PaneBorderColors, TerminalColor};
+
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let active = TerminalColor::Indexed(5);
+    let inactive = TerminalColor::Indexed(8);
+    let renderer = Renderer {
+        pane_borders: PaneBorderColors {
+            active: Some(active),
+            inactive: Some(inactive),
+        },
+    };
+
+    let grid = renderer.render(&state, &presentation);
+
+    // The divider is column 13. The focused pane on its right starts at row 2,
+    // under its nested tab bar: the divider is active alongside it only.
+    assert_eq!(
+        grid.render().lines().nth(2).unwrap().chars().nth(13),
+        Some('|')
+    );
+    for row in 2..5 {
+        let style = grid.cell_style(13, row).unwrap();
+        assert_eq!(style.fg, Some(active), "row {row}");
+        assert!(!style.dim, "row {row}");
+    }
+    assert_eq!(grid.cell_style(13, 1).unwrap().fg, Some(inactive));
+
+    // Without theme colors every divider cell stays dim and uncolored.
+    let plain = Renderer::default().render(&state, &presentation);
+    for row in 1..5 {
+        let style = plain.cell_style(13, row).unwrap();
+        assert_eq!(style.fg, None, "row {row}");
+        assert!(style.dim, "row {row}");
+    }
+}
+
+#[test]
 fn default_tab_bar_marks_synchronized_windows() {
     let mut state = demo_state();
     let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();
@@ -135,7 +182,7 @@ fn default_tab_bar_marks_synchronized_windows() {
     )
     .expect("projection succeeds");
 
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
 
     assert!(
         grid.render()
@@ -157,7 +204,7 @@ fn truncates_titles_in_narrow_viewports() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
 
     let grid = renderer.render(&state, &presentation);
 
@@ -185,7 +232,7 @@ fn renderer_emits_styles_and_tracks_cursor_position() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let focused_leaf = presentation.focused_leaf().expect("focused leaf");
 
     let grid = renderer.render(&state, &presentation);
@@ -232,7 +279,7 @@ fn renderer_shows_scroll_indicator_and_search_highlights() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
@@ -266,7 +313,7 @@ fn renderer_uses_snapshot_lines_for_overlays_when_visible_lines_are_empty() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
@@ -303,7 +350,7 @@ fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
 
     assert!(grid.cursor().is_none());
@@ -340,7 +387,7 @@ fn renderer_draws_the_copy_mode_cursor_instead_of_the_program_cursor() {
     )
     .unwrap();
     let leaf = presentation.focused_leaf().unwrap().clone();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
 
     assert_eq!(
         grid.cursor(),
@@ -385,7 +432,7 @@ fn selection_composes_with_content_color() {
         },
     )
     .unwrap();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
     // The selected span keeps its red foreground and gains reverse — the two
@@ -624,7 +671,7 @@ fn scrolled_styled_view_keeps_color() {
         },
     )
     .unwrap();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     assert!(
         grid.ansi_lines()
             .iter()

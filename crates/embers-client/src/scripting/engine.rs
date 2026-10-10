@@ -23,7 +23,7 @@ use crate::host_terminal::TerminalFeatures;
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
-    RgbColor, ScriptFunctionRef, ThemeSpec,
+    RgbColor, ScriptFunctionRef, ThemeSpec, parse_terminal_color,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -522,6 +522,29 @@ impl ThemeApi {
         }
         Ok(())
     }
+
+    fn set_pane_border_color(
+        &self,
+        position: Position,
+        active: bool,
+        value: &str,
+    ) -> ScriptResult<()> {
+        let color = parse_terminal_color(value).map_err(|_| {
+            runtime_error(
+                format!("pane border color must be '#RRGGBB' or an ANSI color name such as \"magenta\" or \"brightblack\", not \"{value}\""),
+                position,
+            )
+        })?;
+        let registration = clone_active_registration(position)?;
+        let mut registration = registration.lock().expect("registration lock");
+        let borders = &mut registration.theme.pane_borders;
+        if active {
+            borders.active = Some(color);
+        } else {
+            borders.inactive = Some(color);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1003,6 +1026,48 @@ mod theme_registration_api {
     #[rhai_fn(return_raw, name = "set_palette")]
     pub fn set_palette(ctx: NativeCallContext, theme: ThemeApi, palette: Map) -> RhaiResultOf<()> {
         theme.set_palette(ctx.call_position(), palette)
+    }
+
+    /// Color the dividers between panes, except next to the focused pane,
+    /// like tmux's `pane-border-style fg=...`. Takes `"#RRGGBB"` or one of
+    /// the sixteen ANSI color names (`"black"` to `"white"` and
+    /// `"brightblack"` to `"brightwhite"`), which follow the terminal's color
+    /// scheme. Without it dividers are drawn dim.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_pane_border_color("brightblack");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_pane_border_color")]
+    pub fn set_pane_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_pane_border_color(ctx.call_position(), false, color)
+    }
+
+    /// Color the divider cells next to the focused pane, like tmux's
+    /// `pane-active-border-style fg=...`. Takes the same colors as
+    /// `set_pane_border_color`. Without it they are drawn like the others.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_pane_active_border_color("magenta");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_pane_active_border_color")]
+    pub fn set_pane_active_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_pane_border_color(ctx.call_position(), true, color)
     }
 }
 
