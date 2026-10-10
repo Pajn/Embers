@@ -122,8 +122,11 @@ socket in the server's runtime directory.
 - a clean server shutdown leaves keepers running, so a restarted server can reattach through
   their sockets and restore `Running` buffers
 - a keeper keeps serving captures after its child exits while a server stays attached to it
-- once no server is attached, a keeper whose child has exited has nothing left to reattach to
-  and exits; a restarted server keeps the buffer record as `Exited`
+- a keeper whose child has exited stays until a server has saved a workspace that no longer needs
+  it (the buffer recorded as `Exited`, or its record removed) and told the keeper so; once no
+  server is attached after that, it exits. If the server goes down before that save, the keeper
+  waits for the next server, which reattaches and records the buffer as `Exited` instead of
+  taking it for interrupted and running its command again
 - while no server is attached, a keeper also watches its socket; once the socket is removed or
   replaced no server can reattach, so the keeper stops its child (SIGHUP, then SIGKILL) and exits
 

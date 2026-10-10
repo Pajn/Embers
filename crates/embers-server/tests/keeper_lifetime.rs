@@ -293,13 +293,13 @@ async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_th
     // resurrected command would now keep running instead of exiting 3.
     std::fs::remove_file(&release).expect("withdraw the release");
 
-    // No server has seen the exit yet, so the keeper must stay reachable for
+    // No server has saved the exit yet, so the keeper must stay reachable for
     // the next one. Give it several socket-check intervals to (wrongly) leave.
     sleep(Duration::from_millis(1500)).await;
     if let Some(keeper_pid) = keeper_pid {
         assert!(
             process_alive(keeper_pid),
-            "keeper {keeper_pid} exited before any server saw its child exit"
+            "keeper {keeper_pid} exited before any server saved its child exit"
         );
     }
 
@@ -321,13 +321,13 @@ async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_th
     assert_eq!(restored.state, BufferRecordState::Exited);
     assert_eq!(restored.exit_code, Some(3));
 
-    // Now that a server has seen the exit, the keeper leaves once it is gone.
+    // Now that a server has saved the exit, the keeper leaves once it is gone.
     drop(client);
     handle.shutdown().await.expect("shutdown restarted server");
     if let Some(keeper_pid) = keeper_pid {
         assert!(
             wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
-            "keeper {keeper_pid} still running after a server saw its child exit"
+            "keeper {keeper_pid} still running after a server saved its child exit"
         );
     }
 }
