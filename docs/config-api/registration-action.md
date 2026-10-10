@@ -2597,6 +2597,74 @@ Send a key notation sequence to the focused buffer.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_environment </h2>
+
+```rust,ignore
+fn set_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_environment" id="link-set_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_environment', 'Description')">
+Description
+</button>
+<button group="set_environment" id="link-set_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_environment" id="set_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in the current
+session (tmux `set-environment`). Pass `()` as the value to unset it.
+Panes that already run keep their environment.
+</div>
+<div group="set_environment" id="set_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_environment("AWS_PROFILE", "staging")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_global_environment </h2>
+
+```rust,ignore
+fn set_global_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_global_environment" id="link-set_global_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_global_environment', 'Description')">
+Description
+</button>
+<button group="set_global_environment" id="link-set_global_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_global_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_global_environment" id="set_global_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in every session
+(tmux `set-environment -g`). Pass `()` as the value to unset it. A
+session's own value wins over the global one.
+</div>
+<div group="set_global_environment" id="set_global_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_global_environment("EDITOR", "nvim")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_synchronize_panes </h2>
 
 ```rust,ignore

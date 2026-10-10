@@ -946,6 +946,25 @@ where
                     self.spawn_run_shell(command, current_session_id);
                     Ok(())
                 }
+                Action::SetEnvironment {
+                    global,
+                    name,
+                    value,
+                } => match (global, current_session_id) {
+                    (false, None) => Err(MuxError::invalid_input(
+                        "set_environment needs a current session",
+                    )),
+                    (global, session_id) => self
+                        .client
+                        .request_message(ClientMessage::Session(SessionRequest::SetEnvironment {
+                            request_id: self.client.next_request_id(),
+                            session_id: session_id.filter(|_| !global),
+                            name,
+                            value,
+                        }))
+                        .await
+                        .map(|_| ()),
+                },
                 Action::EnterHints { action } => match (current_session_id, current_viewport) {
                     (Some(session_id), Some(viewport)) => {
                         let presentation = self.prepare_presentation(session_id, viewport).await?;
@@ -1900,7 +1919,7 @@ where
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
             TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
             TreeSpec::BufferSpawn(spec) => self
-                .create_buffer(spec, size())
+                .create_buffer(spec, size(), session_id)
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             TreeSpec::BufferEmpty => self
@@ -1912,6 +1931,7 @@ where
                         env: Default::default(),
                     },
                     size(),
+                    session_id,
                 )
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
@@ -1925,6 +1945,7 @@ where
         &self,
         spec: crate::scripting::BufferSpawnSpec,
         size: Option<PtySize>,
+        session_id: SessionId,
     ) -> Result<BufferId> {
         let response = self
             .client
@@ -1935,6 +1956,7 @@ where
                 cwd: spec.cwd,
                 env: spec.env,
                 size,
+                session_id: Some(session_id),
             }))
             .await?;
 

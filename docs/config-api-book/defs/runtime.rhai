@@ -603,6 +603,28 @@ fn send_keys(_: ActionApi, buffer_id: int, notation: string) -> Action;
 /// Send a key notation sequence to the focused buffer.
 fn send_keys_current(_: ActionApi, notation: string) -> Action;
 
+/// Set an environment variable for panes created later in the current
+/// session (tmux `set-environment`). Pass `()` as the value to unset it.
+/// Panes that already run keep their environment.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_environment("AWS_PROFILE", "staging")
+/// ```
+fn set_environment(_: ActionApi, name: string, value: ?) -> Action;
+
+/// Set an environment variable for panes created later in every session
+/// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+/// session's own value wins over the global one.
+///
+/// # Example
+///
+/// ```rhai
+/// action.set_global_environment("EDITOR", "nvim")
+/// ```
+fn set_global_environment(_: ActionApi, name: string, value: ?) -> Action;
+
 /// Turn tmux-style `synchronize-panes` on or off for the active window.
 ///
 /// The setting belongs to the window (a root tab) and is shared by every client. While it

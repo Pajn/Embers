@@ -79,6 +79,22 @@ pub enum SessionRequest {
         session_id: SessionId,
         viewport: Size,
     },
+    /// tmux `set-environment`: set `name` to `value`, or unset it when `value`
+    /// is `None`, in a session's environment, or in the global environment when
+    /// `session_id` is `None`. New buffers created for a session get the global
+    /// environment, then the session's, then their own `env`.
+    SetEnvironment {
+        request_id: RequestId,
+        session_id: Option<SessionId>,
+        name: String,
+        value: Option<String>,
+    },
+    /// tmux `show-environment`: a session's environment, or the global one when
+    /// `session_id` is `None`. Answered with `ServerResponse::Environment`.
+    ShowEnvironment {
+        request_id: RequestId,
+        session_id: Option<SessionId>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +117,9 @@ impl SessionRequest {
             | Self::RenameRootTab { request_id, .. }
             | Self::CloseRootTab { request_id, .. }
             | Self::SetRootTabSynchronizePanes { request_id, .. }
-            | Self::SetViewport { request_id, .. } => *request_id,
+            | Self::SetViewport { request_id, .. }
+            | Self::SetEnvironment { request_id, .. }
+            | Self::ShowEnvironment { request_id, .. } => *request_id,
         }
     }
 }
@@ -117,6 +135,9 @@ pub enum BufferRequest {
         /// The PTY size to start the command at: the size the buffer will be
         /// drawn at once placed. `None` uses the server default.
         size: Option<PtySize>,
+        /// The session the buffer is created for. Its environment (see
+        /// `SessionRequest::SetEnvironment`) is applied under `env`.
+        session_id: Option<SessionId>,
     },
     List {
         request_id: RequestId,
@@ -890,6 +911,12 @@ pub struct BufferLocationResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentResponse {
+    pub request_id: RequestId,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferWithLocationResponse {
     pub(crate) request_id: RequestId,
     pub(crate) buffer: BufferRecord,
@@ -1029,6 +1056,7 @@ pub enum ServerResponse {
     Client(ClientResponse),
     BufferLocation(BufferLocationResponse),
     BufferWithLocation(BufferWithLocationResponse),
+    Environment(EnvironmentResponse),
     Snapshot(SnapshotResponse),
     VisibleSnapshot(VisibleSnapshotResponse),
     ScrollbackSlice(ScrollbackSliceResponse),
@@ -1051,6 +1079,7 @@ impl ServerResponse {
             Self::Client(response) => Some(response.request_id),
             Self::BufferLocation(response) => Some(response.request_id),
             Self::BufferWithLocation(response) => Some(response.request_id()),
+            Self::Environment(response) => Some(response.request_id),
             Self::Snapshot(response) => Some(response.request_id),
             Self::VisibleSnapshot(response) => Some(response.request_id),
             Self::ScrollbackSlice(response) => Some(response.request_id),

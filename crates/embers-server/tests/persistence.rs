@@ -138,6 +138,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         },
     )
     .await
@@ -152,6 +153,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         },
     )
     .await
@@ -305,6 +307,7 @@ async fn clean_restart_stops_ephemeral_buffer_pipes() {
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         },
     )
     .await
@@ -410,6 +413,7 @@ async fn long_server_socket_path_still_spawns_and_restores_keepers() {
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         },
     )
     .await
@@ -507,6 +511,7 @@ async fn create_shell_buffer(
             cwd: Some(cwd.display().to_string()),
             env: Default::default(),
             size: None,
+            session_id: None,
         },
     )
     .await

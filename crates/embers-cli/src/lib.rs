@@ -313,6 +313,30 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
+    /// Set an environment variable for panes created later in a session, or in
+    /// every session with `-g`, like tmux. `-u` unsets it.
+    #[command(name = "set-environment", visible_alias = "setenv")]
+    SetEnvironment {
+        #[arg(short = 't', long = "target", conflicts_with = "global")]
+        target: Option<String>,
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        #[arg(short = 'u', long = "unset")]
+        unset: bool,
+        name: String,
+        #[arg(conflicts_with = "unset", allow_hyphen_values = true)]
+        value: Option<String>,
+    },
+    /// Print a session's environment (or the global one with `-g`) as
+    /// `NAME=VALUE` lines, or one variable when NAME is given.
+    #[command(name = "show-environment", visible_alias = "showenv")]
+    ShowEnvironment {
+        #[arg(short = 't', long = "target", conflicts_with = "global")]
+        target: Option<String>,
+        #[arg(short = 'g', long = "global")]
+        global: bool,
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -935,7 +959,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let snapshot = connection.session_snapshot(session.id).await?;
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, None, size)
+                .create_buffer(Some(window_title.clone()), command, None, size, session.id)
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -1047,7 +1071,13 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 },
             );
             let buffer = connection
-                .create_buffer(Some(default_title(&command, "pane")), command, None, size)
+                .create_buffer(
+                    Some(default_title(&command, "pane")),
+                    command,
+                    None,
+                    size,
+                    pane.snapshot.session.id,
+                )
                 .await?;
             let response = connection
                 .request(ClientMessage::Node(NodeRequest::Split {
@@ -1221,7 +1251,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let snapshot = connection.session_snapshot(session.id).await?;
             let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, None, size)
+                .create_buffer(Some(popup_title.clone()), command, None, size, session.id)
                 .await?;
             let response = connection
                 .request(ClientMessage::Floating(FloatingRequest::Create {
@@ -1250,6 +1280,80 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             Ok(popup.id.to_string())
+        }
+        Command::SetEnvironment {
+            target,
+            global,
+            unset,
+            name,
+            value,
+        } => {
+            if !unset && value.is_none() {
+                return Err(MuxError::invalid_input(format!(
+                    "set-environment {name} requires a value (or -u to unset it)"
+                )));
+            }
+            let session_id = if global {
+                None
+            } else {
+                Some(
+                    connection
+                        .resolve_session_record(target.as_deref())
+                        .await?
+                        .id,
+                )
+            };
+            let response = connection
+                .request(ClientMessage::Session(SessionRequest::SetEnvironment {
+                    request_id: new_request_id(),
+                    session_id,
+                    name,
+                    value,
+                }))
+                .await?;
+            expect_ok(response, "set-environment")?;
+            Ok(String::new())
+        }
+        Command::ShowEnvironment {
+            target,
+            global,
+            name,
+        } => {
+            let session_id = if global {
+                None
+            } else {
+                Some(
+                    connection
+                        .resolve_session_record(target.as_deref())
+                        .await?
+                        .id,
+                )
+            };
+            let env = match connection
+                .request(ClientMessage::Session(SessionRequest::ShowEnvironment {
+                    request_id: new_request_id(),
+                    session_id,
+                }))
+                .await?
+            {
+                ServerResponse::Environment(response) => response.env,
+                other => {
+                    return Err(MuxError::protocol(format!(
+                        "unexpected response to show-environment: {other:?}"
+                    )));
+                }
+            };
+            match name {
+                Some(name) => env
+                    .get(&name)
+                    .map(|value| format!("{name}={value}"))
+                    .ok_or_else(|| MuxError::not_found(format!("unknown variable: {name}"))),
+                None => Ok(env
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")),
+            }
         }
         Command::KillPopup { target } => {
             let popup = connection.resolve_popup(target.as_deref()).await?;
@@ -1758,6 +1862,7 @@ impl CliConnection {
         command: Vec<String>,
         cwd: Option<String>,
         size: Option<PtySize>,
+        session_id: SessionId,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -1767,6 +1872,7 @@ impl CliConnection {
                 cwd,
                 env: Default::default(),
                 size,
+                session_id: Some(session_id),
             }))
             .await?
         {

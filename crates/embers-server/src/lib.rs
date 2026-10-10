@@ -3,6 +3,7 @@ pub mod state;
 
 mod buffer_runtime;
 mod config;
+mod environment;
 mod persist;
 mod protocol;
 mod restore;

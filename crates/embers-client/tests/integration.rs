@@ -4,6 +4,7 @@ mod configured_client;
 mod context;
 mod copy_mode;
 mod e2e;
+mod environment;
 mod layout_controls;
 mod presentation;
 mod reducer;

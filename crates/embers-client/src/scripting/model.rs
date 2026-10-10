@@ -192,6 +192,14 @@ pub enum Action {
     RunShell {
         command: Vec<String>,
     },
+    /// tmux `set-environment [-g] [-u]`: set (or unset, when `value` is
+    /// `None`) a variable for panes created later in the current session, or
+    /// in every session when `global`.
+    SetEnvironment {
+        global: bool,
+        name: String,
+        value: Option<String>,
+    },
     EnterHints {
         action: Option<String>,
     },

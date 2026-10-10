@@ -1,4 +1,5 @@
 mod automation;
+mod environment;
 mod interactive;
 mod layout_controls;
 mod panes;

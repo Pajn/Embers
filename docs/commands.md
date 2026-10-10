@@ -1,8 +1,8 @@
 # Commands
 
 This page covers the tmux-style commands Embers offers beyond the basics in the
-[README](../README.md): how windows are numbered, and the commands and client
-actions that go with them.
+[README](../README.md): how windows are numbered, session environments, and the
+commands and client actions that go with them.
 
 ## Window numbering
 
@@ -68,3 +68,33 @@ zero-based index.
 
 Panes are addressed by id (`list-panes` prints them, and `-t <id>` selects
 one), not by a per-window index, so there is no `pane-base-index`.
+
+## Environment
+
+Like tmux, Embers keeps a global environment and one per session. A pane
+created for a session starts with the server's environment, then the global
+variables, then the session's, then any variables its creator passed
+(`tree.buffer_spawn` env, for example); later layers win. Changes only affect
+panes created afterwards. The environments are kept in memory, not saved with
+the workspace, so set them from your config or a startup script.
+
+```sh
+embers set-environment -t work AWS_PROFILE staging   # one session
+embers set-environment -g EDITOR nvim                # every session
+embers set-environment -u -t work AWS_PROFILE        # unset
+embers show-environment -t work                      # NAME=VALUE lines
+embers show-environment -g EDITOR                    # one variable
+```
+
+`-t` names a session and, as with other commands, may be left out when only
+one session exists. `-g` and `-t` cannot be combined. `setenv` and `showenv`
+are accepted as short names. Unsetting a session variable removes it from the
+session; the global value, if any, applies again.
+
+From the Rhai config, `action.set_environment(name, value)` sets a variable in
+the current session and `action.set_global_environment(name, value)` in the
+global environment; a value of `()` unsets it.
+
+```rhai
+bind("normal", "<leader>P", action.set_environment("AWS_PROFILE", "prod"));
+```

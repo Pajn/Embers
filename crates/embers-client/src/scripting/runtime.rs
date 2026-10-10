@@ -1069,6 +1069,44 @@ mod documented_action_api {
         }
     }
 
+    /// Set an environment variable for panes created later in the current
+    /// session (tmux `set-environment`). Pass `()` as the value to unset it.
+    /// Panes that already run keep their environment.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_environment("AWS_PROFILE", "staging")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_environment")]
+    pub fn set_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(false, name, value))
+    }
+
+    /// Set an environment variable for panes created later in every session
+    /// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+    /// session's own value wins over the global one.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_global_environment("EDITOR", "nvim")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_global_environment")]
+    pub fn set_global_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(true, name, value))
+    }
+
     /// Enter thumbs-style hint mode: label the matches in the visible pane and
     /// copy the selected one to the clipboard (OSC 52).
     ///
@@ -2981,6 +3019,28 @@ fn parse_amount(value: i64, label: &str) -> ScriptResult<u16> {
         return Err(runtime_error(format!("{label} must be greater than zero")));
     }
     u16::try_from(value).map_err(|_| runtime_error(format!("{label} is too large")))
+}
+
+fn environment_action(global: bool, name: &str, value: Dynamic) -> ScriptResult<Action> {
+    if name.is_empty() || name.contains('=') {
+        return Err(runtime_error(format!(
+            "invalid environment variable name '{name}'"
+        )));
+    }
+    let value = if value.is_unit() {
+        None
+    } else {
+        Some(
+            value
+                .into_string()
+                .map_err(|_| runtime_error("environment value must be a string or ()"))?,
+        )
+    };
+    Ok(Action::SetEnvironment {
+        global,
+        name: name.to_owned(),
+        value,
+    })
 }
 
 fn parse_index(value: i64, label: &str) -> ScriptResult<usize> {

@@ -86,6 +86,7 @@ fn client_message_families_round_trip() {
             cwd: Some("/tmp".to_owned()),
             env: std::collections::BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
             size: None,
+            session_id: None,
         }),
         ClientMessage::Buffer(BufferRequest::Create {
             request_id: RequestId(91),
@@ -94,6 +95,33 @@ fn client_message_families_round_trip() {
             cwd: None,
             env: Default::default(),
             size: Some(PtySize::new(100, 30)),
+            session_id: Some(SessionId(10)),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(92),
+            session_id: Some(SessionId(10)),
+            name: "EDITOR".to_owned(),
+            value: Some("nvim".to_owned()),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(93),
+            session_id: None,
+            name: "EMPTY".to_owned(),
+            value: Some(String::new()),
+        }),
+        ClientMessage::Session(SessionRequest::SetEnvironment {
+            request_id: RequestId(94),
+            session_id: None,
+            name: "GONE".to_owned(),
+            value: None,
+        }),
+        ClientMessage::Session(SessionRequest::ShowEnvironment {
+            request_id: RequestId(95),
+            session_id: Some(SessionId(10)),
+        }),
+        ClientMessage::Session(SessionRequest::ShowEnvironment {
+            request_id: RequestId(96),
+            session_id: None,
         }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
@@ -399,6 +427,7 @@ fn sizes_must_be_non_zero_in_both_directions() {
         cwd: None,
         env: Default::default(),
         size: Some(PtySize::new(80, 0)),
+        session_id: None,
     });
     encode_client_message(&create).expect_err("zero-row pty size is rejected");
 
@@ -440,6 +469,17 @@ fn server_envelope_families_round_trip() {
     let floating = snapshot.floating.clone();
 
     let envelopes = vec![
+        ServerEnvelope::Response(ServerResponse::Environment(EnvironmentResponse {
+            request_id: RequestId(97),
+            env: std::collections::BTreeMap::from([
+                ("EDITOR".to_owned(), "nvim".to_owned()),
+                ("EMPTY".to_owned(), String::new()),
+            ]),
+        })),
+        ServerEnvelope::Response(ServerResponse::Environment(EnvironmentResponse {
+            request_id: RequestId(98),
+            env: Default::default(),
+        })),
         ServerEnvelope::Response(ServerResponse::Pong(PingResponse {
             request_id: RequestId(30),
             payload: "pong".to_owned(),

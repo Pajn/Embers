@@ -16,13 +16,13 @@ use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
-    ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse, FocusChangedEvent,
-    FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse, ProtocolError, RawFrame,
-    RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
-    SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
-    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
-    SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message, encode_server_envelope,
-    read_frame, write_frame_no_flush,
+    EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
+    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
+    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
+    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
+    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
+    SubscriptionAckResponse, SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message,
+    encode_server_envelope, read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1145,6 +1145,47 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            SessionRequest::SetEnvironment {
+                request_id,
+                session_id,
+                name,
+                value,
+            } => {
+                if let Some(session_id) = session_id
+                    && let Err(error) = state.session(session_id)
+                {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                // Sessions are never reused, so forget the environments of
+                // closed ones here rather than when they close.
+                let ServerState {
+                    sessions,
+                    environment,
+                    ..
+                } = &mut *state;
+                environment.retain_sessions(|session_id| sessions.contains_key(&session_id));
+                match environment.set(session_id, &name, value) {
+                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
+            SessionRequest::ShowEnvironment {
+                request_id,
+                session_id,
+            } => {
+                if let Some(session_id) = session_id
+                    && let Err(error) = state.session(session_id)
+                {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                (
+                    ServerResponse::Environment(EnvironmentResponse {
+                        request_id,
+                        env: state.environment.get(session_id),
+                    }),
+                    Vec::new(),
+                )
+            }
         }
     }
 
@@ -1161,6 +1202,7 @@ impl Runtime {
                 cwd,
                 env,
                 size,
+                session_id,
             } => {
                 if command.is_empty() {
                     return (
@@ -1189,11 +1231,21 @@ impl Runtime {
                             Vec::new(),
                         );
                     }
+                    if let Some(session_id) = session_id
+                        && let Err(error) = state.session(session_id)
+                    {
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
+                    // The session's environment goes under the creator's own
+                    // variables and is recorded with the buffer, so a restored
+                    // pane gets it again.
+                    let mut buffer_env = state.environment.for_new_buffer(session_id);
+                    buffer_env.extend(env);
                     let buffer_id = state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
                         command,
                         cwd.map(Into::into),
-                        env,
+                        buffer_env,
                     );
                     // Start the command at the size it will be drawn at, so it
                     // never sees the default size first.
@@ -4283,6 +4335,7 @@ mod tests {
                     cwd: None,
                     env: BTreeMap::new(),
                     size: None,
+                    session_id: None,
                 },
             )
             .await;

@@ -361,7 +361,7 @@ async fn ensure_root_window(
     let size = viewport.and_then(|viewport| {
         spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
     });
-    let buffer_id = create_buffer(client, &command, &title, size).await?;
+    let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client
         .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: client.next_request_id(),
@@ -407,6 +407,7 @@ async fn create_buffer(
     command: &[String],
     title: &str,
     size: Option<PtySize>,
+    session_id: SessionId,
 ) -> Result<embers_core::BufferId> {
     let response = client
         .request_message(ClientMessage::Buffer(BufferRequest::Create {
@@ -416,6 +417,7 @@ async fn create_buffer(
             cwd: None,
             env: Default::default(),
             size,
+            session_id: Some(session_id),
         }))
         .await?;
     match response {

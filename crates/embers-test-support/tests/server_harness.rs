@@ -61,6 +61,7 @@ async fn running_buffer_pid(connection: &mut TestConnection) -> u32 {
             cwd: None,
             env: Default::default(),
             size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer request succeeds");
