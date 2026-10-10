@@ -1661,6 +1661,21 @@ async fn tmux_passthrough_reaches_the_host_at_the_pane_cursor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_kitty_graphics_reach_the_host_at_the_pane_cursor() {
+    // Sent without the tmux wrapper, as a program that does not know it runs
+    // in a multiplexer would.
+    let script = "printf '\\033[3;5H\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\\\'";
+    let output = pane_passthrough_output("", script, false).await;
+    let (row, col) = output.pane_cursor.expect("pane on screen");
+    let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
+    assert!(
+        contains_subslice(&output.frame_output, expected.as_bytes()),
+        "expected {expected:?} in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tmux_passthrough_is_dropped_when_off() {
     let output = pane_passthrough_output(
         "set_allow_passthrough(\"off\");",

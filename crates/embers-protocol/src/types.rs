@@ -1203,7 +1203,7 @@ pub struct ClipboardEvent {
 }
 
 /// Sequences a program in a buffer sent for the host terminal (tmux
-/// passthrough), in order. Like [`ClipboardEvent`] it goes only to the clients
+/// passthrough and unwrapped kitty graphics commands), in order. Like [`ClipboardEvent`] it goes only to the clients
 /// whose current session contains the buffer; each decides from its own layout
 /// whether the pane is on screen.
 #[derive(Clone, Debug, PartialEq, Eq)]

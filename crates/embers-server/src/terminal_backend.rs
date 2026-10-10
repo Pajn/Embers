@@ -129,10 +129,11 @@ impl RawByteRouter {
     /// (DECRQSS and XTGETTCAP). Output is split after each one so the backend
     /// answers it with the state as of that byte.
     ///
-    /// Before either, tmux passthrough sequences (`ESC P tmux; ... ESC \`) are
-    /// taken out of the stream: the backend never sees them, and each one
-    /// comes back unwrapped with the cursor position the backend had reached
-    /// at that point, for the keeper to forward to clients.
+    /// Before either, tmux passthrough sequences (`ESC P tmux; ... ESC \`) and
+    /// unwrapped kitty graphics commands (`ESC _ G ... ESC \`) are taken out of
+    /// the stream: the backend never sees them, and each one comes back, tmux
+    /// ones unwrapped, with the cursor position the backend had reached at
+    /// that point, for the keeper to forward to clients.
     pub fn route_output(
         &mut self,
         backend: &mut dyn TerminalBackend,
@@ -414,12 +415,20 @@ impl DcsQueryScanner {
 /// What follows `ESC P` in a tmux passthrough sequence.
 const TMUX_PASSTHROUGH_PREFIX: &[u8] = b"tmux;";
 
-/// Streaming scanner that takes tmux passthrough sequences
-/// (`ESC P tmux; <payload> ESC \`) out of PTY output. Inside the payload every
-/// ESC is doubled, so `ESC ESC` stands for one ESC and `ESC \` ends the
-/// sequence; like tmux, an ESC followed by anything else is dropped.
+/// Streaming scanner that takes sequences for the host terminal out of PTY
+/// output:
 ///
-/// Bytes that might begin a passthrough (`ESC`, `ESC P`, `ESC P tm`, ...) are
+/// - tmux passthrough (`ESC P tmux; <payload> ESC \`), returned unwrapped.
+///   Inside the payload every ESC is doubled, so `ESC ESC` stands for one ESC
+///   and `ESC \` ends the sequence; like tmux, an ESC followed by anything
+///   else is dropped.
+/// - kitty graphics commands sent without the wrapper (`ESC _ G ... ESC \`),
+///   returned whole. The emulator would drop them, and programs only send them
+///   when they believe the terminal shows images, so they go the same way as
+///   wrapped ones. Like any APC, one ends at the first ESC; ended by anything
+///   but `ESC \`, it is dropped.
+///
+/// Bytes that might begin either (`ESC`, `ESC P`, `ESC P tm`, `ESC _`, ...) are
 /// held back until it is clear whether they do, possibly across read chunks,
 /// so the backend never sees part of one. Everything else passes through
 /// unchanged and in order.
@@ -431,6 +440,14 @@ struct PassthroughScanner {
     payload: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassthroughKind {
+    /// `ESC P tmux; ... ESC \`.
+    Tmux,
+    /// `ESC _ G ... ESC \`.
+    KittyGraphics,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum PassthroughState {
     #[default]
@@ -438,22 +455,28 @@ enum PassthroughState {
     /// Holding an ESC.
     Escape,
     /// Holding `ESC P` and this many bytes of [`TMUX_PASSTHROUGH_PREFIX`].
-    Prefix(usize),
-    /// Inside a passthrough, collecting its payload.
-    Collect,
-    /// Inside a passthrough and saw ESC.
-    CollectEscape,
-    /// Inside a passthrough over [`MAX_PASSTHROUGH_BYTES`], dropping it.
-    Discard,
-    /// Inside a dropped passthrough and saw ESC.
-    DiscardEscape,
+    TmuxPrefix(usize),
+    /// Holding `ESC _`.
+    ApcPrefix,
+    /// Inside a sequence, collecting its payload.
+    Collect(PassthroughKind),
+    /// Inside a sequence and saw ESC.
+    CollectEscape(PassthroughKind),
+    /// Inside a sequence over [`MAX_PASSTHROUGH_BYTES`], dropping it.
+    Discard(PassthroughKind),
+    /// Inside a dropped sequence and saw ESC.
+    DiscardEscape(PassthroughKind),
 }
 
 impl PassthroughScanner {
     /// Advance by one byte. Bytes meant for the backend are appended to
-    /// `forward`; returns the unwrapped payload when `byte` ends a passthrough.
+    /// `forward`; returns the bytes for the host terminal when `byte` ends a
+    /// sequence.
     fn step(&mut self, byte: u8, forward: &mut Vec<u8>) -> Option<Vec<u8>> {
         const ESC: u8 = 0x1b;
+        const CAN: u8 = 0x18;
+        const SUB: u8 = 0x1a;
+        use PassthroughKind::{KittyGraphics, Tmux};
         match self.state {
             PassthroughState::Ground => {
                 if byte == ESC {
@@ -464,66 +487,98 @@ impl PassthroughScanner {
                 }
             }
             PassthroughState::Escape => {
-                if byte != b'P' {
-                    return self.release_and_step(byte, forward);
-                }
+                self.state = match byte {
+                    b'P' => PassthroughState::TmuxPrefix(0),
+                    b'_' => PassthroughState::ApcPrefix,
+                    _ => return self.release_and_step(byte, forward),
+                };
                 self.held.push(byte);
-                self.state = PassthroughState::Prefix(0);
             }
-            PassthroughState::Prefix(matched) => {
+            PassthroughState::TmuxPrefix(matched) => {
                 if byte != TMUX_PASSTHROUGH_PREFIX[matched] {
                     return self.release_and_step(byte, forward);
                 }
                 if matched + 1 == TMUX_PASSTHROUGH_PREFIX.len() {
                     self.held.clear();
                     self.payload.clear();
-                    self.state = PassthroughState::Collect;
+                    self.state = PassthroughState::Collect(Tmux);
                 } else {
                     self.held.push(byte);
-                    self.state = PassthroughState::Prefix(matched + 1);
+                    self.state = PassthroughState::TmuxPrefix(matched + 1);
                 }
             }
-            PassthroughState::Collect => {
-                if byte == ESC {
-                    self.state = PassthroughState::CollectEscape;
-                } else {
-                    self.collect(byte);
+            PassthroughState::ApcPrefix => {
+                if byte != b'G' {
+                    return self.release_and_step(byte, forward);
                 }
+                self.held.clear();
+                self.payload.clear();
+                self.payload.extend_from_slice(b"\x1b_G");
+                self.state = PassthroughState::Collect(KittyGraphics);
             }
-            PassthroughState::CollectEscape => {
+            PassthroughState::Collect(kind) => match byte {
+                ESC => self.state = PassthroughState::CollectEscape(kind),
+                // CAN and SUB abort an APC, and run as controls.
+                CAN | SUB if kind == KittyGraphics => {
+                    self.payload.clear();
+                    self.state = PassthroughState::Ground;
+                    forward.push(byte);
+                }
+                _ => self.collect(kind, byte),
+            },
+            PassthroughState::CollectEscape(kind) => {
                 if byte == b'\\' {
                     self.state = PassthroughState::Ground;
-                    return Some(std::mem::take(&mut self.payload));
+                    let mut payload = std::mem::take(&mut self.payload);
+                    if kind == KittyGraphics {
+                        payload.extend_from_slice(b"\x1b\\");
+                    }
+                    return Some(payload);
                 }
-                // `ESC ESC` is an escaped ESC; tmux drops an ESC before
-                // anything else.
-                self.state = PassthroughState::Collect;
-                self.collect(byte);
-            }
-            PassthroughState::Discard => {
-                if byte == ESC {
-                    self.state = PassthroughState::DiscardEscape;
+                match kind {
+                    // `ESC ESC` is an escaped ESC; tmux drops an ESC before
+                    // anything else.
+                    Tmux => {
+                        self.state = PassthroughState::Collect(Tmux);
+                        self.collect(Tmux, byte);
+                    }
+                    // The ESC ended the command early: drop it, and let the
+                    // ESC begin whatever follows.
+                    KittyGraphics => {
+                        self.payload.clear();
+                        return self.restart_after_escape(byte, forward);
+                    }
                 }
             }
-            PassthroughState::DiscardEscape => {
-                self.state = if byte == b'\\' {
-                    PassthroughState::Ground
+            PassthroughState::Discard(kind) => match byte {
+                ESC => self.state = PassthroughState::DiscardEscape(kind),
+                CAN | SUB if kind == KittyGraphics => {
+                    self.state = PassthroughState::Ground;
+                    forward.push(byte);
+                }
+                _ => {}
+            },
+            PassthroughState::DiscardEscape(kind) => {
+                if byte == b'\\' {
+                    self.state = PassthroughState::Ground;
+                } else if kind == Tmux {
+                    self.state = PassthroughState::Discard(Tmux);
                 } else {
-                    PassthroughState::Discard
-                };
+                    return self.restart_after_escape(byte, forward);
+                }
             }
         }
         None
     }
 
-    fn collect(&mut self, byte: u8) {
+    fn collect(&mut self, kind: PassthroughKind, byte: u8) {
         if self.payload.len() >= MAX_PASSTHROUGH_BYTES {
             debug!(
                 limit = MAX_PASSTHROUGH_BYTES,
                 "dropping oversized passthrough sequence"
             );
             self.payload = Vec::new();
-            self.state = PassthroughState::Discard;
+            self.state = PassthroughState::Discard(kind);
         } else {
             self.payload.push(byte);
         }
@@ -534,6 +589,14 @@ impl PassthroughScanner {
     fn release_and_step(&mut self, byte: u8, forward: &mut Vec<u8>) -> Option<Vec<u8>> {
         forward.append(&mut self.held);
         self.state = PassthroughState::Ground;
+        self.step(byte, forward)
+    }
+
+    /// Continue as if an ESC had just arrived in ordinary output, then `byte`.
+    fn restart_after_escape(&mut self, byte: u8, forward: &mut Vec<u8>) -> Option<Vec<u8>> {
+        self.held.clear();
+        self.held.push(0x1b);
+        self.state = PassthroughState::Escape;
         self.step(byte, forward)
     }
 }
@@ -2065,6 +2128,64 @@ mod tests {
             router.route_output(&mut backend, &tmux_wrap(&vec![b'y'; MAX_PASSTHROUGH_BYTES]));
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].bytes.len(), MAX_PASSTHROUGH_BYTES);
+    }
+
+    #[test]
+    fn router_forwards_raw_kitty_graphics_commands_whole() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        let mut output = b"ab".to_vec();
+        output.extend_from_slice(KITTY_IMAGE);
+        output.extend_from_slice(b"cd");
+
+        // Split at every byte: the APC may straddle read chunks.
+        let mut writes = Vec::new();
+        for byte in &output {
+            writes.extend(router.route_output(&mut backend, std::slice::from_ref(byte)));
+        }
+
+        assert_eq!(
+            writes,
+            vec![PassthroughWrite {
+                bytes: KITTY_IMAGE.to_vec(),
+                cursor: CursorPosition { row: 0, col: 2 },
+            }]
+        );
+        assert_eq!(backend.ingested, b"abcd");
+    }
+
+    #[test]
+    fn router_leaves_other_apc_strings_and_broken_graphics_to_the_backend() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // An APC that is not a graphics command goes to the emulator, which
+        // ignores it.
+        let writes = router.route_output(&mut backend, b"\x1b_Xother\x1b\\");
+        assert!(writes.is_empty());
+        assert_eq!(backend.ingested, b"\x1b_Xother\x1b\\");
+
+        // A graphics command cut short by another escape sequence is dropped;
+        // the sequence that cut it short still runs.
+        backend.ingested.clear();
+        let writes = router.route_output(&mut backend, b"\x1b_Gf=100;AAAA\x1b[1mx");
+        assert!(writes.is_empty());
+        assert_eq!(backend.ingested, b"\x1b[1mx");
+    }
+
+    #[test]
+    fn router_drops_oversized_raw_kitty_graphics_commands() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        let mut output = b"\x1b_G".to_vec();
+        output.extend(vec![b'A'; MAX_PASSTHROUGH_BYTES]);
+        output.extend_from_slice(b"\x1b\\z");
+        output.extend_from_slice(KITTY_IMAGE);
+
+        let writes = router.route_output(&mut backend, &output);
+
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].bytes, KITTY_IMAGE);
+        assert_eq!(backend.ingested, b"z");
     }
 
     #[test]

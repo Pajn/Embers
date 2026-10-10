@@ -140,7 +140,8 @@ Programs that run under tmux wrap sequences meant for the outer
 terminal, such as kitty graphics images or desktop notifications, as
 `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
 terminal running the client, with its cursor at the pane's cursor so
-images land where the program put them.
+images land where the program put them. Kitty graphics commands sent
+without the wrapper are passed on the same way.
 
 - `"on"` (the default): only from panes that are on screen.
 - `"all"`: from every pane in the client's session, on screen or not.

@@ -657,7 +657,8 @@ table ClipboardEvent {
   text:string;
 }
 
-// One sequence from a tmux passthrough (`ESC P tmux; ... ESC \`), unwrapped,
+// One sequence for the host terminal, the unwrapped payload of a tmux
+// passthrough (`ESC P tmux; ... ESC \`) or an unwrapped kitty graphics command,
 // with the pane cursor at the point it ended.
 table PassthroughWrite {
   data:[ubyte];

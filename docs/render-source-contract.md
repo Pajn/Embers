@@ -42,7 +42,7 @@ The interactive client handles every event that has already arrived before it dr
 
 ### Passthrough sequences
 
-`PassthroughEvent` carries sequences a program sent for the host terminal (tmux passthrough), in order, each with the pane cursor at the point the program sent it. They are not part of any snapshot. See [Passthrough](configuration.md#passthrough) for the user-facing behavior and [the backend boundary](terminal-backend-boundary.md#passthrough) for how they reach the client.
+`PassthroughEvent` carries sequences a program sent for the host terminal (tmux passthrough and unwrapped kitty graphics commands), in order, each with the pane cursor at the point the program sent it. They are not part of any snapshot. See [Passthrough](configuration.md#passthrough) for the user-facing behavior and [the backend boundary](terminal-backend-boundary.md#passthrough) for how they reach the client.
 
 On the event the client refreshes the buffer's visible snapshot and holds the writes. When it next draws a session it turns them into output for right after that frame (`ConfiguredClient::drain_frame_output`, which is separate from the output written before a frame): for a pane in the frame, a cursor move to the pane's cursor in screen coordinates (the leaf's content origin below its title row, plus the cursor, clamped into the pane), then the sequence; for a pane not in the frame, the sequence alone with `allow-passthrough all`, nothing otherwise. The output hides the cursor first and resets the pen last, and the interactive client then puts the cursor back where the frame left it.
 

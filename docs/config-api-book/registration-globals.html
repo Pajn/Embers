@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-045c40c3.js";
+            window.path_to_searchindex_js = "searchindex-f3caf7fe.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -297,7 +297,8 @@ passthrough, like tmux's `allow-passthrough`.
 terminal, such as kitty graphics images or desktop notifications, as
 <code>ESC P tmux; ... ESC \</code>. Embers unwraps them and writes them to the
 terminal running the client, with its cursor at the pane’s cursor so
-images land where the program put them.</p>
+images land where the program put them. Kitty graphics commands sent
+without the wrapper are passed on the same way.</p>
 <ul>
 <li><code>"on"</code> (the default): only from panes that are on screen.</li>
 <li><code>"all"</code>: from every pane in the client’s session, on screen or not.

@@ -23,7 +23,7 @@ For live PTY buffers, that pipeline runs inside the runtime keeper (`KeeperSurfa
 Today it is intentionally minimal:
 
 - input routing is passthrough
-- output routing first takes tmux passthrough sequences (`ESC P tmux; ... ESC \`) out of the stream (see below); the backend never sees them
+- output routing first takes tmux passthrough sequences (`ESC P tmux; ... ESC \`) and unwrapped kitty graphics commands (`ESC _ G ... ESC \`) out of the stream (see below); the backend never sees them
 - the remaining bytes go directly to the backend, with two side scanners: one sniffs OSC 7 working-directory reports, and one picks out the DCS queries alacritty leaves unanswered (DECRQSS and XTGETTCAP). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
 
 The seam is also where further special-case interception, or metadata extraction that must happen before backend ingestion, belongs.
@@ -60,6 +60,8 @@ The emulator runs with OSC 52 set to copy-only: stores raise a clipboard event a
 ## Passthrough
 
 The router unwraps `ESC P tmux; <payload> ESC \` the way tmux does: `ESC ESC` in the payload is one ESC, `ESC \` ends it, and an ESC before anything else is dropped. Bytes that might begin a passthrough are held back, across read chunks, until it is clear whether they do, so the emulator never sees part of one; in particular a doubled-ESC payload never runs as pane output. Right after the bytes before it are ingested, the router reads the backend's cursor position (`TerminalBackend::cursor_position`, which ignores whether the cursor is hidden) and returns the payload with it as a `PassthroughWrite`. A payload over `MAX_PASSTHROUGH_BYTES` (4 MiB) is dropped whole, and the scanner skips to its terminator.
+
+The same scanner takes unwrapped kitty graphics commands, APC strings starting with `G`, out of the stream and returns them whole, so they take the same path. alacritty ignores every APC, so these were lost before, and programs only send them when they believe the terminal shows images. Like any APC one ends at the first ESC, and a command ended by anything but `ESC \` is dropped; other APC strings still go to the backend. Unwrapped sixel (`ESC P q`) stays with the backend, which ignores it: the emulator neither stores sixel images nor moves its cursor past them, and its DA1 reply does not claim sixel, so forwarding raw sixel would put the host and the pane out of step. Rendering sixel into the pane, as tmux 3.4 does, would need an image store in the backend.
 
 The keeper queues the writes in order, numbered, under the surface lock the read loop already holds, and reports the latest number in its status reply. The queue holds at most 8 MiB and drops its oldest writes beyond that, which bounds memory while no server is attached. Unlike the latest-only clipboard write every write is kept, because an image is many sequences. When the number advances, the status poller takes the queued writes with `Passthrough { after }` requests, base64 in keeper JSON and at most 8 MiB per reply, and hands them to the server in one callback per poll. The poller seeds the number from the attach-time status, so a reattaching server drops what was queued for frames long gone.
 

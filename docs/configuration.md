@@ -173,6 +173,8 @@ default.
   forwards sequences from panes that are on screen in the client.
   `set_allow_passthrough("all")` also forwards them from panes in hidden
   windows of the client's session. `set_allow_passthrough("off")` drops them.
+  The setting also covers [unwrapped kitty graphics
+  commands](#images-without-the-tmux-wrapper).
 - **Who receives them.** Like [clipboard writes](#clipboard-osc-52), the
   server sends them only to clients whose current session contains the pane;
   each client then checks whether the pane is on its screen. Sequences from a
@@ -210,10 +212,29 @@ long it stays:
 - **Sixel** images are cells, so the next frame Embers draws over those cells
   erases them. They are only shown briefly.
 
+### Images without the tmux wrapper
+
 Programs decide whether to wrap sequences for tmux mostly from the `TMUX`
 environment variable, which Embers does not set. Programs that do not see it
-send their sequences unwrapped, and the pane's terminal emulator ignores
-graphics sequences it does not understand.
+send their sequences unwrapped, as to a terminal of their own:
+
+- **Kitty graphics commands** (`ESC _ G ... ESC \`) are forwarded like wrapped
+  ones, with the same setting, cursor handling and size cap. The pane's
+  terminal emulator would drop them, and a program only sends them when it
+  believes the terminal shows images (often from `TERM_PROGRAM`, which panes
+  inherit from the environment the server started in), so passing them on is
+  what the program expects.
+- **Sixel** (`ESC P q ...`) is not forwarded. The emulator does not keep sixel
+  images, does not move its cursor past them as a sixel terminal would, and
+  does not report sixel support, so a program that checks first does not send
+  any. tmux 3.4 and later draws sixel images into its own screen instead;
+  Embers has no image store to do that. Wrapped sixel still goes through
+  passthrough, and is erased by the next frame as described above.
+- **Detection.** A program that asks the terminal whether it supports kitty
+  graphics (`a=q`) and then sends a device attributes query (DA1) gets the DA1
+  answer from Embers first, before the host's answer to the graphics query
+  comes back, and usually concludes there is no image support. The late
+  answer then arrives in the focused pane as input. tmux behaves the same way.
 
 ## Terminal capabilities
 

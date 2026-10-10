@@ -2,7 +2,8 @@ use crate::CursorPosition;
 
 /// A sequence a program in a pane asked to have written to the host terminal,
 /// as tmux does with `allow-passthrough`: the unwrapped payload of
-/// `ESC P tmux; ... ESC \`.
+/// `ESC P tmux; ... ESC \`, or a kitty graphics command sent without the
+/// wrapper (`ESC _ G ... ESC \`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PassthroughWrite {
     /// The bytes to write to the host terminal, already unwrapped.
