@@ -91,6 +91,7 @@ The intended transition graph is:
 - `Created -> Running` when the runtime keeper is spawned or restored
 - `Running -> Exited` when the child process terminates normally or is explicitly killed
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
+- `Interrupted -> Running` when restore starts a fresh process for that buffer (see below)
 - `Exited -> cleaned up` when a detached exited buffer is removed from server state
 
 ## Keeper process lifetime
@@ -106,6 +107,54 @@ socket in the server's runtime directory.
 - while no server is attached, a keeper also watches its socket; once the socket is removed or
   replaced no server can reattach, so the keeper stops its child (SIGHUP, then SIGKILL) and exits
 
+## Workspace persistence
+
+The server saves the workspace to `<socket>.workspace.json`: sessions, the layout tree (splits,
+tabs, floating windows, focus and zoom) and every buffer record. For a buffer that is its id,
+title, command, environment hints, last known working directory, the command line of the job last
+seen in its foreground, its keeper socket path, its lifecycle state and its attachment. Terminal
+contents and scrollback are not saved; they live in the keeper only.
+
+The workspace is saved whenever it changes, not only on a clean shutdown:
+
+- every request that changes sessions, layout or buffers (any request that emits an event other
+  than a render invalidation)
+- a buffer's title, working directory or foreground command changing
+- a buffer exiting
+- server startup, once keepers are reattached or restored
+
+Saves are batched: the first change starts a short timer (100 ms) and one write covers every change
+made before it fires. Output and activity alone never trigger a save. A write whose contents match
+the previous one is skipped. Each write goes to a temp file next to the workspace file, is fsynced,
+renamed over it, and the directory is fsynced, so a crash leaves either the previous file or the new
+one. A crash or SIGKILL of the server therefore loses at most the changes of the last batch. A clean
+shutdown writes the final state once more.
+
+## Restore after keepers are gone
+
+On startup the server reattaches every buffer whose keeper is still alive, exactly as after a
+clean shutdown. A buffer whose keeper is gone (its socket is missing or nothing answers on it, as
+after a reboot) cannot be reattached and is marked `Interrupted`. With restore on, the default,
+every interrupted PTY buffer then gets a fresh keeper:
+
+- same buffer id, title, environment hints and place in the layout, so panes come back where they
+  were; detached buffers come back detached
+- started in the last known working directory, or its nearest ancestor that still exists
+- if the buffer ran a shell, the same shell starts. If its last foreground job was an allowlisted
+  program, that command line is typed into the new shell once it prints its prompt, the way
+  tmux-resurrect does, so leaving the program drops back to the shell
+- if the buffer ran an allowlisted program directly, that program starts again
+- anything else restores as a plain shell (`$SHELL`, or `/bin/sh`)
+
+The allowlist matches the program name of the command line and defaults to tmux-resurrect's: `vi`,
+`vim`, `nvim`, `emacs`, `man`, `less`, `more`, `tail`, `top`, `htop`, `irssi`, `weechat`, `mutt`.
+The foreground job is the PTY's foreground process group, read by the keeper; it is only recorded
+while it differs from the buffer's own process, so a shell at its prompt has none.
+
+Restore can be turned off and the allowlist replaced through environment variables (see
+`docs/configuration.md`). With restore off, such buffers stay `Interrupted`. `Exited` buffers are
+never restarted.
+
 ## Attachment transitions
 
 - `Attached(NodeId) -> Detached` when a view closes or the buffer is explicitly detached
@@ -120,3 +169,5 @@ same runtime stays alive.
 - State transitions: `crates/embers-server/src/state.rs`
 - Runtime keeper and PTY lifecycle: `crates/embers-server/src/buffer_runtime.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
+- Workspace file format and atomic writes: `crates/embers-server/src/persist.rs`
+- Restore planning and the command allowlist: `crates/embers-server/src/restore.rs`

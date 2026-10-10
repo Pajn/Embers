@@ -9,6 +9,7 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Headless Unix-socket server with interactive terminal clients
 - Sessions, windows, panes, tab trees, splits, and floating popups
 - Durable terminal buffers that can be detached, reattached, moved, and captured
+- Layout saved as it changes and panes restored after a crash or reboot, tmux-resurrect style
 - Scrollback, visible snapshots, search, selection, and yank-oriented client behavior
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
@@ -125,6 +126,20 @@ EMBERS_MAX_BUFFERS=256 EMBERS_MAX_SCROLLBACK_LINES=2000 embers
 See [`docs/configuration.md`](docs/configuration.md) for the full reference of
 operational environment variables and flags.
 
+## Persistence and Restore
+
+The server saves sessions, layout and pane records next to its socket
+(`<socket>.workspace.json`) whenever they change, so killing the server loses at
+most the last moment of changes. Pane processes run in separate keeper processes
+that outlive the server; a restarted server reattaches to them.
+
+When a pane's keeper is gone, as after a reboot, the pane is restored in place
+with a fresh shell in its last working directory. A program from a safe
+allowlist (`vim`, `less`, `tail`, `htop`, and so on) that was running in it is
+started again; other programs are not, and scrollback is not restored.
+`EMBERS_RESTORE=off` turns this off and `EMBERS_RESTORE_COMMANDS` replaces the
+allowlist. See [`docs/configuration.md`](docs/configuration.md#workspace-persistence-and-restore).
+
 ## Configuration
 
 Embers loads configuration in this order:
@@ -146,7 +161,7 @@ embers --config ./config.rhai
 
 The generated config API reference lives in [`docs/config-api`](docs/config-api/index.md), with a rendered mdBook copy in [`docs/config-api-book`](docs/config-api-book/index.html).
 
-Operational configuration (socket path, logging, and resource limits via
+Operational configuration (socket path, logging, resource limits, and restore via
 environment variables and flags) is documented in
 [`docs/configuration.md`](docs/configuration.md).
 

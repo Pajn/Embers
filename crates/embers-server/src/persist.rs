@@ -58,6 +58,8 @@ pub struct PersistedBuffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_command: Option<Vec<String>>,
     #[serde(default)]
     pub runtime_socket_path: Option<PathBuf>,
     pub state: PersistedBufferState,
@@ -192,14 +194,27 @@ pub fn load_workspace(path: &Path) -> Result<Option<ServerState>> {
     }
 }
 
+#[cfg(test)]
 pub fn save_workspace(path: &Path, state: &ServerState) -> Result<()> {
+    write_workspace(path, &encode_workspace(state)?)
+}
+
+/// Serialize `state` into the bytes [`write_workspace`] stores.
+pub fn encode_workspace(state: &ServerState) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&state.to_persisted())
+        .map_err(|error| MuxError::internal(error.to_string()))
+}
+
+/// Atomically replace the workspace file at `path` with `bytes`: write a temp
+/// file next to it, fsync it, rename it over `path`, then fsync the directory.
+/// A crash at any point leaves either the old file or the new one, never a
+/// partial write.
+pub fn write_workspace(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(&state.to_persisted())
-        .map_err(|error| MuxError::internal(error.to_string()))?;
     let (temp_path, mut file) = open_workspace_temp_file(path)?;
-    if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(&temp_path);
         return Err(error.into());
     }
@@ -354,6 +369,7 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         command: buffer.command.clone(),
         cwd: buffer.cwd.clone(),
         env: buffer.env.clone(),
+        foreground_command: buffer.foreground_command.clone(),
         runtime_socket_path: buffer.runtime_socket_path().cloned(),
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
@@ -373,6 +389,7 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
         buffer.cwd,
         buffer.env,
     );
+    restored.foreground_command = buffer.foreground_command;
     restored.set_runtime_socket_path(buffer.runtime_socket_path);
     restored.state = restored_buffer_state(buffer.state)?;
     restored.attachment = restored_buffer_attachment(buffer.attachment);

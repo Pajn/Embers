@@ -1,6 +1,7 @@
 mod automation;
 mod interactive;
 mod panes;
+mod persistence;
 mod ping;
 mod popups;
 mod sessions;

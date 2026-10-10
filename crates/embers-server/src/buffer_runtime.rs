@@ -65,6 +65,10 @@ pub struct BufferRuntimeUpdate {
     /// `Some(value)` when the working directory changed in this update (`value`
     /// is `None` when it became unknown); `None` when cwd is unchanged.
     pub cwd: Option<Option<PathBuf>>,
+    /// `Some(value)` when the foreground command changed in this update
+    /// (`value` is `None` once the pane's own process is in the foreground
+    /// again); `None` when it is unchanged.
+    pub foreground_command: Option<Option<Vec<String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +81,9 @@ pub struct BufferRuntimeStatus {
     pub exit_code: Option<i32>,
     pub pipe: Option<BufferRuntimePipeStatus>,
     pub cwd: Option<PathBuf>,
+    /// Command line of the job in the PTY's foreground when that is not the
+    /// pane's own process, for example a program a shell is running.
+    pub foreground_command: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +194,9 @@ struct KeeperStatus {
     // predates live-cwd reporting.
     #[serde(default)]
     cwd: Option<PathBuf>,
+    // Defaulted for keepers that predate foreground command reporting.
+    #[serde(default)]
+    foreground_command: Option<Vec<String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -249,6 +259,9 @@ struct KeeperRuntime {
     activity: Mutex<ActivityState>,
     exit_code: Mutex<Option<Option<i32>>>,
     pid: Option<u32>,
+    /// The last foreground process group leader and its command line, so the
+    /// command line is only looked up when the foreground job changes.
+    foreground: Mutex<Option<(u32, Option<Vec<String>>)>>,
 }
 
 struct KeeperSurface {
@@ -579,6 +592,7 @@ impl KeeperConnection {
                 exit_code: status.exit_code,
                 pipe: status.pipe,
                 cwd: status.cwd,
+                foreground_command: status.foreground_command,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
@@ -1012,6 +1026,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         activity: Mutex::new(ActivityState::Idle),
         exit_code: Mutex::new(None),
         pid,
+        foreground: Mutex::new(None),
     });
 
     let reader_runtime = runtime.clone();
@@ -1196,6 +1211,11 @@ impl KeeperRuntime {
                 None
             }
         });
+        let foreground_command = if running {
+            self.foreground_command()
+        } else {
+            None
+        };
         let pipe = self
             .pipe
             .lock()
@@ -1211,7 +1231,30 @@ impl KeeperRuntime {
             exit_code: exit_code.flatten(),
             pipe,
             cwd,
+            foreground_command,
         })
+    }
+
+    /// Command line of the PTY's foreground process group leader when that is
+    /// not the direct child: the job a shell is running. `None` while the child
+    /// itself is in the foreground (a shell at its prompt) or when the leader
+    /// cannot be resolved.
+    fn foreground_command(&self) -> Option<Vec<String>> {
+        let child_pid = self.pid?;
+        let leader = self.master.lock().ok()?.process_group_leader()?;
+        let leader = u32::try_from(leader).ok()?;
+        if leader == child_pid {
+            return None;
+        }
+        let mut cached = self.foreground.lock().ok()?;
+        if let Some((cached_leader, command)) = cached.as_ref()
+            && *cached_leader == leader
+        {
+            return command.clone();
+        }
+        let command = resolve_pid_argv(leader).filter(|argv| !argv.is_empty());
+        *cached = Some((leader, command.clone()));
+        command
     }
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
@@ -1501,6 +1544,7 @@ fn notify_pipe_removed(
             title: None,
             pipe: Some(None),
             cwd: None,
+            foreground_command: None,
         },
     );
     *last_pipe = None;
@@ -1517,12 +1561,14 @@ fn status_update_delta(
     last_activity: ActivityState,
     last_pipe: &Option<BufferRuntimePipeStatus>,
     last_cwd: &Option<PathBuf>,
+    last_foreground: &Option<Vec<String>>,
 ) -> Option<BufferRuntimeUpdate> {
     let changed = status.sequence != last_sequence
         || status.title != *last_title
         || status.activity != last_activity
         || status.pipe != *last_pipe
-        || status.cwd != *last_cwd;
+        || status.cwd != *last_cwd
+        || status.foreground_command != *last_foreground;
     if !changed {
         return None;
     }
@@ -1532,6 +1578,8 @@ fn status_update_delta(
         title: (status.title != *last_title).then(|| status.title.clone()),
         pipe: (status.pipe != *last_pipe).then(|| status.pipe.clone()),
         cwd: (status.cwd != *last_cwd).then(|| status.cwd.clone()),
+        foreground_command: (status.foreground_command != *last_foreground)
+            .then(|| status.foreground_command.clone()),
     })
 }
 
@@ -1551,6 +1599,8 @@ fn spawn_status_poller(
             // the current directory: an OSC 7 report or pid resolution may already
             // be present at attach, and the buffer record must still learn it.
             let mut last_cwd: Option<PathBuf> = None;
+            // The attaching server applies `initial` itself, foreground included.
+            let mut last_foreground = initial.foreground_command.clone();
             let mut saw_exit = !initial.running;
 
             while !inner.stop.load(Ordering::Relaxed) {
@@ -1584,6 +1634,7 @@ fn spawn_status_poller(
                     last_activity,
                     &last_pipe,
                     &last_cwd,
+                    &last_foreground,
                 ) {
                     (callbacks.on_output)(inner.buffer_id, update);
                     last_sequence = status.sequence;
@@ -1591,6 +1642,7 @@ fn spawn_status_poller(
                     last_activity = status.activity;
                     last_pipe = status.pipe.clone();
                     last_cwd = status.cwd.clone();
+                    last_foreground = status.foreground_command.clone();
                 }
 
                 if !saw_exit && !status.running {
@@ -1648,6 +1700,87 @@ fn resolve_pid_cwd(pid: u32) -> Option<PathBuf> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn resolve_pid_cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+/// Resolve the argument vector of a running process by pid.
+#[cfg(target_os = "linux")]
+fn resolve_pid_argv(pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        bytes
+            .split(|&byte| byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_pid_argv(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size: libc::size_t = 0;
+    // Safety: a null output buffer asks `sysctl` for the size it needs.
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u8; size];
+    // Safety: `buffer` holds `size` writable bytes and `sysctl` writes at most
+    // that many, updating `size` to the count it wrote.
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    parse_procargs2(&buffer)
+}
+
+/// Parse a `KERN_PROCARGS2` buffer: `argc` as a native-endian `int`, the
+/// executable path, NUL padding, then `argc` NUL-terminated arguments.
+#[cfg(any(target_os = "macos", test))]
+fn parse_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
+    let argc_bytes: [u8; 4] = buffer.get(..4)?.try_into().ok()?;
+    let argc = usize::try_from(i32::from_ne_bytes(argc_bytes)).ok()?;
+    let rest = &buffer[4..];
+    let mut position = rest.iter().position(|&byte| byte == 0)?;
+    while rest.get(position) == Some(&0) {
+        position += 1;
+    }
+    let mut argv = Vec::with_capacity(argc);
+    for _ in 0..argc {
+        let remaining = rest.get(position..)?;
+        let end = remaining.iter().position(|&byte| byte == 0)?;
+        argv.push(String::from_utf8_lossy(&remaining[..end]).into_owned());
+        position += end + 1;
+    }
+    Some(argv)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn resolve_pid_argv(_pid: u32) -> Option<Vec<String>> {
     None
 }
 
@@ -1927,6 +2060,7 @@ mod tests {
             exit_code: None,
             pipe: None,
             cwd: cwd.map(std::path::PathBuf::from),
+            foreground_command: None,
         }
     }
 
@@ -1941,6 +2075,7 @@ mod tests {
             ActivityState::Idle,
             &None,
             &Some(std::path::PathBuf::from("/old")),
+            &None,
         )
         .expect("cwd change should emit an update even at the same sequence");
         assert_eq!(update.sequence, 7);
@@ -1961,6 +2096,7 @@ mod tests {
             ActivityState::Idle,
             &None,
             &Some(std::path::PathBuf::from("/old")),
+            &None,
         )
         .expect("cwd clear should emit an update even at the same sequence");
         assert_eq!(update.cwd, Some(None));
@@ -1976,8 +2112,41 @@ mod tests {
             ActivityState::Idle,
             &None,
             &Some(std::path::PathBuf::from("/same")),
+            &None,
         );
         assert!(update.is_none());
+    }
+
+    #[test]
+    fn status_update_delta_emits_foreground_command_changes() {
+        let mut status = status_with_cwd(7, Some("/same"));
+        status.foreground_command = Some(vec!["vim".to_owned(), "notes.txt".to_owned()]);
+        let update = status_update_delta(
+            &status,
+            7,
+            &Some("shell".to_owned()),
+            ActivityState::Idle,
+            &None,
+            &Some(std::path::PathBuf::from("/same")),
+            &None,
+        )
+        .expect("a new foreground job should emit an update");
+        assert_eq!(
+            update.foreground_command,
+            Some(Some(vec!["vim".to_owned(), "notes.txt".to_owned()]))
+        );
+        assert!(update.cwd.is_none());
+    }
+
+    #[test]
+    fn parse_procargs2_reads_the_argument_vector() {
+        let mut buffer = 2_i32.to_ne_bytes().to_vec();
+        buffer.extend_from_slice(b"/usr/bin/vim\0\0\0\0vim\0notes.txt\0HOME=/x\0");
+        assert_eq!(
+            super::parse_procargs2(&buffer),
+            Some(vec!["vim".to_owned(), "notes.txt".to_owned()])
+        );
+        assert_eq!(super::parse_procargs2(&buffer[..2]), None);
     }
 
     #[test]
@@ -2111,6 +2280,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 cwd: None,
+                foreground_command: None,
             },
         )
         .expect("spawn poller");
@@ -2173,6 +2343,7 @@ mod tests {
                     stop_reason: None,
                 }),
                 cwd: None,
+                foreground_command: None,
             },
         )
         .expect("spawn poller");

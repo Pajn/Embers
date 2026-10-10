@@ -73,6 +73,10 @@ pub struct Buffer {
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
     pub user_options: BTreeMap<String, String>,
+    /// Command line of the job last seen in the foreground of this buffer's
+    /// PTY when that was not the buffer's own process, for example a program
+    /// its shell runs. Saved so a restore can decide whether to run it again.
+    pub foreground_command: Option<Vec<String>>,
     runtime_socket_path: Option<PathBuf>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
@@ -99,6 +103,7 @@ impl Buffer {
             cwd,
             env,
             user_options: BTreeMap::new(),
+            foreground_command: None,
             runtime_socket_path: None,
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
@@ -130,6 +135,7 @@ impl fmt::Debug for Buffer {
             .field("cwd", &self.cwd)
             .field("env", &self.env)
             .field("user_options", &self.user_options)
+            .field("foreground_command", &self.foreground_command)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
