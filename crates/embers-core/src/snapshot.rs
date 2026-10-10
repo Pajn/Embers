@@ -55,11 +55,21 @@ pub enum TermColor {
     },
 }
 
+impl TermColor {
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
 /// Per-cell attribute bitflags.
 ///
 /// A hand-rolled newtype over `u16` (no `bitflags` dependency). Serializes
 /// transparently as its inner integer. `WIDE_CHAR`/`WRAPLINE`/spacer flags are
 /// consumed by the emulator walk and never represented here.
+///
+/// The underline flags (`UNDERLINE`, `DOUBLE_UNDERLINE`, `CURLY_UNDERLINE`,
+/// `DOTTED_UNDERLINE`, `DASHED_UNDERLINE`) are mutually exclusive: a cell has at
+/// most one underline style, mirroring SGR `4:1`..`4:5`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellAttrs(pub u16);
 
@@ -72,6 +82,15 @@ impl CellAttrs {
     pub const INVERSE: u16 = 32;
     pub const HIDDEN: u16 = 64;
     pub const STRIKEOUT: u16 = 128;
+    pub const CURLY_UNDERLINE: u16 = 256;
+    pub const DOTTED_UNDERLINE: u16 = 512;
+    pub const DASHED_UNDERLINE: u16 = 1024;
+    /// Every underline style flag.
+    pub const ANY_UNDERLINE: u16 = Self::UNDERLINE
+        | Self::DOUBLE_UNDERLINE
+        | Self::CURLY_UNDERLINE
+        | Self::DOTTED_UNDERLINE
+        | Self::DASHED_UNDERLINE;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -101,6 +120,11 @@ pub struct StyledRun {
     pub fg: TermColor,
     pub bg: TermColor,
     pub attrs: CellAttrs,
+    /// Underline color (SGR 58). [`TermColor::Default`] means the underline
+    /// follows the foreground, which is the common case; it is omitted from the
+    /// keeper JSON and travels sparsely on the wire.
+    #[serde(default, skip_serializing_if = "TermColor::is_default")]
+    pub underline_color: TermColor,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +220,7 @@ mod tests {
                     fg: TermColor::Indexed(1),
                     bg: TermColor::Default,
                     attrs,
+                    underline_color: TermColor::Default,
                 },
                 StyledRun {
                     len: 1,
@@ -206,6 +231,7 @@ mod tests {
                     },
                     bg: TermColor::Indexed(4),
                     attrs: CellAttrs::empty(),
+                    underline_color: TermColor::Default,
                 },
             ],
         };
@@ -213,6 +239,22 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         let decoded: SnapshotLine = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, line);
+    }
+
+    #[test]
+    fn underline_color_is_omitted_from_json_when_default() {
+        let mut run = StyledRun {
+            len: 1,
+            attrs: CellAttrs(CellAttrs::CURLY_UNDERLINE),
+            ..StyledRun::default()
+        };
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(!json.contains("underline_color"), "{json}");
+        assert_eq!(serde_json::from_str::<StyledRun>(&json).unwrap(), run);
+
+        run.underline_color = TermColor::Rgb { r: 1, g: 2, b: 3 };
+        let json = serde_json::to_string(&run).unwrap();
+        assert_eq!(serde_json::from_str::<StyledRun>(&json).unwrap(), run);
     }
 
     #[test]

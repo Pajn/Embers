@@ -1247,8 +1247,10 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
     server.shutdown().await.expect("server shuts down");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn styled_pane_output_reaches_client_ansi_lines() {
+/// Run `script` under `/bin/sh` in a fresh pane, wait until `marker` shows in its
+/// visible snapshot, then render the session through a separate client the way
+/// the interactive client does. Returns the rendered ANSI and plain text.
+async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
     let server = TestServer::start().await.expect("server starts");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -1257,35 +1259,30 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
     let session = create_session(&mut connection, "alpha").await;
     let buffer = create_buffer_with_command(
         &mut connection,
-        "colored",
-        vec![
-            "/bin/sh".to_owned(),
-            "-lc".to_owned(),
-            // Emit red text via SGR, then idle so the pane persists while we render.
-            "printf '\\033[31mRED-TEXT\\033[0m\\n'; sleep 2".to_owned(),
-        ],
+        "styled",
+        vec!["/bin/sh".to_owned(), "-lc".to_owned(), script.to_owned()],
     )
     .await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
             session_id: session.session.id,
-            title: "colored".to_owned(),
+            title: "styled".to_owned(),
             buffer_id: Some(buffer.id),
             child_node_id: None,
         }))
         .await
-        .expect("add colored tab succeeds");
+        .expect("add styled tab succeeds");
 
     connection
-        .wait_for_capture_contains(buffer.id, "RED-TEXT", Duration::from_secs(3))
+        .wait_for_capture_contains(buffer.id, marker, Duration::from_secs(3))
         .await
-        .expect("colored output renders");
+        .expect("styled output renders");
     let _ = wait_for_visible_snapshot(
         &mut connection,
         buffer.id,
         Duration::from_secs(3),
-        |snapshot| lines_text(&snapshot.lines).contains("RED-TEXT"),
+        |snapshot| lines_text(&snapshot.lines).contains(marker),
     )
     .await;
 
@@ -1307,7 +1304,17 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
     )
     .expect("projection succeeds");
     let grid = Renderer.render(client.state(), &model);
-    let ansi = grid.ansi_lines().join("\n");
+    let rendered = (grid.ansi_lines().join("\n"), grid.render());
+
+    server.shutdown().await.expect("server shuts down");
+    rendered
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn styled_pane_output_reaches_client_ansi_lines() {
+    // Emit red text via SGR, then idle so the pane persists while we render.
+    let (ansi, plain) =
+        render_pane_output("printf '\\033[31mRED-TEXT\\033[0m\\n'; sleep 2", "RED-TEXT").await;
 
     // ANSI red maps to indexed color 1; the client re-emits `38;5;1m` so the
     // outer terminal's palette resolves it (semantic colors are not baked to RGB).
@@ -1315,9 +1322,23 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
         ansi.contains("\x1b[38;5;1m"),
         "expected indexed red SGR in client output:\n{ansi:?}"
     );
-    assert!(grid.render().contains("RED-TEXT"));
+    assert!(plain.contains("RED-TEXT"));
+}
 
-    server.shutdown().await.expect("server shuts down");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undercurl_and_underline_color_reach_client_ansi_lines() {
+    // What Neovim emits for a diagnostic: a curly underline in true-color red.
+    let (ansi, plain) = render_pane_output(
+        "printf '\\033[4:3m\\033[58:2::255:0:0mDIAG\\033[0m\\n'; sleep 2",
+        "DIAG",
+    )
+    .await;
+
+    assert!(
+        ansi.contains("\x1b[4:3m\x1b[58:2::255:0:0mDIAG"),
+        "expected curly underline and its color in client output:\n{ansi:?}"
+    );
+    assert!(plain.contains("DIAG"));
 }
 
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {

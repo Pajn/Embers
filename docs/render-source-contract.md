@@ -14,7 +14,15 @@ The client does not consume terminal diffs. It renders from full visible snapsho
 
 ### Styled visible lines
 
-Each visible line is a `SnapshotLine { text, runs }`: the plain text plus run-length style annotations (`StyledRun`) carrying per-cell foreground/background color and attributes. Colors are semantic — named/indexed ANSI colors travel as `Indexed(n)` so the outer terminal's palette resolves them, and only true-color sequences carry explicit RGB. An empty `runs` vector means the whole line is default-styled, so plain buffers ship (and render) exactly as before. Scrollback slices used for scrolled-back views carry the same styling; full capture and helper/persistence surfaces stay plain text. The no-diff / full-snapshot model is otherwise unchanged.
+Each visible line is a `SnapshotLine { text, runs }`: the plain text plus run-length style annotations (`StyledRun`) carrying per-cell foreground/background color, attributes, and underline color. Colors are semantic — named/indexed ANSI colors travel as `Indexed(n)` so the outer terminal's palette resolves them, and only true-color sequences carry explicit RGB. An empty `runs` vector means the whole line is default-styled, so plain buffers ship (and render) exactly as before. Scrollback slices used for scrolled-back views carry the same styling; full capture and helper/persistence surfaces stay plain text. The no-diff / full-snapshot model is otherwise unchanged.
+
+### Underline style and color
+
+Underlines keep their shape. `CellAttrs` has one exclusive flag per style — `UNDERLINE`, `DOUBLE_UNDERLINE`, `CURLY_UNDERLINE`, `DOTTED_UNDERLINE`, `DASHED_UNDERLINE` — matching SGR `4:1` to `4:5`. The underline color (SGR 58) travels on the run as `underline_color`, where `Default` means the underline follows the foreground.
+
+On the wire the fixed-size `StyledRunWire` struct is unchanged: the style flags fit in its existing `attrs` bits, and underline colors go in a sparse `underline_colors` vector on `StyledLine` with one 8-byte entry per run that sets a color. Frames from programs that never set an underline color are byte-identical to before. In keeper JSON a default `underline_color` is omitted.
+
+The client renderer re-emits these to the host terminal: `CSI 4 m` for a single underline, `CSI 4:n m` for the other styles, and `CSI 58:5:n m` or `CSI 58:2::r:g:b m` for the color. The host terminal must understand colon sub-parameters to draw them; Embers does not translate them for terminals that don't.
 
 ### Freshness expectations
 

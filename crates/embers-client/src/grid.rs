@@ -37,13 +37,33 @@ impl From<Color> for TerminalColor {
     }
 }
 
+/// Underline shape. Discriminants match the SGR `4:n` sub-parameter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    #[default]
+    None = 0,
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
+}
+
+impl UnderlineStyle {
+    pub const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CellStyle {
     pub fg: Option<TerminalColor>,
     pub bg: Option<TerminalColor>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
+    /// Underline color (SGR 58); `None` follows the foreground.
+    pub underline_color: Option<TerminalColor>,
     pub dim: bool,
     pub reverse: bool,
     pub blink: bool,
@@ -83,7 +103,12 @@ impl From<&crate::scripting::StyleSpec> for CellStyle {
             bg: value.bg.map(|color| TerminalColor::Rgb(color.into())),
             bold: value.bold,
             italic: value.italic,
-            underline: value.underline,
+            underline: if value.underline {
+                UnderlineStyle::Single
+            } else {
+                UnderlineStyle::None
+            },
+            underline_color: None,
             dim: value.dim,
             reverse: false,
             blink: value.blink,
@@ -515,8 +540,7 @@ impl<'a> RunCursor<'a> {
     }
 }
 
-/// Map a content style run to a renderable [`CellStyle`]. Double underline folds
-/// to a single underline (the client has no distinct double-underline SGR).
+/// Map a content style run to a renderable [`CellStyle`].
 pub(crate) fn style_for_run(run: &StyledRun) -> CellStyle {
     let attrs = run.attrs;
     CellStyle {
@@ -524,12 +548,28 @@ pub(crate) fn style_for_run(run: &StyledRun) -> CellStyle {
         bg: term_color_to_cell(run.bg),
         bold: attrs.contains(CellAttrs::BOLD),
         italic: attrs.contains(CellAttrs::ITALIC),
-        underline: attrs.contains(CellAttrs::UNDERLINE)
-            || attrs.contains(CellAttrs::DOUBLE_UNDERLINE),
+        underline: underline_for_attrs(attrs),
+        underline_color: term_color_to_cell(run.underline_color),
         dim: attrs.contains(CellAttrs::DIM),
         reverse: attrs.contains(CellAttrs::INVERSE),
         blink: false,
         strikeout: attrs.contains(CellAttrs::STRIKEOUT),
+    }
+}
+
+fn underline_for_attrs(attrs: CellAttrs) -> UnderlineStyle {
+    if !attrs.contains(CellAttrs::ANY_UNDERLINE) {
+        UnderlineStyle::None
+    } else if attrs.contains(CellAttrs::CURLY_UNDERLINE) {
+        UnderlineStyle::Curly
+    } else if attrs.contains(CellAttrs::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if attrs.contains(CellAttrs::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if attrs.contains(CellAttrs::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else {
+        UnderlineStyle::Single
     }
 }
 
@@ -559,8 +599,13 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
     if to.italic {
         output.push_str("\x1b[3m");
     }
-    if to.underline {
-        output.push_str("\x1b[4m");
+    match to.underline {
+        UnderlineStyle::None => {}
+        // Plain `4` for a single underline: understood by every terminal.
+        UnderlineStyle::Single => output.push_str("\x1b[4m"),
+        style => {
+            let _ = write!(output, "\x1b[4:{}m", style as u8);
+        }
     }
     if to.blink {
         output.push_str("\x1b[5m");
@@ -596,6 +641,22 @@ fn write_style_transition(output: &mut String, from: CellStyle, to: CellStyle) {
             }
             TerminalColor::Indexed(index) => {
                 let _ = write!(output, "\x1b[48;5;{index}m");
+            }
+        }
+    }
+    // SGR 58 only has the colon form (`58:2::r:g:b`, `58:5:n`), the one kitty,
+    // Ghostty, WezTerm, foot and VTE all accept.
+    if let Some(color) = to.underline_color {
+        match color {
+            TerminalColor::Rgb(color) => {
+                let _ = write!(
+                    output,
+                    "\x1b[58:2::{}:{}:{}m",
+                    color.red, color.green, color.blue
+                );
+            }
+            TerminalColor::Indexed(index) => {
+                let _ = write!(output, "\x1b[58:5:{index}m");
             }
         }
     }
@@ -656,6 +717,7 @@ mod tests {
                 fg,
                 bg: TermColor::Default,
                 attrs: CellAttrs(attrs),
+                underline_color: TermColor::Default,
             }],
         }
     }
@@ -696,12 +758,14 @@ mod tests {
                     fg: TermColor::Indexed(1),
                     bg: TermColor::Default,
                     attrs: CellAttrs(CellAttrs::HIDDEN),
+                    underline_color: TermColor::Default,
                 },
                 StyledRun {
                     len: 1,
                     fg: TermColor::Default,
                     bg: TermColor::Default,
                     attrs: CellAttrs::empty(),
+                    underline_color: TermColor::Default,
                 },
             ],
         };

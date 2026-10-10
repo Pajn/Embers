@@ -4,7 +4,7 @@ use embers_core::{ActivityState, Point, Rect, Size, SnapshotLine};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid};
+use crate::grid::{BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle};
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
 use crate::scripting::{BarSegment, BarSpec};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
@@ -510,7 +510,12 @@ fn compose_overlay(base: CellStyle, overlay: CellStyle) -> CellStyle {
         bg: overlay.bg.or(base.bg),
         bold: base.bold || overlay.bold,
         italic: base.italic || overlay.italic,
-        underline: base.underline || overlay.underline,
+        underline: if overlay.underline.is_none() {
+            base.underline
+        } else {
+            overlay.underline
+        },
+        underline_color: overlay.underline_color.or(base.underline_color),
         dim: base.dim || overlay.dim,
         reverse: base.reverse || overlay.reverse,
         blink: base.blink || overlay.blink,
@@ -778,14 +783,18 @@ fn hint_label_style(typed: bool) -> CellStyle {
     CellStyle {
         bold: true,
         reverse: !typed,
-        underline: typed,
+        underline: if typed {
+            UnderlineStyle::Single
+        } else {
+            UnderlineStyle::None
+        },
         ..CellStyle::default()
     }
 }
 
 fn search_style() -> CellStyle {
     CellStyle {
-        underline: true,
+        underline: UnderlineStyle::Single,
         italic: true,
         ..CellStyle::default()
     }
@@ -793,7 +802,7 @@ fn search_style() -> CellStyle {
 
 fn active_search_style() -> CellStyle {
     CellStyle {
-        underline: true,
+        underline: UnderlineStyle::Single,
         reverse: true,
         italic: true,
         ..CellStyle::default()

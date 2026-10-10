@@ -17,6 +17,7 @@ fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
             fg,
             bg: TermColor::Default,
             attrs: CellAttrs(attrs),
+            underline_color: TermColor::Default,
         }],
     }
 }
@@ -357,6 +358,64 @@ fn renders_styled_wide_char() {
         "{ansi:?}"
     );
     assert!(grid.lines().iter().any(|line| line.contains("界")));
+}
+
+#[test]
+fn renders_underline_styles_with_colon_subparameters() {
+    let styles = [
+        CellAttrs::UNDERLINE,
+        CellAttrs::DOUBLE_UNDERLINE,
+        CellAttrs::CURLY_UNDERLINE,
+        CellAttrs::DOTTED_UNDERLINE,
+        CellAttrs::DASHED_UNDERLINE,
+    ];
+    let line = SnapshotLine {
+        text: "abcde".to_owned(),
+        runs: styles
+            .iter()
+            .map(|&attrs| StyledRun {
+                len: 1,
+                attrs: CellAttrs(attrs),
+                ..StyledRun::default()
+            })
+            .collect(),
+    };
+    let ansi = render_focused_with_lines(vec![line])
+        .ansi_lines()
+        .join("\n");
+    // A single underline keeps the universally understood `4`; the other
+    // styles use the `4:n` sub-parameter form.
+    for expected in [
+        "\x1b[4ma",
+        "\x1b[4:2mb",
+        "\x1b[4:3mc",
+        "\x1b[4:4md",
+        "\x1b[4:5me",
+    ] {
+        assert!(ansi.contains(expected), "missing {expected:?} in {ansi:?}");
+    }
+}
+
+#[test]
+fn renders_underline_color() {
+    let mut rgb = styled_line("diag", TermColor::Default, CellAttrs::CURLY_UNDERLINE);
+    rgb.runs[0].underline_color = TermColor::Rgb {
+        r: 255,
+        g: 16,
+        b: 0,
+    };
+    let mut indexed = styled_line("warn", TermColor::Default, CellAttrs::UNDERLINE);
+    indexed.runs[0].underline_color = TermColor::Indexed(3);
+    let grid = render_focused_with_lines(vec![rgb, indexed]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b[58:2::255:16:0m"),
+        "expected rgb underline color in {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[58:5:3m"),
+        "expected indexed underline color in {ansi:?}"
+    );
 }
 
 #[test]

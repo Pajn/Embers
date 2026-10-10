@@ -434,6 +434,7 @@ impl AlacrittyTerminalBackend {
             let fg = map_color(cell.fg);
             let bg = map_color(cell.bg);
             let attrs = map_attrs(flags);
+            let underline_color = cell.underline_color().map_or(TermColor::Default, map_color);
 
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
@@ -441,12 +442,21 @@ impl AlacrittyTerminalBackend {
             emit_cell_text(cell, &mut text);
             let byte_len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
 
-            if fg != TermColor::Default || bg != TermColor::Default || attrs != CellAttrs::empty() {
+            if fg != TermColor::Default
+                || bg != TermColor::Default
+                || attrs != CellAttrs::empty()
+                || underline_color != TermColor::Default
+            {
                 styled = true;
             }
 
             match runs.last_mut() {
-                Some(last) if last.fg == fg && last.bg == bg && last.attrs == attrs => {
+                Some(last)
+                    if last.fg == fg
+                        && last.bg == bg
+                        && last.attrs == attrs
+                        && last.underline_color == underline_color =>
+                {
                     last.len += byte_len;
                 }
                 _ => runs.push(StyledRun {
@@ -454,6 +464,7 @@ impl AlacrittyTerminalBackend {
                     fg,
                     bg,
                     attrs,
+                    underline_color,
                 }),
             }
         }
@@ -741,13 +752,18 @@ fn map_attrs(flags: Flags) -> CellAttrs {
     if flags.contains(Flags::ITALIC) {
         attrs.insert(CellAttrs::ITALIC);
     }
-    if flags.intersects(
-        Flags::UNDERLINE | Flags::UNDERCURL | Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE,
-    ) {
-        attrs.insert(CellAttrs::UNDERLINE);
-    }
-    if flags.contains(Flags::DOUBLE_UNDERLINE) {
-        attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
+    // The emulator keeps at most one underline flag set per cell (SGR 4:n
+    // replaces the previous style), so each maps onto its own exclusive flag.
+    for (flag, attr) in [
+        (Flags::UNDERLINE, CellAttrs::UNDERLINE),
+        (Flags::DOUBLE_UNDERLINE, CellAttrs::DOUBLE_UNDERLINE),
+        (Flags::UNDERCURL, CellAttrs::CURLY_UNDERLINE),
+        (Flags::DOTTED_UNDERLINE, CellAttrs::DOTTED_UNDERLINE),
+        (Flags::DASHED_UNDERLINE, CellAttrs::DASHED_UNDERLINE),
+    ] {
+        if flags.contains(flag) {
+            attrs.insert(attr);
+        }
     }
     if flags.contains(Flags::INVERSE) {
         attrs.insert(CellAttrs::INVERSE);
@@ -910,6 +926,54 @@ mod tests {
 
         let line = first_line(&backend, size);
         assert_eq!(line.runs[0].fg, TermColor::Indexed(9));
+    }
+
+    #[test]
+    fn underline_styles_keep_their_shape() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        // Single, double, curly, dotted, dashed: one cell each.
+        backend.ingest_bytes(b"\x1b[4:1ma\x1b[4:2mb\x1b[4:3mc\x1b[4:4md\x1b[4:5me\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "abcde");
+        let attrs: Vec<_> = line.runs.iter().map(|run| run.attrs).collect();
+        assert_eq!(
+            attrs,
+            vec![
+                CellAttrs(CellAttrs::UNDERLINE),
+                CellAttrs(CellAttrs::DOUBLE_UNDERLINE),
+                CellAttrs(CellAttrs::CURLY_UNDERLINE),
+                CellAttrs(CellAttrs::DOTTED_UNDERLINE),
+                CellAttrs(CellAttrs::DASHED_UNDERLINE),
+            ]
+        );
+    }
+
+    #[test]
+    fn underline_color_is_carried_semantically() {
+        let size = PtySize::new(8, 1);
+        let mut backend = backend(size);
+        let _ = backend.take_damage();
+
+        // Curly underline in true-color red, then an indexed underline color,
+        // then SGR 59 resets the underline color back to the foreground.
+        backend.ingest_bytes(b"\x1b[4:3;58:2::255:0:0mab\x1b[58:5:12mc\x1b[59md\x1b[0m");
+
+        let line = first_line(&backend, size);
+        assert_eq!(line.text, "abcd");
+        assert_eq!(line.runs.len(), 3);
+        assert_eq!(line.runs[0].len, 2);
+        assert!(line.runs[0].attrs.contains(CellAttrs::CURLY_UNDERLINE));
+        assert_eq!(
+            line.runs[0].underline_color,
+            TermColor::Rgb { r: 255, g: 0, b: 0 }
+        );
+        assert_eq!(line.runs[1].underline_color, TermColor::Indexed(12));
+        assert_eq!(line.runs[2].underline_color, TermColor::Default);
+        assert!(line.runs[2].attrs.contains(CellAttrs::CURLY_UNDERLINE));
     }
 
     #[test]
