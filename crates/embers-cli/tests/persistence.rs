@@ -18,12 +18,17 @@ struct ServeProcess {
 
 impl ServeProcess {
     async fn start(socket_path: &Path) -> Self {
+        Self::start_with_env(socket_path, &[]).await
+    }
+
+    async fn start_with_env(socket_path: &Path, env: &[(&str, &str)]) -> Self {
         let _ = fs::remove_file(socket_path.with_extension("pid"));
         let child = Command::new(cargo_bin_path("embers"))
             .arg("__serve")
             .arg("--socket")
             .arg(socket_path)
             .env("SHELL", "/bin/sh")
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -179,6 +184,76 @@ async fn panes_come_back_in_place_after_the_server_and_keepers_are_killed() {
         })
         .await;
     }
+
+    server.kill();
+    kill_keepers(&socket_path).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killed_panes_whose_keepers_are_gone_stay_gone() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let root = tempfile::Builder::new()
+        .prefix("emb")
+        .tempdir_in("/tmp")
+        .expect("tempdir");
+    let socket_path = root.path().join("s.sock");
+    let workspace_path = ServerConfig::new(socket_path.clone()).workspace_path;
+
+    let server = ServeProcess::start(&socket_path).await;
+    cli(&socket_path, &["new-session", "main"]);
+    cli(&socket_path, &["new-window", "-t", "main", "--", "/bin/sh"]);
+    let right_pane = cli(&socket_path, &["split-window", "--", "/bin/sh"]);
+    let right_pane = right_pane.trim().to_owned();
+    cli(&socket_path, &["new-session", "other"]);
+    cli(
+        &socket_path,
+        &["new-window", "-t", "other", "--", "/bin/sh"],
+    );
+    wait_until("the three panes to be saved running", || {
+        fs::read_to_string(&workspace_path)
+            .is_ok_and(|contents| contents.matches("\"running\"").count() >= 3)
+    })
+    .await;
+    server.kill();
+    kill_keepers(&socket_path).await;
+
+    // With restore off the panes are left interrupted. Killing them must
+    // remove them even though there is no program left to end.
+    let server = ServeProcess::start_with_env(&socket_path, &[("EMBERS_RESTORE", "0")]).await;
+    let buffers = cli(&socket_path, &["list-buffers"]);
+    assert_eq!(
+        buffers.matches("interrupted").count(),
+        3,
+        "every pane is interrupted:\n{buffers}"
+    );
+    cli(&socket_path, &["kill-pane", "-t", &right_pane]);
+    cli(&socket_path, &["kill-session", "-t", "other"]);
+    let buffers = cli(&socket_path, &["list-buffers"]);
+    assert_eq!(
+        buffers.lines().count(),
+        1,
+        "only main's remaining pane is left:\n{buffers}"
+    );
+    assert!(
+        !buffers.contains("detached"),
+        "orphaned buffers:\n{buffers}"
+    );
+    wait_until("the kills to be saved", || {
+        fs::read_to_string(&workspace_path)
+            .is_ok_and(|contents| contents.matches("\"interrupted\"").count() == 1)
+    })
+    .await;
+    server.kill();
+
+    // Restore on: only the pane still shown comes back.
+    let server = ServeProcess::start(&socket_path).await;
+    let buffers = cli(&socket_path, &["list-buffers"]);
+    assert_eq!(
+        buffers.lines().count(),
+        1,
+        "killed panes came back:\n{buffers}"
+    );
+    assert!(buffers.contains("attached"), "{buffers}");
 
     server.kill();
     kill_keepers(&socket_path).await;

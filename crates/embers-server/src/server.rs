@@ -36,7 +36,10 @@ use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
     IS_VIM_OPTION, Node,
 };
-use crate::persist::{encode_workspace, load_workspace, write_workspace};
+use crate::persist::{
+    PersistedWorkspace, encode_persisted_workspace, load_workspace, same_saved_state,
+    write_workspace,
+};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
@@ -64,6 +67,16 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 /// it writes the workspace file. Changes made meanwhile land in the same write,
 /// so a burst costs one write, and a crash loses at most this much.
 const WORKSPACE_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// [`WORKSPACE_SAVE_DELAY`] for changes to a buffer's title, working directory
+/// or foreground command. Programs change these continuously (a progress
+/// display in the title, a shell prompt that sets it), and losing the last
+/// moment of them in a crash costs little.
+const WORKSPACE_METADATA_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long a connection gets to write the shutdown notice to its client when
+/// the server stops, before it is closed anyway.
+const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long a restored shell gets to print its prompt before the command it
 /// should run again is typed into it anyway.
@@ -210,7 +223,11 @@ impl Server {
                             .await;
 
                         let write_runtime = runtime.clone();
-                        let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        let mut write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        // Held until the shutdown notice is flushed, so the
+                        // server does not exit first; released right away
+                        // otherwise.
+                        let flush_task = runtime.connection_tasks.enter();
                         let read_runtime = runtime.clone();
                         let connection_task = runtime.connection_tasks.enter();
                         let read_handle = tokio::spawn(async move {
@@ -238,7 +255,22 @@ impl Server {
                             };
                             let _ = stopped_tx.send(());
 
+                            if exit == ConnectionExit::ServerStopped {
+                                // Dropping the connection's subscriptions drops
+                                // the last senders, so the writer ends once it
+                                // has written what is queued.
+                                write_runtime.cleanup_connection(connection_id).await;
+                                if tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, &mut write_handle)
+                                    .await
+                                    .is_err()
+                                {
+                                    write_handle.abort();
+                                }
+                                return;
+                            }
+                            drop(flush_task);
                             match exit {
+                                ConnectionExit::ServerStopped => {}
                                 ConnectionExit::SelfDetached => match write_handle.await {
                                     Ok(Ok(())) => {}
                                     Ok(Err(error)) => {
@@ -432,9 +464,13 @@ struct Runtime {
     /// Signalled whenever the workspace changes in a way worth saving; the
     /// workspace saver batches these into one write.
     workspace_dirty: Notify,
-    /// The bytes last written to the workspace file. Held across a whole save so
-    /// saves never interleave, and used to skip writing identical contents.
-    last_saved_workspace: Mutex<Option<Vec<u8>>>,
+    /// Signalled when only buffer metadata (title, working directory,
+    /// foreground command) changed; saved after a longer delay.
+    workspace_metadata_dirty: Notify,
+    /// The workspace last written to the workspace file. Held across a whole
+    /// save so saves never interleave, and used to skip writing a workspace
+    /// that has not changed in a way worth saving (see [`same_saved_state`]).
+    last_saved_workspace: Mutex<Option<PersistedWorkspace>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
@@ -532,6 +568,7 @@ impl Runtime {
                 ..RestoreConfig::default()
             },
             workspace_dirty: Notify::new(),
+            workspace_metadata_dirty: Notify::new(),
             last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
@@ -546,41 +583,73 @@ impl Runtime {
 }
 
 impl Runtime {
+    /// Write the workspace file unless it already holds the current state.
+    /// Only a snapshot of the state is taken under the state lock; encoding
+    /// and the write happen outside it.
     async fn persist_workspace(&self) -> Result<()> {
         let mut last_saved = self.last_saved_workspace.lock().await;
-        let bytes = encode_workspace(&*self.state.lock().await)?;
-        if last_saved.as_deref() == Some(bytes.as_slice()) {
+        let persisted = self.state.lock().await.to_persisted();
+        if last_saved
+            .as_ref()
+            .is_some_and(|saved| same_saved_state(saved, &persisted))
+        {
             return Ok(());
         }
         let path = self.workspace_path.clone();
-        let bytes =
-            tokio::task::spawn_blocking(move || write_workspace(&path, &bytes).map(|()| bytes))
-                .await
-                .map_err(|error| MuxError::internal(error.to_string()))??;
-        *last_saved = Some(bytes);
+        let persisted = tokio::task::spawn_blocking(move || {
+            write_workspace(&path, &encode_persisted_workspace(&persisted)?).map(|()| persisted)
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))??;
+        *last_saved = Some(persisted);
         Ok(())
     }
 
-    /// Ask the workspace saver to write the workspace soon.
+    /// Ask the workspace saver to write the workspace soon: a change to the
+    /// layout, sessions or buffers, saved within [`WORKSPACE_SAVE_DELAY`].
     fn mark_workspace_dirty(&self) {
         self.workspace_dirty.notify_one();
     }
 
+    /// Ask the workspace saver to write the workspace eventually: a change to
+    /// a buffer's title, working directory or foreground command, which
+    /// programs can make many times a second. These are saved within
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`], so a burst of them costs one write.
+    fn mark_workspace_metadata_dirty(&self) {
+        self.workspace_metadata_dirty.notify_one();
+    }
+
     /// Saves the workspace after changes, so a crash or SIGKILL of the server
-    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of them. Stops at
-    /// shutdown, which writes the final state itself.
+    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of layout changes and
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`] of title, directory and foreground
+    /// command changes. The wait starts at the first change and is not
+    /// extended by later ones, so a pane that never stops changing its title
+    /// is still saved regularly. Stops at shutdown, which writes the final
+    /// state itself.
     fn spawn_workspace_saver(self: &Arc<Self>) -> JoinHandle<()> {
         let runtime = self.clone();
         let mut shutdown = self.shutdown.subscribe();
         tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    () = runtime.workspace_dirty.notified() => {}
+                let delay = tokio::select! {
+                    () = runtime.workspace_dirty.notified() => WORKSPACE_SAVE_DELAY,
+                    () = runtime.workspace_metadata_dirty.notified() => {
+                        WORKSPACE_METADATA_SAVE_DELAY
+                    }
                     () = wait_for_shutdown(&mut shutdown) => return,
-                }
-                tokio::select! {
-                    () = tokio::time::sleep(WORKSPACE_SAVE_DELAY) => {}
-                    () = wait_for_shutdown(&mut shutdown) => return,
+                };
+                let mut deadline = tokio::time::Instant::now() + delay;
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline) => break,
+                        // A layout change during a long wait is saved as
+                        // promptly as any other.
+                        () = runtime.workspace_dirty.notified() => {
+                            deadline = deadline
+                                .min(tokio::time::Instant::now() + WORKSPACE_SAVE_DELAY);
+                        }
+                        () = wait_for_shutdown(&mut shutdown) => return,
+                    }
                 }
                 if let Err(error) = runtime.persist_workspace().await {
                     warn!(%error, "failed to save workspace");
@@ -752,20 +821,34 @@ impl Runtime {
         Ok(())
     }
 
-    /// Start a fresh process for every PTY buffer left `Interrupted`: its keeper
-    /// is gone, so it cannot be reattached. Restarts run concurrently so a
-    /// large workspace does not hold up startup.
+    /// Start a fresh process for every PTY buffer left `Interrupted` that a
+    /// pane shows: its keeper is gone, so it cannot be reattached. Restarts run
+    /// concurrently so a large workspace does not hold up startup.
+    ///
+    /// Like tmux-resurrect, only what is in the layout is restored. A detached
+    /// buffer has no place to come back to and its terminal contents are not
+    /// restored, so a fresh shell for it would only be a hidden process
+    /// nobody asked for; its record is dropped instead.
     async fn restart_interrupted_buffers(self: &Arc<Self>) {
         let interrupted: Vec<_> = {
-            let state = self.state.lock().await;
-            state
+            let mut state = self.state.lock().await;
+            let (attached, detached): (Vec<_>, Vec<_>) = state
                 .buffers
                 .values()
                 .filter(|buffer| {
                     matches!(buffer.state, BufferState::Interrupted(_))
                         && matches!(buffer.kind, BufferKind::Pty)
                 })
-                .map(|buffer| buffer.id)
+                .map(|buffer| (buffer.id, buffer.attachment.clone()))
+                .partition(|(_, attachment)| matches!(attachment, BufferAttachment::Attached(_)));
+            for (buffer_id, _) in detached {
+                if state.remove_buffer(buffer_id).is_ok() {
+                    info!(%buffer_id, "dropped detached buffer whose keeper was gone");
+                }
+            }
+            attached
+                .into_iter()
+                .map(|(buffer_id, _)| buffer_id)
                 .collect()
         };
         let mut restarts = tokio::task::JoinSet::new();
@@ -785,20 +868,18 @@ impl Runtime {
     /// last directory, keeping its id, title and place in the layout.
     async fn restart_buffer(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
         let plan = {
-            let mut state = self.state.lock().await;
-            let buffer = state
-                .buffers
-                .get_mut(&buffer_id)
-                .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))?;
-            let plan = plan_restore(buffer, &self.restore, &default_shell());
-            buffer.command = plan.command.clone();
-            buffer.cwd = plan.cwd.clone();
-            buffer.foreground_command = None;
+            let state = self.state.lock().await;
+            plan_restore(state.buffer(buffer_id)?, &self.restore, &default_shell())
+        };
+        // The record keeps its command and directory until the new keeper
+        // runs: a restore that fails leaves (and saves) the pane as it was,
+        // so a later restore can still bring back what it ran.
+        self.spawn_buffer_runtime_with(buffer_id, plan.command.clone(), plan.cwd.clone())
+            .await?;
+        if let Some(buffer) = self.state.lock().await.buffers.get_mut(&buffer_id) {
             // The program that set it is gone; a rerun Neovim sets it again.
             buffer.user_options.remove(IS_VIM_OPTION);
-            plan
-        };
-        self.spawn_buffer_runtime(buffer_id).await?;
+        }
         info!(%buffer_id, command = ?plan.command, "restored buffer whose keeper was gone");
 
         if let Some(command_line) = plan.typed_command {
@@ -1568,11 +1649,8 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 force: _,
-            } => match self.buffer_runtime(buffer_id).await {
-                Ok(runtime) => match runtime.kill().await {
-                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
-                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                },
+            } => match self.kill_buffer(buffer_id).await {
+                Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             BufferRequest::Capture {
@@ -2475,10 +2553,28 @@ impl Runtime {
     }
 
     async fn spawn_buffer_runtime(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
-        let (command, cwd, size, env_hints) = {
+        let (command, cwd) = {
             let state = self.state.lock().await;
-            let buffer = state.buffer(buffer_id)?.clone();
-            (buffer.command, buffer.cwd, buffer.pty_size, buffer.env)
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.command.clone(), buffer.cwd.clone())
+        };
+        self.spawn_buffer_runtime_with(buffer_id, command, cwd)
+            .await
+    }
+
+    /// Start a keeper for `buffer_id` running `command` in `cwd`. The buffer
+    /// record takes them as its command and directory only once the keeper
+    /// runs, so a spawn that fails leaves the record as it was.
+    async fn spawn_buffer_runtime_with(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+    ) -> Result<()> {
+        let (size, env_hints) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.pty_size, buffer.env.clone())
         };
 
         let mut buffer_env = self.buffer_env.clone();
@@ -2529,6 +2625,10 @@ impl Runtime {
                 buffer_id,
                 Some(runtime.socket_path().to_path_buf()),
             )?;
+            if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+                buffer.command = command;
+                buffer.cwd = cwd;
+            }
             apply_runtime_status(&mut state, buffer_id, &status);
         }
 
@@ -2569,6 +2669,36 @@ impl Runtime {
                 "buffer {buffer_id} has already exited"
             ))),
         }
+    }
+
+    /// End `buffer_id`'s program. A buffer left `Interrupted` (its keeper is
+    /// gone and restore is off or failed) has no program to end, so killing it
+    /// ends the buffer itself: a detached one is removed, and an attached one
+    /// is marked exited, which the exit cleanup then handles like any other
+    /// (closing its view unless it remains on exit). Without this, killing
+    /// its view would leave an orphaned record that a later restore brings
+    /// back.
+    async fn kill_buffer(&self, buffer_id: BufferId) -> Result<()> {
+        let runtime = self.buffer_runtimes.lock().await.get(&buffer_id).cloned();
+        if let Some(runtime) = runtime {
+            return runtime.kill().await;
+        }
+        {
+            let mut state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            if matches!(buffer.state, BufferState::Interrupted(_)) {
+                if matches!(buffer.attachment, BufferAttachment::Detached) {
+                    state.remove_buffer(buffer_id)?;
+                } else {
+                    state.mark_buffer_exited(buffer_id, None)?;
+                }
+                drop(state);
+                info!(%buffer_id, "removed killed buffer whose keeper was gone");
+                self.mark_workspace_dirty();
+                return Ok(());
+            }
+        }
+        self.buffer_runtime(buffer_id).await?.kill().await
     }
 
     async fn ensure_buffer_accepts_input(&self, buffer_id: BufferId) -> Result<()> {
@@ -3387,7 +3517,7 @@ impl Runtime {
             (render_invalidated, pipe_event, workspace_changed)
         };
         if workspace_changed {
-            self.mark_workspace_dirty();
+            self.mark_workspace_metadata_dirty();
         }
 
         let mut events = Vec::new();
@@ -4010,6 +4140,9 @@ fn location_is_root_tab(state: &ServerState, location: &BufferLocation) -> Resul
 enum ConnectionExit {
     Closed,
     SelfDetached,
+    /// The server is stopping; the connection's last event,
+    /// [`ServerEvent::ServerShutdown`], is queued and should be flushed.
+    ServerStopped,
 }
 
 fn closed_session_ids(events: &[ServerEvent]) -> Vec<embers_core::SessionId> {
@@ -4033,7 +4166,11 @@ async fn handle_connection(
     loop {
         let frame = tokio::select! {
             _ = wait_for_shutdown(&mut server_shutdown) => {
-                return Ok(ConnectionExit::Closed);
+                // Tell the client the server is stopping on purpose, so it can
+                // exit cleanly rather than report a lost server. Best effort:
+                // a client too slow to take it sees the connection close.
+                let _ = outbound.try_send(ServerEnvelope::Event(ServerEvent::ServerShutdown));
+                return Ok(ConnectionExit::ServerStopped);
             }
             _ = &mut shutdown => {
                 debug!(connection_id, "client detach requested");

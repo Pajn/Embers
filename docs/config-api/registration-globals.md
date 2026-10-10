@@ -143,16 +143,22 @@ terminal running the client, with its cursor at the pane's cursor so
 images land where the program put them. Kitty graphics commands sent
 without the wrapper are passed on the same way.
 
-- `"on"` (the default): only from panes that are on screen.
+- `"off"` (the default, as in tmux): drop them.
+- `"on"`: only from panes that are on screen.
 - `"all"`: from every pane in the client's session, on screen or not.
   Sequences from a pane that is not on screen are written without
   moving the cursor.
-- `"off"`: drop them.
+
+Passthrough is off by default because it lets any program on screen,
+or `cat` of an untrusted file, write raw sequences to the terminal,
+bypassing `set_clipboard(false)` and the filtering Embers applies to
+pane output. Turning it on only has an effect when the terminal is
+known to support passthrough (see `set_terminal_features`).
 </div>
 <div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent"  style="display: none;" >
 
 ```rhai
-set_allow_passthrough("all");
+set_allow_passthrough("on");
 ```
 
 </div>

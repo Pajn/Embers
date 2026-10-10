@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8d0129b0.js";
+            window.path_to_searchindex_js = "searchindex-a5527125.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -383,16 +383,21 @@ terminal running the client, with its cursor at the pane’s cursor so
 images land where the program put them. Kitty graphics commands sent
 without the wrapper are passed on the same way.</p>
 <ul>
-<li><code>"on"</code> (the default): only from panes that are on screen.</li>
+<li><code>"off"</code> (the default, as in tmux): drop them.</li>
+<li><code>"on"</code>: only from panes that are on screen.</li>
 <li><code>"all"</code>: from every pane in the client’s session, on screen or not.
 Sequences from a pane that is not on screen are written without
 moving the cursor.</li>
-<li><code>"off"</code>: drop them.</li>
 </ul>
+<p>Passthrough is off by default because it lets any program on screen,
+or <code>cat</code> of an untrusted file, write raw sequences to the terminal,
+bypassing <code>set_clipboard(false)</code> and the filtering Embers applies to
+pane output. Turning it on only has an effect when the terminal is
+known to support passthrough (see <code>set_terminal_features</code>).</p>
 </div>
 
 <div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent" style="display: none;">
-<pre><code class="language-rhai">set_allow_passthrough("all");
+<pre><code class="language-rhai">set_allow_passthrough("on");
 </code></pre>
 </div>
 

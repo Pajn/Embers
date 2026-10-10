@@ -33,7 +33,26 @@ pub async fn run(
     target: Option<String>,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    let mut client = MuxClient::connect(&socket_path).await?;
+    let transport = SocketTransport::connect(&socket_path).await?;
+    let server_shutdown = transport.server_shutdown_flag();
+    let result = run_attached(MuxClient::new(transport), socket_path, target, config_path).await;
+    // The terminal is restored by now. Like tmux, a server stopped on purpose
+    // (kill-server) ends the client normally, whatever the connection's close
+    // did to the request in flight; a server that went away without saying so
+    // is still an error.
+    if server_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+        println!("[server exited]");
+        return Ok(());
+    }
+    result
+}
+
+async fn run_attached(
+    mut client: MuxClient<SocketTransport>,
+    socket_path: PathBuf,
+    target: Option<String>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
@@ -151,6 +170,15 @@ pub async fn run(
                             .handle_focus_event(active_session_id, viewport, focused)
                             .await?;
                         terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
+                }
+                Ok(TerminalEvent::HostReply(bytes)) => {
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_host_reply(active_session_id, viewport, bytes)
+                            .await?;
                         dirty = true;
                     }
                 }
@@ -539,6 +567,9 @@ enum TerminalEvent {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Focus(bool),
+    /// A reply from the host terminal to a query, not typed input (see
+    /// `ConfiguredClient::handle_host_reply`).
+    HostReply(Vec<u8>),
     /// A recognized report that carries no input to act on (e.g. a kitty
     /// key-release when report-event-types is negotiated). Distinguished from an
     /// unrecognized sequence so it isn't forwarded to the program as raw bytes.
@@ -698,7 +729,21 @@ fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
     if bytes == b"\x1b[200~" {
         return Ok(TerminalEvent::Paste(read_bracketed_paste(fd)?));
     }
-    Ok(parse_csi_event(&bytes).unwrap_or(TerminalEvent::Key(KeyEvent::Bytes(bytes))))
+    Ok(parse_csi_event(&bytes).unwrap_or_else(|| {
+        if is_csi_report(&bytes) {
+            TerminalEvent::HostReply(bytes)
+        } else {
+            TerminalEvent::Key(KeyEvent::Bytes(bytes))
+        }
+    }))
+}
+
+/// Whether `bytes`, a CSI sequence that is not a key, mouse or focus event, is
+/// a report from the host terminal: one with a private-parameter marker
+/// (`CSI ?`, `CSI >`, `CSI =`), as DA1, DA2, kitty keyboard flags and DECRPM
+/// replies have, or a DECRPM reply (`... $ y`). Keys never take those forms.
+fn is_csi_report(bytes: &[u8]) -> bool {
+    matches!(bytes.get(2), Some(b'?' | b'>' | b'=')) || (bytes.len() > 4 && bytes.ends_with(b"$y"))
 }
 
 /// Longest DCS, APC or OSC reply read from the host terminal; the rest of a
@@ -706,10 +751,11 @@ fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
 const MAX_HOST_STRING_LEN: usize = 64 * 1024;
 
 /// Read a DCS (`ESC P`), APC (`ESC _`) or OSC (`ESC ]`) string. From the host
-/// terminal these are replies to queries a program in a pane sent through
-/// passthrough, such as a kitty graphics query, so they go to the focused pane
-/// whole rather than as keys. The same two bytes alone are Alt+P, Alt+_ and
-/// Alt+], which nothing follows within the continuation timeout.
+/// terminal these are replies, to the client's own queries or to ones a
+/// program in a pane sent through passthrough such as a kitty graphics query,
+/// so they are read whole as a reply rather than as keys. The same two bytes
+/// alone are Alt+P, Alt+_ and Alt+], which nothing follows within the
+/// continuation timeout.
 fn read_string_event(fd: libc::c_int, introducer: u8) -> Result<TerminalEvent> {
     let Some(first) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? else {
         return Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(introducer))));
@@ -721,7 +767,7 @@ fn read_string_event(fd: libc::c_int, introducer: u8) -> Result<TerminalEvent> {
         };
         bytes.push(next);
     }
-    Ok(TerminalEvent::Key(KeyEvent::Bytes(bytes)))
+    Ok(TerminalEvent::HostReply(bytes))
 }
 
 /// Whether `bytes` ends with the string terminator `ESC \`, or BEL for OSC.
@@ -1653,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn host_string_replies_reach_the_pane_whole() {
+    fn host_string_replies_are_read_whole_as_replies() {
         // Replies to a kitty graphics query, XTGETTCAP and an OSC colour query,
         // as a host sends them back for a program in a pane.
         let replies: [&[u8]; 3] = [
@@ -1665,9 +1711,35 @@ mod tests {
             for reply in replies {
                 assert_eq!(
                     read_terminal_event(fd).unwrap(),
-                    Some(TerminalEvent::Key(KeyEvent::Bytes(reply.to_vec())))
+                    Some(TerminalEvent::HostReply(reply.to_vec()))
                 );
             }
+        });
+    }
+
+    #[test]
+    fn private_csi_reports_are_replies_not_keys() {
+        // DA1, DA2, the kitty keyboard flags and a DECRPM mode report.
+        let replies: [&[u8]; 4] = [
+            b"\x1b[?62;22c",
+            b"\x1b[>1;4000;29c",
+            b"\x1b[?1u",
+            b"\x1b[?2026;2$y",
+        ];
+        with_pipe(&replies.concat(), |fd| {
+            for reply in replies {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::HostReply(reply.to_vec()))
+                );
+            }
+        });
+        // An unknown key sequence is still a key.
+        with_pipe(b"\x1b[99z", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[99z".to_vec())))
+            );
         });
     }
 

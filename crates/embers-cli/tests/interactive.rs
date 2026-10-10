@@ -801,6 +801,78 @@ async fn client_commands_can_switch_and_detach_a_live_attached_client() {
     server.shutdown().await.expect("shutdown server");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_server_ends_attached_clients_normally() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &["attach", "--socket", &socket_arg, "-t", "main"],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders main");
+
+    run_cli(&server, ["kill-server"]);
+
+    // Like tmux: a short notice once the terminal is restored, and success.
+    harness
+        .read_until_contains("[server exited]", IO_TIMEOUT)
+        .expect("client says the server exited");
+    let status = harness.wait().expect("client exits");
+    assert!(status.success(), "client exited with {status:?}");
+    server.shutdown().await.expect("server finishes stopping");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crashed_server_is_still_an_error_for_attached_clients() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let tempdir = interactive_startup_tempdir();
+    let socket_path = interactive_socket_path(&tempdir);
+    let socket_arg = socket_path.to_string_lossy().into_owned();
+    let (_spawned, mut harness) = spawn_embers(&["--socket", &socket_arg], socket_path.clone());
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("client starts and renders");
+
+    let pid_path = socket_path.with_extension("pid");
+    let pid = read_pid(&pid_path).expect("server pid");
+    assert!(pid_matches_serve_process(pid, &socket_path));
+    // SAFETY: kill only sends a signal to the server process this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+
+    let output = harness
+        .read_until_contains("error", IO_TIMEOUT)
+        .expect("client reports the lost server");
+    assert!(
+        !output.contains("[server exited]"),
+        "a crash is not a clean exit: {output:?}"
+    );
+    let status = harness.wait().expect("client exits");
+    assert!(!status.success(), "a lost server must be an error");
+}
+
 /// Attach a live client to "main" of two sessions ("main", "ops"), with
 /// `config` as its config file, and end main's only pane by typing `exit`.
 async fn exit_last_pane_of_attached_session(
@@ -1541,10 +1613,23 @@ async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_curs
         ],
     );
 
+    // Passthrough is off unless the config turns it on.
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let config_path = config_dir.path().join("config.rhai");
+    fs::write(&config_path, "set_allow_passthrough(\"on\");").expect("write config");
+    let config_arg = config_path.to_string_lossy().into_owned();
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
     let socket_path = server.socket_path().to_path_buf();
     let (_spawned, mut harness) = spawn_embers_on_host(
-        &["attach", "--socket", &socket_arg, "-t", "main"],
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
         socket_path,
         GHOSTTY_HOST,
     );

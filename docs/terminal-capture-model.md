@@ -89,7 +89,8 @@ the record itself is removed when the buffer exits (see "When a buffer's command
 resizes, and kills must fail after exit, but capture reads continue to work. In practice callers
 should expect an error result rather than a silent no-op: writes and kills surface a conflict such
 as `buffer 12 has already exited`, while resize requests can fail with `buffer runtime has already
-exited`.
+exited`. The interactive client is the exception: like tmux, it drops what is typed into a dead
+pane instead of reporting the refused write.
 
 ## Alternate-screen policy
 
