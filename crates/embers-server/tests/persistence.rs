@@ -530,7 +530,8 @@ async fn wait_for_saved_workspace(path: &Path, what: &str, predicate: impl Fn(&s
         }
         assert!(
             Instant::now() < deadline,
-            "workspace file never saved {what} while the server was running"
+            "workspace file never saved {what} while the server was running: {}",
+            std::fs::read_to_string(path).unwrap_or_default()
         );
         sleep(Duration::from_millis(25)).await;
     }
