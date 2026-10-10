@@ -94,6 +94,107 @@ Chain multiple actions into one composite action.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_session </h2>
+
+```rust,ignore
+fn choose_session(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_session" id="link-choose_session-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_session', 'Description')">
+Description
+</button>
+<button group="choose_session" id="link-choose_session-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_session', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_session" id="choose_session-Description" class="tabcontent"  style="display: block;" >
+Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+(`prefix s`). See `choose_tree` for the keys.
+</div>
+<div group="choose_session" id="choose_session-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>S", action.choose_session());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_tree </h2>
+
+```rust,ignore
+fn choose_tree(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_tree" id="link-choose_tree-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_tree', 'Description')">
+Description
+</button>
+<button group="choose_tree" id="link-choose_tree-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_tree', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_tree" id="choose_tree-Description" class="tabcontent"  style="display: block;" >
+Open the picker on a tree of every session, window and pane, like
+tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+expand and collapse, Enter switches to the selected item, `x` kills it
+after asking, `/` or typing other text filters, and `q`/Esc closes.
+</div>
+<div group="choose_tree" id="choose_tree-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>T", action.choose_tree());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> choose_window </h2>
+
+```rust,ignore
+fn choose_window(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="choose_window" id="link-choose_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'choose_window', 'Description')">
+Description
+</button>
+<button group="choose_window" id="link-choose_window-Example"  class="tablinks"
+    onclick="openTab(event, 'choose_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="choose_window" id="choose_window-Description" class="tabcontent"  style="display: block;" >
+Open the picker with every session expanded to its windows, like tmux
+`choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+</div>
+<div group="choose_window" id="choose_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>\"", action.choose_window());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> clear_pending_keys </h2>
 
 ```rust,ignore

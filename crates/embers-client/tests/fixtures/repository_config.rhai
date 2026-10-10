@@ -417,5 +417,7 @@ bind("normal", "<leader>o", "scratchpad");
 bind("normal", "<leader>:", action.command_prompt());
 bind("normal", "<leader>,", action.rename_window_prompt());
 bind("normal", "<leader>$", action.rename_session_prompt());
+bind("normal", "<leader>W", action.choose_window());
+bind("normal", "<leader>T", action.choose_tree());
 
 on("buffer_bell", bell_handler);

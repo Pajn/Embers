@@ -12,6 +12,9 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Layout saved as it changes and panes restored after a crash or reboot, tmux-resurrect style
 - Scrollback, visible snapshots, search, and a vi-style copy mode with mouse selection (see
   [`docs/copy-mode.md`](docs/copy-mode.md))
+- A session/window/pane picker, a command prompt that runs the CLI's commands,
+  `display-message` and session environments, as in tmux (see
+  [`docs/commands.md`](docs/commands.md))
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
 - FlatBuffers protocol shared by the client and server crates

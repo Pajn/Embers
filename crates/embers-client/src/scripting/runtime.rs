@@ -1164,6 +1164,53 @@ mod documented_action_api {
         }
     }
 
+    /// Open the picker on a tree of every session, window and pane, like
+    /// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+    /// expand and collapse, Enter switches to the selected item, `x` kills it
+    /// after asking, `/` or typing other text filters, and `q`/Esc closes.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>T", action.choose_tree());
+    /// ```
+    #[rhai_fn(name = "choose_tree")]
+    pub fn choose_tree(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Tree,
+        }
+    }
+
+    /// Open the picker with every session expanded to its windows, like tmux
+    /// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>\"", action.choose_window());
+    /// ```
+    #[rhai_fn(name = "choose_window")]
+    pub fn choose_window(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Windows,
+        }
+    }
+
+    /// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+    /// (`prefix s`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>S", action.choose_session());
+    /// ```
+    #[rhai_fn(name = "choose_session")]
+    pub fn choose_session(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Sessions,
+        }
+    }
+
     /// Run a command line as if it was typed at the command prompt, like
     /// binding a tmux command. Output and errors are shown in the status line.
     ///

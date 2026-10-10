@@ -63,6 +63,24 @@ async fn prompt_commands_default_to_the_clients_session() {
     let alpha_windows = stdout(&run_cli(&server, ["list-windows", "-t", "alpha"]));
     assert_eq!(alpha_windows.trim(), "");
 
+    // The picker kills a window by number with an explicit base index.
+    runner
+        .run(
+            words("kill-window -t 1"),
+            CommandContext {
+                base_index: Some(0),
+                ..context.clone()
+            },
+        )
+        .await
+        .expect("kill-window runs");
+    let listed = runner
+        .run(words("list-windows"), context.clone())
+        .await
+        .expect("list-windows runs");
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    assert!(!listed.contains("two"), "{listed}");
+
     // Errors come back as text for the status line.
     let error = runner
         .run(words("bogus-command"), context.clone())

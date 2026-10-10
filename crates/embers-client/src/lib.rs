@@ -1,3 +1,4 @@
+pub mod chooser;
 pub mod client;
 pub mod command_prompt;
 pub mod config;
@@ -20,6 +21,7 @@ pub mod state;
 pub mod testing;
 pub mod transport;
 
+pub use chooser::{Chooser, ChooserItem, ChooserRow, ChooserScope};
 pub use client::MuxClient;
 pub use command_prompt::{CommandContext, CommandPrompt, CommandRunner};
 pub use config::{
@@ -36,8 +38,8 @@ pub use grid::{
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
     KeyCode, KeyParseError, KeySequence, KeyToken, ModeSpec, Modifiers, NORMAL_MODE, PROMPT_MODE,
-    SEARCH_MODE, SELECT_MODE, encode_key, expand_leader, mode_disambiguates, parse_key_sequence,
-    resolve_key,
+    SEARCH_MODE, SELECT_MODE, TREE_MODE, encode_key, expand_leader, mode_disambiguates,
+    parse_key_sequence, resolve_key,
 };
 pub use numbering::{
     BASE_INDEX_ENV_VAR, base_index_from_env, parse_base_index, window_number, window_position,

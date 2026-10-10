@@ -6,6 +6,7 @@ use embers_protocol::{
     SynchronizePanesMode,
 };
 
+use crate::chooser::ChooserScope;
 use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
@@ -211,6 +212,10 @@ pub enum Action {
         prompt: Option<String>,
         initial: String,
         template: Option<String>,
+    },
+    /// tmux `choose-tree`: open the session/window/pane picker.
+    ChooseTree {
+        scope: ChooserScope,
     },
     /// Run a command line as if typed at the command prompt.
     RunCommand {

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-32ae8305.js";
+            window.path_to_searchindex_js = "searchindex-7e6cac0f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -256,6 +256,98 @@ Description
 
 <div group="chain" id="chain-Description" class="tabcontent" style="display: block;">
 Chain multiple actions into one composite action.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> choose_session </h2>
+
+<pre><code class="language-rust ignore">fn choose_session(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="choose_session" id="link-choose_session-Description" class="tablinks active" onclick="openTab(event, &#39;choose_session&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="choose_session" id="link-choose_session-Example" class="tablinks" onclick="openTab(event, &#39;choose_session&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="choose_session" id="choose_session-Description" class="tabcontent" style="display: block;">
+Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+(`prefix s`). See `choose_tree` for the keys.
+</div>
+
+<div group="choose_session" id="choose_session-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;S", action.choose_session());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> choose_tree </h2>
+
+<pre><code class="language-rust ignore">fn choose_tree(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="choose_tree" id="link-choose_tree-Description" class="tablinks active" onclick="openTab(event, &#39;choose_tree&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="choose_tree" id="link-choose_tree-Example" class="tablinks" onclick="openTab(event, &#39;choose_tree&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="choose_tree" id="choose_tree-Description" class="tabcontent" style="display: block;">
+Open the picker on a tree of every session, window and pane, like
+tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+expand and collapse, Enter switches to the selected item, `x` kills it
+after asking, `/` or typing other text filters, and `q`/Esc closes.
+</div>
+
+<div group="choose_tree" id="choose_tree-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;T", action.choose_tree());
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> choose_window </h2>
+
+<pre><code class="language-rust ignore">fn choose_window(_: ActionApi) -&gt; Action</code></pre>
+<div>
+<div class="tab">
+<button group="choose_window" id="link-choose_window-Description" class="tablinks active" onclick="openTab(event, &#39;choose_window&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="choose_window" id="link-choose_window-Example" class="tablinks" onclick="openTab(event, &#39;choose_window&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="choose_window" id="choose_window-Description" class="tabcontent" style="display: block;">
+Open the picker with every session expanded to its windows, like tmux
+`choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+</div>
+
+<div group="choose_window" id="choose_window-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">bind("normal", "&lt;leader&gt;\"", action.choose_window());
+</code></pre>
 </div>
 
 </div>

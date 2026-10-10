@@ -18,6 +18,7 @@ use embers_protocol::{
 };
 
 use crate::RenderGrid;
+use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area};
 use crate::client::MuxClient;
 use crate::command_prompt::{CommandContext, CommandPrompt, CommandRunner, record_history};
 use crate::config::ConfigManager;
@@ -28,7 +29,7 @@ use crate::copy_mode::{
 };
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
-    PROMPT_MODE, SEARCH_MODE, SELECT_MODE, resolve_key,
+    PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::pty_sizes::PtySizeSync;
@@ -115,6 +116,7 @@ pub struct ConfiguredClient<T> {
     /// Command lines run from the prompt, oldest first.
     prompt_history: VecDeque<String>,
     command_runner: Option<Arc<dyn CommandRunner>>,
+    chooser: Option<Chooser>,
     status_message: Option<StatusMessage>,
     hints_node: Option<NodeId>,
     copy: CopyModeState,
@@ -148,6 +150,7 @@ where
             command_prompt: None,
             prompt_history: VecDeque::new(),
             command_runner: None,
+            chooser: None,
             status_message: None,
             hints_node: None,
             copy: CopyModeState::default(),
@@ -169,6 +172,11 @@ where
     /// unavailable.
     pub fn set_command_runner(&mut self, runner: Arc<dyn CommandRunner>) {
         self.command_runner = Some(runner);
+    }
+
+    /// The open session/window/pane picker, if any.
+    pub fn chooser(&self) -> Option<&Chooser> {
+        self.chooser.as_ref()
     }
 
     /// The open command prompt, if any.
@@ -336,6 +344,10 @@ where
             return self.handle_prompt_key(session_id, key).await;
         }
 
+        if self.input_state.current_mode() == TREE_MODE {
+            return self.handle_chooser_key(session_id, viewport, key).await;
+        }
+
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
                 .handle_search_key(session_id, viewport, &presentation, key)
@@ -465,6 +477,14 @@ where
         if self.input_state.current_mode() == PROMPT_MODE {
             if let Some(prompt) = &mut self.command_prompt {
                 prompt.insert(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
+        if self.input_state.current_mode() == TREE_MODE {
+            if let Some(chooser) = &mut self.chooser
+                && chooser.editing_filter
+            {
+                chooser.filter.push_str(&String::from_utf8_lossy(&bytes));
             }
             return Ok(());
         }
@@ -806,9 +826,21 @@ where
             }
         }
 
-        Ok(self
-            .renderer
-            .render_with_tab_bars(self.client.state(), &presentation, &custom_bars))
+        let mut grid =
+            self.renderer
+                .render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+        if let Some(chooser) = &mut self.chooser {
+            let rows = chooser.rows(self.client.state(), self.active_session_id, {
+                self.config
+                    .active_script()
+                    .loaded_config()
+                    .base_index
+                    .or_else(crate::numbering::base_index_from_env)
+            });
+            chooser.render(&mut grid, chooser_area(viewport), &rows);
+            grid.set_cursor(None);
+        }
+        Ok(grid)
     }
 
     pub fn reload_config(&mut self) -> Result<()> {
@@ -849,6 +881,7 @@ where
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
             self.command_prompt = None;
+            self.chooser = None;
             // Also drop any active hints overlay so it can't outlive its mode.
             if let Some(node_id) = self.hints_node.take()
                 && let Some(state) = self.client.state_mut().view_state_mut(node_id)
@@ -1084,6 +1117,10 @@ where
                     self.command_prompt =
                         Some(CommandPrompt::new(label, initial, template, return_mode));
                     self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::ChooseTree { scope } => {
+                    self.open_chooser(scope, current_session_id);
                     Ok(())
                 }
                 Action::RunCommand { command } => {
@@ -2976,6 +3013,179 @@ where
             .unwrap_or_else(|| template.to_owned())
     }
 
+    fn open_chooser(&mut self, scope: ChooserScope, session_id: Option<SessionId>) {
+        let mode = self.input_state.current_mode();
+        let return_mode = if [SEARCH_MODE, HINTS_MODE, PROMPT_MODE, TREE_MODE].contains(&mode) {
+            NORMAL_MODE.to_owned()
+        } else {
+            mode.to_owned()
+        };
+        self.search_prompt = None;
+        self.command_prompt = None;
+        self.chooser = Some(Chooser::open(
+            scope,
+            self.client.state(),
+            session_id.or(self.active_session_id),
+            self.base_index(),
+            return_mode,
+        ));
+        self.input_state.set_mode(TREE_MODE);
+    }
+
+    fn close_chooser(&mut self) {
+        if let Some(chooser) = self.chooser.take() {
+            self.input_state.set_mode(chooser.return_mode);
+        } else {
+            self.input_state.set_mode(NORMAL_MODE);
+        }
+    }
+
+    async fn handle_chooser_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        key: KeyEvent,
+    ) -> Result<()> {
+        let base_index = self.base_index();
+        let rows = match &self.chooser {
+            Some(chooser) => chooser.rows(self.client.state(), self.active_session_id, base_index),
+            None => {
+                self.input_state.set_mode(NORMAL_MODE);
+                return Ok(());
+            }
+        };
+        let chooser = self.chooser.as_mut().expect("checked chooser");
+
+        if let Some(item) = chooser.confirm_kill.take() {
+            if matches!(key, KeyEvent::Char('y' | 'Y')) {
+                self.kill_chooser_item(item).await;
+            }
+            return Ok(());
+        }
+
+        if chooser.editing_filter {
+            match key {
+                KeyEvent::Char(ch) => chooser.filter.push(ch),
+                KeyEvent::Bytes(bytes) => chooser.filter.push_str(&String::from_utf8_lossy(&bytes)),
+                KeyEvent::Backspace => {
+                    if chooser.filter.pop().is_none() {
+                        chooser.editing_filter = false;
+                    }
+                }
+                KeyEvent::Ctrl('u') => chooser.filter.clear(),
+                KeyEvent::Escape => {
+                    chooser.filter.clear();
+                    chooser.editing_filter = false;
+                }
+                KeyEvent::Up => chooser.move_by(&rows, -1),
+                KeyEvent::Down => chooser.move_by(&rows, 1),
+                // Enter ends filtering; a second Enter chooses.
+                KeyEvent::Enter | KeyEvent::Tab => chooser.editing_filter = false,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        let page = isize::try_from(chooser_area(viewport).size.height.saturating_sub(3).max(1))
+            .unwrap_or(1);
+        match key {
+            KeyEvent::Char('j') | KeyEvent::Down | KeyEvent::Ctrl('n') => chooser.move_by(&rows, 1),
+            KeyEvent::Char('k') | KeyEvent::Up | KeyEvent::Ctrl('p') => chooser.move_by(&rows, -1),
+            KeyEvent::PageDown | KeyEvent::Ctrl('d') => chooser.move_by(&rows, page),
+            KeyEvent::PageUp | KeyEvent::Ctrl('u') => chooser.move_by(&rows, -page),
+            KeyEvent::Char('g') | KeyEvent::Home => chooser.select_first(&rows),
+            KeyEvent::Char('G') | KeyEvent::End => chooser.select_last(&rows),
+            KeyEvent::Char('l' | '+') | KeyEvent::Right => chooser.expand(&rows),
+            KeyEvent::Char('h' | '-') | KeyEvent::Left => chooser.collapse(&rows),
+            KeyEvent::Char('/') => chooser.editing_filter = true,
+            KeyEvent::Char('x') => chooser.confirm_kill = chooser.selected(&rows),
+            KeyEvent::Escape if !chooser.filter.is_empty() => chooser.filter.clear(),
+            KeyEvent::Char('q') | KeyEvent::Escape | KeyEvent::Ctrl('c') => self.close_chooser(),
+            KeyEvent::Enter => {
+                let selected = chooser.selected(&rows);
+                self.close_chooser();
+                if let Some(item) = selected {
+                    self.choose_item(session_id, item).await?;
+                }
+            }
+            // Any other text starts a filter, so typing a name finds it.
+            KeyEvent::Char(ch) if !ch.is_control() => {
+                chooser.editing_filter = true;
+                chooser.filter.push(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Switch to the chosen session, window or pane, like Enter in tmux
+    /// `choose-tree`.
+    async fn choose_item(&mut self, session_id: SessionId, item: ChooserItem) -> Result<()> {
+        let target_session = item.session_id();
+        if target_session != session_id || self.active_session_id != Some(target_session) {
+            self.perform_session_switch(target_session).await?;
+        }
+        match item {
+            ChooserItem::Session(_) => Ok(()),
+            ChooserItem::Window(session_id, position) => {
+                let has_root_tabs = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .is_some_and(|root| root.tabs.is_some());
+                if !has_root_tabs {
+                    return Ok(());
+                }
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(position).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
+            ChooserItem::Pane(session_id, node_id) => self.focus_node(session_id, node_id).await,
+        }
+    }
+
+    /// Kill a picker item with the same commands as the CLI (`kill-session`,
+    /// `kill-window`, `kill-pane`), so it behaves exactly as they do.
+    async fn kill_chooser_item(&mut self, item: ChooserItem) {
+        let base_index = self.base_index().unwrap_or(0);
+        let argv: Vec<String> = match item {
+            ChooserItem::Session(_) => vec!["kill-session".to_owned()],
+            ChooserItem::Window(_, position) => vec![
+                "kill-window".to_owned(),
+                "-t".to_owned(),
+                crate::numbering::window_number(position, Some(base_index)).to_string(),
+            ],
+            ChooserItem::Pane(_, node_id) => {
+                vec!["kill-pane".to_owned(), "-t".to_owned(), node_id.to_string()]
+            }
+        };
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: Some(item.session_id()),
+            client_id: self.client.cached_client_id(),
+            // An explicit base index makes the window number unambiguous.
+            base_index: Some(base_index),
+        };
+        if let Err(error) = runner.run(argv, context).await {
+            self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME);
+        }
+    }
+
     async fn handle_prompt_key(&mut self, session_id: SessionId, key: KeyEvent) -> Result<()> {
         let Some(prompt) = self.command_prompt.as_mut() else {
             self.input_state.set_mode(NORMAL_MODE);
@@ -3033,6 +3243,22 @@ where
             }
         };
         if argv.is_empty() {
+            return;
+        }
+        // The picker belongs to this client, so its commands open it here
+        // rather than going through the runner.
+        let scope = match argv[0].as_str() {
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-s") => {
+                Some(ChooserScope::Sessions)
+            }
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-w") => Some(ChooserScope::Windows),
+            "choose-tree" => Some(ChooserScope::Tree),
+            "choose-window" => Some(ChooserScope::Windows),
+            "choose-session" => Some(ChooserScope::Sessions),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            self.open_chooser(scope, session_id);
             return;
         }
         let Some(runner) = self.command_runner.clone() else {

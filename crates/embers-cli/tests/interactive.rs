@@ -1397,3 +1397,91 @@ async fn fullscreen_terminal_transitions_render_in_the_live_client_pty() {
     harness.wait().expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_prompt_picker_and_display_message_work_in_a_live_client() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("config.rhai");
+    fs::write(
+        &config_path,
+        r#"
+        bind("normal", "<M-:>", action.command_prompt());
+        bind("normal", "<M-w>", action.choose_window());
+        "#,
+    )
+    .expect("write config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+
+    // The prompt runs CLI commands against the client's session.
+    harness.write_all("\x1b:").expect("open command prompt");
+    harness
+        .write_all("rename-window prompt-renamed")
+        .expect("type command");
+    harness
+        .read_until_contains("rename-window prompt-renamed", IO_TIMEOUT)
+        .expect("prompt echoes the typed line");
+    harness.write_all("\r").expect("run command");
+    let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    loop {
+        let windows = stdout(&run_cli(&server, ["list-windows", "-t", "main"]));
+        if windows.contains("prompt-renamed") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "window was not renamed: {windows}"
+        );
+        tokio::time::sleep(FILE_WAIT_POLL).await;
+    }
+
+    harness.write_all("\x1bw").expect("open picker");
+    harness
+        .read_until_contains("choose-window", IO_TIMEOUT)
+        .expect("picker renders");
+    harness.write_all("q").expect("close picker");
+
+    run_cli(&server, ["display-message", "shown-from-cli"]);
+    harness
+        .read_until_contains("shown-from-cli", IO_TIMEOUT)
+        .expect("display-message reaches the status line");
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait().expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}

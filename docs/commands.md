@@ -1,9 +1,53 @@
 # Commands
 
 This page covers the tmux-style commands Embers offers beyond the basics in the
-[README](../README.md): how windows are numbered, session environments,
-`display-message`, the command prompt, and the client actions that go with
-them.
+[README](../README.md): the session/window/pane picker, the command prompt,
+`display-message`, session environments, how windows are numbered, and the
+client actions that go with them.
+
+## Picker (choose-tree)
+
+The picker is tmux's `choose-tree`: a box over the client listing every
+session, its windows and their panes as a collapsible tree.
+
+| Action | Opens with | tmux |
+| --- | --- | --- |
+| `action.choose_tree()` | sessions, windows and panes all expanded | `choose-tree` |
+| `action.choose_window()` | sessions expanded to their windows | `choose-tree -w` (`prefix w`) |
+| `action.choose_session()` | sessions only | `choose-tree -s` (`prefix s`) |
+
+The same three are available at the command prompt as `choose-tree` (with
+`-s` or `-w`), `choose-window` and `choose-session`. The picker opens on the
+current window or pane, marked with `*`. Sessions show their window count,
+windows their number (from the base index) and pane count, and panes their id,
+title and the program in their foreground.
+
+| Key | Effect |
+| --- | --- |
+| `j`/`k`, Down/Up, C-n/C-p | move |
+| PageDown/PageUp, C-d/C-u | move a page |
+| `g`/`G`, Home/End | first/last row |
+| `l`, Right, `+` | expand, or step into an expanded row |
+| `h`, Left, `-` | collapse, or step out to the parent |
+| Enter | switch to the session, window or pane |
+| `x` | kill the selected item, after `y` to confirm |
+| `/`, or any other text | filter |
+| Esc | clear the filter, or close |
+| `q`, C-c | close |
+
+While filtering, typed text goes to the filter and only rows whose text
+contains it (ignoring case) are shown, with the sessions and windows above
+them; Up/Down still move, Enter or Tab ends filtering and Backspace on an empty
+filter does too.
+
+`x` runs `kill-session`, `kill-window` or `kill-pane` exactly as the CLI does,
+so the picker kills the way those commands do. Choosing a pane in a hidden
+nested tab reveals it. There is no preview.
+
+```rhai
+bind("normal", "<leader>w", action.choose_window());
+bind("normal", "<leader>s", action.choose_session());
+```
 
 ## Window numbering
 
