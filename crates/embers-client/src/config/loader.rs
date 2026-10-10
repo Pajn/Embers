@@ -11,24 +11,74 @@ pub const BUILTIN_CONFIG_SOURCE: &str = r#"mouse.set_click_focus(true);
 mouse.set_click_forward(true);
 mouse.set_wheel_scroll(true);
 mouse.set_wheel_forward(true);
+mouse.set_select(true);
 
 bind("normal", "<PageUp>", action.scroll_page_up());
 bind("normal", "<PageDown>", action.scroll_page_down());
 bind("normal", "/", action.enter_search_mode());
+bind("normal", "?", action.enter_search_backward());
 bind("normal", "n", action.search_next());
 bind("normal", "N", action.search_prev());
 bind("normal", "v", action.enter_select_char());
 bind("normal", "V", action.enter_select_line());
 bind("normal", "<C-v>", action.enter_select_block());
 
-bind("select", "<Left>", action.select_move_left());
-bind("select", "<Right>", action.select_move_right());
-bind("select", "<Up>", action.select_move_up());
-bind("select", "<Down>", action.select_move_down());
-bind("select", "h", action.select_move_left());
-bind("select", "j", action.select_move_down());
-bind("select", "k", action.select_move_up());
-bind("select", "l", action.select_move_right());
+// tmux copy-mode-vi motions, shared by copy mode and its selection mode.
+for mode in ["copy", "select"] {
+    bind(mode, "h", action.copy_cursor_left());
+    bind(mode, "j", action.copy_cursor_down());
+    bind(mode, "k", action.copy_cursor_up());
+    bind(mode, "l", action.copy_cursor_right());
+    bind(mode, "<Left>", action.copy_cursor_left());
+    bind(mode, "<Down>", action.copy_cursor_down());
+    bind(mode, "<Up>", action.copy_cursor_up());
+    bind(mode, "<Right>", action.copy_cursor_right());
+    bind(mode, "w", action.copy_next_word());
+    bind(mode, "b", action.copy_previous_word());
+    bind(mode, "e", action.copy_next_word_end());
+    bind(mode, "W", action.copy_next_space());
+    bind(mode, "B", action.copy_previous_space());
+    bind(mode, "E", action.copy_next_space_end());
+    bind(mode, "0", action.copy_start_of_line());
+    bind(mode, "^", action.copy_back_to_indentation());
+    bind(mode, "$", action.copy_end_of_line());
+    bind(mode, "<Home>", action.copy_start_of_line());
+    bind(mode, "<End>", action.copy_end_of_line());
+    bind(mode, "gg", action.copy_history_top());
+    bind(mode, "G", action.copy_history_bottom());
+    bind(mode, "H", action.copy_top_line());
+    bind(mode, "M", action.copy_middle_line());
+    bind(mode, "L", action.copy_bottom_line());
+    bind(mode, "<C-u>", action.copy_halfpage_up());
+    bind(mode, "<C-d>", action.copy_halfpage_down());
+    bind(mode, "<C-b>", action.copy_page_up());
+    bind(mode, "<C-f>", action.copy_page_down());
+    bind(mode, "<PageUp>", action.copy_page_up());
+    bind(mode, "<PageDown>", action.copy_page_down());
+    bind(mode, "<C-y>", action.scroll_line_up());
+    bind(mode, "<C-e>", action.scroll_line_down());
+    bind(mode, "f", action.copy_jump_forward());
+    bind(mode, "F", action.copy_jump_backward());
+    bind(mode, "t", action.copy_jump_to_forward());
+    bind(mode, "T", action.copy_jump_to_backward());
+    bind(mode, ";", action.copy_jump_again());
+    bind(mode, ",", action.copy_jump_reverse());
+    bind(mode, "/", action.enter_search_mode());
+    bind(mode, "?", action.enter_search_backward());
+    bind(mode, "n", action.search_next());
+    bind(mode, "N", action.search_prev());
+    bind(mode, "v", action.enter_select_char());
+    bind(mode, "V", action.enter_select_line());
+    bind(mode, "<C-v>", action.enter_select_block());
+    bind(mode, "<Enter>", action.yank_selection());
+    bind(mode, "q", action.exit_copy_mode());
+    bind(mode, "<C-c>", action.exit_copy_mode());
+}
+
+bind("copy", "<Space>", action.enter_select_char());
+bind("copy", "<Esc>", action.exit_copy_mode());
+
+bind("select", "o", action.select_other_end());
 bind("select", "y", action.yank_selection());
 bind("select", "<Esc>", action.cancel_selection());
 

@@ -5,6 +5,7 @@ use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
 };
 
+use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
 use crate::state::SelectionKind;
@@ -135,16 +136,29 @@ pub enum Action {
     ScrollToBottom,
     FollowOutput,
     EnterSearchMode,
+    EnterSearchBackward,
     SearchNext,
     SearchPrev,
     CommitSearch,
     CancelSearch,
+    EnterCopyMode,
+    ExitCopyMode,
+    CopyMotion {
+        motion: CopyMotion,
+    },
+    /// Wait for a character, then jump to it on the cursor line.
+    CopyJump {
+        kind: JumpKind,
+    },
+    CopyJumpAgain,
+    CopyJumpReverse,
     EnterSelect {
         kind: SelectionKind,
     },
     SelectMove {
         direction: NavigationDirection,
     },
+    SelectOtherEnd,
     CopySelection,
     CancelSelection,
     Notify {

@@ -37,6 +37,13 @@ Built-in fallback policy is:
 
 Changing modes clears any pending key sequence. Reloading config also clears pending input if the current mode still exists, or resets the client back to `normal` if it no longer does.
 
+In `copy` and `select` mode, two kinds of input are handled before binding resolution:
+
+- after `f`/`F`/`t`/`T`, the next character key is the jump target and any other key cancels the jump
+- digits form a count prefix for the next binding (`0` only once a count has started), unless the mode binds that digit itself
+
+See `docs/copy-mode.md` for copy-mode behaviour.
+
 ## Prefix and leader behavior
 
 Leader bindings are expanded into ordinary key sequences during config compilation. At runtime there is no separate "leader state" object; the pending sequence in `InputState` is the source of truth.
@@ -53,7 +60,7 @@ Most exact matches execute locally, but Embers intentionally avoids stealing som
 
 Configured bindings are forwarded to the terminal instead of executing locally when:
 
-- the focused view is in alternate screen and the bound actions are all local search/select/scroll actions, or
+- the client is not in `copy` or `select` mode, the focused view is in alternate screen, and the bound actions are all local search/select/scroll actions, or
 - the client is in normal mode with `follow_output` enabled, has no active search or selection state, and the bound actions require local search/select context
 
 This keeps fullscreen terminal apps from losing keys that would otherwise be meaningful inside the application.
@@ -73,7 +80,7 @@ So scripted terminal input uses the same protocol/runtime path as unmapped passt
 
 - paste uses `handle_paste`; if the focused buffer has bracketed paste enabled, Embers wraps the payload in `ESC [ 200~` / `ESC [ 201~`
 - focus events use `handle_focus_event`; they forward `ESC [ I` / `ESC [ O` only when the program requested focus reporting
-- mouse events use `handle_mouse`; they either drive local scroll/focus behavior or send encoded mouse bytes when mouse reporting is enabled
+- mouse events use `handle_mouse`; they either drive local scroll/focus behavior or send encoded mouse bytes when mouse reporting is enabled. In panes without mouse reporting, left-button drags and double/triple clicks drive copy-mode selection instead; once a drag selection starts, its drag and release events stay with that pane until release
 
 ## Code anchors
 

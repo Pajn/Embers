@@ -2,6 +2,7 @@ pub mod client;
 pub mod config;
 pub mod configured_client;
 pub mod controller;
+pub mod copy_mode;
 pub mod grid;
 pub mod hints;
 pub mod input;

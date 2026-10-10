@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use embers_core::{ActivityState, Point, Rect, Size, SnapshotLine};
+use embers_core::{ActivityState, CursorShape, Point, Rect, Size, SnapshotLine};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -323,7 +323,30 @@ impl Renderer {
             }
         }
 
-        if let Some(snapshot) = state.snapshots.get(&leaf.buffer_id)
+        // In copy mode the cursor shows the copy-mode position (a selection's
+        // free end while selecting) instead of the program's cursor.
+        let copy_cursor = view_state
+            .filter(|view| !view.alternate_screen)
+            .and_then(|view| {
+                view.copy_cursor.map(|cursor| {
+                    view.selection_state
+                        .as_ref()
+                        .map_or(cursor, |selection| selection.cursor)
+                })
+            });
+        if let Some(cursor) = copy_cursor {
+            if leaf.focused
+                && let Some(row) = cursor.line.checked_sub(displayed_top_line)
+                && row < content_rows as u64
+                && cursor.column < width
+            {
+                grid.set_cursor(Some(GridCursor {
+                    x: x + cursor.column,
+                    y: y + 1 + row as u16,
+                    shape: CursorShape::Block,
+                }));
+            }
+        } else if let Some(snapshot) = state.snapshots.get(&leaf.buffer_id)
             && leaf.focused
         {
             let locally_scrolled = view_state.is_some_and(|view| {

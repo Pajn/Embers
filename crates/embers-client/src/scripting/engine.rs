@@ -554,6 +554,15 @@ impl MouseApi {
             .wheel_forward = value;
         Ok(())
     }
+
+    fn set_select(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .select = value;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -837,6 +846,18 @@ mod mouse_registration_api {
     ) -> RhaiResultOf<()> {
         mouse.set_wheel_forward(ctx.call_position(), value)
     }
+
+    /// Toggle mouse selection in panes that have not requested mouse reporting:
+    /// dragging enters copy mode with a selection and copies it on release,
+    /// a double click copies a word and a triple click copies a line (tmux's
+    /// defaults with `mouse on`). Panes running programs that requested the
+    /// mouse keep receiving these events instead.
+    ///
+    /// # rhai-autodocs:index:26
+    #[rhai_fn(return_raw, name = "set_select")]
+    pub fn set_select(ctx: NativeCallContext, mouse: MouseApi, value: bool) -> RhaiResultOf<()> {
+        mouse.set_select(ctx.call_position(), value)
+    }
 }
 
 #[export_module]
@@ -854,7 +875,7 @@ mod hints_registration_api {
     /// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
     /// ```
     ///
-    /// # rhai-autodocs:index:26
+    /// # rhai-autodocs:index:27
     #[rhai_fn(return_raw, name = "set_patterns")]
     pub fn set_patterns(
         ctx: NativeCallContext,

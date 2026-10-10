@@ -164,7 +164,8 @@ fn break_current_node(_: ActionApi, destination: string) -> Action;
 /// Cancel the active search.
 fn cancel_search(_: ActionApi) -> Action;
 
-/// Cancel the current selection.
+/// Clear the current selection and return to copy mode with the cursor
+/// where the selection ended.
 fn cancel_selection(_: ActionApi) -> Action;
 
 /// Chain multiple actions into one composite action.
@@ -189,14 +190,108 @@ fn close_view(_: ActionApi) -> Action;
 /// mode with the committed result in place.
 fn commit_search(_: ActionApi) -> Action;
 
-/// Copy the current selection into the clipboard.
+/// Move to the first non-blank character of the line (`^`).
+fn copy_back_to_indentation(_: ActionApi) -> Action;
+
+/// Move to the bottom row of the view (`L`).
+fn copy_bottom_line(_: ActionApi) -> Action;
+
+/// Move the copy-mode cursor down (`j`).
+fn copy_cursor_down(_: ActionApi) -> Action;
+
+/// Move the copy-mode cursor left (`h`).
+fn copy_cursor_left(_: ActionApi) -> Action;
+
+/// Move the copy-mode cursor right (`l`).
+fn copy_cursor_right(_: ActionApi) -> Action;
+
+/// Move the copy-mode cursor up (`k`).
+fn copy_cursor_up(_: ActionApi) -> Action;
+
+/// Move to the last character of the line (`$`).
+fn copy_end_of_line(_: ActionApi) -> Action;
+
+/// Scroll the view and move the cursor down half a page (`C-d`).
+fn copy_halfpage_down(_: ActionApi) -> Action;
+
+/// Scroll the view and move the cursor up half a page (`C-u`).
+fn copy_halfpage_up(_: ActionApi) -> Action;
+
+/// Move to the last line of the buffer (`G`).
+fn copy_history_bottom(_: ActionApi) -> Action;
+
+/// Move to the first line of history (`gg`).
+fn copy_history_top(_: ActionApi) -> Action;
+
+/// Repeat the last character jump (`;`).
+fn copy_jump_again(_: ActionApi) -> Action;
+
+/// Wait for a character and move onto its previous occurrence on the line
+/// (`F`).
+fn copy_jump_backward(_: ActionApi) -> Action;
+
+/// Wait for a character and move onto its next occurrence on the line (`f`).
+fn copy_jump_forward(_: ActionApi) -> Action;
+
+/// Repeat the last character jump in the opposite direction (`,`).
+fn copy_jump_reverse(_: ActionApi) -> Action;
+
+/// Wait for a character and move just after its previous occurrence on the
+/// line (`T`).
+fn copy_jump_to_backward(_: ActionApi) -> Action;
+
+/// Wait for a character and move just before its next occurrence on the
+/// line (`t`).
+fn copy_jump_to_forward(_: ActionApi) -> Action;
+
+/// Move to the middle row of the view (`M`).
+fn copy_middle_line(_: ActionApi) -> Action;
+
+/// Move to the start of the next whitespace-separated word (`W`).
+fn copy_next_space(_: ActionApi) -> Action;
+
+/// Move to the end of the next whitespace-separated word (`E`).
+fn copy_next_space_end(_: ActionApi) -> Action;
+
+/// Move to the start of the next word (`w`). Whitespace separates words, and
+/// a run of ASCII punctuation other than `_` is a word of its own.
+fn copy_next_word(_: ActionApi) -> Action;
+
+/// Move to the end of the next word (`e`).
+fn copy_next_word_end(_: ActionApi) -> Action;
+
+/// Scroll the view and move the cursor down a page (`C-f`).
+fn copy_page_down(_: ActionApi) -> Action;
+
+/// Scroll the view and move the cursor up a page (`C-b`).
+fn copy_page_up(_: ActionApi) -> Action;
+
+/// Move to the start of the previous whitespace-separated word (`B`).
+fn copy_previous_space(_: ActionApi) -> Action;
+
+/// Move to the start of the previous word (`b`).
+fn copy_previous_word(_: ActionApi) -> Action;
+
+/// Copy the current selection into the clipboard (OSC 52) and leave copy
+/// mode. Same as `yank_selection`.
 fn copy_selection(_: ActionApi) -> Action;
+
+/// Move to the first column of the line (`0`).
+fn copy_start_of_line(_: ActionApi) -> Action;
+
+/// Move to the top row of the view (`H`).
+fn copy_top_line(_: ActionApi) -> Action;
 
 /// Detach the currently focused buffer.
 fn detach_buffer(_: ActionApi) -> Action;
 
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
+
+/// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
+/// following output and a cursor appears at the program's cursor; copy-mode
+/// motions move it. Does nothing on the alternate screen.
+fn enter_copy_mode(_: ActionApi) -> Action;
 
 /// Enter thumbs-style hint mode: label the matches in the visible pane and
 /// copy the selected one to the clipboard (OSC 52).
@@ -221,17 +316,30 @@ fn enter_hints_with(_: ActionApi, action: string) -> Action;
 /// Enter a specific input mode by name.
 fn enter_mode(_: ActionApi, mode: string) -> Action;
 
-/// Enter incremental search mode.
+/// Enter incremental search mode, searching backward (`?`). After a backward
+/// search `search_next` moves to earlier matches and `search_prev` to later
+/// ones, as in vim.
+fn enter_search_backward(_: ActionApi) -> Action;
+
+/// Enter incremental search mode, searching forward (`/`).
 fn enter_search_mode(_: ActionApi) -> Action;
 
-/// Enter block selection mode.
+/// Start a block (rectangle) selection at the copy-mode cursor. Toggles
+/// like `enter_select_char`.
 fn enter_select_block(_: ActionApi) -> Action;
 
-/// Enter character selection mode.
+/// Start a character selection at the copy-mode cursor, entering copy mode
+/// first if needed. With a character selection already active this clears
+/// it; with another kind active it switches to character selection.
 fn enter_select_char(_: ActionApi) -> Action;
 
-/// Enter line selection mode.
+/// Start a line selection at the copy-mode cursor. Toggles like
+/// `enter_select_char`.
 fn enter_select_line(_: ActionApi) -> Action;
+
+/// Leave copy mode: drop the cursor and any selection, follow output again,
+/// and return to `normal` mode (tmux `cancel`).
+fn exit_copy_mode(_: ActionApi) -> Action;
 
 /// Focus a specific buffer by id.
 fn focus_buffer(_: ActionApi, buffer_id: int) -> Action;
@@ -411,17 +519,20 @@ fn search_prev(_: ActionApi) -> Action;
 /// Select a tab by index in the currently focused tabs node.
 fn select_current_tabs(_: ActionApi, index: int) -> Action;
 
-/// Move the active selection down.
+/// Move the copy-mode cursor down. Same as `copy_cursor_down`.
 fn select_move_down(_: ActionApi) -> Action;
 
-/// Move the active selection left.
+/// Move the copy-mode cursor left. Same as `copy_cursor_left`.
 fn select_move_left(_: ActionApi) -> Action;
 
-/// Move the active selection right.
+/// Move the copy-mode cursor right. Same as `copy_cursor_right`.
 fn select_move_right(_: ActionApi) -> Action;
 
-/// Move the active selection up.
+/// Move the copy-mode cursor up. Same as `copy_cursor_up`.
 fn select_move_up(_: ActionApi) -> Action;
+
+/// Swap the selection's ends, so motions move the other end (`o`).
+fn select_other_end(_: ActionApi) -> Action;
 
 /// Select a tab by index in a specific tabs node.
 fn select_tab(_: ActionApi, tabs_node_id: int, index: int) -> Action;
@@ -480,7 +591,8 @@ fn toggle_zoom_node(_: ActionApi, node_id: int) -> Action;
 /// This removes the current session zoom rather than unwinding a stack of prior zooms.
 fn unzoom_current_session(_: ActionApi) -> Action;
 
-/// Copy the current selection into the clipboard.
+/// Copy the current selection into the clipboard (OSC 52) and leave copy
+/// mode. Without a selection it only leaves copy mode.
 fn yank_selection(_: ActionApi) -> Action;
 
 /// Zoom the session's currently focused node.

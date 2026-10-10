@@ -9,7 +9,8 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Headless Unix-socket server with interactive terminal clients
 - Sessions, windows, panes, tab trees, splits, and floating popups
 - Durable terminal buffers that can be detached, reattached, moved, and captured
-- Scrollback, visible snapshots, search, selection, and yank-oriented client behavior
+- Scrollback, visible snapshots, search, and a vi-style copy mode with mouse selection (see
+  [`docs/copy-mode.md`](docs/copy-mode.md))
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
 - FlatBuffers protocol shared by the client and server crates
@@ -134,7 +135,7 @@ Embers loads configuration in this order:
 3. The platform config directory for the `embers` application, typically `~/.config/embers/config.rhai` on Linux
 4. Built-in defaults
 
-User config is loaded as an overlay on top of the built-in defaults. The built-in config enables mouse behavior, scroll/search/select modes, and basic selection bindings.
+User config is loaded as an overlay on top of the built-in defaults. The built-in config enables mouse behavior (including drag-to-copy), scroll/search modes, and tmux `copy-mode-vi` style bindings for copy mode, described in [`docs/copy-mode.md`](docs/copy-mode.md).
 
 This repository includes a fuller example at [`config.rhai`](config.rhai). It defines a tmux-inspired leader, smart navigation for Vim/Neovim panes, split/tab helpers, popup helpers, history views, and a custom tab bar/theme.
 

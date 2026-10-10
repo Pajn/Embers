@@ -286,6 +286,44 @@ fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
 }
 
 #[test]
+fn renderer_draws_the_copy_mode_cursor_instead_of_the_program_cursor() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("focused pane snapshot")
+        .cursor = Some(CursorState {
+        position: CursorPosition { row: 0, col: 0 },
+        shape: CursorShape::Beam,
+    });
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.follow_output = false;
+    view.scroll_top_line = 0;
+    view.copy_cursor = Some(SelectionPoint { line: 1, column: 3 });
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .unwrap();
+    let leaf = presentation.focused_leaf().unwrap().clone();
+    let grid = Renderer.render(&state, &presentation);
+
+    assert_eq!(
+        grid.cursor(),
+        Some(embers_client::GridCursor {
+            x: leaf.rect.origin.x as u16 + 3,
+            y: leaf.rect.origin.y as u16 + 2,
+            shape: CursorShape::Block,
+        })
+    );
+}
+
+#[test]
 fn renders_indexed_foreground_run_in_pane() {
     let grid = render_focused_with_lines(vec![styled_line("red", TermColor::Indexed(1), 0)]);
     let ansi = grid.ansi_lines();
