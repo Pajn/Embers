@@ -147,6 +147,9 @@ pub struct ConfiguredClient<T> {
     /// Passthrough writes from panes, oldest first, waiting for the next frame.
     pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
     pending_passthrough_bytes: usize,
+    /// The buffer whose passthrough write last reached the host terminal: the
+    /// pane a host reply to a query sent through passthrough is meant for.
+    last_passthrough_buffer: Option<BufferId>,
     /// Host terminal output that must follow the frame `render_session` last
     /// returned (see [`ConfiguredClient::drain_frame_output`]).
     frame_output: Vec<u8>,
@@ -190,6 +193,7 @@ where
             terminal_output: VecDeque::new(),
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
+            last_passthrough_buffer: None,
             frame_output: Vec::new(),
             detected_host: HostCapabilities::default(),
             socket_path: None,
@@ -402,8 +406,9 @@ where
                     output.extend_from_slice(&write.bytes);
                 }
                 (PassthroughMode::All, None) => output.extend_from_slice(&write.bytes),
-                _ => {}
+                _ => continue,
             }
+            self.last_passthrough_buffer = Some(buffer_id);
         }
         if output.is_empty() {
             return;
@@ -782,6 +787,35 @@ where
         };
         self.send_bytes_to_buffer(buffer_id, session_id, bytes)
             .await
+    }
+
+    /// Deliver `bytes`, a reply from the host terminal (a DCS, APC or OSC
+    /// string, or a CSI report), to the pane it is meant for. A reply is not
+    /// typed input: it is never copied to synchronized panes, inserted into
+    /// the command prompt or chooser filter, or matched against bindings.
+    ///
+    /// The host only answers what it was sent, and the only queries that do
+    /// not come from the client come from panes through passthrough, so a
+    /// reply goes to the pane whose passthrough write last reached the host.
+    /// When there is none, or its buffer is gone, it goes to the focused pane.
+    pub async fn handle_host_reply(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        self.set_active_view(session_id, viewport);
+        let source = self
+            .last_passthrough_buffer
+            .filter(|buffer_id| self.client.state().buffers.contains_key(buffer_id));
+        let buffer_id = match source {
+            Some(buffer_id) => buffer_id,
+            None => {
+                let presentation = self.prepare_presentation(session_id, viewport).await?;
+                self.resolve_buffer_id(None, &presentation)?
+            }
+        };
+        self.send_input(session_id, vec![(buffer_id, bytes)]).await
     }
 
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {

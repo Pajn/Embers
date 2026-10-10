@@ -1788,6 +1788,172 @@ async fn oversized_tmux_passthrough_is_dropped() {
     assert!(contains_subslice(&output.frame_output, b"\x1b]9;done\x07"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_replies_go_to_the_pane_whose_passthrough_asked() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    // Sends a kitty graphics query through passthrough, then shows whatever
+    // it is sent back.
+    let asking = create_buffer_with_command(
+        &mut connection,
+        "asking",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "read _; stty raw -echo; \
+             printf '\\033Ptmux;\\033\\033_Gi=31,a=q;\\033\\033\\\\\\033\\\\'; \
+             printf '\\033Ptmux;\\033\\033]9;done\\007\\033\\\\'; cat -v"
+                .to_owned(),
+        ],
+    )
+    .await;
+    let snapshot = match connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "images".to_owned(),
+            buffer_id: Some(asking.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add tab succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    // The focused pane, which did not ask.
+    let focused = create_buffer_with_command(
+        &mut connection,
+        "focused",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "stty raw -echo; cat -v".to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::Split {
+            request_id: new_request_id(),
+            leaf_node_id: snapshot.session.focused_leaf_id.expect("focused leaf"),
+            direction: SplitDirection::Vertical,
+            new_buffer_id: focused.id,
+        }))
+        .await
+        .expect("split succeeds");
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        "set_allow_passthrough(\"on\");",
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(embers_client::HostCapabilities::ALL);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("first frame");
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: asking.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("start the script");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "passthrough event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        if let Some(embers_protocol::ServerEvent::Passthrough(event)) = event
+            && event
+                .writes
+                .iter()
+                .any(|write| write.bytes == b"\x1b]9;done\x07")
+        {
+            break;
+        }
+    }
+    // Drawing the frame writes the query to the host.
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("frame after passthrough");
+    assert!(contains_subslice(
+        &configured.drain_frame_output(),
+        b"\x1b_Gi=31,a=q;\x1b\\"
+    ));
+
+    configured
+        .handle_host_reply(
+            session.session.id,
+            viewport,
+            b"\x1b_Gi=31;OK\x1b\\".to_vec(),
+        )
+        .await
+        .expect("reply delivered");
+
+    let _ = wait_for_visible_snapshot(
+        &mut connection,
+        asking.id,
+        Duration::from_secs(5),
+        |snapshot| lines_text(&snapshot.lines).contains("^[_Gi=31;OK^[\\"),
+    )
+    .await;
+    let focused_text = match connection
+        .request(&ClientMessage::Buffer(BufferRequest::CaptureVisible {
+            request_id: new_request_id(),
+            buffer_id: focused.id,
+        }))
+        .await
+        .expect("capture focused pane")
+    {
+        ServerResponse::VisibleSnapshot(snapshot) => lines_text(&snapshot.lines),
+        other => panic!("expected visible snapshot, got {other:?}"),
+    };
+    assert!(
+        !focused_text.contains("Gi=31"),
+        "the focused pane got the reply: {focused_text:?}"
+    );
+    server.shutdown().await.expect("server shuts down");
+}
+
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(

@@ -233,8 +233,14 @@ default.
   command would leave the host waiting for the rest of it. Large kitty images
   are not affected: programs send them as many small chunks.
 - **Replies.** A host terminal's reply to a forwarded query (for example a
-  kitty graphics query) arrives as input and goes to the focused pane whole,
-  as under tmux.
+  kitty graphics query) arrives with the keyboard input, but the client reads
+  DCS, APC and OSC strings and CSI reports with a private marker (`CSI ?`,
+  `CSI >`, `CSI =`) as replies, not keys. A reply goes whole to the pane whose
+  passthrough sequence last reached the host, since only panes send queries
+  through passthrough; when no pane has, or that pane is gone, it goes to the
+  focused pane. A reply is never copied to other panes by synchronize-panes,
+  typed into the command prompt or a picker's filter, or matched against key
+  bindings.
 
 Images are not part of the pane's contents in Embers: they are not kept in
 snapshots or scrollback, and Embers does not move or redraw them. What a host
@@ -275,7 +281,8 @@ send their sequences unwrapped, as to a terminal of their own:
   graphics (`a=q`) and then sends a device attributes query (DA1) gets the DA1
   answer from Embers first, before the host's answer to the graphics query
   comes back, and usually concludes there is no image support. The late
-  answer then arrives in the focused pane as input. tmux behaves the same way.
+  answer then arrives in the pane as input (see Replies above). tmux behaves
+  the same way.
 
 ## Terminal capabilities
 

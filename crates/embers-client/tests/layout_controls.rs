@@ -529,3 +529,54 @@ async fn keys_pastes_and_focus_reports_to_a_dead_pane_are_dropped() {
         ]
     );
 }
+
+/// A kitty graphics reply, as the host sends it to a pane's query.
+const KITTY_GRAPHICS_REPLY: &[u8] = b"\x1b_Gi=31;OK\x1b\\";
+
+#[tokio::test]
+async fn host_replies_are_not_synchronized() {
+    let state = synchronized(demo_state());
+    let transport = FakeTransport::default();
+    push_input_responses(&transport, &state, &[FOCUSED_BUFFER_ID]);
+    let (mut configured, _tempdir) = configured(transport.clone(), state, "");
+
+    configured
+        .handle_host_reply(SESSION_ID, VIEWPORT, KITTY_GRAPHICS_REPLY.to_vec())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sent_input(&transport),
+        vec![(FOCUSED_BUFFER_ID, KITTY_GRAPHICS_REPLY.to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn host_replies_skip_the_command_prompt_and_bindings() {
+    let state = demo_state();
+    let transport = FakeTransport::default();
+    push_input_responses(&transport, &state, &[FOCUSED_BUFFER_ID]);
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        state,
+        r#"bind("normal", "<M-:>", action.command_prompt());"#,
+    );
+    configured
+        .handle_key(SESSION_ID, VIEWPORT, KeyEvent::Alt(':'))
+        .await
+        .unwrap();
+    assert_eq!(configured.current_mode(), embers_client::PROMPT_MODE);
+
+    configured
+        .handle_host_reply(SESSION_ID, VIEWPORT, KITTY_GRAPHICS_REPLY.to_vec())
+        .await
+        .unwrap();
+
+    // The prompt line is untouched and still open; the reply went to the pane.
+    assert_eq!(configured.current_mode(), embers_client::PROMPT_MODE);
+    assert_eq!(configured.command_prompt().unwrap().display(), ":");
+    assert_eq!(
+        sent_input(&transport),
+        vec![(FOCUSED_BUFFER_ID, KITTY_GRAPHICS_REPLY.to_vec())]
+    );
+}
