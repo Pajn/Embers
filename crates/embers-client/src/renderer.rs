@@ -584,7 +584,8 @@ fn format_tab_label(tab: &crate::presentation::TabItem, width: u16) -> String {
 
     let marker = activity_marker(tab.activity);
     let body_width = width.saturating_sub(2);
-    let body = truncate(&format!("{marker}{}", tab.title), body_width);
+    let sync = if tab.synchronize_panes { " (sync)" } else { "" };
+    let body = truncate(&format!("{marker}{}{sync}", tab.title), body_width);
     if tab.active {
         truncate(&format!("[{body}]"), width)
     } else {

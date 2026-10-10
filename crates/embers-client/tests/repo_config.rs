@@ -2,12 +2,13 @@ use std::path::PathBuf;
 
 use embers_client::{
     Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec,
-    FloatingSize, PresentationModel, ScriptEngine, TreeSpec,
+    FloatingSize, KeyToken, NavigationDirection, PresentationModel, ScriptEngine, TabBarContext,
+    TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::{BufferId, Size, SplitDirection};
 
-use crate::support::{SESSION_ID, demo_state};
+use crate::support::{ROOT_TABS_ID, SESSION_ID, demo_state};
 
 #[test]
 fn repository_config_loads_with_current_public_api() {
@@ -42,6 +43,105 @@ fn repository_config_smart_nav_uses_buffer_input_for_nvim() {
             bytes: vec![8],
         }]
     );
+}
+
+#[test]
+fn repository_config_smart_resize_passes_alt_keys_to_nvim() {
+    let engine = repository_config_engine();
+    let mut state = demo_state();
+    // Neovim marks its pane through `embers buffer set-option is-vim 1`.
+    state
+        .buffers
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .user_options
+        .insert("is-vim".to_owned(), "1".to_owned());
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 24,
+        },
+    )
+    .unwrap();
+
+    for (name, key) in [
+        ("smart-resize-left", 'h'),
+        ("smart-resize-down", 'j'),
+        ("smart-resize-up", 'k'),
+        ("smart-resize-right", 'l'),
+    ] {
+        assert_eq!(
+            engine
+                .run_named_action(name, Context::from_state(&state, Some(&presentation)))
+                .unwrap(),
+            vec![Action::SendKeys {
+                buffer_id: None,
+                keys: vec![KeyToken::Alt(key)],
+            }],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn repository_config_smart_resize_resizes_other_panes_by_three_cells() {
+    let engine = repository_config_engine();
+
+    for (name, direction) in [
+        ("smart-resize-left", NavigationDirection::Left),
+        ("smart-resize-down", NavigationDirection::Down),
+        ("smart-resize-up", NavigationDirection::Up),
+        ("smart-resize-right", NavigationDirection::Right),
+    ] {
+        assert_eq!(
+            engine.run_named_action(name, demo_context()).unwrap(),
+            vec![Action::ResizePane {
+                direction,
+                cells: 3
+            }],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn repository_config_tab_bar_flags_synchronized_windows() {
+    let engine = repository_config_engine();
+    let mut state = demo_state();
+    let presentation = |state: &embers_client::ClientState| {
+        PresentationModel::project(
+            state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .unwrap()
+    };
+    let bar_text = |presentation: &PresentationModel| {
+        let bar = engine
+            .format_tab_bar(TabBarContext::from_frame(
+                presentation.root_tabs.as_ref().unwrap(),
+                "normal",
+                80,
+            ))
+            .unwrap()
+            .expect("formatter produces a bar");
+        bar.left
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>()
+    };
+
+    assert!(!bar_text(&presentation(&state)).contains("sync"));
+
+    let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();
+    root.tabs.as_mut().unwrap().tabs[1].synchronize_panes = true;
+    let text = bar_text(&presentation(&state));
+    assert!(text.contains(" sync "), "{text:?}");
 }
 
 #[test]

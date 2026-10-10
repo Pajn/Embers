@@ -2,7 +2,7 @@ use crate::support::integration_test_lock;
 use embers_core::{ErrorCode, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, ClientMessage, ServerResponse, SessionRequest,
-    SessionSnapshotResponse, SessionsResponse, TabsRecord,
+    SessionSnapshotResponse, SessionsResponse, SynchronizePanesMode, TabsRecord,
 };
 use embers_test_support::{TestConnection, TestServer};
 
@@ -240,6 +240,32 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
             .title,
         "editor"
     );
+
+    for (mode, expected) in [
+        (SynchronizePanesMode::Toggle, true),
+        (SynchronizePanesMode::On, true),
+        (SynchronizePanesMode::Toggle, false),
+        (SynchronizePanesMode::Off, false),
+    ] {
+        let synchronized = connection
+            .request(&ClientMessage::Session(
+                SessionRequest::SetRootTabSynchronizePanes {
+                    request_id: new_request_id(),
+                    session_id,
+                    index: 0,
+                    mode,
+                },
+            ))
+            .await
+            .expect("synchronize-panes request succeeds");
+        let synchronized = match synchronized {
+            ServerResponse::SessionSnapshot(snapshot) => snapshot,
+            other => panic!("expected session snapshot response, got {other:?}"),
+        };
+        let tabs = root_tabs(&synchronized.snapshot).expect("root windows keep tabs root");
+        assert_eq!(tabs.tabs[0].synchronize_panes, expected, "after {mode:?}");
+        assert!(!tabs.tabs[1].synchronize_panes);
+    }
 
     let closed_second = connection
         .request(&ClientMessage::Session(SessionRequest::CloseRootTab {

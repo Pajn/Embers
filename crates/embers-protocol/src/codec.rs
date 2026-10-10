@@ -230,7 +230,8 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
         | SessionRequest::Rename { session_id, .. }
         | SessionRequest::SelectRootTab { session_id, .. }
         | SessionRequest::RenameRootTab { session_id, .. }
-        | SessionRequest::CloseRootTab { session_id, .. } => {
+        | SessionRequest::CloseRootTab { session_id, .. }
+        | SessionRequest::SetRootTabSynchronizePanes { session_id, .. } => {
             validate_required_session_id(*session_id, "session_request.session_id")
         }
     }
@@ -928,6 +929,26 @@ fn encode_session_request<'a>(
             false,
             *index,
         ),
+        SessionRequest::SetRootTabSynchronizePanes {
+            session_id, index, ..
+        } => (
+            fb::SessionOp::SetRootTabSynchronizePanes,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            *index,
+        ),
+    };
+    let synchronize_panes = match req {
+        SessionRequest::SetRootTabSynchronizePanes { mode, .. } => match mode {
+            SynchronizePanesMode::Toggle => fb::SynchronizePanesModeWire::Toggle,
+            SynchronizePanesMode::On => fb::SynchronizePanesModeWire::On,
+            SynchronizePanesMode::Off => fb::SynchronizePanesModeWire::Off,
+        },
+        _ => fb::SynchronizePanesModeWire::Toggle,
     };
 
     let name = name_str.map(|s| builder.create_string(s));
@@ -943,6 +964,7 @@ fn encode_session_request<'a>(
             title,
             force,
             index,
+            synchronize_panes,
         },
     );
 
@@ -3362,6 +3384,7 @@ fn encode_node_record<'a>(
                     &fb::TabRecordArgs {
                         title: Some(title),
                         child_id: tab.child_id.into(),
+                        synchronize_panes: tab.synchronize_panes,
                     },
                 )
             })
@@ -3556,6 +3579,26 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     )?,
                     index: req.index(),
                 },
+                fb::SessionOp::SetRootTabSynchronizePanes => {
+                    SessionRequest::SetRootTabSynchronizePanes {
+                        request_id,
+                        session_id: decode_required_session_id(
+                            req.session_id(),
+                            "session_request.session_id",
+                        )?,
+                        index: req.index(),
+                        mode: match req.synchronize_panes() {
+                            fb::SynchronizePanesModeWire::Toggle => SynchronizePanesMode::Toggle,
+                            fb::SynchronizePanesModeWire::On => SynchronizePanesMode::On,
+                            fb::SynchronizePanesModeWire::Off => SynchronizePanesMode::Off,
+                            _ => {
+                                return Err(ProtocolError::InvalidMessage(
+                                    "unknown synchronize-panes mode",
+                                ));
+                            }
+                        },
+                    }
+                }
                 _ => return Err(ProtocolError::InvalidMessage("unknown session op")),
             };
             Ok(ClientMessage::Session(session_request))
@@ -4661,6 +4704,7 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
                     Ok(TabRecord {
                         title: required(tab.title(), "node_record.tabs.title")?.to_owned(),
                         child_id: NodeId(tab.child_id()),
+                        synchronize_panes: tab.synchronize_panes(),
                     })
                 })
                 .collect::<Result<Vec<_>, ProtocolError>>()?;
@@ -5149,6 +5193,7 @@ mod tests {
                 title: None,
                 force: false,
                 index: 0,
+                ..Default::default()
             },
         );
 

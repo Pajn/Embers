@@ -65,6 +65,13 @@ enum SessionOp : ubyte {
   RenameRootTab = 6,
   CloseRootTab = 7,
   Rename = 8,
+  SetRootTabSynchronizePanes = 9,
+}
+
+enum SynchronizePanesModeWire : ubyte {
+  Toggle = 0,
+  On = 1,
+  Off = 2,
 }
 
 enum BufferOp : ubyte {
@@ -214,6 +221,7 @@ table SessionRequest {
   title:string (id: 5);
   force:bool = false (id: 6);
   index:uint = 0 (id: 7);
+  synchronize_panes:SynchronizePanesModeWire = Toggle (id: 8);
 }
 
 table BufferRequest {
@@ -376,6 +384,7 @@ table SplitRecord {
 table TabRecord {
   title:string;
   child_id:ulong;
+  synchronize_panes:bool = false;
 }
 
 table TabsRecord {

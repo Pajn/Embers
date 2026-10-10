@@ -21,8 +21,8 @@ use embers_protocol::{
     RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse,
     SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
     SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
-    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
-    write_frame_no_flush,
+    SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message, encode_server_envelope,
+    read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -30,14 +30,15 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::config::ResourceLimits;
+use crate::config::{ResourceLimits, RestoreConfig};
 use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
 };
-use crate::persist::{load_workspace, save_workspace};
+use crate::persist::{encode_workspace, load_workspace, write_workspace};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
+use crate::restore::{default_shell, plan_restore};
 use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::{
     BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
@@ -56,6 +57,15 @@ use crate::{
 /// only fails on a genuinely closed channel. Only best-effort events, which a
 /// reattached client recovers via resync, are dropped when the queue is full.
 const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
+
+/// How long the workspace saver waits after the first change of a burst before
+/// it writes the workspace file. Changes made meanwhile land in the same write,
+/// so a burst costs one write, and a crash loses at most this much.
+const WORKSPACE_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How long a restored shell gets to print its prompt before the command it
+/// should run again is typed into it anyway.
+const RESTORED_SHELL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Caps on runtime-settable pane user options. Each option is re-encoded into
 /// every `BufferRecord` (list/get responses and RenderInvalidated broadcasts),
@@ -119,15 +129,20 @@ impl Server {
 
         let restored_state = load_workspace(&self.config.workspace_path)?;
         let socket_path = self.config.socket_path.clone();
-        let runtime = Arc::new(Runtime::new(
+        let mut runtime = Runtime::new(
             restored_state.unwrap_or_default(),
             self.config.socket_path.clone(),
             self.config.workspace_path.clone(),
             self.config.runtime_dir.clone(),
             self.config.buffer_env.clone(),
             self.config.limits.clone(),
-        ));
+        );
+        runtime.restore = self.config.restore.clone();
+        let runtime = Arc::new(runtime);
         runtime.restore_buffer_runtimes().await?;
+        // Record what the restore changed (reattached pids, restarted panes).
+        runtime.mark_workspace_dirty();
+        let workspace_saver = runtime.spawn_workspace_saver();
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_socket_permissions(&self.config.socket_path)?;
         let shutdown_signal = runtime.shutdown.clone();
@@ -215,6 +230,9 @@ impl Server {
             }
 
             runtime.shutdown.trigger();
+            if let Err(error) = workspace_saver.await {
+                error!(%error, "workspace saver panicked");
+            }
             runtime.shutdown_runtimes().await;
             runtime.quiesce_state_tasks().await;
             if let Err(error) = runtime.persist_workspace().await {
@@ -352,6 +370,13 @@ struct Runtime {
     runtime_dir: PathBuf,
     buffer_env: BTreeMap<String, OsString>,
     limits: ResourceLimits,
+    restore: RestoreConfig,
+    /// Signalled whenever the workspace changes in a way worth saving; the
+    /// workspace saver batches these into one write.
+    workspace_dirty: Notify,
+    /// The bytes last written to the workspace file. Held across a whole save so
+    /// saves never interleave, and used to skip writing identical contents.
+    last_saved_workspace: Mutex<Option<Vec<u8>>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
@@ -439,6 +464,14 @@ impl Runtime {
             runtime_dir,
             buffer_env,
             limits,
+            // `Server::start` applies the configured policy; a bare runtime
+            // leaves panes without a keeper `Interrupted`.
+            restore: RestoreConfig {
+                enabled: false,
+                ..RestoreConfig::default()
+            },
+            workspace_dirty: Notify::new(),
+            last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
@@ -452,8 +485,46 @@ impl Runtime {
 
 impl Runtime {
     async fn persist_workspace(&self) -> Result<()> {
-        let state = self.state.lock().await;
-        save_workspace(&self.workspace_path, &state)
+        let mut last_saved = self.last_saved_workspace.lock().await;
+        let bytes = encode_workspace(&*self.state.lock().await)?;
+        if last_saved.as_deref() == Some(bytes.as_slice()) {
+            return Ok(());
+        }
+        let path = self.workspace_path.clone();
+        let bytes =
+            tokio::task::spawn_blocking(move || write_workspace(&path, &bytes).map(|()| bytes))
+                .await
+                .map_err(|error| MuxError::internal(error.to_string()))??;
+        *last_saved = Some(bytes);
+        Ok(())
+    }
+
+    /// Ask the workspace saver to write the workspace soon.
+    fn mark_workspace_dirty(&self) {
+        self.workspace_dirty.notify_one();
+    }
+
+    /// Saves the workspace after changes, so a crash or SIGKILL of the server
+    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of them. Stops at
+    /// shutdown, which writes the final state itself.
+    fn spawn_workspace_saver(self: &Arc<Self>) -> JoinHandle<()> {
+        let runtime = self.clone();
+        let mut shutdown = self.shutdown.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = runtime.workspace_dirty.notified() => {}
+                    () = wait_for_shutdown(&mut shutdown) => return,
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(WORKSPACE_SAVE_DELAY) => {}
+                    () = wait_for_shutdown(&mut shutdown) => return,
+                }
+                if let Err(error) = runtime.persist_workspace().await {
+                    warn!(%error, "failed to save workspace");
+                }
+            }
+        })
     }
 
     async fn quiesce_state_tasks(&self) {
@@ -580,6 +651,81 @@ impl Runtime {
             }
         }
 
+        if self.restore.enabled {
+            self.restart_interrupted_buffers().await;
+        }
+        Ok(())
+    }
+
+    /// Start a fresh process for every PTY buffer left `Interrupted`: its keeper
+    /// is gone, so it cannot be reattached. Restarts run concurrently so a
+    /// large workspace does not hold up startup.
+    async fn restart_interrupted_buffers(self: &Arc<Self>) {
+        let interrupted: Vec<_> = {
+            let state = self.state.lock().await;
+            state
+                .buffers
+                .values()
+                .filter(|buffer| {
+                    matches!(buffer.state, BufferState::Interrupted(_))
+                        && matches!(buffer.kind, BufferKind::Pty)
+                })
+                .map(|buffer| buffer.id)
+                .collect()
+        };
+        let mut restarts = tokio::task::JoinSet::new();
+        for buffer_id in interrupted {
+            let runtime = self.clone();
+            restarts.spawn(async move {
+                if let Err(error) = runtime.restart_buffer(buffer_id).await {
+                    warn!(%buffer_id, %error, "failed to restore buffer");
+                }
+            });
+        }
+        while restarts.join_next().await.is_some() {}
+    }
+
+    /// Restore one buffer whose keeper is gone: start the shell (or allowlisted
+    /// program) its [`RestorePlan`](crate::restore::RestorePlan) names in its
+    /// last directory, keeping its id, title and place in the layout.
+    async fn restart_buffer(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
+        let plan = {
+            let mut state = self.state.lock().await;
+            let buffer = state
+                .buffers
+                .get_mut(&buffer_id)
+                .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))?;
+            let plan = plan_restore(buffer, &self.restore, &default_shell());
+            buffer.command = plan.command.clone();
+            buffer.cwd = plan.cwd.clone();
+            buffer.foreground_command = None;
+            plan
+        };
+        self.spawn_buffer_runtime(buffer_id).await?;
+        info!(%buffer_id, command = ?plan.command, "restored buffer whose keeper was gone");
+
+        if let Some(command_line) = plan.typed_command {
+            let runtime = self.buffer_runtime(buffer_id).await?;
+            let task = self.state_tasks.enter();
+            tokio::spawn(async move {
+                let _task = task;
+                // Wait for the shell's first output (its prompt) so the command
+                // is not echoed ahead of it, then type it like a user would.
+                let deadline = tokio::time::Instant::now() + RESTORED_SHELL_READY_TIMEOUT;
+                while tokio::time::Instant::now() < deadline {
+                    match runtime.status().await {
+                        Ok(status) if status.sequence > 0 || !status.running => break,
+                        Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                        Err(_) => return,
+                    }
+                }
+                let mut bytes = command_line.into_bytes();
+                bytes.push(b'\r');
+                if let Err(error) = runtime.write(bytes).await {
+                    debug!(%buffer_id, %error, "failed to rerun command in restored buffer");
+                }
+            });
+        }
         Ok(())
     }
 
@@ -956,6 +1102,24 @@ impl Runtime {
                 Ok(()) => layout_snapshot_response(&state, request_id, session_id),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            SessionRequest::SetRootTabSynchronizePanes {
+                request_id,
+                session_id,
+                index,
+                mode,
+            } => {
+                let enabled = match mode {
+                    SynchronizePanesMode::Toggle => None,
+                    SynchronizePanesMode::On => Some(true),
+                    SynchronizePanesMode::Off => Some(false),
+                };
+                match protocol_tab_index(index).and_then(|index| {
+                    state.set_root_tab_synchronize_panes(session_id, index, enabled)
+                }) {
+                    Ok(_) => layout_snapshot_response(&state, request_id, session_id),
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
         }
     }
 
@@ -2918,13 +3082,16 @@ impl Runtime {
     }
 
     async fn record_buffer_update(&self, buffer_id: BufferId, update: BufferRuntimeUpdate) {
-        let (render_invalidated, pipe_event) = {
+        let (render_invalidated, pipe_event, workspace_changed) = {
             let mut state = self.state.lock().await;
             let Some(buffer) = state.buffers.get_mut(&buffer_id) else {
                 return;
             };
             let previous_pipe = buffer.pipe.clone();
             let mut render_invalidated = false;
+            // Title, cwd and foreground command are what a restore brings back,
+            // so a change to any of them is saved. Output and activity are not.
+            let mut workspace_changed = false;
             {
                 let sequence_advanced = update.sequence > buffer.last_snapshot_seq;
                 let sequence_current = update.sequence >= buffer.last_snapshot_seq;
@@ -2938,6 +3105,7 @@ impl Runtime {
                         let next_title = title.unwrap_or_default();
                         if next_title != buffer.title {
                             buffer.title = next_title;
+                            workspace_changed = true;
                         }
                     }
                     render_invalidated = true;
@@ -2955,6 +3123,14 @@ impl Runtime {
                 {
                     buffer.cwd = cwd;
                     render_invalidated = true;
+                    workspace_changed = true;
+                }
+                if sequence_current
+                    && let Some(foreground_command) = update.foreground_command
+                    && foreground_command != buffer.foreground_command
+                {
+                    buffer.foreground_command = foreground_command;
+                    workspace_changed = true;
                 }
                 if sequence_current && let Some(pipe) = update.pipe {
                     let next_pipe = pipe.as_ref().map(model_pipe_from_runtime);
@@ -2970,8 +3146,11 @@ impl Runtime {
                 }
                 _ => None,
             };
-            (render_invalidated, pipe_event)
+            (render_invalidated, pipe_event, workspace_changed)
         };
+        if workspace_changed {
+            self.mark_workspace_dirty();
+        }
 
         let mut events = Vec::new();
         if render_invalidated {
@@ -3056,6 +3235,7 @@ impl Runtime {
         };
 
         if updated {
+            self.mark_workspace_dirty();
             let mut events = vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
                 buffer_id,
             })];
@@ -3080,6 +3260,7 @@ impl Runtime {
                 title: Some(status.title.clone()),
                 pipe: Some(status.pipe.clone()),
                 cwd: Some(status.cwd.clone()),
+                foreground_command: Some(status.foreground_command.clone()),
             },
         )
         .await;
@@ -3438,6 +3619,14 @@ async fn handle_connection(
         {
             return Err(MuxError::transport("connection writer closed"));
         }
+        // Every request that changes the workspace tells clients so through an
+        // event. Render invalidations alone only report new output.
+        if events
+            .iter()
+            .any(|event| !matches!(event, ServerEvent::RenderInvalidated(_)))
+        {
+            runtime.mark_workspace_dirty();
+        }
         let retired_session_ids = closed_session_ids(&events);
         runtime.broadcast(events, &retired_session_ids).await;
 
@@ -3654,6 +3843,7 @@ fn apply_runtime_status(
     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
         buffer.last_snapshot_seq = status.sequence;
         buffer.pipe = status.pipe.as_ref().map(model_pipe_from_runtime);
+        buffer.foreground_command = status.foreground_command.clone();
     }
     if let Some(title) = &status.title {
         let _ = state.set_buffer_title(buffer_id, title.clone());
@@ -4222,6 +4412,7 @@ mod tests {
                     title: Some(Some("stale-title".to_owned())),
                     pipe: None,
                     cwd: None,
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4247,6 +4438,7 @@ mod tests {
                     title: Some(Some("fresh-title".to_owned())),
                     pipe: None,
                     cwd: None,
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4313,6 +4505,7 @@ mod tests {
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
                     cwd: None,
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4373,6 +4566,7 @@ mod tests {
                         stop_reason: Some(BufferRuntimePipeStopReason::PipeExited),
                     })),
                     cwd: None,
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4427,6 +4621,7 @@ mod tests {
                     title: Some(None),
                     pipe: None,
                     cwd: None,
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4479,6 +4674,7 @@ mod tests {
                     title: None,
                     pipe: None,
                     cwd: Some(None),
+                    foreground_command: None,
                 },
             )
             .await;
@@ -4502,6 +4698,7 @@ mod tests {
                     title: None,
                     pipe: None,
                     cwd: Some(Some(PathBuf::from("/tmp/work"))),
+                    foreground_command: None,
                 },
             )
             .await;

@@ -466,6 +466,7 @@ impl TabBarContext {
                     ),
                     has_bell: matches!(tab.activity, ActivityState::Bell),
                     buffer_count: tab.buffer_count,
+                    synchronize_panes: tab.synchronize_panes,
                 })
                 .collect(),
         }
@@ -480,6 +481,7 @@ pub struct TabInfo {
     pub has_activity: bool,
     pub has_bell: bool,
     pub buffer_count: usize,
+    pub synchronize_panes: bool,
 }
 
 fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> {

@@ -554,6 +554,15 @@ impl MouseApi {
             .wheel_forward = value;
         Ok(())
     }
+
+    fn set_drag_resize(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .drag_resize = value;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -836,6 +845,21 @@ mod mouse_registration_api {
         value: bool,
     ) -> RhaiResultOf<()> {
         mouse.set_wheel_forward(ctx.call_position(), value)
+    }
+
+    /// Toggle resizing splits by dragging their dividers with the left button.
+    ///
+    /// Only drags that start on a divider are claimed; clicks and drags inside panes behave
+    /// as before. The built-in config turns this on.
+    ///
+    /// # rhai-autodocs:index:27
+    #[rhai_fn(return_raw, name = "set_drag_resize")]
+    pub fn set_drag_resize(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_drag_resize(ctx.call_position(), value)
     }
 }
 

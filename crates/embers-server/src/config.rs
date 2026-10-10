@@ -78,6 +78,73 @@ impl ResourceLimits {
     }
 }
 
+/// Environment variable turning restore of panes whose keeper is gone on or off.
+pub const RESTORE_ENV_VAR: &str = "EMBERS_RESTORE";
+/// Environment variable replacing [`DEFAULT_RESTORE_COMMANDS`].
+pub const RESTORE_COMMANDS_ENV_VAR: &str = "EMBERS_RESTORE_COMMANDS";
+
+/// Programs that are run again when a pane is restored, matched against the
+/// name of the program the pane last had in the foreground. The same safe
+/// default as tmux-resurrect: viewers, editors and monitors that are harmless
+/// to start twice.
+pub const DEFAULT_RESTORE_COMMANDS: &[&str] = &[
+    "vi", "vim", "nvim", "emacs", "man", "less", "more", "tail", "top", "htop", "irssi", "weechat",
+    "mutt",
+];
+
+/// How the server brings back panes whose runtime keeper is gone, for example
+/// after a reboot. Panes whose keeper is still alive are always reattached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreConfig {
+    /// Start a fresh process for a pane whose keeper is gone. When off, such a
+    /// pane is left `Interrupted`.
+    pub enabled: bool,
+    /// Program names that are run again in a restored pane. Anything else
+    /// restores as a plain shell.
+    pub commands: Vec<String>,
+}
+
+impl Default for RestoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            commands: DEFAULT_RESTORE_COMMANDS
+                .iter()
+                .map(|command| (*command).to_owned())
+                .collect(),
+        }
+    }
+}
+
+impl RestoreConfig {
+    /// Build the restore settings from defaults, applying any environment
+    /// overrides. `EMBERS_RESTORE` set to `0`, `off`, `false` or `no` turns
+    /// restore off. `EMBERS_RESTORE_COMMANDS` replaces the allowlist with its
+    /// comma- or whitespace-separated names; set but empty, no program is run
+    /// again.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        if let Ok(value) = std::env::var(RESTORE_ENV_VAR) {
+            config.enabled = !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false" | "no"
+            );
+        }
+        if let Ok(value) = std::env::var(RESTORE_COMMANDS_ENV_VAR) {
+            config.commands = parse_command_list(&value);
+        }
+        config
+    }
+}
+
+fn parse_command_list(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Read a positive `usize` from `var`. Returns `None` when unset, empty, zero,
 /// or unparseable, so callers keep their default.
 fn parse_limit_env(var: &str) -> Option<usize> {
@@ -94,6 +161,7 @@ pub struct ServerConfig {
     pub runtime_dir: PathBuf,
     pub buffer_env: BTreeMap<String, OsString>,
     pub limits: ResourceLimits,
+    pub restore: RestoreConfig,
 }
 
 impl ServerConfig {
@@ -119,6 +187,7 @@ impl ServerConfig {
             runtime_dir,
             buffer_env,
             limits: ResourceLimits::from_env(),
+            restore: RestoreConfig::from_env(),
         }
     }
 
@@ -140,6 +209,24 @@ mod tests {
         assert_eq!(limits.max_sessions, DEFAULT_MAX_SESSIONS);
         assert_eq!(limits.max_buffers, DEFAULT_MAX_BUFFERS);
         assert_eq!(limits.max_scrollback_lines, DEFAULT_MAX_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn restore_command_list_splits_on_commas_and_whitespace() {
+        assert_eq!(
+            parse_command_list(" vim, less\ttail ,,"),
+            vec!["vim".to_owned(), "less".to_owned(), "tail".to_owned()]
+        );
+        assert!(parse_command_list("").is_empty());
+        assert!(parse_command_list(" , ").is_empty());
+    }
+
+    #[test]
+    fn restore_defaults_to_enabled_with_the_safe_allowlist() {
+        let config = RestoreConfig::default();
+        assert!(config.enabled);
+        assert!(config.commands.iter().any(|command| command == "vim"));
+        assert!(!config.commands.iter().any(|command| command == "sh"));
     }
 
     #[test]

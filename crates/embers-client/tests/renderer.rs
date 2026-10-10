@@ -6,7 +6,7 @@ use embers_core::{
     CellAttrs, CursorPosition, CursorShape, CursorState, Size, SnapshotLine, StyledRun, TermColor,
 };
 
-use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
+use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state};
 
 /// Build a single-run styled line covering the whole text.
 fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
@@ -113,6 +113,31 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
             "             |                          \n",
             "             |                          "
         )
+    );
+}
+
+#[test]
+fn default_tab_bar_marks_synchronized_windows() {
+    let mut state = demo_state();
+    let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();
+    root.tabs.as_mut().unwrap().tabs[1].synchronize_panes = true;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+
+    let grid = Renderer.render(&state, &presentation);
+
+    assert!(
+        grid.render()
+            .starts_with("  shell  [!workspace (sync)]            \n"),
+        "{}",
+        grid.render()
     );
 }
 
