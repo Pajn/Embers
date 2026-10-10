@@ -32,6 +32,20 @@ available of:
 The default runtime directory is created with `0700` permissions and the socket
 with `0600`, so other users on the host cannot reach it.
 
+### Runtime keeper sockets
+
+Each buffer's PTY is owned by a separate runtime keeper process, which the server
+reaches over its own Unix socket. These sockets live in a directory derived from
+the server socket, `<socket>.runtimes/` (for example `embers.runtimes/` next to
+`embers.sock`), and are named `buffer-<id>.sock`.
+
+Unix socket paths are limited to 104 bytes on macOS and 108 bytes on Linux. A
+keeper socket that would not fit in the derived directory goes in
+`/tmp/embers-<uid>/runtimes-<hash>/` instead, where `<hash>` is derived from the
+server socket path, so each server keeps a stable directory of its own. Any
+server socket path that can itself be bound therefore works. Keeper socket
+directories are created with `0700` permissions.
+
 ## Logging
 
 The tracing filter is resolved from the first of these that is set, highest

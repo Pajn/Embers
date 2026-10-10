@@ -2,8 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -40,6 +38,7 @@ use crate::persist::{load_workspace, save_workspace};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
+use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::{
     BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
     BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, BufferState,
@@ -472,10 +471,8 @@ impl Runtime {
     }
 
     fn runtime_socket_path(&self, buffer_id: BufferId) -> Result<PathBuf> {
-        let path = self
-            .runtime_dir
-            .join(format!("buffer-{}.sock", buffer_id.0));
-        validate_keeper_socket_path(&self.socket_path, &path)?;
+        let path = keeper_socket_path(&self.socket_path, &self.runtime_dir, buffer_id);
+        prepare_keeper_socket_dir(&path)?;
         Ok(path)
     }
 
@@ -3472,36 +3469,6 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 fn set_socket_permissions(socket_path: &Path) -> Result<()> {
     #[cfg(unix)]
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-/// Maximum Unix-domain socket path length in bytes for runtime keeper sockets.
-/// These values come from `sockaddr_un.sun_path`: macOS exposes 104 bytes per
-/// `unix(4)`, while other Unix/Linux platforms expose 108 bytes per `unix(7)`.
-/// `validate_keeper_socket_path` uses this limit to validate keeper socket
-/// paths derived from the server socket path before binding.
-#[cfg(target_os = "macos")]
-const UNIX_SOCKET_PATH_LIMIT: usize = 104;
-/// Maximum Unix-domain socket path length in bytes for runtime keeper sockets.
-/// These values come from `sockaddr_un.sun_path`: macOS exposes 104 bytes per
-/// `unix(4)`, while other Unix/Linux platforms expose 108 bytes per `unix(7)`.
-/// `validate_keeper_socket_path` uses this limit to validate keeper socket
-/// paths derived from the server socket path before binding.
-#[cfg(all(unix, not(target_os = "macos")))]
-const UNIX_SOCKET_PATH_LIMIT: usize = 108;
-
-fn validate_keeper_socket_path(server_socket_path: &Path, keeper_socket_path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let len = keeper_socket_path.as_os_str().as_bytes().len();
-        if len > UNIX_SOCKET_PATH_LIMIT {
-            return Err(MuxError::invalid_input(format!(
-                "runtime keeper socket path is too long ({len} bytes, max {UNIX_SOCKET_PATH_LIMIT}): {} (runtime_dir derived from server socket {}). Use a shorter server socket path.",
-                keeper_socket_path.display(),
-                server_socket_path.display(),
-            )));
-        }
-    }
     Ok(())
 }
 
