@@ -868,20 +868,18 @@ impl Runtime {
     /// last directory, keeping its id, title and place in the layout.
     async fn restart_buffer(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
         let plan = {
-            let mut state = self.state.lock().await;
-            let buffer = state
-                .buffers
-                .get_mut(&buffer_id)
-                .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))?;
-            let plan = plan_restore(buffer, &self.restore, &default_shell());
-            buffer.command = plan.command.clone();
-            buffer.cwd = plan.cwd.clone();
-            buffer.foreground_command = None;
+            let state = self.state.lock().await;
+            plan_restore(state.buffer(buffer_id)?, &self.restore, &default_shell())
+        };
+        // The record keeps its command and directory until the new keeper
+        // runs: a restore that fails leaves (and saves) the pane as it was,
+        // so a later restore can still bring back what it ran.
+        self.spawn_buffer_runtime_with(buffer_id, plan.command.clone(), plan.cwd.clone())
+            .await?;
+        if let Some(buffer) = self.state.lock().await.buffers.get_mut(&buffer_id) {
             // The program that set it is gone; a rerun Neovim sets it again.
             buffer.user_options.remove(IS_VIM_OPTION);
-            plan
-        };
-        self.spawn_buffer_runtime(buffer_id).await?;
+        }
         info!(%buffer_id, command = ?plan.command, "restored buffer whose keeper was gone");
 
         if let Some(command_line) = plan.typed_command {
@@ -2555,10 +2553,28 @@ impl Runtime {
     }
 
     async fn spawn_buffer_runtime(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
-        let (command, cwd, size, env_hints) = {
+        let (command, cwd) = {
             let state = self.state.lock().await;
-            let buffer = state.buffer(buffer_id)?.clone();
-            (buffer.command, buffer.cwd, buffer.pty_size, buffer.env)
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.command.clone(), buffer.cwd.clone())
+        };
+        self.spawn_buffer_runtime_with(buffer_id, command, cwd)
+            .await
+    }
+
+    /// Start a keeper for `buffer_id` running `command` in `cwd`. The buffer
+    /// record takes them as its command and directory only once the keeper
+    /// runs, so a spawn that fails leaves the record as it was.
+    async fn spawn_buffer_runtime_with(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+    ) -> Result<()> {
+        let (size, env_hints) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.pty_size, buffer.env.clone())
         };
 
         let mut buffer_env = self.buffer_env.clone();
@@ -2609,6 +2625,10 @@ impl Runtime {
                 buffer_id,
                 Some(runtime.socket_path().to_path_buf()),
             )?;
+            if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+                buffer.command = command;
+                buffer.cwd = cwd;
+            }
             apply_runtime_status(&mut state, buffer_id, &status);
         }
 

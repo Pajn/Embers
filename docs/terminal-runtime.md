@@ -260,6 +260,10 @@ every interrupted PTY buffer shown in a pane or popup then gets a fresh keeper:
 - if the buffer ran an allowlisted program directly, that program starts again
 - anything else restores as a plain shell (`$SHELL`, or `/bin/sh`)
 
+The buffer record takes the restored command and directory only once the fresh keeper runs. If it
+cannot be started, the buffer stays `Interrupted` with the command and directory it had, and that
+is what is saved, so a later restore can still bring back what the pane ran.
+
 The allowlist matches the program name of the command line and defaults to tmux-resurrect's: `vi`,
 `vim`, `nvim`, `emacs`, `man`, `less`, `more`, `tail`, `top`, `htop`, `irssi`, `weechat`, `mutt`.
 The foreground job is the PTY's foreground process group, read by the keeper; it is only recorded

@@ -1410,3 +1410,102 @@ async fn a_pane_spamming_its_title_does_not_spam_the_disk() {
     handle.shutdown().await.expect("shutdown server");
     stop_keepers(&config, &[(buffer_id, pid)]).await;
 }
+
+#[tokio::test]
+async fn a_failed_restore_keeps_the_original_command() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let root = tempdir.path().canonicalize().expect("canonical tempdir");
+    let socket_path = root.join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    // Neither a shell nor allowlisted, so a restore would start a plain shell
+    // instead, in the nearest directory that still exists.
+    let original = vec!["/bin/cat".to_owned(), "-u".to_owned()];
+    let work_dir = root.join("work");
+    std::fs::create_dir(&work_dir).expect("create work dir");
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+    let session_id = request_session_snapshot(
+        &mut client,
+        SessionRequest::Create {
+            request_id: RequestId(1301),
+            name: "main".to_owned(),
+        },
+    )
+    .await
+    .snapshot
+    .session
+    .id;
+    let buffer_id = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(1302),
+            title: Some("original".to_owned()),
+            command: original.clone(),
+            cwd: Some(work_dir.display().to_string()),
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer
+    .id;
+    show_buffer(&mut client, RequestId(1303), session_id, buffer_id).await;
+    let pid = wait_for_running_buffer(&mut client, RequestId(1304), buffer_id)
+        .await
+        .pid
+        .expect("buffer pid");
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    stop_keepers(&config, &[(buffer_id, pid)]).await;
+
+    std::fs::remove_dir(&work_dir).expect("remove work dir");
+    // Keepers cannot start: the server refuses a keeper directory that is a
+    // symlink.
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir(&elsewhere).expect("create elsewhere");
+    let _ = std::fs::remove_dir_all(&config.runtime_dir);
+    std::os::unix::fs::symlink(&elsewhere, &config.runtime_dir).expect("symlink keeper dir");
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(1305),
+            buffer_id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(buffer.state, BufferRecordState::Interrupted);
+    assert_eq!(
+        buffer.command, original,
+        "a failed restore replaced the command"
+    );
+    assert_eq!(
+        buffer.cwd.as_deref(),
+        work_dir.to_str(),
+        "a failed restore replaced the directory"
+    );
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+    let saved = std::fs::read_to_string(&config.workspace_path).expect("saved workspace");
+    assert!(
+        saved.contains("\"/bin/cat\""),
+        "the saved workspace lost the original command: {saved}"
+    );
+}
