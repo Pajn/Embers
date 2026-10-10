@@ -357,3 +357,111 @@ async fn clean_restart_stops_ephemeral_buffer_pipes() {
 
     handle.shutdown().await.expect("shutdown restarted server");
 }
+
+/// `sockaddr_un.sun_path` size: 104 bytes on macOS, 108 on other Unix
+/// platforms. A bindable path must leave room for the trailing NUL.
+#[cfg(target_os = "macos")]
+const SUN_PATH_LEN: usize = 104;
+#[cfg(not(target_os = "macos"))]
+const SUN_PATH_LEN: usize = 108;
+
+#[tokio::test]
+async fn long_server_socket_path_still_spawns_and_restores_keepers() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    init_test_tracing();
+
+    // Pad the directory so the server socket path is a few bytes under the
+    // limit: still bindable itself, but too long to nest keeper sockets in a
+    // directory derived from it.
+    let tempdir = tempdir().expect("tempdir");
+    let base_len = tempdir.path().as_os_str().as_bytes().len();
+    let socket_len = SUN_PATH_LEN - 8;
+    let padding = socket_len
+        .checked_sub(base_len + "/".len() + "/mux.sock".len())
+        .expect("temp dir leaves room for a padded socket path");
+    let socket_dir = tempdir.path().join("d".repeat(padding));
+    std::fs::create_dir(&socket_dir).expect("create socket dir");
+    let socket_path = socket_dir.join("mux.sock");
+    assert_eq!(socket_path.as_os_str().as_bytes().len(), socket_len);
+
+    let config = ServerConfig::new(socket_path.clone());
+
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let buffer_id = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(201),
+            title: Some("long".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+        },
+    )
+    .await
+    .buffer
+    .id;
+    let _ = wait_for_running_buffer(&mut client, RequestId(202), buffer_id).await;
+
+    let keeper_socket = config.keeper_socket_path(buffer_id);
+    let keeper_dir = keeper_socket.parent().expect("keeper dir").to_path_buf();
+    assert!(keeper_socket.as_os_str().as_bytes().len() < SUN_PATH_LEN);
+    assert!(!keeper_socket.starts_with(&config.runtime_dir));
+    assert!(
+        keeper_socket.exists(),
+        "keeper listens on the reported path"
+    );
+    let mode = std::fs::metadata(&keeper_dir)
+        .expect("keeper dir exists")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "keeper dir must be private");
+
+    handle.shutdown().await.expect("shutdown server");
+
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(203),
+            buffer_id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(restored.state, BufferRecordState::Running);
+
+    match client
+        .request(&ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(204),
+            buffer_id,
+            bytes: b"printf restored-long\\n\r".to_vec(),
+        }))
+        .await
+        .expect("send to restored buffer succeeds")
+    {
+        ServerResponse::Ok(_) => {}
+        other => panic!("expected ok response, got {other:?}"),
+    }
+    let _ = wait_for_snapshot_line(&mut client, RequestId(205), buffer_id, "restored-long").await;
+
+    // Keepers outlive the server, and this keeper directory is outside the
+    // temp dir, so stop the keeper and remove the directory here.
+    handle.shutdown().await.expect("shutdown restarted server");
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg(keeper_socket.as_os_str())
+        .status();
+    let _ = std::fs::remove_dir_all(&keeper_dir);
+}

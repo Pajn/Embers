@@ -2,6 +2,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use embers_core::BufferId;
+
+use crate::runtime_dir::keeper_socket_path;
+
 pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
 
 /// `TERM` advertised to buffer child processes. Embers ships no terminfo of its
@@ -116,6 +120,13 @@ impl ServerConfig {
             buffer_env,
             limits: ResourceLimits::from_env(),
         }
+    }
+
+    /// Path of the runtime keeper socket for `buffer_id`: inside
+    /// [`Self::runtime_dir`] when that fits the Unix socket path limit,
+    /// otherwise inside a short private directory under `/tmp/embers-<uid>/`.
+    pub fn keeper_socket_path(&self, buffer_id: BufferId) -> PathBuf {
+        keeper_socket_path(&self.socket_path, &self.runtime_dir, buffer_id)
     }
 }
 

@@ -5,6 +5,7 @@ mod buffer_runtime;
 mod config;
 mod persist;
 mod protocol;
+mod runtime_dir;
 mod server;
 mod terminal_backend;
 
