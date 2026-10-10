@@ -62,9 +62,9 @@ const KEEPER_WRITE_QUEUE_CAPACITY: usize = 64;
 /// needed: whether its child is still running and its socket is still the one it
 /// bound (servers only ever reattach through that socket).
 const KEEPER_SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-/// How long an unreachable keeper waits for its child to exit after SIGHUP
-/// before escalating to SIGKILL.
-const KEEPER_ORPHAN_KILL_GRACE: Duration = Duration::from_secs(2);
+/// How long a keeper waits for its child to exit after SIGHUP, when told to
+/// kill it or when it finds itself unreachable, before escalating to SIGKILL.
+const KEEPER_KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct BufferRuntimeUpdate {
@@ -1337,6 +1337,7 @@ fn handle_keeper_request(
         )),
         KeeperRequest::Kill => {
             runtime.kill()?;
+            escalate_kill(runtime.clone());
             Ok((KeeperResponse::Ok, false))
         }
         KeeperRequest::Shutdown => Ok((KeeperResponse::Ok, true)),
@@ -1503,6 +1504,7 @@ impl KeeperRuntime {
         Ok(surface.capture_scrollback_slice(start_line, line_count))
     }
 
+    /// Send the child SIGHUP, like a terminal hanging up.
     fn kill(&self) -> Result<()> {
         self.ensure_running()?;
         let mut killer = self
@@ -1691,7 +1693,7 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
 /// kill, then SIGKILL if the child ignores it, and wait for it to exit.
 fn stop_runtime_child(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
     let _ = runtime.kill();
-    let deadline = Instant::now() + KEEPER_ORPHAN_KILL_GRACE;
+    let deadline = Instant::now() + KEEPER_KILL_GRACE;
     while !wait_join.is_finished() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
     }
@@ -1705,6 +1707,37 @@ fn stop_runtime_child(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>
         }
     }
     let _ = wait_join.join();
+}
+
+/// Follow up a requested kill: a child still running [`KEEPER_KILL_GRACE`]
+/// after its SIGHUP gets SIGKILL. A program may ignore SIGHUP, and a shell
+/// can lose one that arrives while it is still starting up, so without this
+/// `kill-pane` could leave the program running.
+fn escalate_kill(runtime: Arc<KeeperRuntime>) {
+    let spawned = thread::Builder::new()
+        .name("keeper-kill-escalation".to_owned())
+        .spawn(move || {
+            let deadline = Instant::now() + KEEPER_KILL_GRACE;
+            while Instant::now() < deadline {
+                if runtime.ensure_running().is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            if runtime.ensure_running().is_ok()
+                && let Some(pid) = runtime.pid.and_then(|pid| libc::pid_t::try_from(pid).ok())
+            {
+                // SAFETY: plain signal delivery. The wait thread records the
+                // exit as soon as it has reaped the child, and the child was
+                // still recorded as running just above, so `pid` still names it.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        debug!(%error, "failed to start kill escalation");
+    }
 }
 
 fn keeper_wait_loop(runtime: Arc<KeeperRuntime>, mut child: Box<dyn Child + Send + Sync>) {

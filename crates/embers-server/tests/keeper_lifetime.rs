@@ -59,6 +59,21 @@ fn process_alive(pid: u32) -> bool {
     !stat.is_empty() && !stat.starts_with('Z')
 }
 
+/// `ps` lines for `pids`, to show what a process that should be gone is doing.
+fn process_states(pids: &[Option<u32>]) -> String {
+    let pids = pids
+        .iter()
+        .flatten()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pid,ppid,pgid,stat,wchan,command", "-p", &pids])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn parent_pid(pid: u32) -> Option<u32> {
     let output = std::process::Command::new("ps")
         .args(["-o", "ppid=", "-p", &pid.to_string()])
@@ -187,7 +202,8 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
     }
     assert!(
         wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
-        "shell {shell_pid} still running after kill"
+        "shell {shell_pid} still running after kill: {}",
+        process_states(&[Some(shell_pid), keeper_pid])
     );
 
     let deadline = Instant::now() + Duration::from_secs(10);

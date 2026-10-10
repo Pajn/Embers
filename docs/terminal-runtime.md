@@ -36,7 +36,8 @@ Closing a view removes the `BufferView` node and transitions the buffer to `Deta
 
 Killing a buffer targets the runtime, not the view tree.
 
-- the PTY child is terminated
+- the PTY child is sent SIGHUP, and SIGKILL if it is still running two seconds later: a program
+  can ignore SIGHUP, and a shell can lose one that arrives while it is still starting up
 - the buffer transitions to `Exited`
 - from there the buffer is cleaned up like any buffer whose command exited (see below)
 
