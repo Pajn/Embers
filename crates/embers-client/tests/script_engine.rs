@@ -384,3 +384,21 @@ fn passthrough_is_off_unless_the_config_turns_it_on() {
         PassthroughMode::All
     );
 }
+
+#[test]
+fn the_root_tab_bar_can_be_hidden() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .map(|engine| engine.loaded_config().tab_bar_visible)
+    };
+
+    assert!(load("").unwrap());
+    assert!(!load("tabbar.set_visible(false);").unwrap());
+    assert!(load("tabbar.set_visible(true);").unwrap());
+    assert!(load(r#"tabbar.set_visible("no");"#).is_err());
+}

@@ -62,3 +62,41 @@ tabbar.set_position("bottom");
 </div>
 </div>
 </br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_visible </h2>
+
+```rust,ignore
+fn set_visible(tabbar: TabbarApi, visible: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_visible" id="link-set_visible-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_visible', 'Description')">
+Description
+</button>
+<button group="set_visible" id="link-set_visible-Example"  class="tablinks"
+    onclick="openTab(event, 'set_visible', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_visible" id="set_visible-Description" class="tabcontent"  style="display: block;" >
+Show (`true`, the default) or hide (`false`) the session's tab bar,
+like tmux's `status on` and `status off`. Hidden, it gives its row to
+the panes, and the command prompt and messages are drawn over the last
+row of the screen while they show. Only the session's own tab bar is
+hidden; tab bars of nested tabs, like `set_position`, are not
+affected.
+</div>
+<div group="set_visible" id="set_visible-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+tabbar.set_visible(false);
+```
+
+</div>
+
+</div>
+</div>
+</br>

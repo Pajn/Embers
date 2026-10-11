@@ -247,6 +247,9 @@ pub struct LoadedConfig {
     pub tab_bar_formatter: Option<ScriptFunctionRef>,
     /// Where the root tab bar is drawn (`tabbar.set_position`).
     pub tab_bar_position: TabBarPosition,
+    /// Whether the root tab bar is drawn (`tabbar.set_visible`). On by
+    /// default.
+    pub tab_bar_visible: bool,
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
@@ -298,6 +301,7 @@ impl fmt::Debug for LoadedConfig {
             .field("event_handlers", &self.event_handlers)
             .field("tab_bar_formatter", &self.tab_bar_formatter)
             .field("tab_bar_position", &self.tab_bar_position)
+            .field("tab_bar_visible", &self.tab_bar_visible)
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)

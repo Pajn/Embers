@@ -35,14 +35,14 @@ use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
-use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
+use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel, RootTabBar};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
     FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
 };
-use crate::spawn_size::{PanePlacement, spawn_pty_size};
+use crate::spawn_size::{PanePlacement, spawn_pty_size_with};
 use crate::split_resize::SplitResize;
 use crate::state::{
     HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
@@ -1094,7 +1094,11 @@ where
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let mut custom_bars = BTreeMap::<embers_core::NodeId, BarSpec>::new();
         let mut recorded_formatter_error = false;
-        for tabs in &presentation.tab_bars {
+        for tabs in presentation
+            .tab_bars
+            .iter()
+            .filter(|tabs| tabs.rect.size.height > 0)
+        {
             let bar_context =
                 TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
                     .with_base_index(self.base_index());
@@ -2456,10 +2460,11 @@ where
         placement: PanePlacement,
     ) -> Result<ResolvedTreeBuffer> {
         let size = || {
-            spawn_pty_size(
+            spawn_pty_size_with(
                 self.client.state(),
                 session_id,
                 presentation.viewport,
+                self.root_tab_bar(),
                 placement,
             )
         };
@@ -2877,14 +2882,23 @@ where
     }
 
     /// Project `session_id` the way this client draws it, with the root tab
-    /// bar where the config puts it.
+    /// bar where the config puts it, if it shows it.
     fn project(&self, session_id: SessionId, viewport: Size) -> Result<PresentationModel> {
         PresentationModel::project_with(
             self.client.state(),
             session_id,
             viewport,
-            self.config.active_script().loaded_config().tab_bar_position,
+            self.root_tab_bar(),
         )
+    }
+
+    /// How the config has the session's root tab bar drawn.
+    pub fn root_tab_bar(&self) -> RootTabBar {
+        let config = self.config.active_script().loaded_config();
+        RootTabBar {
+            position: config.tab_bar_position,
+            visible: config.tab_bar_visible,
+        }
     }
 
     async fn prepare_presentation(
@@ -3361,10 +3375,14 @@ where
     ///
     /// The viewport itself is reported to the server too, so panes created
     /// from the CLI can be spawned at the size this client will draw them.
+    /// The CLI does not know whether the root tab bar is hidden, so the
+    /// viewport reported is one in which it is shown and the panes keep
+    /// their sizes ([`PresentationModel::layout_viewport`]).
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
-        self.report_viewport(session_id, viewport).await;
-        self.report_base_index(session_id).await;
         let presentation = self.project(session_id, viewport)?;
+        self.report_viewport(session_id, presentation.layout_viewport())
+            .await;
+        self.report_base_index(session_id).await;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
             let result = self
                 .client

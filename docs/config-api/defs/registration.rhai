@@ -933,6 +933,22 @@ fn set_formatter(tabbar: TabbarApi, callback: Fn) -> ();
 /// # rhai-autodocs:index:20
 fn set_position(tabbar: TabbarApi, value: string) -> ();
 
+/// Show (`true`, the default) or hide (`false`) the session's tab bar,
+/// like tmux's `status on` and `status off`. Hidden, it gives its row to
+/// the panes, and the command prompt and messages are drawn over the last
+/// row of the screen while they show. Only the session's own tab bar is
+/// hidden; tab bars of nested tabs, like `set_position`, are not
+/// affected.
+///
+/// # Example
+///
+/// ```rhai
+/// tabbar.set_visible(false);
+/// ```
+///
+/// # rhai-autodocs:index:20
+fn set_visible(tabbar: TabbarApi, visible: bool) -> ();
+
 fn bind(mode: string, notation: string, action: Action) -> ();
 
 /// Bind a key notation to an [`Action`], a string action name, or an array of actions.

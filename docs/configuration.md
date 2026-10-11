@@ -193,6 +193,21 @@ of tabs nested inside a window stay at the top of their own area and are never
 covered. Without a root tab bar, as when a pane is zoomed, status content is
 drawn over the last row.
 
+`tabbar.set_visible(false)` hides the session's tab bar, like tmux's `status
+off`: the panes get the whole screen, and status content is drawn over the
+last row while it shows. Only the session's own bar is hidden; tab bars of
+nested tabs are still drawn, as `set_position` leaves them at the top.
+
+```rhai
+tabbar.set_position("bottom");   // status-position bottom
+tabbar.set_visible(false);       // status off
+```
+
+Panes created from the CLI are sized from the viewport the client reports to
+the server. With the bar hidden the client reports one row more than the
+screen it draws on, the row the bar would take, since the CLI does not know
+the bar is hidden and sizes panes as if it were shown.
+
 The default bar starts with the session name, like tmux's default
 `status-left`. A formatter set with `tabbar.set_formatter` draws the whole bar
 instead (see [`TabBarContext`](config-api/tab-bar-context.md)).

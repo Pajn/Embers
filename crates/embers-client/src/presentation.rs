@@ -35,6 +35,33 @@ impl TabBarPosition {
     }
 }
 
+/// How the session's root tab bar is drawn: where (tmux `status-position`)
+/// and whether at all (tmux `status`). A hidden bar gives its row to the
+/// panes. Nested tab bars are always drawn, at the top of their area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootTabBar {
+    pub position: TabBarPosition,
+    pub visible: bool,
+}
+
+impl Default for RootTabBar {
+    fn default() -> Self {
+        Self {
+            position: TabBarPosition::default(),
+            visible: true,
+        }
+    }
+}
+
+impl From<TabBarPosition> for RootTabBar {
+    fn from(position: TabBarPosition) -> Self {
+        Self {
+            position,
+            visible: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabItem {
     pub title: String,
@@ -142,15 +169,17 @@ impl PresentationModel {
         Self::project_with(state, session_id, viewport, TabBarPosition::Top)
     }
 
-    /// Project with the root tab bar at `tab_bar`. The bar takes one row
-    /// either way, so panes have the same sizes wherever it is; only their
-    /// positions differ.
+    /// Project with the root tab bar drawn as `tab_bar` says. A shown bar
+    /// takes one row at the top or the bottom alike, so panes have the same
+    /// sizes wherever it is; only their positions differ. A hidden one takes
+    /// none (see [`Self::layout_viewport`]).
     pub fn project_with(
         state: &ClientState,
         session_id: SessionId,
         viewport: Size,
-        tab_bar: TabBarPosition,
+        tab_bar: impl Into<RootTabBar>,
     ) -> Result<Self> {
+        let tab_bar = tab_bar.into();
         let session = state
             .sessions
             .get(&session_id)
@@ -217,6 +246,23 @@ impl PresentationModel {
             .filter(|bar| bar.rect.size.height > 0)
             .and_then(|bar| u16::try_from(bar.rect.origin.y).ok())
             .or_else(|| self.viewport.height.checked_sub(1))
+    }
+
+    /// The viewport in which the root tab bar, shown at the top, leaves the
+    /// panes the sizes they have here: the viewport, plus the row of a hidden
+    /// bar. This is what the client reports to the server, since the CLI,
+    /// which sizes new panes and plans resizes from it, projects without the
+    /// client's config. Like [`crate::drawn_viewport`], which works it out
+    /// from the panes' PTY sizes, it counts a row for every tab bar.
+    pub fn layout_viewport(&self) -> Size {
+        let hidden_bar = self
+            .root_tabs
+            .as_ref()
+            .is_some_and(|bar| bar.rect.size.height == 0);
+        Size {
+            width: self.viewport.width,
+            height: self.viewport.height.saturating_add(u16::from(hidden_bar)),
+        }
     }
 
     pub fn focused_leaf(&self) -> Option<&LeafFrame> {
@@ -339,8 +385,8 @@ struct Projector<'a> {
     projection: &'a mut Projection,
     activity_by_node: BTreeMap<NodeId, ActivityState>,
     buffer_count_by_node: BTreeMap<NodeId, usize>,
-    /// Where the root tab bar goes.
-    tab_bar: TabBarPosition,
+    /// Where the root tab bar goes, if it is shown.
+    tab_bar: RootTabBar,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -413,10 +459,13 @@ impl Projector<'_> {
                     ))
                 })?;
 
-                let at_bottom =
-                    is_root && floating_id.is_none() && self.tab_bar == TabBarPosition::Bottom;
+                let root_bar = is_root && floating_id.is_none();
+                // A hidden root bar is still projected, with no rows, so
+                // actions on the session's windows find its tabs.
+                let bar_rows = u16::from(!root_bar || self.tab_bar.visible);
+                let at_bottom = root_bar && self.tab_bar.position == TabBarPosition::Bottom;
                 let (bar_rect, content_rect) = if at_bottom {
-                    let content_rect = inset_bottom(rect, 1);
+                    let content_rect = inset_bottom(rect, bar_rows);
                     let bar_rect = Rect {
                         origin: Point {
                             x: rect.origin.x,
@@ -424,7 +473,7 @@ impl Projector<'_> {
                         },
                         size: Size {
                             width: rect.size.width,
-                            height: 1,
+                            height: bar_rows,
                         },
                     };
                     (bar_rect, content_rect)
@@ -433,10 +482,10 @@ impl Projector<'_> {
                         origin: rect.origin,
                         size: Size {
                             width: rect.size.width,
-                            height: 1,
+                            height: bar_rows,
                         },
                     };
-                    (bar_rect, inset_top(rect, 1))
+                    (bar_rect, inset_top(rect, bar_rows))
                 };
                 let mut tab_items = Vec::with_capacity(tabs.tabs.len());
                 for (index, tab) in tabs.tabs.iter().enumerate() {

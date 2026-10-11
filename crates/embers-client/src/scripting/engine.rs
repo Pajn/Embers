@@ -262,6 +262,7 @@ struct RegistrationState {
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
     tab_bar_position: TabBarPosition,
+    tab_bar_visible: Option<bool>,
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
@@ -372,6 +373,7 @@ impl RegistrationState {
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
             tab_bar_position: self.tab_bar_position,
+            tab_bar_visible: self.tab_bar_visible.unwrap_or(true),
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
@@ -508,6 +510,14 @@ impl TabbarApi {
             .lock()
             .expect("registration lock")
             .tab_bar_position = tab_bar;
+        Ok(())
+    }
+
+    fn set_visible(&self, position: Position, visible: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .tab_bar_visible = Some(visible);
         Ok(())
     }
 }
@@ -1104,6 +1114,29 @@ mod tabbar_registration_api {
         value: &str,
     ) -> RhaiResultOf<()> {
         tabbar.set_position(ctx.call_position(), value)
+    }
+
+    /// Show (`true`, the default) or hide (`false`) the session's tab bar,
+    /// like tmux's `status on` and `status off`. Hidden, it gives its row to
+    /// the panes, and the command prompt and messages are drawn over the last
+    /// row of the screen while they show. Only the session's own tab bar is
+    /// hidden; tab bars of nested tabs, like `set_position`, are not
+    /// affected.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// tabbar.set_visible(false);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:20
+    #[rhai_fn(return_raw, name = "set_visible")]
+    pub fn set_visible(
+        ctx: NativeCallContext,
+        tabbar: TabbarApi,
+        visible: bool,
+    ) -> RhaiResultOf<()> {
+        tabbar.set_visible(ctx.call_position(), visible)
     }
 }
 

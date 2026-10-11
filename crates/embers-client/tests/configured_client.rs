@@ -667,11 +667,12 @@ async fn status_content_overlays_the_root_tab_bar_without_moving_panes() {
     };
     for status_line in ["overlay"] {
         for position in ["top", "bottom"] {
-            for visible in [true] {
+            for visible in [true, false] {
                 let layout = format!("{status_line} {position} visible={visible}");
                 let (config, _tempdir) = manager_from_source(&format!(
                     r#"
                     tabbar.set_position("{position}");
+                    tabbar.set_visible({visible});
                     bind("normal", "<M-:>", action.command_prompt());
                     "#
                 ));

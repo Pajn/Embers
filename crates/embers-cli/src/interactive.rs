@@ -9,8 +9,8 @@ use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attrib
 use embers_client::{
     ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
     KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
-    detect_host_capabilities, spawn_pty_size,
+    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, RootTabBar, SocketTransport,
+    detect_host_capabilities, spawn_pty_size_with,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
@@ -48,7 +48,7 @@ pub async fn run(
 }
 
 async fn run_attached(
-    mut client: MuxClient<SocketTransport>,
+    client: MuxClient<SocketTransport>,
     socket_path: PathBuf,
     target: Option<String>,
     config_path: Option<PathBuf>,
@@ -56,17 +56,28 @@ async fn run_attached(
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
-    // The first window of a new session is created before the first frame, so
-    // size it from the terminal directly.
-    let initial_viewport = terminal_size(io::stdout().as_raw_fd()).ok();
-    let initial_session_id =
-        ensure_session_ready(&mut client, requested_target.as_deref(), initial_viewport).await?;
-    client.switch_current_session(initial_session_id).await?;
-    let mut session_id = Some(initial_session_id);
     let config = ConfigManager::from_process(config_path)
         .map_err(|error| MuxError::invalid_input(error.to_string()))?;
-    let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
+    // The first window of a new session is created before the first frame, so
+    // size it from the terminal directly.
+    let initial_viewport = terminal_size(io::stdout().as_raw_fd())
+        .ok()
+        .map(|size| configured.content_viewport(size));
+    let tab_bar = configured.root_tab_bar();
+    let initial_session_id = ensure_session_ready(
+        configured.client_mut(),
+        requested_target.as_deref(),
+        initial_viewport,
+        tab_bar,
+    )
+    .await?;
+    configured
+        .client_mut()
+        .switch_current_session(initial_session_id)
+        .await?;
+    let mut session_id = Some(initial_session_id);
+    let watched_config_path = configured.config().active_source().path.clone();
     configured.set_socket_path(socket_path.clone());
     configured.set_command_runner(std::sync::Arc::new(crate::PromptCommandRunner::new(
         socket_path.clone(),
@@ -222,9 +233,7 @@ async fn run_attached(
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
             if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-                let viewport = configured.content_viewport(terminal_size);
-                ensure_root_window(configured.client_mut(), active_session_id, Some(viewport))
-                    .await?;
+                ensure_shown_root_window(&mut configured, active_session_id, terminal_size).await?;
                 session_id = Some(active_session_id);
                 dirty = true;
             }
@@ -268,8 +277,7 @@ async fn run_attached(
                         .sessions
                         .contains_key(&next_session_id) =>
                 {
-                    let viewport = configured.content_viewport(terminal_size);
-                    ensure_root_window(configured.client_mut(), next_session_id, Some(viewport))
+                    ensure_shown_root_window(&mut configured, next_session_id, terminal_size)
                         .await?;
                     session_id = Some(next_session_id);
                 }
@@ -286,8 +294,7 @@ async fn run_attached(
             return Ok(());
         }
         if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-            let viewport = configured.content_viewport(terminal_size);
-            ensure_root_window(configured.client_mut(), active_session_id, Some(viewport)).await?;
+            ensure_shown_root_window(&mut configured, active_session_id, terminal_size).await?;
             session_id = Some(active_session_id);
         }
         // handle_event drains background notifications up front, but its own
@@ -380,13 +387,14 @@ async fn ensure_session_ready(
     client: &mut MuxClient<SocketTransport>,
     target: Option<&str>,
     viewport: Option<Size>,
+    tab_bar: RootTabBar,
 ) -> Result<SessionId> {
     client.resync_all_sessions().await?;
     let session_id = match select_session_id(client, target)? {
         Some(session_id) => session_id,
         None => create_session(client, target.unwrap_or(DEFAULT_SESSION_NAME)).await?,
     };
-    ensure_root_window(client, session_id, viewport).await?;
+    ensure_root_window(client, session_id, viewport, tab_bar).await?;
     client.resync_session(session_id).await?;
     Ok(session_id)
 }
@@ -436,12 +444,26 @@ async fn create_session(client: &mut MuxClient<SocketTransport>, name: &str) -> 
     }
 }
 
+/// [`ensure_root_window`] for a session `configured` is about to show on a
+/// `terminal`-sized screen.
+async fn ensure_shown_root_window(
+    configured: &mut ConfiguredClient<SocketTransport>,
+    session_id: SessionId,
+    terminal: Size,
+) -> Result<()> {
+    let viewport = configured.content_viewport(terminal);
+    let tab_bar = configured.root_tab_bar();
+    ensure_root_window(configured.client_mut(), session_id, Some(viewport), tab_bar).await
+}
+
 /// Gives `session_id` a first window when it has none, spawned at the size it
-/// will be drawn at in `viewport`.
+/// will be drawn at in `viewport`, with the root tab bar drawn as `tab_bar`
+/// says.
 async fn ensure_root_window(
     client: &mut MuxClient<SocketTransport>,
     session_id: SessionId,
     viewport: Option<Size>,
+    tab_bar: RootTabBar,
 ) -> Result<()> {
     client.resync_session(session_id).await?;
     if session_has_root_window(client, session_id)? {
@@ -451,7 +473,13 @@ async fn ensure_root_window(
     let command = default_shell_command();
     let title = default_title(&command, "shell");
     let size = viewport.and_then(|viewport| {
-        spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
+        spawn_pty_size_with(
+            client.state(),
+            session_id,
+            viewport,
+            tab_bar,
+            PanePlacement::RootTab,
+        )
     });
     let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client
