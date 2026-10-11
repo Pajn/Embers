@@ -302,6 +302,10 @@ theme.set_palette(#{
 theme.set_pane_active_border_color("magenta");
 theme.set_pane_border_color("brightblack");
 
+// pane-border-status off is the default, so panes have no title row and the
+// dividers above tell them apart. set_pane_titles("top") would give each pane
+// one, like pane-border-status top.
+
 // The last two components of a path: /home/me/src/app -> src/app.
 fn short_path(path) {
     if path == () {

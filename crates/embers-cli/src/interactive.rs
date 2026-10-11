@@ -9,7 +9,7 @@ use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attrib
 use embers_client::{
     ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
     KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
+    MuxClient, PanePlacement, PaneTitles, PendingAttachQueries, RenderGrid, SocketTransport,
     detect_host_capabilities, spawn_pty_size,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
@@ -56,17 +56,22 @@ async fn run_attached(
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
+    let config = ConfigManager::from_process(config_path)
+        .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     // The first window of a new session is created before the first frame, so
     // size it from the terminal directly.
     let initial_viewport = terminal_size(io::stdout().as_raw_fd())
         .ok()
         .map(content_viewport);
-    let initial_session_id =
-        ensure_session_ready(&mut client, requested_target.as_deref(), initial_viewport).await?;
+    let initial_session_id = ensure_session_ready(
+        &mut client,
+        requested_target.as_deref(),
+        initial_viewport,
+        config.active_script().loaded_config().pane_titles,
+    )
+    .await?;
     client.switch_current_session(initial_session_id).await?;
     let mut session_id = Some(initial_session_id);
-    let config = ConfigManager::from_process(config_path)
-        .map_err(|error| MuxError::invalid_input(error.to_string()))?;
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
     configured.set_socket_path(socket_path.clone());
@@ -222,10 +227,12 @@ async fn run_attached(
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
             if let Some(active_session_id) = moved_to_session(&configured, session_id) {
+                let pane_titles = configured.pane_titles();
                 ensure_root_window(
                     configured.client_mut(),
                     active_session_id,
                     Some(content_viewport(terminal_size)),
+                    pane_titles,
                 )
                 .await?;
                 session_id = Some(active_session_id);
@@ -271,10 +278,12 @@ async fn run_attached(
                         .sessions
                         .contains_key(&next_session_id) =>
                 {
+                    let pane_titles = configured.pane_titles();
                     ensure_root_window(
                         configured.client_mut(),
                         next_session_id,
                         Some(content_viewport(terminal_size)),
+                        pane_titles,
                     )
                     .await?;
                     session_id = Some(next_session_id);
@@ -292,10 +301,12 @@ async fn run_attached(
             return Ok(());
         }
         if let Some(active_session_id) = moved_to_session(&configured, session_id) {
+            let pane_titles = configured.pane_titles();
             ensure_root_window(
                 configured.client_mut(),
                 active_session_id,
                 Some(content_viewport(terminal_size)),
+                pane_titles,
             )
             .await?;
             session_id = Some(active_session_id);
@@ -390,13 +401,14 @@ async fn ensure_session_ready(
     client: &mut MuxClient<SocketTransport>,
     target: Option<&str>,
     viewport: Option<Size>,
+    pane_titles: PaneTitles,
 ) -> Result<SessionId> {
     client.resync_all_sessions().await?;
     let session_id = match select_session_id(client, target)? {
         Some(session_id) => session_id,
         None => create_session(client, target.unwrap_or(DEFAULT_SESSION_NAME)).await?,
     };
-    ensure_root_window(client, session_id, viewport).await?;
+    ensure_root_window(client, session_id, viewport, pane_titles).await?;
     client.resync_session(session_id).await?;
     Ok(session_id)
 }
@@ -447,11 +459,12 @@ async fn create_session(client: &mut MuxClient<SocketTransport>, name: &str) -> 
 }
 
 /// Gives `session_id` a first window when it has none, spawned at the size it
-/// will be drawn at in `viewport`.
+/// will be drawn at in `viewport`, with pane title rows as `pane_titles` says.
 async fn ensure_root_window(
     client: &mut MuxClient<SocketTransport>,
     session_id: SessionId,
     viewport: Option<Size>,
+    pane_titles: PaneTitles,
 ) -> Result<()> {
     client.resync_session(session_id).await?;
     if session_has_root_window(client, session_id)? {
@@ -461,7 +474,13 @@ async fn ensure_root_window(
     let command = default_shell_command();
     let title = default_title(&command, "shell");
     let size = viewport.and_then(|viewport| {
-        spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
+        spawn_pty_size(
+            client.state(),
+            session_id,
+            viewport,
+            pane_titles,
+            PanePlacement::RootTab,
+        )
     });
     let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client

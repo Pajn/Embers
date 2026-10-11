@@ -1,4 +1,4 @@
-use embers_client::{PanePlacement, PresentationModel, spawn_pty_size};
+use embers_client::{PanePlacement, PaneTitles, PresentationModel, TabBarPosition, spawn_pty_size};
 use embers_core::{FloatGeometry, NodeId, PtySize, Size, SplitDirection};
 
 use crate::support::{
@@ -22,6 +22,7 @@ fn split_gives_the_new_pane_the_second_half_of_the_leaf() {
             &state,
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Split {
                 leaf_id: ROOT_SPLIT_RIGHT_LEAF_ID,
                 direction: SplitDirection::Horizontal,
@@ -35,6 +36,7 @@ fn split_gives_the_new_pane_the_second_half_of_the_leaf() {
             &state,
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Split {
                 leaf_id: ROOT_SPLIT_RIGHT_LEAF_ID,
                 direction: SplitDirection::Vertical,
@@ -47,8 +49,14 @@ fn split_gives_the_new_pane_the_second_half_of_the_leaf() {
 #[test]
 fn split_inside_a_floating_window_stays_inside_its_border() {
     let state = demo_state();
-    let presentation =
-        PresentationModel::project(&state, SESSION_ID, VIEWPORT).expect("projection succeeds");
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        VIEWPORT,
+        TabBarPosition::Top,
+        PaneTitles::Top,
+    )
+    .expect("projection succeeds");
     let top = presentation
         .leaves
         .iter()
@@ -58,6 +66,7 @@ fn split_inside_a_floating_window_stays_inside_its_border() {
         &state,
         SESSION_ID,
         VIEWPORT,
+        PaneTitles::Top,
         PanePlacement::Split {
             leaf_id: FLOATING_TOP_LEAF_ID,
             direction: SplitDirection::Vertical,
@@ -79,12 +88,19 @@ fn new_window_takes_the_area_below_the_root_tab_bar() {
             &root_buffer_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::RootTab,
         ),
         Some(PtySize::new(41, 19))
     );
     assert_eq!(
-        spawn_pty_size(&demo_state(), SESSION_ID, VIEWPORT, PanePlacement::RootTab),
+        spawn_pty_size(
+            &demo_state(),
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Top,
+            PanePlacement::RootTab,
+        ),
         Some(PtySize::new(41, 19))
     );
 }
@@ -92,8 +108,14 @@ fn new_window_takes_the_area_below_the_root_tab_bar() {
 #[test]
 fn new_tab_takes_the_area_of_its_tabs_container() {
     let state = demo_state();
-    let presentation =
-        PresentationModel::project(&state, SESSION_ID, VIEWPORT).expect("projection succeeds");
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        VIEWPORT,
+        TabBarPosition::Top,
+        PaneTitles::Top,
+    )
+    .expect("projection succeeds");
     let bar = presentation
         .tab_bars
         .iter()
@@ -103,6 +125,7 @@ fn new_tab_takes_the_area_of_its_tabs_container() {
         &state,
         SESSION_ID,
         VIEWPORT,
+        PaneTitles::Top,
         PanePlacement::Tab {
             tabs_node_id: NESTED_TABS_ID,
         },
@@ -114,6 +137,7 @@ fn new_tab_takes_the_area_of_its_tabs_container() {
             &state,
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Tab {
                 tabs_node_id: ROOT_TABS_ID,
             },
@@ -129,6 +153,7 @@ fn popup_loses_its_border_and_title_row() {
             &root_buffer_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Floating {
                 geometry: FloatGeometry::new(2, 2, 30, 10),
             },
@@ -141,6 +166,7 @@ fn popup_loses_its_border_and_title_row() {
             &root_buffer_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Floating {
                 geometry: FloatGeometry::new(30, 2, 30, 10),
             },
@@ -156,6 +182,7 @@ fn replaced_pane_keeps_the_size_of_the_leaf() {
             &root_split_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Replace {
                 leaf_id: ROOT_SPLIT_LEFT_LEAF_ID,
             },
@@ -178,6 +205,7 @@ fn hidden_or_unknown_placements_have_no_size() {
             &state,
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Split {
                 leaf_id: ROOT_SPLIT_RIGHT_LEAF_ID,
                 direction: SplitDirection::Vertical,
@@ -190,6 +218,7 @@ fn hidden_or_unknown_placements_have_no_size() {
             &root_buffer_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Split {
                 leaf_id: NodeId(999),
                 direction: SplitDirection::Vertical,
@@ -204,6 +233,7 @@ fn hidden_or_unknown_placements_have_no_size() {
             &demo_state(),
             SESSION_ID,
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::Split {
                 leaf_id: NESTED_TABS_ID,
                 direction: SplitDirection::Vertical,
@@ -216,8 +246,50 @@ fn hidden_or_unknown_placements_have_no_size() {
             &root_buffer_state(),
             embers_core::SessionId(99),
             VIEWPORT,
+            PaneTitles::Top,
             PanePlacement::RootTab,
         ),
         None
+    );
+}
+
+#[test]
+fn panes_without_title_rows_spawn_at_their_whole_area() {
+    // The same placements as above, with no title rows to lose.
+    assert_eq!(
+        spawn_pty_size(
+            &root_split_state(),
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::Split {
+                leaf_id: ROOT_SPLIT_RIGHT_LEAF_ID,
+                direction: SplitDirection::Horizontal,
+            },
+        ),
+        Some(PtySize::new(20, 10))
+    );
+    assert_eq!(
+        spawn_pty_size(
+            &demo_state(),
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::RootTab,
+        ),
+        Some(PtySize::new(41, 20))
+    );
+    // Popup panes keep their title row.
+    assert_eq!(
+        spawn_pty_size(
+            &root_buffer_state(),
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::Floating {
+                geometry: FloatGeometry::new(2, 2, 30, 10),
+            },
+        ),
+        Some(PtySize::new(28, 7))
     );
 }

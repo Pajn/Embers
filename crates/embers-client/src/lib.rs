@@ -50,8 +50,8 @@ pub use numbering::{
     BASE_INDEX_ENV_VAR, base_index_from_env, parse_base_index, window_number, window_position,
 };
 pub use presentation::{
-    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PresentationModel, SplitFrame,
-    TabBarPosition, TabItem, TabPane, TabsFrame,
+    DividerFrame, FloatingFrame, LeafFrame, NavigationDirection, PaneTitles, PresentationModel,
+    SplitFrame, TabBarPosition, TabItem, TabPane, TabsFrame,
 };
 pub use renderer::Renderer;
 pub use scripting::{

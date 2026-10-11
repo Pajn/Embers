@@ -1663,7 +1663,10 @@ async fn pane_passthrough_output_on_host(
         .leaves
         .iter()
         .find(|leaf| leaf.buffer_id == buffer.id)
-        .map(|leaf| (leaf.rect.origin.y + 1 + 2 + 1, leaf.rect.origin.x + 4 + 1));
+        .map(|leaf| {
+            let origin = leaf.content_rect.origin;
+            (origin.y + 2 + 1, origin.x + 4 + 1)
+        });
     assert_eq!(pane_cursor.is_none(), hidden, "pane visibility");
     server.shutdown().await.expect("server shuts down");
     PassthroughOutput {
@@ -2635,15 +2638,15 @@ async fn pane_pty_size_follows_the_drawn_pane_size() {
         height: 31,
     };
 
-    // First attach: the root tab bar takes one row and the pane title another,
-    // so a 101x31 viewport leaves 101x29 for the shell.
+    // First attach: the root tab bar takes one row, so a 101x31 viewport
+    // leaves 101x30 for the shell.
     configured
         .sync_pty_sizes(alpha, initial)
         .await
         .expect("sync");
     let leaves = leaf_buffers(&mut connection, "alpha").await;
     assert_eq!(leaves.len(), 1);
-    assert_stty_size(&mut connection, leaves[0].1, 101, 29).await;
+    assert_stty_size(&mut connection, leaves[0].1, 101, 30).await;
 
     // A vertical split shares the width, minus one divider column.
     run_cli(&server, &["split-window", "--", "/bin/sh"]);
@@ -2658,8 +2661,8 @@ async fn pane_pty_size_follows_the_drawn_pane_size() {
         .expect("sync after split");
     let leaves = leaf_buffers(&mut connection, "alpha").await;
     assert_eq!(leaves.len(), 2);
-    assert_stty_size(&mut connection, leaves[0].1, 50, 29).await;
-    assert_stty_size(&mut connection, leaves[1].1, 50, 29).await;
+    assert_stty_size(&mut connection, leaves[0].1, 50, 30).await;
+    assert_stty_size(&mut connection, leaves[1].1, 50, 30).await;
 
     // Resizing the outer terminal resizes every visible pane.
     let resized = Size {
@@ -2670,8 +2673,8 @@ async fn pane_pty_size_follows_the_drawn_pane_size() {
         .sync_pty_sizes(alpha, resized)
         .await
         .expect("sync after outer resize");
-    assert_stty_size(&mut connection, leaves[0].1, 60, 39).await;
-    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+    assert_stty_size(&mut connection, leaves[0].1, 60, 40).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 40).await;
 
     // A zoomed pane fills the whole viewport (no tab bar); the hidden pane
     // keeps its last size.
@@ -2691,8 +2694,90 @@ async fn pane_pty_size_follows_the_drawn_pane_size() {
         .sync_pty_sizes(alpha, resized)
         .await
         .expect("sync after zoom");
-    assert_stty_size(&mut connection, leaves[0].1, 121, 40).await;
-    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+    assert_stty_size(&mut connection, leaves[0].1, 121, 41).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 40).await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panes_give_a_row_to_their_title_only_when_the_config_shows_it() {
+    use embers_client::{ConfigDiscoveryOptions, ConfigManager, ConfiguredClient};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let config_path = tempdir.path().join("config.rhai");
+    std::fs::write(&config_path, "").expect("write config");
+    let config = ConfigManager::load(
+        ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let viewport = Size {
+        width: 101,
+        height: 31,
+    };
+
+    // Off by default: the pane has every row below the root tab bar.
+    configured
+        .sync_pty_sizes(alpha, viewport)
+        .await
+        .expect("sync");
+    let buffer_id = leaf_buffers(&mut connection, "alpha").await[0].1;
+    assert_stty_size(&mut connection, buffer_id, 101, 30).await;
+    let session = session_snapshot_by_name(&mut connection, "alpha").await;
+    assert!(!session.session.pane_titles);
+
+    // A title row takes one of them, and the server learns the client shows
+    // title rows along with the viewport.
+    std::fs::write(&config_path, r#"set_pane_titles("top");"#).expect("write config");
+    configured.reload_config().expect("config reloads");
+    configured
+        .sync_pty_sizes(alpha, viewport)
+        .await
+        .expect("sync after reload");
+    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+    let session = session_snapshot_by_name(&mut connection, "alpha").await;
+    assert!(session.session.pane_titles);
+
+    // So panes created from the CLI start at the size the client draws them:
+    // 30 rows minus a divider, shared 14/15, minus the title row.
+    run_cli(
+        &server,
+        &[
+            "split-window",
+            "--horizontal",
+            "--",
+            "/bin/sh",
+            "-c",
+            REPORT_STARTUP_SIZE,
+        ],
+    );
+    let buffer_id = newest_buffer(&mut connection, "alpha").await;
+    assert_spawned_at_drawn_size(
+        &mut connection,
+        &mut configured,
+        alpha,
+        viewport,
+        buffer_id,
+        (101, 14),
+    )
+    .await;
 
     server.shutdown().await.expect("server shuts down");
 }
@@ -2747,9 +2832,14 @@ async fn drawn_size(
         .resync_all_sessions()
         .await
         .expect("resync");
-    let presentation =
-        PresentationModel::project(configured.client().state(), session_id, viewport)
-            .expect("projection succeeds");
+    let presentation = PresentationModel::project_with(
+        configured.client().state(),
+        session_id,
+        viewport,
+        embers_client::TabBarPosition::Top,
+        configured.pane_titles(),
+    )
+    .expect("projection succeeds");
     let size = presentation
         .leaves
         .iter()
@@ -2809,7 +2899,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
         .expect("sync");
 
     // A horizontal split stacks the panes: 30 rows below the tab bar, minus
-    // one divider row, shared 14/15, each minus its title row.
+    // one divider row, shared 14/15.
     run_cli(
         &server,
         &[
@@ -2828,7 +2918,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
         alpha,
         viewport,
         buffer_id,
-        (101, 14),
+        (101, 15),
     )
     .await;
 
@@ -2844,7 +2934,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
         alpha,
         viewport,
         buffer_id,
-        (50, 14),
+        (50, 15),
     )
     .await;
 
@@ -2868,7 +2958,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
         alpha,
         viewport,
         buffer_id,
-        (101, 29),
+        (101, 30),
     )
     .await;
 
@@ -2961,9 +3051,9 @@ async fn action_created_panes_start_at_their_drawn_size() {
     };
 
     for (key, expected) in [
-        ('1', (101, 14)),
-        ('2', (50, 14)),
-        ('3', (101, 29)),
+        ('1', (101, 15)),
+        ('2', (50, 15)),
+        ('3', (101, 30)),
         ('4', (28, 7)),
     ] {
         configured
@@ -3126,11 +3216,11 @@ async fn most_recently_active_client_owns_the_pane_pty_size() {
     let buffer_id = leaf_buffers(&mut connection, "alpha").await[0].1;
 
     clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
-    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+    assert_stty_size(&mut connection, buffer_id, 101, 30).await;
 
     // A client attaching later takes over with its own size.
     clients[1].sync_pty_sizes(alpha, small).await.expect("sync");
-    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+    assert_stty_size(&mut connection, buffer_id, 81, 20).await;
 
     // Redrawing an idle client at an unchanged size does not fight back, even
     // once it has seen the other client's size.
@@ -3140,7 +3230,7 @@ async fn most_recently_active_client_owns_the_pane_pty_size() {
         .await
         .expect("resync");
     clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
-    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+    assert_stty_size(&mut connection, buffer_id, 81, 20).await;
 
     // Typing in the first client makes it the active one again. Ctrl-U then
     // clears the typed character so the shell reads a clean `stty size`.
@@ -3157,7 +3247,7 @@ async fn most_recently_active_client_owns_the_pane_pty_size() {
         }))
         .await
         .expect("clear typed key");
-    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+    assert_stty_size(&mut connection, buffer_id, 101, 30).await;
 
     server.shutdown().await.expect("server shuts down");
 }

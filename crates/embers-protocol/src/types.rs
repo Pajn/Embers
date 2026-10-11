@@ -79,12 +79,14 @@ pub enum SessionRequest {
         index: u32,
         mode: SynchronizePanesMode,
     },
-    /// Records the area an attached client draws the session in, so panes
-    /// created without a client can still be spawned at their drawn size.
+    /// Records the area an attached client draws the session in, and whether
+    /// it gives each pane a title row, so panes created without a client can
+    /// still be spawned at their drawn size.
     SetViewport {
         request_id: RequestId,
         session_id: SessionId,
         viewport: Size,
+        pane_titles: bool,
     },
     /// Records the window base index (tmux `base-index`) of the client that
     /// shows the session, so the CLI numbers windows the way that client
@@ -739,6 +741,9 @@ pub struct SessionRecord {
     /// The window base index of the client that last showed the session;
     /// see `SessionRequest::SetBaseIndex`.
     pub base_index: Option<u32>,
+    /// Whether the client that last drew the session gave each pane a title
+    /// row; see `SessionRequest::SetViewport`.
+    pub pane_titles: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

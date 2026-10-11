@@ -21,7 +21,7 @@ use super::runtime::{
 };
 use crate::command_prompt::StatusKeys;
 use crate::host_terminal::TerminalFeatures;
-use crate::presentation::TabBarPosition;
+use crate::presentation::{PaneTitles, TabBarPosition};
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
@@ -265,6 +265,7 @@ struct RegistrationState {
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
+    pane_titles: PaneTitles,
     clipboard: Option<bool>,
     base_index: Option<u32>,
     passthrough: Option<PassthroughMode>,
@@ -375,6 +376,7 @@ impl RegistrationState {
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
+            pane_titles: self.pane_titles,
             clipboard: self.clipboard.unwrap_or(true),
             base_index: self.base_index,
             passthrough: self.passthrough.unwrap_or_default(),
@@ -992,6 +994,43 @@ mod registration_globals {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Choose whether each pane gets a title row, and where, like tmux's
+    /// `pane-border-status`. The title row shows the pane's title, `>` on the
+    /// focused pane and a marker for activity (`+`) or a bell (`!`).
+    ///
+    /// - `"off"` (the default, as in tmux): no title rows. Panes show their
+    ///   program in their whole area; the dividers between split panes, in
+    ///   the `theme.set_pane_border_color` colors, tell them apart.
+    /// - `"top"` / `"bottom"`: each pane gives its top or bottom row to its
+    ///   title, so its program has one row fewer.
+    ///
+    /// Panes in popups keep their title row whatever the setting. The client
+    /// reports whether title rows are shown to the server with the size it
+    /// draws the session at, so panes created with the `embers` CLI start at
+    /// the size this client draws them.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_pane_titles("top");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:15
+    #[rhai_fn(return_raw, global, name = "set_pane_titles")]
+    pub fn set_pane_titles(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(pane_titles) = PaneTitles::parse(value) else {
+            return Err(runtime_error(
+                format!("set_pane_titles expects \"off\", \"top\" or \"bottom\", got {value:?}"),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .pane_titles = pane_titles;
         Ok(())
     }
 

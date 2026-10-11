@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-9c999019.js";
+            window.path_to_searchindex_js = "searchindex-3210ef80.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -465,6 +465,48 @@ Set the leader sequence used in binding notations.
 
 <div group="set_leader" id="set_leader-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_leader("&lt;C-a&gt;");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_pane_titles </h2>
+
+<pre><code class="language-rust ignore">fn set_pane_titles(value: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_pane_titles" id="link-set_pane_titles-Description" class="tablinks active" onclick="openTab(event, &#39;set_pane_titles&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_pane_titles" id="link-set_pane_titles-Example" class="tablinks" onclick="openTab(event, &#39;set_pane_titles&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_pane_titles" id="set_pane_titles-Description" class="tabcontent" style="display: block;">
+Choose whether each pane gets a title row, and where, like tmux's
+`pane-border-status`. The title row shows the pane's title, `&gt;` on the
+focused pane and a marker for activity (`+`) or a bell (`!`).
+<ul>
+<li><code>"off"</code> (the default, as in tmux): no title rows. Panes show their
+program in their whole area; the dividers between split panes, in
+the <code>theme.set_pane_border_color</code> colors, tell them apart.</li>
+<li><code>"top"</code> / <code>"bottom"</code>: each pane gives its top or bottom row to its
+title, so its program has one row fewer.</li>
+</ul>
+<p>Panes in popups keep their title row whatever the setting. The client
+reports whether title rows are shown to the server with the size it
+draws the session at, so panes created with the <code>embers</code> CLI start at
+the size this client draws them.</p>
+</div>
+
+<div group="set_pane_titles" id="set_pane_titles-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_pane_titles("top");
 </code></pre>
 </div>
 

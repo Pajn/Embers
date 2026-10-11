@@ -45,7 +45,8 @@ fn split_frames_report_drawn_lengths_and_minimums() {
         .iter()
         .find(|split| split.node_id == FLOATING_SPLIT_ID)
         .expect("floating split is projected");
-    // Two stacked panes each need a title row and one content row.
+    // Panes in popups keep their title rows, so two stacked ones each need
+    // a title row and one content row.
     assert_eq!(floating.min_lengths, vec![2, 2]);
 }
 
@@ -209,9 +210,15 @@ fn dragging_a_divider_moves_it_to_the_pointer() {
 #[test]
 fn drawn_viewport_is_reconstructed_from_pane_pty_sizes() {
     let mut state = demo_state();
-    // The sizes a client drawing the session at 80x20 gives the visible panes.
+    // The sizes a client drawing the session at 80x20 without title rows
+    // gives the visible panes.
+    state.buffers.get_mut(&BufferId(2)).unwrap().pty_size = PtySize::new(26, 19);
+    state.buffers.get_mut(&BufferId(4)).unwrap().pty_size = PtySize::new(53, 18);
+    assert_eq!(drawn_viewport(&state, SESSION_ID), Some(VIEWPORT));
+
+    // With title rows, as the client reported, each pane has a row fewer.
+    state.sessions.get_mut(&SESSION_ID).unwrap().pane_titles = true;
     state.buffers.get_mut(&BufferId(2)).unwrap().pty_size = PtySize::new(26, 18);
     state.buffers.get_mut(&BufferId(4)).unwrap().pty_size = PtySize::new(53, 17);
-
     assert_eq!(drawn_viewport(&state, SESSION_ID), Some(VIEWPORT));
 }

@@ -90,6 +90,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
         nodes: vec![
             NodeRecord {
@@ -223,6 +224,7 @@ fn root_buffer_snapshot() -> SessionSnapshot {
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
         nodes: vec![buffer_view_node(ROOT_BUFFER_LEAF_ID, None, BufferId(7))],
         buffers: vec![buffer(
@@ -247,6 +249,7 @@ fn root_split_snapshot() -> SessionSnapshot {
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
         nodes: vec![
             NodeRecord {

@@ -1,6 +1,6 @@
-use embers_client::{PresentationModel, TabBarPosition};
+use embers_client::{PaneTitles, PresentationModel, TabBarPosition};
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, NodeId, PtySize, SessionId, Size, SplitDirection,
+    ActivityState, BufferId, FloatGeometry, NodeId, Point, PtySize, SessionId, Size, SplitDirection,
 };
 use embers_protocol::{
     BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, NodeRecord, NodeRecordKind,
@@ -64,9 +64,14 @@ fn root_tab_bar_can_sit_at_the_bottom() {
         height: 14,
     };
     let top = PresentationModel::project(&state, SESSION_ID, viewport).unwrap();
-    let bottom =
-        PresentationModel::project_with(&state, SESSION_ID, viewport, TabBarPosition::Bottom)
-            .unwrap();
+    let bottom = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        viewport,
+        TabBarPosition::Bottom,
+        PaneTitles::Off,
+    )
+    .unwrap();
 
     assert_eq!(top.root_tabs.as_ref().unwrap().rect.origin.y, 0);
     assert_eq!(bottom.root_tabs.as_ref().unwrap().rect.origin.y, 13);
@@ -482,4 +487,130 @@ fn projects_root_split_without_tabs_frame() {
     );
     assert_eq!(presentation.dividers[0].floating_id, None);
     assert_ne!(ROOT_ONLY_SPLIT_ID, ROOT_SPLIT_LEFT_LEAF_ID);
+}
+
+#[test]
+fn panes_without_title_rows_draw_content_in_their_whole_rect() {
+    let state = root_buffer_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        viewport,
+        TabBarPosition::Top,
+        PaneTitles::Off,
+    )
+    .unwrap();
+
+    let leaf = &presentation.leaves[0];
+    assert_eq!(leaf.title_rect, None);
+    assert_eq!(leaf.content_rect, leaf.rect);
+    assert_eq!(leaf.content_rect.size, viewport);
+    assert_eq!(leaf.pty_size(), Some(PtySize::new(40, 14)));
+}
+
+#[test]
+fn pane_title_rows_take_the_top_or_bottom_row_of_each_pane() {
+    let state = root_buffer_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let project = |pane_titles| {
+        PresentationModel::project_with(
+            &state,
+            SESSION_ID,
+            viewport,
+            TabBarPosition::Top,
+            pane_titles,
+        )
+        .unwrap()
+        .leaves[0]
+            .clone()
+    };
+
+    let top = project(PaneTitles::Top);
+    let title = top.title_rect.expect("title row");
+    assert_eq!(title.origin, Point { x: 0, y: 0 });
+    assert_eq!(title.size.height, 1);
+    assert_eq!(top.content_rect.origin, Point { x: 0, y: 1 });
+    assert_eq!(top.content_rect.size.height, 13);
+    assert_eq!(top.pty_size(), Some(PtySize::new(40, 13)));
+
+    let bottom = project(PaneTitles::Bottom);
+    assert_eq!(
+        bottom.title_rect.expect("title row").origin,
+        Point { x: 0, y: 13 }
+    );
+    assert_eq!(bottom.content_rect.origin, Point { x: 0, y: 0 });
+    assert_eq!(bottom.content_rect.size.height, 13);
+    assert_eq!(bottom.pty_size(), Some(PtySize::new(40, 13)));
+}
+
+#[test]
+fn split_panes_without_title_rows_keep_their_divider() {
+    let state = root_split_state();
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+        TabBarPosition::Top,
+        PaneTitles::Off,
+    )
+    .unwrap();
+
+    assert_eq!(presentation.dividers.len(), 1);
+    let divider = presentation.dividers[0].rect;
+    assert_eq!(
+        divider.size,
+        Size {
+            width: 1,
+            height: 14
+        }
+    );
+    let mut widths = 0;
+    for leaf in &presentation.leaves {
+        assert_eq!(leaf.title_rect, None);
+        assert!(!leaf.rect.contains(divider.origin));
+        let size = leaf.pty_size().expect("pane has content");
+        assert_eq!(size.rows, 14);
+        widths += size.cols;
+    }
+    assert_eq!(widths + 1, 40);
+}
+
+#[test]
+fn popup_panes_keep_their_title_row_without_pane_titles() {
+    let state = demo_state();
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+        TabBarPosition::Top,
+        PaneTitles::Off,
+    )
+    .unwrap();
+
+    assert!(
+        presentation
+            .leaves
+            .iter()
+            .any(|leaf| leaf.floating_id.is_some())
+    );
+    for leaf in &presentation.leaves {
+        assert_eq!(
+            leaf.title_rect.is_some(),
+            leaf.floating_id.is_some(),
+            "{leaf:?}"
+        );
+    }
 }

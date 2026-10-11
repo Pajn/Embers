@@ -7,7 +7,7 @@ use embers_protocol::{
     NodeRecord, NodeRecordKind, SplitRecord, TabRecord, TabsRecord,
 };
 
-use crate::presentation::PresentationModel;
+use crate::presentation::{PaneTitles, PresentationModel, TabBarPosition};
 use crate::state::ClientState;
 
 /// Where a pane about to be created will be placed, mirroring the server
@@ -44,10 +44,13 @@ pub enum PanePlacement {
 /// The root tab bar takes one row at the top or the bottom alike
 /// ([`crate::TabBarPosition`]), so sizes do not depend on where the client
 /// draws it, and callers without the client's config get the same answer.
+/// Title rows do change sizes, so `pane_titles` is the client's; callers
+/// without its config take what it reported ([`PaneTitles::reported`]).
 pub fn spawn_pty_size(
     state: &ClientState,
     session_id: SessionId,
     viewport: Size,
+    pane_titles: PaneTitles,
     placement: PanePlacement,
 ) -> Option<PtySize> {
     let mut layout = session_layout(state, session_id)?;
@@ -76,12 +79,18 @@ pub fn spawn_pty_size(
         PanePlacement::Replace { leaf_id } => leaf_id,
     };
 
-    PresentationModel::project(&layout, session_id, viewport)
-        .ok()?
-        .leaves
-        .iter()
-        .find(|leaf| leaf.node_id == drawn_leaf)?
-        .pty_size()
+    PresentationModel::project_with(
+        &layout,
+        session_id,
+        viewport,
+        TabBarPosition::Top,
+        pane_titles,
+    )
+    .ok()?
+    .leaves
+    .iter()
+    .find(|leaf| leaf.node_id == drawn_leaf)?
+    .pty_size()
 }
 
 // Ids for the records the simulated placement adds. Real ids count up from 1,

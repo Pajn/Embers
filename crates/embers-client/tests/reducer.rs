@@ -75,6 +75,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
         nodes: vec![
             NodeRecord {
@@ -615,6 +616,7 @@ async fn reconnect_resync_rebuilds_sessions_and_detached_buffers() {
                 zoomed_node_id: None,
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             }],
         }),
     );
@@ -654,6 +656,7 @@ async fn reconnect_resync_rebuilds_sessions_and_detached_buffers() {
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
     );
     client

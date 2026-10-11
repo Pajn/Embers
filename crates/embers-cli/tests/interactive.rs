@@ -1656,9 +1656,9 @@ async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_curs
     let (row, col) = cursor_move_before(&output, index)
         .unwrap_or_else(|| panic!("no cursor move before the payload in {output:?}"));
     // The only pane fills the width, so column 5 of the pane is column 5 of
-    // the screen; its content starts below the tab bar and its title row.
+    // the screen; its content starts below the tab bar.
     assert_eq!(col, 5);
-    assert!(row > 3, "row {row} is not below the pane's title");
+    assert!(row > 3, "row {row} is not below the tab bar");
     assert!(
         !output.contains("tmux;"),
         "wrapper reached the host: {output:?}"

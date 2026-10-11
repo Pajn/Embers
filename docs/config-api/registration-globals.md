@@ -337,6 +337,52 @@ set_leader("<C-a>");
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_pane_titles </h2>
+
+```rust,ignore
+fn set_pane_titles(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_pane_titles" id="link-set_pane_titles-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_pane_titles', 'Description')">
+Description
+</button>
+<button group="set_pane_titles" id="link-set_pane_titles-Example"  class="tablinks"
+    onclick="openTab(event, 'set_pane_titles', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_pane_titles" id="set_pane_titles-Description" class="tabcontent"  style="display: block;" >
+Choose whether each pane gets a title row, and where, like tmux's
+`pane-border-status`. The title row shows the pane's title, `>` on the
+focused pane and a marker for activity (`+`) or a bell (`!`).
+
+- `"off"` (the default, as in tmux): no title rows. Panes show their
+  program in their whole area; the dividers between split panes, in
+  the `theme.set_pane_border_color` colors, tell them apart.
+- `"top"` / `"bottom"`: each pane gives its top or bottom row to its
+  title, so its program has one row fewer.
+
+Panes in popups keep their title row whatever the setting. The client
+reports whether title rows are shown to the server with the size it
+draws the session at, so panes created with the `embers` CLI start at
+the size this client draws them.
+</div>
+<div group="set_pane_titles" id="set_pane_titles-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_pane_titles("top");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_status_keys </h2>
 
 ```rust,ignore
