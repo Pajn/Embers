@@ -1,5 +1,10 @@
 mod automation;
+mod capture;
+mod clients;
+mod formats;
 mod interactive;
+mod popup;
+mod sessions;
 mod target;
 
 use std::ffi::{OsStr, OsString};
@@ -18,13 +23,12 @@ use std::process::{Command as ProcessCommand, Stdio};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
-    ClientState, CommandContext, CommandRunner, FormatContext, NavigationDirection, PanePlacement,
-    PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size, window_number,
-    window_position,
+    ClientState, CommandContext, CommandRunner, NavigationDirection, PanePlacement,
+    PresentationModel, SplitResize, drawn_viewport, spawn_pty_size, window_number, window_position,
 };
 use embers_core::{
-    BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
-    SplitDirection, new_request_id,
+    BufferId, FloatingId, MuxError, NodeId, PtySize, Result, SessionId, SplitDirection,
+    new_request_id,
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
@@ -40,6 +44,13 @@ use tracing::warn;
 
 /// What `display-message` shows without a message, like tmux's default.
 const DEFAULT_DISPLAY_MESSAGE: &str = "[#S] #I:#W, current pane #D - (#{pane_current_command})";
+
+/// What `new-window -P` and `split-window -P` print without `-F`, like tmux.
+const DEFAULT_PANE_FORMAT: &str = "#{session_name}:#{window_index}.#{pane_index}";
+
+/// The client a `run_shell` child runs for, like tmux's client of a
+/// `run-shell` command; read with [`SOCKET_ENV_VAR`] like [`BUFFER_ENV_VAR`].
+const CLIENT_ENV_VAR: &str = "EMBERS_CLIENT";
 
 /// Environment variable selecting the tracing filter (e.g. `info`, `embers=debug`).
 pub const EMBERS_LOG_ENV_VAR: &str = "EMBERS_LOG";
@@ -58,7 +69,11 @@ pub struct Cli {
         value_name = "FILTER"
     )]
     pub log: Option<String>,
-    #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
+    /// `-v`/`-vv`: log at debug/trace. The short form goes before the command,
+    /// which leaves `-v` to commands such as `split-window`.
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    pub verbose_short: u8,
+    #[arg(long = "verbose", global = true, action = clap::ArgAction::Count, hide = true)]
     pub verbose: u8,
     /// Number windows from this index, like tmux `base-index`. Defaults to
     /// `EMBERS_BASE_INDEX`; when neither is set, window numbers start at 0 and
@@ -74,7 +89,7 @@ impl Cli {
         if let Some(filter) = self.log.as_ref().filter(|value| !value.trim().is_empty()) {
             return filter.clone();
         }
-        match self.verbose {
+        match self.verbose.saturating_add(self.verbose_short) {
             0 => {}
             1 => return "debug".to_owned(),
             _ => return "trace".to_owned(),
@@ -147,10 +162,51 @@ pub enum Command {
     /// reattach to or restore.
     #[command(name = "kill-server")]
     KillServer,
-    #[command(name = "new-session")]
-    NewSession { name: String },
-    #[command(name = "list-sessions")]
-    ListSessions,
+    /// Create a session, like tmux `new-session`: with a first window running
+    /// COMMAND (or `$SHELL`) in `-c DIR`, attached unless `-d`. The old form,
+    /// `new-session NAME`, creates an empty session and prints its id and name.
+    #[command(name = "new-session", visible_alias = "new")]
+    NewSession {
+        /// The old form's session name.
+        #[arg(
+            value_name = "NAME",
+            conflicts_with_all = ["session_name", "attach_existing", "cwd", "window_name", "width", "height", "print", "format", "command"]
+        )]
+        name: Option<String>,
+        /// Do not attach (or, from the command prompt, switch) to the session.
+        #[arg(short = 'd')]
+        detached: bool,
+        /// Attach to session `-s` if it exists instead of failing.
+        #[arg(short = 'A')]
+        attach_existing: bool,
+        #[arg(short = 's', value_name = "NAME")]
+        session_name: Option<String>,
+        /// Name of the first window.
+        #[arg(short = 'n', value_name = "WINDOW")]
+        window_name: Option<String>,
+        /// Working directory of the first window; may use formats such as
+        /// `#{pane_current_path}`. Defaults to the current directory.
+        #[arg(short = 'c', value_name = "DIR")]
+        cwd: Option<String>,
+        /// Size to lay the session out at until a client shows it.
+        #[arg(short = 'x', value_name = "COLUMNS")]
+        width: Option<u16>,
+        #[arg(short = 'y', value_name = "ROWS")]
+        height: Option<u16>,
+        /// Print information about the session (`-F`, default `#{session_name}:`).
+        #[arg(short = 'P')]
+        print: bool,
+        #[arg(short = 'F', value_name = "FORMAT", requires = "print")]
+        format: Option<String>,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    #[command(name = "list-sessions", visible_alias = "ls")]
+    ListSessions {
+        /// Print each session with this format instead of `id<TAB>name`.
+        #[arg(short = 'F', value_name = "FORMAT")]
+        format: Option<String>,
+    },
     #[command(name = "has-session")]
     HasSession {
         #[arg(short = 't', long = "target")]
@@ -190,17 +246,36 @@ pub enum Command {
     },
     #[command(name = "list-clients")]
     ListClients,
-    /// Detach a client. From the command prompt the client defaults to the
-    /// one the prompt belongs to.
-    #[command(name = "detach-client")]
-    DetachClient { client_id: Option<u64> },
-    /// Show session `-t` on a client. From the command prompt the client
-    /// defaults to the one the prompt belongs to.
-    #[command(name = "switch-client")]
-    SwitchClient {
+    /// Detach a client: `-c`, else the client the command runs for (see
+    /// `switch-client`).
+    #[command(name = "detach-client", visible_alias = "detach")]
+    DetachClient {
+        #[arg(conflicts_with = "client")]
         client_id: Option<u64>,
-        #[arg(short = 't', long = "target")]
-        target: String,
+        #[arg(short = 'c', long = "client", value_name = "CLIENT")]
+        client: Option<u64>,
+    },
+    /// Show session `-t` on a client, like tmux. Without `-c` the client is
+    /// the command prompt's, else `EMBERS_CLIENT`, else the one showing the
+    /// session of the pane the command runs in, else the only attached one.
+    /// `-n`/`-p` move to the next/previous session by name.
+    #[command(name = "switch-client", visible_alias = "switchc")]
+    SwitchClient {
+        #[arg(conflicts_with = "client")]
+        client_id: Option<u64>,
+        #[arg(short = 'c', long = "client", value_name = "CLIENT")]
+        client: Option<u64>,
+        #[arg(
+            short = 't',
+            long = "target",
+            required_unless_present_any = ["next", "previous"],
+            conflicts_with_all = ["next", "previous"]
+        )]
+        target: Option<String>,
+        #[arg(short = 'n', conflicts_with = "previous")]
+        next: bool,
+        #[arg(short = 'p')]
+        previous: bool,
     },
     Buffer {
         #[command(subcommand)]
@@ -210,19 +285,39 @@ pub enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
-    #[command(name = "new-window")]
+    /// Add a window to session `-t` running COMMAND (or `$SHELL`) in `-c DIR`
+    /// (default: the current directory). Prints its number and title, or
+    /// with `-P` the format `-F` (default
+    /// `#{session_name}:#{window_index}.#{pane_index}`).
+    #[command(name = "new-window", visible_alias = "neww")]
     NewWindow {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         title: Option<String>,
+        #[arg(short = 'c', value_name = "DIR")]
+        cwd: Option<String>,
+        /// Keep the current window active.
+        #[arg(short = 'd')]
+        detached: bool,
+        #[arg(short = 'P')]
+        print: bool,
+        #[arg(short = 'F', value_name = "FORMAT", requires = "print")]
+        format: Option<String>,
         #[arg(last = true)]
         command: Vec<String>,
     },
-    #[command(name = "list-windows")]
+    #[command(name = "list-windows", visible_alias = "lsw")]
     ListWindows {
-        #[arg(short = 't', long = "target")]
+        #[arg(short = 't', long = "target", conflicts_with = "all")]
         target: Option<String>,
+        /// Every session's windows.
+        #[arg(short = 'a')]
+        all: bool,
+        /// Print each window with this format instead of
+        /// `number<TAB>active<TAB>title`.
+        #[arg(short = 'F', value_name = "FORMAT")]
+        format: Option<String>,
     },
     #[command(name = "select-window")]
     SelectWindow {
@@ -244,30 +339,75 @@ pub enum Command {
         #[arg(long)]
         detach: bool,
     },
-    #[command(name = "split-window")]
+    /// Split pane `-t` and run COMMAND (or `$SHELL`) in the new pane, in
+    /// `-c DIR` (default: the current directory). `-h` puts the new pane to
+    /// the right and `-v` below, like tmux; without either it goes to the
+    /// right. `--horizontal` (a horizontal divider) is `-v`, and `--vertical`
+    /// is `-h`. Prints the new pane's id, or with `-P` the
+    /// format `-F` (default `#{session_name}:#{window_index}.#{pane_index}`).
+    #[command(
+        name = "split-window",
+        visible_alias = "splitw",
+        disable_help_flag = true
+    )]
     SplitWindow {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
-        #[arg(long, conflicts_with = "vertical")]
+        #[arg(short = 'h', group = "split_direction")]
+        side_by_side: bool,
+        #[arg(short = 'v', group = "split_direction")]
+        stacked: bool,
+        #[arg(long, group = "split_direction")]
         horizontal: bool,
-        #[arg(long)]
+        #[arg(long, group = "split_direction")]
         vertical: bool,
+        #[arg(short = 'c', value_name = "DIR")]
+        cwd: Option<String>,
+        /// Keep the split pane focused.
+        #[arg(short = 'd')]
+        detached: bool,
+        #[arg(short = 'P')]
+        print: bool,
+        #[arg(short = 'F', value_name = "FORMAT", requires = "print")]
+        format: Option<String>,
+        #[arg(long, action = clap::ArgAction::Help)]
+        help: Option<bool>,
         #[arg(last = true)]
         command: Vec<String>,
     },
-    #[command(name = "list-panes")]
+    #[command(name = "list-panes", visible_alias = "lsp")]
     ListPanes {
+        #[arg(short = 't', long = "target", conflicts_with = "all")]
+        target: Option<String>,
+        /// Every pane of the target's session, not just its window's.
+        #[arg(short = 's', conflicts_with = "all")]
+        session: bool,
+        /// Every pane of every session.
+        #[arg(short = 'a')]
+        all: bool,
+        /// Print each pane with this format instead of
+        /// `pane<TAB>buffer<TAB>focused<TAB>title`.
+        #[arg(short = 'F', value_name = "FORMAT")]
+        format: Option<String>,
+    },
+    /// Focus pane `-t` (default: the pane the command runs in, else the
+    /// focused one); with `-L/-R/-U/-D` the pane next to it on that side, as
+    /// the client's focus actions find it; with `-l` the pane focused before
+    /// the current one in the session's current window (tmux `select-pane -l`).
+    #[command(name = "select-pane", visible_alias = "selectp")]
+    SelectPane {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
-    },
-    /// Focus a pane, or with `-l` the pane focused before the current one in
-    /// the session's current window (tmux `select-pane -l`).
-    #[command(name = "select-pane")]
-    SelectPane {
-        #[arg(short = 't', long = "target", required_unless_present = "last")]
-        target: Option<String>,
-        #[arg(short = 'l', long = "last", conflicts_with = "target")]
+        #[arg(short = 'l', long = "last", conflicts_with_all = ["target", "pane_direction"])]
         last: bool,
+        #[arg(short = 'L', group = "pane_direction")]
+        left: bool,
+        #[arg(short = 'R', group = "pane_direction")]
+        right: bool,
+        #[arg(short = 'U', group = "pane_direction")]
+        up: bool,
+        #[arg(short = 'D', group = "pane_direction")]
+        down: bool,
     },
     /// Resize a pane like tmux: `-L/-R/-U/-D [N]` moves its border N cells
     /// (default 1), `-Z` toggles zoom, and `--sizes` sets the parent split's
@@ -307,10 +447,26 @@ pub enum Command {
         enter: bool,
         keys: Vec<String>,
     },
-    #[command(name = "capture-pane")]
+    /// Print a pane's text. With any of `-p`, `-S`, `-E`, `-J` or `-e` it works
+    /// like tmux `capture-pane -p`: the screen, or lines `-S` to `-E` (0 is the
+    /// screen's first row, negative numbers are history, `-` is the start of
+    /// the history or the end of the screen), `-J` joining wrapped lines and
+    /// `-e` keeping colours and attributes as escape sequences. Without any,
+    /// it prints the whole history and screen as before.
+    #[command(name = "capture-pane", visible_alias = "capturep")]
     CapturePane {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        #[arg(short = 'p')]
+        print: bool,
+        #[arg(short = 'S', value_name = "LINE", allow_hyphen_values = true, value_parser = capture::parse_line_bound)]
+        start: Option<capture::LineBound>,
+        #[arg(short = 'E', value_name = "LINE", allow_hyphen_values = true, value_parser = capture::parse_line_bound)]
+        end: Option<capture::LineBound>,
+        #[arg(short = 'J')]
+        join: bool,
+        #[arg(short = 'e')]
+        escapes: bool,
     },
     #[command(name = "kill-pane")]
     /// Close a pane and end its program.
@@ -321,20 +477,51 @@ pub enum Command {
         #[arg(long)]
         detach: bool,
     },
-    #[command(name = "display-popup")]
+    /// Show COMMAND (or `$SHELL`) in a popup over pane `-t`'s session and,
+    /// like tmux run from a shell, wait until the popup closes, exiting with
+    /// the command's status. `--no-wait` returns at once and prints the popup
+    /// id. Sizes and positions are cells or a percentage of the client's view
+    /// (`90%`); positions also take `C` (centre) and, for `-x`, `R` (right).
+    /// The popup defaults to half the view, centred.
+    #[command(
+        name = "display-popup",
+        visible_alias = "popup",
+        disable_help_flag = true
+    )]
     DisplayPopup {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
-        #[arg(long)]
+        /// Title, which may use formats.
+        #[arg(short = 'T', long)]
         title: Option<String>,
-        #[arg(long, default_value_t = 14)]
-        x: u16,
-        #[arg(long, default_value_t = 4)]
-        y: u16,
-        #[arg(long, default_value_t = 60)]
-        width: u16,
-        #[arg(long, default_value_t = 12)]
-        height: u16,
+        #[arg(short = 'x', long = "x", value_parser = popup::parse_popup_position)]
+        x: Option<popup::PopupPosition>,
+        #[arg(short = 'y', long = "y", value_parser = popup::parse_popup_position)]
+        y: Option<popup::PopupPosition>,
+        #[arg(short = 'w', long = "width", value_parser = popup::parse_popup_length)]
+        width: Option<popup::PopupLength>,
+        #[arg(short = 'h', long = "height", value_parser = popup::parse_popup_length)]
+        height: Option<popup::PopupLength>,
+        /// Close when the command exits, as popups always do (`-E`); given
+        /// twice (`-EE`), only when it exits with status 0.
+        #[arg(short = 'E', action = clap::ArgAction::Count)]
+        close_on_exit: u8,
+        /// Working directory (tmux's `-d`; `-c` is accepted too); may use
+        /// formats such as `#{pane_current_path}`. Defaults to the current
+        /// directory.
+        #[arg(short = 'd', short_alias = 'c', long = "cwd", value_name = "DIR")]
+        cwd: Option<String>,
+        /// Print information about the popup once it is shown (`-F`, default
+        /// `#{popup_id}`).
+        #[arg(short = 'P')]
+        print: bool,
+        #[arg(short = 'F', value_name = "FORMAT", requires = "print")]
+        format: Option<String>,
+        /// Return once the popup is shown and print its id.
+        #[arg(long)]
+        no_wait: bool,
+        #[arg(long, action = clap::ArgAction::Help)]
+        help: Option<bool>,
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -520,15 +707,43 @@ pub enum JoinPlacementArg {
     TabAfter,
 }
 
-async fn execute(socket: &Path, command: Command, base_index: Option<u32>) -> Result<String> {
+/// What a command run from a shell leaves to do once it has run.
+struct Outcome {
+    output: String,
+    /// Attach this terminal to the session with this name (`new-session`).
+    attach_session: Option<String>,
+    /// Exit with this status (`display-popup`).
+    exit_status: Option<i32>,
+}
+
+async fn execute(socket: &Path, command: Command, base_index: Option<u32>) -> Result<Outcome> {
+    use std::io::IsTerminal as _;
+
     let mut connection = CliConnection::connect(socket).await?;
     connection.base_index = base_index;
+    let pane_socket = std::env::var_os(SOCKET_ENV_VAR);
     connection.pane_buffer = pane_buffer(
         std::env::var(BUFFER_ENV_VAR).ok().as_deref(),
-        std::env::var_os(SOCKET_ENV_VAR).as_deref(),
+        pane_socket.as_deref(),
         socket,
     );
-    execute_command(&mut connection, command).await
+    connection.caller_client = pane_buffer(
+        std::env::var(CLIENT_ENV_VAR).ok().as_deref(),
+        pane_socket.as_deref(),
+        socket,
+    )
+    .and_then(|client| NonZeroU64::new(client.0));
+    connection.working_dir = std::env::current_dir()
+        .ok()
+        .map(|dir| dir.to_string_lossy().into_owned());
+    connection.wait_for_popups = true;
+    connection.can_attach = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let output = execute_command(&mut connection, command).await?;
+    Ok(Outcome {
+        output,
+        attach_session: connection.attach_session,
+        exit_status: connection.exit_status,
+    })
 }
 
 async fn execute_command(connection: &mut CliConnection, command: Command) -> Result<String> {
@@ -561,7 +776,10 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .await?;
             Ok(String::new())
         }
-        Command::NewSession { name } => {
+        // The old form never attaches, so `-d` changes nothing.
+        Command::NewSession {
+            name: Some(name), ..
+        } => {
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::Create {
                     request_id: new_request_id(),
@@ -574,9 +792,44 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 snapshot.session.id, snapshot.session.name
             ))
         }
-        Command::ListSessions => {
+        Command::NewSession {
+            name: None,
+            detached,
+            attach_existing,
+            session_name,
+            window_name,
+            cwd,
+            width,
+            height,
+            print,
+            format,
+            command,
+        } => {
+            connection
+                .new_session(sessions::NewSession {
+                    detached,
+                    attach_existing,
+                    name: session_name,
+                    window_name,
+                    cwd,
+                    width,
+                    height,
+                    format: print.then(|| format.unwrap_or_else(|| "#{session_name}:".to_owned())),
+                    command,
+                })
+                .await
+        }
+        Command::ListSessions { format } => {
             let sessions = connection.list_sessions().await?;
-            Ok(format_sessions(&sessions))
+            let Some(format) = format else {
+                return Ok(format_sessions(&sessions));
+            };
+            let mut lines = Vec::new();
+            for session in sessions {
+                let snapshot = connection.session_snapshot(session.id).await?;
+                lines.push(connection.expand_for_pane(&snapshot, None, &format).await?);
+            }
+            Ok(lines.join("\n"))
         }
         Command::HasSession { target } => {
             connection.resolve_session_record(Some(&target)).await?;
@@ -659,8 +912,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let clients = connection.list_clients().await?;
             Ok(format_clients(&clients, &sessions))
         }
-        Command::DetachClient { client_id } => {
-            let client_id = connection.client_id_or_default(client_id)?;
+        Command::DetachClient { client_id, client } => {
+            let client_id = connection.target_client(client_id.or(client)).await?;
             connection
                 .request(ClientMessage::Client(ClientRequest::Detach {
                     request_id: new_request_id(),
@@ -669,9 +922,18 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .await?;
             Ok(String::new())
         }
-        Command::SwitchClient { client_id, target } => {
-            let client_id = connection.client_id_or_default(client_id)?;
-            let session = connection.resolve_session_record(Some(&target)).await?;
+        Command::SwitchClient {
+            client_id,
+            client,
+            target,
+            next: _,
+            previous,
+        } => {
+            let client_id = connection.target_client(client_id.or(client)).await?;
+            let session = match target {
+                Some(target) => connection.resolve_session_record(Some(&target)).await?,
+                None => connection.neighbour_session(client_id, !previous).await?,
+            };
             match connection
                 .request(ClientMessage::Client(ClientRequest::Switch {
                     request_id: new_request_id(),
@@ -1028,15 +1290,25 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         Command::NewWindow {
             target,
             title,
+            cwd,
+            detached,
+            print,
+            format,
             command,
         } => {
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
             let snapshot = connection.session_snapshot(session.id).await?;
+            let cwd = connection
+                .spawn_cwd(cwd.as_deref(), Some(&snapshot))
+                .await?;
+            let previous_window = root_tabs(&snapshot)?
+                .filter(|(_, tabs)| !tabs.tabs.is_empty())
+                .map(|(_, tabs)| tabs.active);
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, None, size, session.id)
+                .create_buffer(Some(window_title.clone()), command, cwd, size, session.id)
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -1054,7 +1326,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 response,
             )
             .await?;
-            let snapshot = rollback_created_buffer_on_error(
+            let mut snapshot = rollback_created_buffer_on_error(
                 connection,
                 buffer.buffer.id,
                 "new-window",
@@ -1063,14 +1335,56 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
             let number = window_number(index as usize, connection.base_index_for(&snapshot));
+            if detached && let Some(previous) = previous_window {
+                let response = connection
+                    .request(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: new_request_id(),
+                        session_id: session.id,
+                        index: previous,
+                    }))
+                    .await?;
+                snapshot = expect_session_snapshot(response, "new-window")?;
+            }
+            if print {
+                let pane = pane_showing(&snapshot, buffer.buffer.id);
+                let format = format.unwrap_or_else(|| DEFAULT_PANE_FORMAT.to_owned());
+                return connection.expand_for_pane(&snapshot, pane, &format).await;
+            }
             Ok(format!("{number}\t{title}"))
         }
-        Command::ListWindows { target } => {
-            let snapshot = connection
-                .resolve_session_snapshot(target.as_deref())
-                .await?;
-            let base_index = connection.base_index_for(&snapshot);
-            Ok(format_windows(&snapshot, base_index)?)
+        Command::ListWindows {
+            target,
+            all,
+            format,
+        } => {
+            let snapshots = if all {
+                let mut snapshots = Vec::new();
+                for session in connection.list_sessions().await? {
+                    snapshots.push(connection.session_snapshot(session.id).await?);
+                }
+                snapshots
+            } else {
+                vec![
+                    connection
+                        .resolve_session_snapshot(target.as_deref())
+                        .await?,
+                ]
+            };
+            let mut lines = Vec::new();
+            for snapshot in snapshots {
+                match &format {
+                    None => {
+                        let base_index = connection.base_index_for(&snapshot);
+                        lines.push(format_windows(&snapshot, base_index)?);
+                    }
+                    Some(format) => {
+                        for pane in window_panes(&snapshot)? {
+                            lines.push(connection.expand_for_pane(&snapshot, pane, format).await?);
+                        }
+                    }
+                }
+            }
+            Ok(lines.join("\n"))
         }
         Command::SelectWindow { target } => {
             let window = connection.resolve_window(Some(&target)).await?;
@@ -1134,17 +1448,27 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         }
         Command::SplitWindow {
             target,
+            side_by_side: _,
+            stacked,
             horizontal,
             vertical: _,
+            cwd,
+            detached,
+            print,
+            format,
+            help: _,
             command,
         } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
             let command = buffer_command(command);
-            let direction = if horizontal {
+            let direction = if horizontal || stacked {
                 SplitDirection::Horizontal
             } else {
                 SplitDirection::Vertical
             };
+            let cwd = connection
+                .spawn_cwd_for_pane(cwd.as_deref(), &pane.snapshot, pane.leaf_id)
+                .await?;
             let size = spawn_size(
                 &pane.snapshot,
                 PanePlacement::Split {
@@ -1156,7 +1480,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .create_buffer(
                     Some(default_title(&command, "pane")),
                     command,
-                    None,
+                    cwd,
                     size,
                     pane.snapshot.session.id,
                 )
@@ -1176,25 +1500,88 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 response,
             )
             .await?;
-            let snapshot = rollback_created_buffer_on_error(
+            let mut snapshot = rollback_created_buffer_on_error(
                 connection,
                 buffer.buffer.id,
                 "split-window",
                 expect_session_snapshot(response, "split-window"),
             )
             .await?;
-            let focused_leaf = snapshot.session.focused_leaf_id.ok_or_else(|| {
-                MuxError::protocol("split-window response did not include focused leaf")
+            let new_pane = pane_showing(&snapshot, buffer.buffer.id).ok_or_else(|| {
+                MuxError::protocol("split-window response does not show the new pane")
             })?;
-            Ok(focused_leaf.to_string())
+            if detached {
+                let response = connection
+                    .request(ClientMessage::Node(NodeRequest::Focus {
+                        request_id: new_request_id(),
+                        session_id: snapshot.session.id,
+                        node_id: pane.leaf_id,
+                    }))
+                    .await?;
+                snapshot = expect_session_snapshot(response, "split-window")?;
+            }
+            if print {
+                let format = format.unwrap_or_else(|| DEFAULT_PANE_FORMAT.to_owned());
+                return connection
+                    .expand_for_pane(&snapshot, Some(new_pane), &format)
+                    .await;
+            }
+            Ok(new_pane.to_string())
         }
-        Command::ListPanes { target } => {
-            let window = connection.resolve_window(target.as_deref()).await?;
-            let leaf_ids = visible_leaf_ids(&window.snapshot, window.child_id)?;
-            Ok(format_panes(&window.snapshot, &leaf_ids)?)
+        Command::ListPanes {
+            target,
+            session,
+            all,
+            format,
+        } => {
+            let mut panes = Vec::new();
+            if all || session {
+                let snapshots = if all {
+                    let mut snapshots = Vec::new();
+                    for session in connection.list_sessions().await? {
+                        snapshots.push(connection.session_snapshot(session.id).await?);
+                    }
+                    snapshots
+                } else {
+                    vec![
+                        connection
+                            .resolve_session_snapshot(target.as_deref())
+                            .await?,
+                    ]
+                };
+                for snapshot in snapshots {
+                    let mut leaf_ids = Vec::new();
+                    for window in window_children(&snapshot)? {
+                        leaf_ids.extend(visible_leaf_ids(&snapshot, window)?);
+                    }
+                    panes.push((snapshot, leaf_ids));
+                }
+            } else {
+                let window = connection.resolve_window(target.as_deref()).await?;
+                let leaf_ids = visible_leaf_ids(&window.snapshot, window.child_id)?;
+                panes.push((window.snapshot, leaf_ids));
+            }
+            let mut lines = Vec::new();
+            for (snapshot, leaf_ids) in panes {
+                match &format {
+                    None => lines.push(format_panes(&snapshot, &leaf_ids)?),
+                    Some(format) => {
+                        for leaf_id in leaf_ids {
+                            lines.push(
+                                connection
+                                    .expand_for_pane(&snapshot, Some(leaf_id), format)
+                                    .await?,
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(lines.join("\n"))
         }
-        Command::SelectPane { target: None, .. } => {
-            let session = connection.resolve_session_record(None).await?;
+        Command::SelectPane {
+            target, last: true, ..
+        } => {
+            let session = connection.resolve_session_record(target.as_deref()).await?;
             connection
                 .request(ClientMessage::Node(NodeRequest::FocusLast {
                     request_id: new_request_id(),
@@ -1204,15 +1591,39 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(String::new())
         }
         Command::SelectPane {
-            target: Some(target),
+            target,
+            left,
+            right,
+            up,
+            down,
             ..
         } => {
-            let pane = connection.resolve_pane(Some(&target)).await?;
+            let direction = [
+                (left, NavigationDirection::Left),
+                (right, NavigationDirection::Right),
+                (up, NavigationDirection::Up),
+                (down, NavigationDirection::Down),
+            ]
+            .into_iter()
+            .find_map(|(set, direction)| set.then_some(direction));
+            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let pane_id = match direction {
+                None => pane.leaf_id,
+                Some(direction) => {
+                    let (_, presentation) = formats::project(&pane.snapshot)?;
+                    match presentation.focus_target_from(pane.leaf_id, direction) {
+                        Some(pane_id) => pane_id,
+                        // Nothing on that side: like the client's focus
+                        // actions, and unlike tmux, focus does not wrap.
+                        None => return Ok(String::new()),
+                    }
+                }
+            };
             connection
                 .request(ClientMessage::Node(NodeRequest::Focus {
                     request_id: new_request_id(),
                     session_id: pane.snapshot.session.id,
-                    node_id: pane.leaf_id,
+                    node_id: pane_id,
                 }))
                 .await?;
             Ok(String::new())
@@ -1309,8 +1720,28 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .await?;
             Ok(String::new())
         }
-        Command::CapturePane { target } => {
+        Command::CapturePane {
+            target,
+            print,
+            start,
+            end,
+            join,
+            escapes,
+        } => {
             let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
+            if print || start.is_some() || end.is_some() || join || escapes {
+                return connection
+                    .capture_lines(
+                        buffer_id,
+                        capture::CaptureOptions {
+                            start,
+                            end,
+                            join,
+                            escapes,
+                        },
+                    )
+                    .await;
+            }
             let response = connection
                 .request(ClientMessage::Buffer(BufferRequest::Capture {
                     request_id: new_request_id(),
@@ -1342,21 +1773,88 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             y,
             width,
             height,
+            close_on_exit,
+            cwd,
+            print,
+            format,
+            no_wait,
+            help: _,
             command,
         } => {
-            let session = connection.resolve_session_record(target.as_deref()).await?;
+            // The popup goes over the target pane's session, which formats
+            // are expanded for; a session without panes takes it too.
+            let (snapshot, pane_id) = match connection.resolve_pane(target.as_deref()).await {
+                Ok(pane) => (pane.snapshot, Some(pane.leaf_id)),
+                Err(error) => match target.as_deref() {
+                    Some(target) => (
+                        connection.resolve_session_snapshot(Some(target)).await?,
+                        None,
+                    ),
+                    None => return Err(error),
+                },
+            };
+            let session_id = snapshot.session.id;
             let command = buffer_command(command);
-            let popup_title = title.unwrap_or_else(|| default_title(&command, "popup"));
-            let geometry = FloatGeometry::new(x, y, width, height);
-            let snapshot = connection.session_snapshot(session.id).await?;
+            let popup_title = match title {
+                Some(title) => {
+                    connection
+                        .expand_for_pane(&snapshot, pane_id, &title)
+                        .await?
+                }
+                None => default_title(&command, "popup"),
+            };
+            let cwd = match pane_id {
+                Some(pane_id) => {
+                    connection
+                        .spawn_cwd_for_pane(cwd.as_deref(), &snapshot, pane_id)
+                        .await?
+                }
+                None => {
+                    connection
+                        .spawn_cwd(cwd.as_deref(), Some(&snapshot))
+                        .await?
+                }
+            };
+            let geometry =
+                popup::popup_geometry(formats::session_viewport(&snapshot), width, height, x, y);
+            let wait = connection.wait_for_popups && !no_wait;
+            let close = if close_on_exit >= 2 {
+                popup::CloseOnExit::OnSuccess
+            } else {
+                popup::CloseOnExit::Always
+            };
             let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, None, size, session.id)
+                .create_buffer(Some(popup_title.clone()), command, cwd, size, session_id)
                 .await?;
+            // Keep the buffer once its command exits, so a waiting CLI can
+            // read the exit status; `-EE` keeps it after a failure.
+            let remain_on_exit = match (wait, close) {
+                (true, _) => Some("on"),
+                (false, popup::CloseOnExit::OnSuccess) => Some("failed"),
+                (false, popup::CloseOnExit::Always) => None,
+            };
+            if let Some(value) = remain_on_exit {
+                let response = connection
+                    .request(ClientMessage::Buffer(BufferRequest::SetUserOption {
+                        request_id: new_request_id(),
+                        buffer_id: buffer.buffer.id,
+                        key: popup::REMAIN_ON_EXIT.to_owned(),
+                        value: Some(value.to_owned()),
+                    }))
+                    .await;
+                rollback_created_buffer_on_error(
+                    connection,
+                    buffer.buffer.id,
+                    "display-popup",
+                    response,
+                )
+                .await?;
+            }
             let response = connection
                 .request(ClientMessage::Floating(FloatingRequest::Create {
                     request_id: new_request_id(),
-                    session_id: session.id,
+                    session_id,
                     root_node_id: None,
                     buffer_id: Some(buffer.buffer.id),
                     geometry,
@@ -1379,7 +1877,38 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 expect_floating(response, "display-popup"),
             )
             .await?;
-            Ok(popup.id.to_string())
+            let output = if print {
+                let snapshot = connection.session_snapshot(session_id).await?;
+                let pane = pane_showing(&snapshot, buffer.buffer.id);
+                let format = format
+                    .unwrap_or_else(|| "#{popup_id}".to_owned())
+                    .replace("#{popup_id}", &popup.id.to_string());
+                connection.expand_for_pane(&snapshot, pane, &format).await?
+            } else if wait {
+                String::new()
+            } else {
+                popup.id.to_string()
+            };
+            if wait {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+                let socket = connection.socket_path.clone();
+                let status = connection
+                    .wait_for_popup(
+                        &socket,
+                        popup::WaitedPopup {
+                            session_id,
+                            floating_id: popup.id,
+                            buffer_id: buffer.buffer.id,
+                            close,
+                        },
+                    )
+                    .await?;
+                connection.exit_status = Some(status);
+                return Ok(String::new());
+            }
+            Ok(output)
         }
         Command::DisplayMessage {
             target,
@@ -1413,13 +1942,9 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 _ => connection.resolve_pane(target.as_deref()).await?,
             };
             let session_id = pane.snapshot.session.id;
-            let base_index = connection.base_index_for(&pane.snapshot);
-            let mut state = ClientState::default();
-            state.apply_session_snapshot(pane.snapshot);
-            let text =
-                FormatContext::from_state(&state, session_id, Some(pane.leaf_id), base_index)
-                    .map(|context| expand_format(&template, &context))
-                    .unwrap_or(template);
+            let text = connection
+                .expand_for_pane(&pane.snapshot, Some(pane.leaf_id), &template)
+                .await?;
             if print {
                 return Ok(text);
             }
@@ -1568,6 +2093,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                             socket.display()
                         )));
                     }
+                    let target = match target {
+                        Some(target) => Some(
+                            CliConnection::connect(&socket)
+                                .await?
+                                .resolve_session_record(Some(&target))
+                                .await?
+                                .name,
+                        ),
+                        None => None,
+                    };
                     interactive::run(socket, target, config).await
                 }
                 Some(Command::Automation {
@@ -1581,9 +2116,16 @@ pub async fn run(cli: Cli) -> Result<()> {
                 Some(Command::KillServer) => kill_server(&socket).await,
                 Some(command) => {
                     ensure_server_process(&socket, &log_filter).await?;
-                    let output = execute(&socket, command, base_index).await?;
-                    if !output.is_empty() {
-                        println!("{output}");
+                    let outcome = execute(&socket, command, base_index).await?;
+                    if !outcome.output.is_empty() {
+                        println!("{}", outcome.output);
+                    }
+                    if let Some(session) = outcome.attach_session {
+                        return interactive::run(socket, Some(session), config).await;
+                    }
+                    if let Some(status) = outcome.exit_status.filter(|status| *status != 0) {
+                        std::io::stdout().flush()?;
+                        std::process::exit(status);
                     }
                     Ok(())
                 }
@@ -2024,7 +2566,7 @@ fn prompt_ignored_global_flag(cli: &Cli) -> Option<&'static str> {
         Some("--config")
     } else if cli.log.is_some() {
         Some("--log")
-    } else if cli.verbose != 0 {
+    } else if cli.verbose != 0 || cli.verbose_short != 0 {
         Some("--verbose")
     } else {
         None
@@ -2066,6 +2608,22 @@ struct CliConnection {
     /// of this server (see [`pane_buffer`]). Commands given no target act on
     /// that pane, its window and its session, like tmux with `TMUX_PANE`.
     pane_buffer: Option<BufferId>,
+    /// The client a `run_shell` child runs for (`EMBERS_CLIENT`), for client
+    /// commands given no client.
+    caller_client: Option<NonZeroU64>,
+    socket_path: PathBuf,
+    /// The directory the command runs in, where it creates panes when not
+    /// given `-c`. `None` (from the command prompt) uses the server's.
+    working_dir: Option<String>,
+    /// Whether `display-popup` waits for the popup to close: when run from a
+    /// shell, not from the command prompt or automation.
+    wait_for_popups: bool,
+    /// Whether `new-session` may attach this process's terminal once done.
+    can_attach: bool,
+    /// Set by `new-session`: the session to attach to.
+    attach_session: Option<String>,
+    /// Set by a waiting `display-popup`: the status to exit with.
+    exit_status: Option<i32>,
 }
 
 /// The buffer a command run inside a pane belongs to: `EMBERS_BUFFER`, which
@@ -2083,7 +2641,7 @@ fn pane_buffer(
 
 impl CliConnection {
     async fn connect(path: impl AsRef<Path>) -> Result<Self> {
-        let client = ProtocolClient::connect(path)
+        let client = ProtocolClient::connect(path.as_ref())
             .await
             .map_err(|error| MuxError::transport(error.to_string()))?;
         Ok(Self {
@@ -2092,6 +2650,13 @@ impl CliConnection {
             default_session: None,
             default_client: None,
             pane_buffer: None,
+            caller_client: None,
+            socket_path: path.as_ref().to_path_buf(),
+            working_dir: None,
+            wait_for_popups: false,
+            can_attach: false,
+            attach_session: None,
+            exit_status: None,
         })
     }
 
@@ -2100,16 +2665,6 @@ impl CliConnection {
     /// client showing the session reported to the server.
     fn base_index_for(&self, snapshot: &SessionSnapshot) -> Option<u32> {
         self.base_index.or(snapshot.session.base_index)
-    }
-
-    fn client_id_or_default(&self, client_id: Option<u64>) -> Result<NonZeroU64> {
-        match client_id {
-            Some(client_id) => NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero")),
-            None => self
-                .default_client
-                .ok_or_else(|| MuxError::invalid_input("a client id is required")),
-        }
     }
 
     /// Where the pane the command runs in is shown, if it runs in one.
@@ -2783,6 +3338,43 @@ fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<Strin
         })
         .collect::<Result<Vec<_>>>()
         .map(|lines| lines.join("\n"))
+}
+
+/// The pane showing `buffer_id` in `snapshot`, if any.
+fn pane_showing(snapshot: &SessionSnapshot, buffer_id: BufferId) -> Option<NodeId> {
+    snapshot
+        .nodes
+        .iter()
+        .find(|node| {
+            node.buffer_view
+                .as_ref()
+                .is_some_and(|view| view.buffer_id == buffer_id)
+        })
+        .map(|node| node.id)
+}
+
+/// The nodes `snapshot`'s windows show, in window order.
+fn window_children(snapshot: &SessionSnapshot) -> Result<Vec<NodeId>> {
+    Ok(match root_tabs(snapshot)? {
+        Some((_, tabs)) => tabs.tabs.iter().map(|tab| tab.child_id).collect(),
+        None => vec![snapshot.session.root_node_id],
+    })
+}
+
+/// Each window's active pane, as tmux window formats see it: the focused
+/// pane in the window that has it, else the window's first pane.
+fn window_panes(snapshot: &SessionSnapshot) -> Result<Vec<Option<NodeId>>> {
+    window_children(snapshot)?
+        .into_iter()
+        .map(|child_id| {
+            let leaves = visible_leaf_ids(snapshot, child_id)?;
+            Ok(snapshot
+                .session
+                .focused_leaf_id
+                .filter(|leaf_id| leaves.contains(leaf_id))
+                .or_else(|| leaves.first().copied()))
+        })
+        .collect()
 }
 
 fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
