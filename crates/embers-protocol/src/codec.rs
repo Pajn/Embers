@@ -2693,6 +2693,7 @@ fn encode_floating_request<'a>(
         geom,
         focus,
         close_on_empty,
+        border,
     ) = match req {
         FloatingRequest::Create {
             session_id,
@@ -2702,6 +2703,7 @@ fn encode_floating_request<'a>(
             title,
             focus,
             close_on_empty,
+            border,
             ..
         } => (
             fb::FloatingOp::Create,
@@ -2713,6 +2715,7 @@ fn encode_floating_request<'a>(
             Some(*geometry),
             *focus,
             *close_on_empty,
+            *border,
         ),
         FloatingRequest::Close { floating_id, .. } => (
             fb::FloatingOp::Close,
@@ -2722,6 +2725,7 @@ fn encode_floating_request<'a>(
             0,
             None,
             None,
+            true,
             true,
             true,
         ),
@@ -2739,6 +2743,7 @@ fn encode_floating_request<'a>(
             Some(*geometry),
             true,
             true,
+            true,
         ),
         FloatingRequest::Focus { floating_id, .. } => (
             fb::FloatingOp::Focus,
@@ -2748,6 +2753,7 @@ fn encode_floating_request<'a>(
             0,
             None,
             None,
+            true,
             true,
             true,
         ),
@@ -2773,6 +2779,7 @@ fn encode_floating_request<'a>(
             height,
             focus,
             close_on_empty,
+            border,
         },
     );
 
@@ -3848,6 +3855,7 @@ fn encode_floating_record<'a>(
             focused: record.focused,
             visible: record.visible,
             close_on_empty: record.close_on_empty,
+            border: record.border,
         },
     )
 }
@@ -4464,6 +4472,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     title: req.title().map(|t| t.to_owned()),
                     focus: req.focus(),
                     close_on_empty: req.close_on_empty(),
+                    border: req.border(),
                 },
                 fb::FloatingOp::Close => FloatingRequest::Close {
                     request_id,
@@ -5328,6 +5337,7 @@ fn decode_floating_record(record: fb::FloatingRecord) -> Result<FloatingRecord, 
         focused: record.focused(),
         visible: record.visible(),
         close_on_empty: record.close_on_empty(),
+        border: record.border(),
     })
 }
 
@@ -5541,6 +5551,28 @@ mod tests {
             error,
             "buffer_record.pipe.command first segment must not be empty"
         );
+    }
+
+    #[test]
+    fn floating_records_from_peers_without_the_border_field_have_a_border() {
+        let mut builder = FlatBufferBuilder::new();
+        let record = fb::FloatingRecord::create(
+            &mut builder,
+            &fb::FloatingRecordArgs {
+                id: 4,
+                session_id: 1,
+                root_node_id: 2,
+                width: 10,
+                height: 5,
+                ..Default::default()
+            },
+        );
+        builder.finish(record, None);
+
+        let record = flatbuffers::root::<fb::FloatingRecord>(builder.finished_data())
+            .expect("floating record root");
+        assert!(record.border());
+        assert!(decode_floating_record(record).expect("decodes").border);
     }
 
     #[test]
@@ -6682,6 +6714,7 @@ mod tests {
                 title: None,
                 focus: true,
                 close_on_empty: true,
+                border: true,
             }))
             .expect_err("zero create session id should be rejected");
         let close_error = encode_client_message(&ClientMessage::Floating(FloatingRequest::Close {

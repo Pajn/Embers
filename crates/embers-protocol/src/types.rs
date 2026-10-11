@@ -583,6 +583,10 @@ pub enum FloatingRequest {
         title: Option<String>,
         focus: bool,
         close_on_empty: bool,
+        /// Frame the popup and show its title, like tmux popups without
+        /// `-B`. Without a frame its content fills the whole popup. Peers
+        /// that do not send it ask for a frame.
+        border: bool,
     },
     Close {
         request_id: RequestId,
@@ -895,6 +899,8 @@ pub struct FloatingRecord {
     pub focused: bool,
     pub visible: bool,
     pub close_on_empty: bool,
+    /// The popup has a frame with its title; see `FloatingRequest::Create`.
+    pub border: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

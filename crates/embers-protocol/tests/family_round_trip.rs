@@ -417,6 +417,18 @@ fn client_message_families_round_trip() {
             title: Some("inspector".to_owned()),
             focus: false,
             close_on_empty: false,
+            border: true,
+        }),
+        ClientMessage::Floating(FloatingRequest::Create {
+            request_id: RequestId(249),
+            session_id: SessionId(10),
+            root_node_id: None,
+            buffer_id: Some(BufferId(12)),
+            geometry: FloatGeometry::new(4, 2, 60, 18),
+            title: None,
+            focus: true,
+            close_on_empty: true,
+            border: false,
         }),
         ClientMessage::Floating(FloatingRequest::Close {
             request_id: RequestId(26),
@@ -885,6 +897,7 @@ fn sample_snapshot() -> SessionSnapshot {
             focused: true,
             visible: true,
             close_on_empty: false,
+            border: false,
         }],
     }
 }

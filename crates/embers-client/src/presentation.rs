@@ -99,8 +99,11 @@ impl StatusLineMode {
 /// Where each pane draws its title row (its title and activity marker), if at
 /// all, like tmux's `pane-border-status` (`set_pane_titles`). A title row
 /// takes the top or the bottom row of the pane alike, so the pane's terminal
-/// content has the same size either way. Panes in popups always have one at
-/// the top, under the popup's own frame.
+/// content has the same size either way.
+///
+/// Panes in a borderless popup follow the setting like tiled ones. A framed
+/// popup shows its title on its frame instead, so its panes have no title
+/// rows whatever the setting, and no title is shown twice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaneTitles {
     /// No title rows; panes show terminal content in their whole area.
@@ -276,6 +279,8 @@ pub struct FloatingFrame {
     pub content_rect: Rect,
     pub title: Option<String>,
     pub focused: bool,
+    /// Framed with its title; without a frame `content_rect` is `rect`.
+    pub border: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -533,11 +538,16 @@ struct FocusScore {
 
 impl Projector<'_> {
     /// Title rows of panes in the popup `floating_id`, or tiled panes for
-    /// `None`. Popups keep theirs; see [`PaneTitles`].
+    /// `None`. A framed popup's frame carries its title, so its panes have
+    /// no title rows; see [`PaneTitles`].
     fn pane_titles_in(&self, floating_id: Option<FloatingId>) -> PaneTitles {
-        match floating_id {
-            Some(_) => PaneTitles::Top,
-            None => self.pane_titles,
+        let framed = floating_id
+            .and_then(|floating_id| self.state.floating.get(&floating_id))
+            .is_some_and(|window| window.border);
+        if framed {
+            PaneTitles::Off
+        } else {
+            self.pane_titles
         }
     }
 
@@ -1418,6 +1428,7 @@ mod zoom_tests {
                 focused: true,
                 visible: false,
                 close_on_empty: true,
+                border: true,
             },
         );
 
@@ -1570,6 +1581,7 @@ mod zoom_tests {
                 focused: true,
                 visible: true,
                 close_on_empty: true,
+                border: true,
             },
         );
 
@@ -1705,13 +1717,18 @@ fn project_floating_window(
         return Ok(());
     }
 
-    let content_rect = inset_border(rect);
+    let content_rect = if window.border {
+        inset_border(rect)
+    } else {
+        rect
+    };
     projector.projection.floating.push(FloatingFrame {
         floating_id: window.id,
         rect,
         content_rect,
         title: window.title.clone(),
         focused: window.focused,
+        border: window.border,
     });
     projector.project_node(node_id, content_rect, Some(window.id), false, Vec::new())
 }

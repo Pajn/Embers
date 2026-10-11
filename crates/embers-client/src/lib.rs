@@ -59,8 +59,9 @@ pub use scripting::{
     Action, BarSegment, BarSpec, BarTarget, BufferRef, BufferSpawnSpec, Context, DetachOnDestroy,
     EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingRef, FloatingSize, FloatingSpec,
     LoadedConfig, ModeHooks, MouseSettings, NodeRef, NotifyLevel, PaletteError, PaneBorderColors,
-    PassthroughMode, RgbColor, ScriptEngine, ScriptError, ScriptFunctionRef, ScriptHarness,
-    SessionRef, StyleSpec, TabBarContext, TabInfo, TabSpec, TabsSpec, ThemeSpec, TreeSpec,
+    PassthroughMode, PopupBorderLines, PopupBorders, RgbColor, ScriptEngine, ScriptError,
+    ScriptFunctionRef, ScriptHarness, SessionRef, StyleSpec, TabBarContext, TabInfo, TabSpec,
+    TabsSpec, ThemeSpec, TreeSpec,
 };
 pub use socket_transport::SocketTransport;
 pub use spawn_size::{PanePlacement, spawn_pty_size, spawn_pty_size_with};

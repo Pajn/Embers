@@ -75,7 +75,9 @@ fn split_inside_a_floating_window_stays_inside_its_border() {
     // The divider takes a column and the second pane any odd one left over.
     let shared = top.rect.size.width - 1;
     assert_eq!(size.cols, shared - shared / 2);
-    assert_eq!(size.rows, top.rect.size.height - 1);
+    // Panes in a framed popup have no title rows, whatever other panes have.
+    assert_eq!(top.title_rect, None);
+    assert_eq!(size.rows, top.rect.size.height);
 }
 
 #[test]
@@ -190,31 +192,44 @@ fn new_tab_takes_the_area_of_its_tabs_container() {
 }
 
 #[test]
-fn popup_loses_its_border_and_title_row() {
-    assert_eq!(
+fn a_framed_popup_loses_its_frame_and_a_borderless_one_its_title_row_if_any() {
+    let popup = |pane_titles, geometry, border| {
         spawn_pty_size(
             &root_buffer_state(),
             SESSION_ID,
             VIEWPORT,
-            PaneTitles::Top,
-            PanePlacement::Floating {
-                geometry: FloatGeometry::new(2, 2, 30, 10),
-            },
-        ),
-        Some(PtySize::new(28, 7))
+            pane_titles,
+            PanePlacement::Floating { geometry, border },
+        )
+    };
+    let geometry = FloatGeometry::new(2, 2, 30, 10);
+    // The frame carries the title, so there is no title row inside it,
+    // whatever the title rows of other panes.
+    for pane_titles in [PaneTitles::Off, PaneTitles::Top, PaneTitles::Bottom] {
+        assert_eq!(
+            popup(pane_titles, geometry, true),
+            Some(PtySize::new(28, 8)),
+            "{pane_titles:?}"
+        );
+    }
+    // Without a frame the pane fills the popup, but for its title row when
+    // panes have them.
+    assert_eq!(
+        popup(PaneTitles::Off, geometry, false),
+        Some(PtySize::new(30, 10))
+    );
+    assert_eq!(
+        popup(PaneTitles::Top, geometry, false),
+        Some(PtySize::new(30, 9))
+    );
+    assert_eq!(
+        popup(PaneTitles::Bottom, geometry, false),
+        Some(PtySize::new(30, 9))
     );
     // A popup reaching past the viewport is clipped to it.
     assert_eq!(
-        spawn_pty_size(
-            &root_buffer_state(),
-            SESSION_ID,
-            VIEWPORT,
-            PaneTitles::Top,
-            PanePlacement::Floating {
-                geometry: FloatGeometry::new(30, 2, 30, 10),
-            },
-        ),
-        Some(PtySize::new(9, 7))
+        popup(PaneTitles::Top, FloatGeometry::new(30, 2, 30, 10), true),
+        Some(PtySize::new(9, 8))
     );
 }
 
@@ -322,7 +337,7 @@ fn panes_without_title_rows_spawn_at_their_whole_area() {
         ),
         Some(PtySize::new(41, 20))
     );
-    // Popup panes keep their title row.
+    // So does a borderless popup's.
     assert_eq!(
         spawn_pty_size(
             &root_buffer_state(),
@@ -331,9 +346,10 @@ fn panes_without_title_rows_spawn_at_their_whole_area() {
             PaneTitles::Off,
             PanePlacement::Floating {
                 geometry: FloatGeometry::new(2, 2, 30, 10),
+                border: false,
             },
         ),
-        Some(PtySize::new(28, 7))
+        Some(PtySize::new(30, 10))
     );
 }
 

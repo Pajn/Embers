@@ -450,8 +450,12 @@ dividers between them, which `theme.set_pane_border_color` and
 `set_pane_titles("top")` or `set_pane_titles("bottom")` gives every pane a
 title row, showing its title, `>` on the focused pane and `+` or `!` for
 activity or a bell; the program in it then has one row fewer.
-`set_pane_titles("off")` is the default. Panes in popups keep their title row
-under the popup's frame either way.
+`set_pane_titles("off")` is the default.
+
+A framed popup shows its title on its frame, so its panes never have a title
+row, whatever the setting, and the title is not shown twice. Panes in a
+borderless popup (`display-popup -B`) follow the setting like any other: with
+title rows off, the default, the program fills the whole popup.
 
 ```rhai
 set_pane_titles("top");   // pane-border-status top

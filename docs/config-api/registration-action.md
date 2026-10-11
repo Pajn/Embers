@@ -1962,6 +1962,7 @@ Move a buffer into a new floating window.
 - `title` (Option\<String\>): window title (default: none)
 - `focus` (bool): whether to focus the window after creation (default: true)
 - `close_on_empty` (bool): whether to close the window when its buffer empties (default: true)
+- `border` (bool): frame the window and show its title; without a frame its content fills the window, like tmux's `display-popup -B` (default: true)
 </div>
 
 </div>
@@ -2262,10 +2263,24 @@ fn open_floating(_: ActionApi, tree: TreeSpec, options: Map) -> Action
     onclick="openTab(event, 'open_floating', 'Description')">
 Description
 </button>
+<button group="open_floating" id="link-open_floating-Example"  class="tablinks"
+    onclick="openTab(event, 'open_floating', 'Example')">
+Example
+</button>
 </div>
 
 <div group="open_floating" id="open_floating-Description" class="tabcontent"  style="display: block;" >
-Open a floating view around the provided tree.
+Open a floating view around the provided tree. Takes the options of
+`move_buffer_to_floating`; `border: false` opens it without a frame,
+its content filling the whole window, like tmux's `display-popup -B`.
+</div>
+<div group="open_floating" id="open_floating-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.open_floating(tree.buffer_spawn(["lazygit"]), #{
+    width: "90%", height: "90%", border: false
+})
+```
 </div>
 
 </div>

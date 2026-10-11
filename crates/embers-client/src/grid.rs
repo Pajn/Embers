@@ -806,13 +806,49 @@ impl BorderStyle {
         vertical: '|',
     };
 
-    pub const FOCUSED: Self = Self {
-        top_left: '#',
-        top_right: '#',
-        bottom_left: '#',
-        bottom_right: '#',
-        horizontal: '#',
-        vertical: '#',
+    pub const ROUNDED: Self = Self {
+        top_left: '╭',
+        top_right: '╮',
+        bottom_left: '╰',
+        bottom_right: '╯',
+        horizontal: '─',
+        vertical: '│',
+    };
+
+    pub const SINGLE: Self = Self {
+        top_left: '┌',
+        top_right: '┐',
+        bottom_left: '└',
+        bottom_right: '┘',
+        horizontal: '─',
+        vertical: '│',
+    };
+
+    pub const DOUBLE: Self = Self {
+        top_left: '╔',
+        top_right: '╗',
+        bottom_left: '╚',
+        bottom_right: '╝',
+        horizontal: '═',
+        vertical: '║',
+    };
+
+    pub const HEAVY: Self = Self {
+        top_left: '┏',
+        top_right: '┓',
+        bottom_left: '┗',
+        bottom_right: '┛',
+        horizontal: '━',
+        vertical: '┃',
+    };
+
+    pub const BLANK: Self = Self {
+        top_left: ' ',
+        top_right: ' ',
+        bottom_left: ' ',
+        bottom_right: ' ',
+        horizontal: ' ',
+        vertical: ' ',
     };
 }
 

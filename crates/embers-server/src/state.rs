@@ -665,6 +665,23 @@ impl ServerState {
         Ok(())
     }
 
+    /// Record the buffer's PTY size as the size of the view showing it, which
+    /// a client draws it at. Returns the view's session when that changed it.
+    pub fn sync_buffer_view_size(&mut self, buffer_id: BufferId) -> Result<Option<SessionId>> {
+        let buffer = self.buffer(buffer_id)?;
+        let BufferAttachment::Attached(node_id) = buffer.attachment else {
+            return Ok(None);
+        };
+        let size = buffer.pty_size;
+        match self.node_mut(node_id)? {
+            Node::BufferView(view) if view.view.last_render_size != size => {
+                view.view.last_render_size = size;
+                Ok(Some(view.session_id))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub fn note_buffer_output(&mut self, buffer_id: BufferId) -> Result<u64> {
         let buffer = self.buffer_mut(buffer_id)?;
         buffer.last_snapshot_seq = buffer.last_snapshot_seq.saturating_add(1);
@@ -690,6 +707,41 @@ impl ServerState {
         Ok(())
     }
 
+    /// The session whose current window shows `buffer_id`: the buffer's pane
+    /// is in the session's active window or in one of its visible popups.
+    pub fn session_showing_buffer(&self, buffer_id: BufferId) -> Option<SessionId> {
+        let BufferAttachment::Attached(node_id) = self.buffer(buffer_id).ok()?.attachment else {
+            return None;
+        };
+        let session_id = self.node_session_id(node_id).ok()?;
+        self.is_node_visible_in_session(session_id, node_id)
+            .ok()?
+            .then_some(session_id)
+    }
+
+    /// Acknowledge the bells of every pane `session_id` shows, as tmux clears
+    /// a window's bell flag when the window becomes current. Their output
+    /// still counts as activity.
+    fn acknowledge_shown_bells(&mut self, session_id: SessionId) -> Result<()> {
+        let session = self.session(session_id)?;
+        let mut leaves = Vec::new();
+        self.collect_visible_leaf_ids(session.root_node, &mut leaves)?;
+        for floating_id in &session.floating {
+            if let Some(floating) = self.floating.get(floating_id)
+                && floating.visible
+            {
+                self.collect_visible_leaf_ids(floating.root_node, &mut leaves)?;
+            }
+        }
+        for leaf_id in leaves {
+            let buffer = self.buffer_mut(self.buffer_view_buffer_id(leaf_id)?)?;
+            if buffer.activity == ActivityState::Bell {
+                buffer.activity = ActivityState::Activity;
+            }
+        }
+        Ok(())
+    }
+
     pub fn create_buffer_view(
         &mut self,
         session_id: SessionId,
@@ -709,7 +761,8 @@ impl ServerState {
         buffer_id: BufferId,
     ) -> Result<NodeId> {
         self.ensure_session_exists(session_id)?;
-        self.buffer(buffer_id)?;
+        // A buffer created with a size hint is drawn at that size.
+        let last_render_size = self.buffer(buffer_id)?.pty_size;
 
         let node_id = self.node_ids.next();
         self.nodes.insert(
@@ -719,7 +772,10 @@ impl ServerState {
                 session_id,
                 parent: None,
                 buffer_id,
-                view: BufferViewState::default(),
+                view: BufferViewState {
+                    last_render_size,
+                    ..BufferViewState::default()
+                },
             }),
         );
         Ok(node_id)
@@ -834,6 +890,15 @@ impl ServerState {
         self.create_floating_window_with_options(session_id, root_node, geometry, title, true, true)
     }
 
+    /// Frame the popup with its title, or let its content fill it.
+    pub fn set_floating_border(&mut self, floating_id: FloatingId, border: bool) -> Result<()> {
+        self.floating
+            .get_mut(&floating_id)
+            .ok_or_else(|| MuxError::not_found(format!("unknown floating window {floating_id}")))?
+            .border = border;
+        Ok(())
+    }
+
     pub fn default_floating_geometry(&self, session_id: SessionId) -> Result<FloatGeometry> {
         let session = self.session(session_id)?;
         let anchor_leaf = session
@@ -910,6 +975,7 @@ impl ServerState {
                 focused: false,
                 visible: true,
                 close_on_empty,
+                border: true,
                 last_focused_leaf: None,
             },
         );
@@ -1921,6 +1987,7 @@ impl ServerState {
         }
 
         self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
+        self.acknowledge_shown_bells(session_id)?;
 
         Ok(())
     }

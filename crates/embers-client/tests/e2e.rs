@@ -802,6 +802,7 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
             title: Some("moved".to_owned()),
             focus: true,
             close_on_empty: true,
+            border: true,
         }))
         .await
         .expect("create floating from detached buffer succeeds")
@@ -3047,13 +3048,12 @@ async fn cli_created_panes_start_at_their_drawn_size() {
     )
     .await;
 
-    // A popup loses its border and title row.
-    run_cli(
-        &server,
-        &[
-            "display-popup",
-            "-t",
-            "alpha",
+    // A popup loses its frame, which carries its title, and a borderless
+    // one, without title rows, nothing.
+    for (flag, expected) in [(None, (38, 10)), (Some("-B"), (40, 12))] {
+        let mut args = vec!["display-popup", "-t", "alpha"];
+        args.extend(flag);
+        args.extend([
             "--width",
             "40",
             "--height",
@@ -3062,18 +3062,19 @@ async fn cli_created_panes_start_at_their_drawn_size() {
             "/bin/sh",
             "-c",
             REPORT_STARTUP_SIZE,
-        ],
-    );
-    let buffer_id = newest_buffer(&mut connection, "alpha").await;
-    assert_spawned_at_drawn_size(
-        &mut connection,
-        &mut configured,
-        alpha,
-        viewport,
-        buffer_id,
-        (38, 9),
-    )
-    .await;
+        ]);
+        run_cli(&server, &args);
+        let buffer_id = newest_buffer(&mut connection, "alpha").await;
+        assert_spawned_at_drawn_size(
+            &mut connection,
+            &mut configured,
+            alpha,
+            viewport,
+            buffer_id,
+            expected,
+        )
+        .await;
+    }
 
     server.shutdown().await.expect("server shuts down");
 }
@@ -3139,7 +3140,7 @@ async fn action_created_panes_start_at_their_drawn_size() {
         ('1', (101, 15)),
         ('2', (50, 15)),
         ('3', (101, 30)),
-        ('4', (28, 7)),
+        ('4', (28, 8)),
     ] {
         configured
             .handle_key(alpha, viewport, KeyEvent::Char(key))

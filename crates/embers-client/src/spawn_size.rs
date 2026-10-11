@@ -24,8 +24,11 @@ pub enum PanePlacement {
     RootTab,
     /// `NodeRequest::AddTab` on `tabs_node_id`, which activates the new tab.
     Tab { tabs_node_id: NodeId },
-    /// `FloatingRequest::Create` with `geometry`.
-    Floating { geometry: FloatGeometry },
+    /// `FloatingRequest::Create` with `geometry`, framed when `border`.
+    Floating {
+        geometry: FloatGeometry,
+        border: bool,
+    },
     /// `NodeRequest::MoveBufferToNode` into `leaf_id`, which keeps its place.
     Replace { leaf_id: NodeId },
 }
@@ -94,8 +97,8 @@ pub fn spawn_pty_size_with(
             add_active_tab(&mut layout, tabs_node_id)?;
             NEW_LEAF
         }
-        PanePlacement::Floating { geometry } => {
-            add_floating(&mut layout, session_id, geometry)?;
+        PanePlacement::Floating { geometry, border } => {
+            add_floating(&mut layout, session_id, geometry, border)?;
             NEW_LEAF
         }
         PanePlacement::Replace { leaf_id } => leaf_id,
@@ -271,6 +274,7 @@ fn add_floating(
     layout: &mut ClientState,
     session_id: SessionId,
     geometry: FloatGeometry,
+    border: bool,
 ) -> Option<()> {
     layout.floating.insert(
         NEW_FLOATING,
@@ -283,6 +287,7 @@ fn add_floating(
             focused: true,
             visible: true,
             close_on_empty: true,
+            border,
         },
     );
     layout

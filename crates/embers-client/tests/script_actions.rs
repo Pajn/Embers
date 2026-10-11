@@ -75,7 +75,7 @@ fn action_helpers_roundtrip_to_typed_actions() {
             fn move_buffer_popup_action(ctx) {
                 action.move_buffer_to_floating(
                     9,
-                    #{ x: 1, y: 2, width: 30, height: 10, close_on_empty: false }
+                    #{ x: 1, y: 2, width: 30, height: 10, close_on_empty: false, border: false }
                 )
             }
             fn detach_buffer_action(ctx) { action.detach_buffer() }
@@ -215,6 +215,7 @@ fn action_helpers_roundtrip_to_typed_actions() {
                 title: Some("popup".to_owned()),
                 focus: true,
                 close_on_empty: true,
+                border: true,
             },
         }]
     );
@@ -234,6 +235,7 @@ fn action_helpers_roundtrip_to_typed_actions() {
             title: None,
             focus: true,
             close_on_empty: false,
+            border: false,
         }]
     );
     assert_eq!(

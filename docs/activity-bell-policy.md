@@ -16,14 +16,18 @@ Any PTY output that advances a buffer snapshot marks that buffer as `Activity`. 
 
 If the terminal backend observes a bell during an output update, the durable `Buffer` record's stored state is set to `Bell` instead of plain `Activity`. `Bell` wins over ordinary activity for that buffer until the state is cleared by focus, which lets client and automation layers distinguish attention-worthy output from normal background chatter.
 
+Like tmux, a bell only flags a window nobody is looking at. When a client is attached to the buffer's session and the buffer's pane is in the session's current window, or in one of its visible popups, the bell is recorded as plain `Activity`. A bell in any other window, or in a session no client is attached to, sets `Bell`. Which window is current is session state on the server, shared by every client attached to the session, so the server decides this when it records the bell, and every client and automation reading the buffer sees the same state.
+
 The runtime keeper only remembers the activity of the latest output it read, and the server learns it by polling, so output right after a bell would otherwise hide the bell from the next poll. The keeper therefore also counts the output chunks that rang the bell, and the server marks the buffer `Bell` whenever that count has advanced since it last looked, whether the poll or a capture brings the news. A bell is recorded once: after focus clears it, the same bell does not come back.
 
 ## Hidden and detached buffers
 
-Hidden tabs, inactive panes, and detached buffers continue to ingest PTY output, update captures, and overwrite their stored activity state as new output arrives. Clients that attach to the buffer recover that state from the server snapshot, and automation can observe bell updates from the normal render-invalidated path.
+Hidden tabs, inactive panes, and detached buffers continue to ingest PTY output, update captures, and overwrite their stored activity state as new output arrives. Clients that attach to the buffer recover that state from the server snapshot, and automation can observe bell updates from the normal render-invalidated path. The client's `buffer_bell` event follows the stored state, so it fires for bells that flag a window and not for bells in a window a client shows.
 
 ## Reset on focus
 
 When a buffer becomes the focused leaf, the server clears its stored status back to `Idle`. This acknowledges the previously hidden background signal without destroying terminal state or capture history.
+
+Focus also acknowledges the bells of every other pane the session now shows, as tmux clears a window's bell flag when the window becomes current: their `Bell` becomes `Activity`.
 
 Reveal without focus does not clear stored status. That reset only applies to the activity/bell state that had accumulated before focus, so if the focused program produces more output afterward, later runtime updates can mark the buffer active again.

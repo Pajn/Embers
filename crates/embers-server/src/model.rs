@@ -450,5 +450,7 @@ pub struct FloatingWindow {
     pub focused: bool,
     pub visible: bool,
     pub close_on_empty: bool,
+    /// Framed with its title; without a frame its content fills the popup.
+    pub border: bool,
     pub last_focused_leaf: Option<NodeId>,
 }

@@ -25,7 +25,7 @@ use crate::presentation::{PaneTitles, StatusLineMode, TabBarPosition};
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
-    RgbColor, ScriptFunctionRef, ThemeSpec, parse_terminal_color,
+    PopupBorderLines, RgbColor, ScriptFunctionRef, ThemeSpec, parse_terminal_color,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -579,6 +579,47 @@ impl ThemeApi {
         }
         Ok(())
     }
+
+    fn set_popup_border_color(
+        &self,
+        position: Position,
+        active: bool,
+        value: &str,
+    ) -> ScriptResult<()> {
+        let color = parse_terminal_color(value).map_err(|_| {
+            runtime_error(
+                format!("popup border color must be '#RRGGBB' or an ANSI color name such as \"magenta\" or \"brightblack\", not \"{value}\""),
+                position,
+            )
+        })?;
+        let registration = clone_active_registration(position)?;
+        let mut registration = registration.lock().expect("registration lock");
+        let borders = &mut registration.theme.popup_borders;
+        if active {
+            borders.active = Some(color);
+        } else {
+            borders.inactive = Some(color);
+        }
+        Ok(())
+    }
+
+    fn set_popup_border_lines(&self, position: Position, value: &str) -> ScriptResult<()> {
+        let Some(lines) = PopupBorderLines::parse(value) else {
+            return Err(runtime_error(
+                format!(
+                    "popup border lines must be \"rounded\", \"single\", \"double\", \"heavy\", \"ascii\" or \"none\", not \"{value}\""
+                ),
+                position,
+            ));
+        };
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .theme
+            .popup_borders
+            .lines = lines;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -1019,8 +1060,9 @@ mod registration_globals {
     /// - `"top"` / `"bottom"`: each pane gives its top or bottom row to its
     ///   title, so its program has one row fewer.
     ///
-    /// Panes in popups keep their title row whatever the setting. The client
-    /// reports whether title rows are shown to the server with the size it
+    /// A framed popup shows its title on its frame, so its panes have no title
+    /// row whatever the setting; panes in a borderless popup follow it. The
+    /// client reports whether title rows are shown to the server with the size it
     /// draws the session at, so panes created with the `embers` CLI start at
     /// the size this client draws them.
     ///
@@ -1266,6 +1308,68 @@ mod theme_registration_api {
         color: &str,
     ) -> RhaiResultOf<()> {
         theme.set_pane_border_color(ctx.call_position(), true, color)
+    }
+
+    /// Draw popup (floating window) frames with `"rounded"` (the default,
+    /// `╭─╮`), `"single"` (`┌─┐`), `"double"` (`╔═╗`), `"heavy"` (`┏━┓`),
+    /// `"ascii"` (`+-+`) or `"none"`, like tmux's `popup-border-lines`. With
+    /// `"none"` the frame cells are left blank and the title stays on the top
+    /// one: the popup's panes keep their size.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_popup_border_lines("single");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_popup_border_lines")]
+    pub fn set_popup_border_lines(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        lines: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_popup_border_lines(ctx.call_position(), lines)
+    }
+
+    /// Color the frames and titles of popups that do not have focus, like
+    /// tmux's `popup-border-style fg=...`. Takes the same colors as
+    /// `set_pane_border_color`. Without it they are drawn dim.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_popup_border_color("brightblack");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_popup_border_color")]
+    pub fn set_popup_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_popup_border_color(ctx.call_position(), false, color)
+    }
+
+    /// Color the frame and title of the focused popup. Takes the same colors
+    /// as `set_pane_border_color`. Without it the frame is drawn bold in the
+    /// terminal's default color.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_popup_active_border_color("magenta");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_popup_active_border_color")]
+    pub fn set_popup_active_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_popup_border_color(ctx.call_position(), true, color)
     }
 }
 
