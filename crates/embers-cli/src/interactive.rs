@@ -116,6 +116,8 @@ async fn run_attached(
                 configured
                     .sync_pty_sizes(active_session_id, viewport)
                     .await?;
+                // Config reloads mark the frame dirty as well.
+                configured.sync_host_graphics().await;
                 let grid = configured
                     .render_session(active_session_id, viewport)
                     .await?;

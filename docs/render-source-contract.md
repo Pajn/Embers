@@ -46,6 +46,8 @@ The interactive client handles every event that has already arrived before it dr
 
 On the event the client refreshes the buffer's visible snapshot and holds the writes. When it next draws a session it turns them into output for right after that frame (`ConfiguredClient::drain_frame_output`, which is separate from the output written before a frame): for a pane in the frame, a cursor move to the pane's cursor in screen coordinates (the leaf's content origin below its title row, plus the cursor, clamped into the pane), then the sequence; for a pane not in the frame, the sequence alone with `allow-passthrough all`, nothing otherwise. Nothing is written when the host terminal does not support passthrough. The output hides the cursor first and resets the pen last, and the interactive client then puts the cursor back where the frame left it.
 
+The client tells the server, with `ClientRequest::SetHostGraphics` (`ConfiguredClient::sync_host_graphics`, sent when it changes), whether it forwards kitty graphics queries to a host that answers them, so keepers can hold a pane's query replies until the host's answer arrives (see [the backend boundary](terminal-backend-boundary.md#replies-behind-graphics-queries)). The host's answer reaches the pane as input through `ConfiguredClient::handle_host_reply`.
+
 What the snapshot model can and cannot promise:
 
 - Writes from one pane reach the host in the order the program sent them: the keeper queues them in order, the server forwards them through one task per buffer, and the client writes each frame's batch in order.

@@ -7,16 +7,16 @@ use std::time::{Duration, Instant};
 
 use embers_client::{
     ClientState, ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport,
-    HostReplies, KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient,
-    PendingAttachQueries, PresentationModel, ScriptedTransport,
+    HostCapabilities, HostReplies, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
+    MouseModifiers, MuxClient, PendingAttachQueries, PresentationModel, ScriptedTransport,
 };
 use embers_core::{
     BufferId, CursorPosition, ErrorCode, PassthroughWrite, RequestId, Size, WireError,
 };
 use embers_protocol::{
-    ClientMessage, ErrorResponse, InputRequest, NodeRequest, OkResponse, PassthroughEvent,
-    ServerEvent, ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
-    SynchronizePanesMode,
+    ClientMessage, ClientRequest, ErrorResponse, InputRequest, NodeRequest, OkResponse,
+    PassthroughEvent, ServerEvent, ServerResponse, SessionRequest, SessionSnapshot,
+    SessionSnapshotResponse, SynchronizePanesMode,
 };
 use tempfile::tempdir;
 
@@ -589,19 +589,22 @@ async fn host_replies_skip_the_command_prompt_and_bindings() {
 }
 
 /// Late replies to [`HOST_QUERIES`], in the order the host sends them.
-const ATTACH_REPLIES: [&[u8]; 4] = [
+const ATTACH_REPLIES: [&[u8]; 5] = [
     // XTVERSION
     b"\x1bP>|kitty(0.35.2)\x1b\\",
     // XTGETTCAP for Smulx and Setulc, found and not found
     b"\x1bP1+r536d756c78=1b5b343a25703125646d\x1b\\",
     b"\x1bP0+r536574756c63\x1b\\",
+    // The kitty graphics query
+    b"\x1b_Gi=1162691154;OK\x1b\\",
     // DA1
     b"\x1b[?62;22c",
 ];
 
 /// The queries [`ATTACH_REPLIES`] answer, as a pane sends them through
 /// passthrough.
-const PANE_QUERIES: &[u8] = b"\x1b[>0q\x1bP+q536d756c78\x1b\\\x1bP+q536574756c63\x1b\\\x1b[c";
+const PANE_QUERIES: &[u8] = b"\x1b[>0q\x1bP+q536d756c78\x1b\\\x1bP+q536574756c63\x1b\\\
+    \x1b_Gi=1162691154,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
 
 /// A client whose attach stopped waiting before the host answered anything.
 fn attach_timed_out(configured: &mut ConfiguredClient<FakeTransport>) {
@@ -735,4 +738,60 @@ async fn an_answered_attach_query_leaves_the_next_identical_reply_to_the_pane() 
             .map(|reply| (LEFT_BUFFER_ID, reply.to_vec()))
             .collect::<Vec<_>>()
     );
+}
+
+/// The `SetHostGraphics` requests sent, in order.
+fn host_graphics_requests(transport: &FakeTransport) -> Vec<bool> {
+    transport
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            ClientMessage::Client(ClientRequest::SetHostGraphics { enabled, .. }) => Some(enabled),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn host_graphics_are_declared_with_passthrough_on_a_graphics_host() {
+    let ok = || {
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(0),
+        })
+    };
+    // Off by default: nothing to tell a server that assumes it.
+    let transport = FakeTransport::default();
+    let (mut default_client, _tempdir) = configured(transport.clone(), demo_state(), "");
+    default_client.sync_host_graphics().await;
+    assert!(host_graphics_requests(&transport).is_empty());
+
+    // Passthrough on, but the host does not answer graphics queries.
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        demo_state(),
+        r#"set_allow_passthrough("on");"#,
+    );
+    configured.set_host_capabilities(HostCapabilities {
+        kitty_graphics: false,
+        ..HostCapabilities::ALL
+    });
+    configured.sync_host_graphics().await;
+    assert!(host_graphics_requests(&transport).is_empty());
+
+    // Then it does; told once, however many frames follow.
+    configured.set_host_capabilities(HostCapabilities::ALL);
+    transport.push_response(ok());
+    configured.sync_host_graphics().await;
+    configured.sync_host_graphics().await;
+    assert_eq!(host_graphics_requests(&transport), vec![true]);
+
+    // A host without passthrough cannot forward the queries at all.
+    configured.set_host_capabilities(HostCapabilities {
+        passthrough: false,
+        ..HostCapabilities::ALL
+    });
+    transport.push_response(ok());
+    configured.sync_host_graphics().await;
+    assert_eq!(host_graphics_requests(&transport), vec![true, false]);
 }

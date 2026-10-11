@@ -13,8 +13,8 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
-    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, PassthroughEvent,
-    ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
+    BufferResponse, ClientMessage, ClientRequest, FloatingRequest, InputRequest, NodeRequest,
+    PassthroughEvent, ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
@@ -144,6 +144,9 @@ pub struct ConfiguredClient<T> {
     reported_viewport: Option<(SessionId, Size)>,
     /// The base index last reported to the server, and for which session.
     reported_base_index: Option<(SessionId, Option<u32>)>,
+    /// What the server was last told about this client forwarding kitty
+    /// graphics queries (see [`ConfiguredClient::sync_host_graphics`]).
+    reported_host_graphics: Option<bool>,
     /// The host terminal's cell size in pixels, when it reports one.
     host_cell_size: Option<CellSize>,
     search_prompt: Option<SearchPrompt>,
@@ -200,6 +203,7 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             reported_base_index: None,
+            reported_host_graphics: None,
             host_cell_size: None,
             search_prompt: None,
             command_prompt: None,
@@ -376,6 +380,33 @@ where
     /// drawn in, so programs that size images by it see the host's.
     pub fn set_host_cell_size(&mut self, cell: Option<CellSize>) {
         self.host_cell_size = cell;
+    }
+
+    /// Tell the server whether this client forwards kitty graphics queries
+    /// from panes to a host terminal that answers them: passthrough is on and
+    /// the host answers graphics queries. While any client does, a pane's
+    /// replies to the queries it sends after a graphics query wait for the
+    /// host's answer, so programs that detect image support that way find it.
+    /// Only sent when it changes; the server assumes not until told.
+    pub async fn sync_host_graphics(&mut self) {
+        let enabled = self.passthrough_mode() != PassthroughMode::Off
+            && self.host_capabilities().kitty_graphics;
+        if self.reported_host_graphics.unwrap_or(false) == enabled {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Client(ClientRequest::SetHostGraphics {
+                request_id: self.client.next_request_id(),
+                enabled,
+            }))
+            .await;
+        // Not retried: a server that predates the request rejects it on
+        // every frame, and only the order of query replies depends on it.
+        if let Err(error) = result {
+            warn!("failed to tell the server about host graphics: {error}");
+        }
+        self.reported_host_graphics = Some(enabled);
     }
 
     /// Which panes may write to the host terminal through passthrough: the
