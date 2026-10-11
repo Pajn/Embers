@@ -100,6 +100,7 @@ async fn run_attached(
     let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
 
     let mut terminal_size = terminal.size()?;
+    let mut cell_size = host_cell_size(io::stdout().as_raw_fd());
     let mut dirty = true;
     loop {
         if dirty {
@@ -120,8 +121,9 @@ async fn run_attached(
             if let Some(active_session_id) = session_id {
                 // Every layout, session or outer-terminal size change marks the
                 // frame dirty, so this keeps each pane's PTY at its drawn size.
-                // A font change resizes the outer terminal too.
-                configured.set_host_cell_size(host_cell_size(io::stdout().as_raw_fd()));
+                // A font change, which changes the cell size, does too.
+                cell_size = host_cell_size(io::stdout().as_raw_fd());
+                configured.set_host_cell_size(cell_size);
                 configured
                     .sync_pty_sizes(active_session_id, viewport)
                     .await?;
@@ -244,8 +246,10 @@ async fn run_attached(
         }
 
         let next_size = terminal.size()?;
-        if next_size != terminal_size {
+        let next_cell_size = host_cell_size(io::stdout().as_raw_fd());
+        if next_size != terminal_size || next_cell_size != cell_size {
             terminal_size = next_size;
+            cell_size = next_cell_size;
             dirty = true;
             continue;
         }
