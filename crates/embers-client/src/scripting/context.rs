@@ -4,7 +4,7 @@ use embers_core::{ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, Re
 use embers_protocol::{BufferRecordState, NodeRecordKind};
 
 use crate::input::NORMAL_MODE;
-use crate::{ClientState, PresentationModel, TabsFrame};
+use crate::{ClientState, PresentationModel, TabPane, TabsFrame};
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Context {
@@ -187,6 +187,7 @@ impl Context {
                         tty_path: None,
                         snapshot_lines,
                         user_options: buffer.user_options.clone(),
+                        foreground_command: buffer.foreground_command.clone(),
                     },
                 )
             })
@@ -352,6 +353,9 @@ pub struct BufferRef {
     pub tty_path: Option<String>,
     pub snapshot_lines: Vec<String>,
     pub user_options: BTreeMap<String, String>,
+    /// Command line of the job in the foreground of the buffer's PTY when that
+    /// is not the buffer's own process; `None` while its own process is.
+    pub foreground_command: Option<Vec<String>>,
 }
 
 impl BufferRef {
@@ -359,15 +363,18 @@ impl BufferRef {
         self.attachment_node_id
     }
 
+    /// Command line of what runs in the foreground of the buffer now: the
+    /// job its shell runs, or the buffer's own command when that is in the
+    /// foreground (a shell at its prompt, or a program started directly).
+    pub fn current_command(&self) -> &[String] {
+        self.foreground_command.as_deref().unwrap_or(&self.command)
+    }
+
+    /// Name of the program in the foreground of the buffer, like tmux's
+    /// `pane_current_command`: the file name of the first word of
+    /// [`Self::current_command`], without the dash a login shell starts with.
     pub fn process_name(&self) -> Option<String> {
-        let command = self.command.first()?;
-        Some(
-            std::path::Path::new(command)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(command)
-                .to_owned(),
-        )
+        embers_protocol::program_name(self.current_command())
     }
 
     pub fn env_hint(&self, key: &str) -> Option<String> {
@@ -468,6 +475,7 @@ impl TabBarContext {
                     has_bell: matches!(tab.activity, ActivityState::Bell),
                     buffer_count: tab.buffer_count,
                     synchronize_panes: tab.synchronize_panes,
+                    pane: tab.pane.clone(),
                 })
                 .collect(),
         }
@@ -496,6 +504,9 @@ pub struct TabInfo {
     pub has_bell: bool,
     pub buffer_count: usize,
     pub synchronize_panes: bool,
+    /// The pane the tab shows, for window labels like tmux's
+    /// `#{pane_current_command}` in `window-status-format`.
+    pub pane: Option<TabPane>,
 }
 
 fn geometry_by_node(presentation: &PresentationModel) -> BTreeMap<NodeId, Rect> {

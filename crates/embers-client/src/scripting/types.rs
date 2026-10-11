@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use rhai::AST;
 use thiserror::Error;
 
+use crate::command_prompt::StatusKeys;
+use crate::grid::TerminalColor;
+use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
+use crate::presentation::TabBarPosition;
 
 use super::model::Action;
 
@@ -57,6 +61,47 @@ impl RgbColor {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeSpec {
     pub palette: BTreeMap<String, RgbColor>,
+    /// Colors of the dividers between panes.
+    pub pane_borders: PaneBorderColors,
+}
+
+/// Colors of the dividers between panes, like tmux's `pane-border-style` and
+/// `pane-active-border-style`. A divider cell next to the focused pane takes
+/// `active`, every other one `inactive`; an unset color leaves the cells dim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneBorderColors {
+    pub active: Option<TerminalColor>,
+    pub inactive: Option<TerminalColor>,
+}
+
+/// The sixteen ANSI color names, as tmux spells them, with their palette
+/// indexes. They follow the host terminal's color scheme.
+const ANSI_COLOR_NAMES: [&str; 16] = [
+    "black",
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "cyan",
+    "white",
+    "brightblack",
+    "brightred",
+    "brightgreen",
+    "brightyellow",
+    "brightblue",
+    "brightmagenta",
+    "brightcyan",
+    "brightwhite",
+];
+
+/// Parse a color given as `#RRGGBB` or as one of the sixteen ANSI color
+/// names (`magenta`, `brightblack`, ...).
+pub fn parse_terminal_color(value: &str) -> Result<TerminalColor, PaletteError> {
+    if let Some(index) = ANSI_COLOR_NAMES.iter().position(|name| *name == value) {
+        return Ok(TerminalColor::Indexed(index as u8));
+    }
+    RgbColor::parse(value).map(|color| TerminalColor::Rgb(color.into()))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -104,6 +149,34 @@ pub struct ModeHooks {
     pub on_leave: Option<ScriptFunctionRef>,
 }
 
+/// Where the client goes when the session it shows is destroyed, because its
+/// last pane closed or it was killed (`set_detach_on_destroy`), like tmux's
+/// `detach-on-destroy`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DetachOnDestroy {
+    /// Detach: the interactive client exits.
+    #[default]
+    On,
+    /// Switch to the session the client showed before, else the first one.
+    Off,
+    /// Switch to the session listed before the destroyed one, wrapping around.
+    Previous,
+    /// Switch to the session listed after the destroyed one, wrapping around.
+    Next,
+}
+
+impl DetachOnDestroy {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            "previous" => Some(Self::Previous),
+            "next" => Some(Self::Next),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MouseSettings {
     pub click_focus: bool,
@@ -134,6 +207,32 @@ pub struct HintsSettings {
     pub patterns: Vec<String>,
 }
 
+/// Which panes may write to the host terminal through tmux passthrough
+/// (`set_allow_passthrough`), like tmux's `allow-passthrough`. Off by default,
+/// as in tmux: passthrough lets any program on screen write raw sequences to
+/// the host terminal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PassthroughMode {
+    /// Drop passthrough sequences.
+    #[default]
+    Off,
+    /// Forward them from panes that are on screen.
+    On,
+    /// Forward them from every pane in the client's session, on screen or not.
+    All,
+}
+
+impl PassthroughMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LoadedConfig {
     pub source_path: Option<PathBuf>,
@@ -146,6 +245,8 @@ pub struct LoadedConfig {
     pub named_actions: BTreeMap<String, ScriptFunctionRef>,
     pub event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     pub tab_bar_formatter: Option<ScriptFunctionRef>,
+    /// Where the root tab bar is drawn (`tabbar.set_position`).
+    pub tab_bar_position: TabBarPosition,
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
@@ -154,6 +255,16 @@ pub struct LoadedConfig {
     pub clipboard: bool,
     /// Number of the first window (`set_base_index`), if the config set one.
     pub base_index: Option<u32>,
+    /// Which panes may write to the host terminal through tmux passthrough
+    /// (`set_allow_passthrough`). `Off` by default.
+    pub passthrough: PassthroughMode,
+    /// Host terminal capabilities forced on or off (`set_terminal_features`).
+    pub terminal_features: TerminalFeatures,
+    /// Where the client goes when its session is destroyed
+    /// (`set_detach_on_destroy`).
+    pub detach_on_destroy: DetachOnDestroy,
+    /// The keys prompts are edited with (`set_status_keys`).
+    pub status_keys: StatusKeys,
 }
 
 impl LoadedConfig {
@@ -186,11 +297,15 @@ impl fmt::Debug for LoadedConfig {
             .field("named_actions", &self.named_actions)
             .field("event_handlers", &self.event_handlers)
             .field("tab_bar_formatter", &self.tab_bar_formatter)
+            .field("tab_bar_position", &self.tab_bar_position)
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
             .field("clipboard", &self.clipboard)
             .field("base_index", &self.base_index)
+            .field("passthrough", &self.passthrough)
+            .field("terminal_features", &self.terminal_features)
+            .field("status_keys", &self.status_keys)
             .finish()
     }
 }

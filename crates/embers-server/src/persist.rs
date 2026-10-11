@@ -52,6 +52,10 @@ pub struct PersistedSession {
     /// after a restart, before a client attaches, still start at that size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Size>,
+    /// The base index of the client that last showed the session, so the
+    /// CLI numbers windows the same way after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_index: Option<u32>,
     pub created_at_ms: u64,
 }
 
@@ -62,6 +66,10 @@ pub struct PersistedBuffer {
     pub command: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    /// Options set on the buffer (`embers buffer set-option`), such as
+    /// `remain-on-exit`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_options: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_command: Option<Vec<String>>,
     #[serde(default)]
@@ -69,11 +77,44 @@ pub struct PersistedBuffer {
     pub state: PersistedBufferState,
     pub attachment: PersistedBufferAttachment,
     pub pty_size: PtySize,
+    /// Saved, but a change to it alone does not call for a save (see
+    /// [`same_saved_state`]). Output sequence numbers are not saved (see
+    /// `last_snapshot_seq`): they only mean something to the keeper that
+    /// produced them, and are taken from the keeper again when one is attached.
     pub activity: PersistedActivityState,
-    pub last_snapshot_seq: u64,
+    /// Only there for servers from before sequence numbers stopped being
+    /// saved, which require the field: see [`LegacySnapshotSeq`].
+    #[serde(default)]
+    pub last_snapshot_seq: LegacySnapshotSeq,
     #[serde(default)]
     pub kind: PersistedBufferKind,
     pub created_at_ms: u64,
+}
+
+/// The `last_snapshot_seq` buffer field of format version 2, which earlier
+/// servers require to load a workspace. It is always written as `0` and
+/// ignored on load. `0` is what an earlier server gives a new buffer: it takes
+/// any output from the keeper as new, and replaces the number with the
+/// keeper's own once it attaches, so it never mistakes output for stale. Being
+/// constant, it never makes a workspace differ from the one last saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LegacySnapshotSeq;
+
+impl Serialize for LegacySnapshotSeq {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_u64(0)
+    }
+}
+
+impl<'de> Deserialize<'de> for LegacySnapshotSeq {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer).map(|_| Self)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -204,9 +245,47 @@ pub fn save_workspace(path: &Path, state: &ServerState) -> Result<()> {
 }
 
 /// Serialize `state` into the bytes [`write_workspace`] stores.
+#[cfg(test)]
 pub fn encode_workspace(state: &ServerState) -> Result<Vec<u8>> {
-    serde_json::to_vec_pretty(&state.to_persisted())
-        .map_err(|error| MuxError::internal(error.to_string()))
+    encode_persisted_workspace(&state.to_persisted())
+}
+
+/// Serialize `workspace` into the bytes [`write_workspace`] stores.
+pub fn encode_persisted_workspace(workspace: &PersistedWorkspace) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(workspace).map_err(|error| MuxError::internal(error.to_string()))
+}
+
+/// Whether `a` and `b` save the same workspace apart from buffer activity,
+/// which changes with every bit of output and is not worth a write of its
+/// own; it is saved along with the next change that is.
+pub fn same_saved_state(a: &PersistedWorkspace, b: &PersistedWorkspace) -> bool {
+    // Destructured so a new field cannot be left out of the comparison.
+    let PersistedWorkspace {
+        format_version,
+        sessions,
+        buffers,
+        nodes,
+        floating,
+        next_session_id,
+        next_buffer_id,
+        next_node_id,
+        next_floating_id,
+    } = a;
+    *format_version == b.format_version
+        && *sessions == b.sessions
+        && *nodes == b.nodes
+        && *floating == b.floating
+        && *next_session_id == b.next_session_id
+        && *next_buffer_id == b.next_buffer_id
+        && *next_node_id == b.next_node_id
+        && *next_floating_id == b.next_floating_id
+        && buffers.len() == b.buffers.len()
+        && buffers.iter().zip(&b.buffers).all(|(a, b)| {
+            PersistedBuffer {
+                activity: b.activity,
+                ..a.clone()
+            } == *b
+        })
 }
 
 /// Atomically replace the workspace file at `path` with `bytes`: write a temp
@@ -350,6 +429,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         focused_floating: session.focused_floating.map(|id| id.0),
         zoomed_node: session.zoomed_node.map(|id| id.0),
         viewport: session.viewport,
+        base_index: session.base_index,
         created_at_ms: timestamp_to_millis(session.created_at),
     }
 }
@@ -364,6 +444,8 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
         viewport: session.viewport,
+        base_index: session.base_index,
+        focus_history: Vec::new(),
         created_at: timestamp_from_millis(session.created_at_ms)?,
     })
 }
@@ -375,13 +457,14 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         command: buffer.command.clone(),
         cwd: buffer.cwd.clone(),
         env: buffer.env.clone(),
+        user_options: buffer.user_options.clone(),
         foreground_command: buffer.foreground_command.clone(),
         runtime_socket_path: buffer.runtime_socket_path().cloned(),
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
         pty_size: buffer.pty_size,
         activity: persisted_activity(buffer.activity),
-        last_snapshot_seq: buffer.last_snapshot_seq,
+        last_snapshot_seq: LegacySnapshotSeq,
         kind: persisted_buffer_kind(&buffer.kind),
         created_at_ms: timestamp_to_millis(buffer.created_at),
     }
@@ -395,15 +478,18 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
         buffer.cwd,
         buffer.env,
     );
+    restored.user_options = buffer.user_options;
     restored.foreground_command = buffer.foreground_command;
     restored.set_runtime_socket_path(buffer.runtime_socket_path);
     restored.state = restored_buffer_state(buffer.state)?;
     restored.attachment = restored_buffer_attachment(buffer.attachment);
     restored.pty_size = buffer.pty_size;
     restored.activity = restored_activity(buffer.activity);
-    restored.last_snapshot_seq = buffer.last_snapshot_seq;
     restored.kind = restored_buffer_kind(buffer.kind);
     restored.created_at = timestamp_from_millis(buffer.created_at_ms)?;
+    // Created by an earlier server: whatever request created it is long
+    // done, so an exited restored buffer is cleaned up even if never shown.
+    restored.ever_attached = true;
     Ok(restored)
 }
 
@@ -694,6 +780,80 @@ mod tests {
     }
 
     #[test]
+    fn only_changes_worth_saving_count_as_changes() {
+        let mut state = ServerState::new();
+        let _ = state.create_session("main");
+        let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+        let saved = state.to_persisted();
+
+        // Output: a new sequence number and activity.
+        let buffer = state.buffers.get_mut(&buffer_id).expect("buffer");
+        buffer.last_snapshot_seq += 100;
+        buffer.activity = ActivityState::Bell;
+        assert!(same_saved_state(&saved, &state.to_persisted()));
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&encode_workspace(&state).expect("encodes")).unwrap();
+        assert_eq!(
+            encoded["buffers"][0]["last_snapshot_seq"],
+            serde_json::json!(0),
+            "output sequence numbers are not saved, only a constant for older servers"
+        );
+
+        // A title is what a restore brings back.
+        state.buffers.get_mut(&buffer_id).expect("buffer").title = "vim".to_owned();
+        assert!(!same_saved_state(&saved, &state.to_persisted()));
+    }
+
+    /// A workspace this server writes still loads in a server from before
+    /// output sequence numbers stopped being saved: that one requires
+    /// `last_snapshot_seq` on every buffer and ignores fields it does not know.
+    #[test]
+    fn saved_workspace_loads_with_the_earlier_buffer_shape() {
+        #[allow(dead_code)]
+        #[derive(Deserialize)]
+        struct EarlierBuffer {
+            id: u64,
+            title: String,
+            command: Vec<String>,
+            cwd: Option<PathBuf>,
+            env: BTreeMap<String, String>,
+            #[serde(default)]
+            foreground_command: Option<Vec<String>>,
+            #[serde(default)]
+            runtime_socket_path: Option<PathBuf>,
+            state: PersistedBufferState,
+            attachment: PersistedBufferAttachment,
+            pty_size: PtySize,
+            activity: PersistedActivityState,
+            last_snapshot_seq: u64,
+            #[serde(default)]
+            kind: PersistedBufferKind,
+            created_at_ms: u64,
+        }
+        #[derive(Deserialize)]
+        struct EarlierWorkspace {
+            format_version: Option<u32>,
+            buffers: Vec<EarlierBuffer>,
+        }
+
+        let mut state = ServerState::new();
+        let _ = state.create_session("main");
+        let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+        let buffer = state.buffers.get_mut(&buffer_id).expect("buffer");
+        buffer.last_snapshot_seq = 42;
+        buffer
+            .user_options
+            .insert("remain-on-exit".to_owned(), "on".to_owned());
+
+        let earlier: EarlierWorkspace =
+            serde_json::from_slice(&encode_workspace(&state).expect("encodes"))
+                .expect("an earlier server reads the workspace");
+        assert_eq!(earlier.format_version, Some(CURRENT_FORMAT_VERSION));
+        assert_eq!(earlier.buffers.len(), 1);
+        assert_eq!(earlier.buffers[0].last_snapshot_seq, 0);
+    }
+
+    #[test]
     fn session_viewport_round_trips_through_persistence() {
         let tempdir = tempdir().expect("tempdir");
         let workspace_path = tempdir.path().join("workspace.json");
@@ -706,6 +866,9 @@ mod tests {
         state
             .set_session_viewport(session_id, viewport)
             .expect("viewport is set");
+        state
+            .set_session_base_index(session_id, Some(1))
+            .expect("base index is set");
 
         save_workspace(&workspace_path, &state).expect("workspace saves");
         let restored = load_workspace(&workspace_path)
@@ -715,6 +878,10 @@ mod tests {
         assert_eq!(
             restored.session(session_id).expect("session").viewport,
             Some(viewport)
+        );
+        assert_eq!(
+            restored.session(session_id).expect("session").base_index,
+            Some(1)
         );
     }
 
@@ -895,6 +1062,7 @@ mod tests {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: None,
+                base_index: None,
                 created_at_ms: 1234,
             }],
             buffers: Vec::new(),

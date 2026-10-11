@@ -152,6 +152,8 @@ where
         self.resync_for_event(event).await
     }
 
+    /// Fetch a session's snapshot. A session the server no longer has, such
+    /// as one destroyed when its last pane closed, is dropped from the state.
     pub async fn resync_session(&mut self, session_id: SessionId) -> Result<()> {
         let response = self
             .transport
@@ -161,17 +163,48 @@ where
             }))
             .await?;
 
-        match expect_response(response)? {
-            ServerResponse::SessionSnapshot(response) => {
-                self.state.apply_session_snapshot(response.snapshot);
+        match expect_response(response) {
+            Err(error) if error.is_not_found() => {
+                self.state.remove_session(session_id);
                 Ok(())
             }
-            other => Err(MuxError::protocol(format!(
-                "expected session snapshot response, got {other:?}"
-            ))),
+            response => match response? {
+                ServerResponse::SessionSnapshot(response) => {
+                    self.state.apply_session_snapshot(response.snapshot);
+                    Ok(())
+                }
+                other => Err(MuxError::protocol(format!(
+                    "expected session snapshot response, got {other:?}"
+                ))),
+            },
         }
     }
 
+    /// Forget a buffer the server no longer has. The sessions whose views
+    /// still show it are fetched again first, so no view is left pointing at
+    /// a buffer the client does not know; a session that is gone as well
+    /// is dropped.
+    async fn forget_buffer(&mut self, buffer_id: BufferId) -> Result<()> {
+        let showing = self
+            .state
+            .nodes
+            .values()
+            .filter(|node| {
+                node.buffer_view
+                    .as_ref()
+                    .is_some_and(|view| view.buffer_id == buffer_id)
+            })
+            .map(|node| node.session_id)
+            .collect::<BTreeSet<_>>();
+        for session_id in showing {
+            self.resync_session(session_id).await?;
+        }
+        self.state.remove_buffer(buffer_id);
+        Ok(())
+    }
+
+    /// Fetch a buffer's visible snapshot. A buffer the server no longer has,
+    /// such as one whose command exited, is dropped from the state.
     pub async fn refresh_buffer_snapshot(&mut self, buffer_id: BufferId) -> Result<()> {
         let response = self
             .transport
@@ -181,17 +214,22 @@ where
             }))
             .await?;
 
-        match expect_response(response)? {
-            ServerResponse::VisibleSnapshot(snapshot) => {
-                self.state.apply_buffer_snapshot(snapshot);
-                Ok(())
-            }
-            other => Err(MuxError::protocol(format!(
-                "expected visible snapshot response, got {other:?}"
-            ))),
+        match expect_response(response) {
+            Err(error) if error.is_not_found() => self.forget_buffer(buffer_id).await,
+            response => match response? {
+                ServerResponse::VisibleSnapshot(snapshot) => {
+                    self.state.apply_buffer_snapshot(snapshot);
+                    Ok(())
+                }
+                other => Err(MuxError::protocol(format!(
+                    "expected visible snapshot response, got {other:?}"
+                ))),
+            },
         }
     }
 
+    /// Fetch a buffer's record. A buffer the server no longer has, such as
+    /// one whose command exited, is dropped from the state.
     pub async fn refresh_buffer_record(&mut self, buffer_id: BufferId) -> Result<()> {
         let response = self
             .transport
@@ -201,14 +239,17 @@ where
             }))
             .await?;
 
-        match expect_response(response)? {
-            ServerResponse::Buffer(response) => {
-                self.state.apply_buffer_record(response.buffer);
-                Ok(())
-            }
-            other => Err(MuxError::protocol(format!(
-                "expected buffer response, got {other:?}"
-            ))),
+        match expect_response(response) {
+            Err(error) if error.is_not_found() => self.forget_buffer(buffer_id).await,
+            response => match response? {
+                ServerResponse::Buffer(response) => {
+                    self.state.apply_buffer_record(response.buffer);
+                    Ok(())
+                }
+                other => Err(MuxError::protocol(format!(
+                    "expected buffer response, got {other:?}"
+                ))),
+            },
         }
     }
 
@@ -332,7 +373,11 @@ where
             ServerEvent::RenderInvalidated(event) => {
                 self.refresh_buffer_record(event.buffer_id).await
             }
-            ServerEvent::BufferPipeChanged(_) | ServerEvent::Clipboard(_) => Ok(()),
+            ServerEvent::BufferPipeChanged(_)
+            | ServerEvent::Clipboard(_)
+            | ServerEvent::DisplayMessage(_)
+            | ServerEvent::Passthrough(_)
+            | ServerEvent::ServerShutdown => Ok(()),
             ServerEvent::BufferCreated(_)
             | ServerEvent::BufferDetached(_)
             | ServerEvent::FocusChanged(_) => Ok(()),

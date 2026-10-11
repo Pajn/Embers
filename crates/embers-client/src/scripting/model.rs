@@ -6,6 +6,7 @@ use embers_protocol::{
     SynchronizePanesMode,
 };
 
+use crate::chooser::ChooserScope;
 use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
@@ -26,6 +27,9 @@ pub enum Action {
     FocusDirection {
         direction: NavigationDirection,
     },
+    /// tmux `select-pane -l`: focus the pane focused before the current one
+    /// in the current window.
+    LastPane,
     SelectTab {
         tabs_node_id: Option<NodeId>,
         index: usize,
@@ -70,6 +74,11 @@ pub enum Action {
         title: Option<String>,
         child: TreeSpec,
     },
+    /// Add a window (a root tab) to the current session, after the last one.
+    NewWindow {
+        title: Option<String>,
+        child: TreeSpec,
+    },
     OpenFloating {
         spec: FloatingSpec,
     },
@@ -77,6 +86,14 @@ pub enum Action {
         floating_id: Option<FloatingId>,
     },
     CloseView {
+        node_id: Option<NodeId>,
+    },
+    /// Close a floating window and end the programs of the buffers it shows.
+    KillFloating {
+        floating_id: Option<FloatingId>,
+    },
+    /// Close a view and end the programs of the buffers it shows.
+    KillView {
         node_id: Option<NodeId>,
     },
     KillBuffer {
@@ -202,6 +219,36 @@ pub enum Action {
     },
     EnterHints {
         action: Option<String>,
+    },
+    /// tmux `command-prompt`: open the prompt labelled `prompt` (`:` when
+    /// `None`) with `initial` text, both expanded as formats. On Enter the
+    /// input runs as a command line, or `template` does with `%%` replaced by
+    /// the quoted input.
+    CommandPrompt {
+        prompt: Option<String>,
+        initial: String,
+        template: Option<String>,
+    },
+    /// tmux `confirm-before`: show `prompt` (expanded as a format) in the
+    /// status line and run `actions` if the next key is `y`.
+    Confirm {
+        prompt: String,
+        actions: Vec<Action>,
+    },
+    /// tmux `choose-tree`: open the session/window/pane picker.
+    ChooseTree {
+        scope: ChooserScope,
+    },
+    /// Run a command line as if typed at the command prompt.
+    RunCommand {
+        command: String,
+    },
+    /// tmux `display-message`: expand `message` as a format for the focused
+    /// pane and show it in the status line for `duration_ms` (the default
+    /// display time when `None`).
+    DisplayMessage {
+        message: String,
+        duration_ms: Option<u32>,
     },
 }
 

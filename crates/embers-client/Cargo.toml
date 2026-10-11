@@ -21,6 +21,7 @@ regex.workspace = true
 # `definitions_with_scope` used by scripting/documentation.rs is gated behind `internals`.
 rhai = { workspace = true, features = ["internals", "metadata"] }
 rhai-autodocs.workspace = true
+shell-words.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

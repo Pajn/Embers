@@ -1,6 +1,10 @@
 mod automation;
+mod chooser;
+mod command_prompt;
+mod display_message;
 mod environment;
 mod interactive;
+mod kill;
 mod layout_controls;
 mod panes;
 mod persistence;

@@ -23,6 +23,7 @@ pub fn session_record(session: &Session) -> SessionRecord {
         focused_floating_id: session.focused_floating,
         zoomed_node_id: session.zoomed_node,
         viewport: session.viewport,
+        base_index: session.base_index,
     }
 }
 
@@ -107,6 +108,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         exit_code,
         env: buffer.env.clone(),
         user_options: buffer.user_options.clone(),
+        foreground_command: buffer.foreground_command.clone(),
     }
 }
 

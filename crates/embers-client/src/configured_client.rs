@@ -1,40 +1,45 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tracing::warn;
+use tracing::{debug, warn};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, FloatGeometry, MuxError, NodeId, Point, PtySize,
-    Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
+    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
-    BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
-    ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent, ServerResponse,
-    SessionRequest,
+    BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
+    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, PassthroughEvent,
+    ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
+use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area, window_position};
 use crate::client::MuxClient;
+use crate::command_prompt::{
+    CommandContext, CommandPrompt, CommandRunner, StatusKeys, record_history,
+};
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
+use crate::host_terminal::{HostCapabilities, PendingAttachQueries};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
-    SEARCH_MODE, SELECT_MODE, resolve_key,
+    PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
-    Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
+    Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
+    FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size};
 use crate::split_resize::SplitResize;
@@ -44,10 +49,32 @@ use crate::state::{
 use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
+/// How long `display-message` text stays in the status line unless the
+/// request gives its own time.
+pub const DEFAULT_DISPLAY_TIME: Duration = Duration::from_secs(3);
 const MAX_EXPANDED_ACTIONS: usize = 256;
 /// Most events `process_ready_events_timeout` handles before the caller gets
 /// to draw, so a flood of output cannot hold off input and frames for long.
 const MAX_EVENT_BATCH: usize = 256;
+/// Most passthrough bytes held for the next frame. Frames follow events
+/// promptly, so this only bounds a client that has stopped drawing.
+const MAX_PENDING_PASSTHROUGH_BYTES: usize = 32 * 1024 * 1024;
+
+/// Where on the host screen a passthrough write from `leaf` goes: the pane's
+/// `cursor`, clamped into the pane's content, which starts below its title row.
+/// `None` when the pane shows no content or that cell is off screen.
+fn passthrough_cursor(
+    leaf: &LeafFrame,
+    cursor: CursorPosition,
+    viewport: Size,
+) -> Option<(u16, u16)> {
+    let pty = leaf.pty_size()?;
+    let x = i64::from(leaf.rect.origin.x) + i64::from(cursor.col.min(pty.cols - 1));
+    let y = i64::from(leaf.rect.origin.y) + 1 + i64::from(cursor.row.min(pty.rows - 1));
+    let x = u16::try_from(x).ok().filter(|x| *x < viewport.width)?;
+    let y = u16::try_from(y).ok().filter(|y| *y < viewport.height)?;
+    Some((x, y))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
@@ -57,6 +84,23 @@ struct SearchPrompt {
     backward: bool,
     /// Mode to return to once the prompt is committed or cancelled.
     return_mode: String,
+}
+
+/// A `confirm-before` question waiting for its answer.
+struct PendingConfirm {
+    /// The question, as shown in the status line.
+    prompt: String,
+    /// What runs if the answer is `y`.
+    actions: Vec<Action>,
+    /// Mode to return to once answered.
+    return_mode: String,
+}
+
+/// A `display-message` shown in the status line until `until`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StatusMessage {
+    text: String,
+    until: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,7 +134,6 @@ pub struct ConfiguredClient<T> {
     client: MuxClient<T>,
     config: ConfigManager,
     input_state: InputState,
-    renderer: Renderer,
     notifications: Vec<String>,
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
@@ -99,17 +142,44 @@ pub struct ConfiguredClient<T> {
     /// The viewport last reported to the server, so it is only sent again
     /// when it changes.
     reported_viewport: Option<(SessionId, Size)>,
+    /// The base index last reported to the server, and for which session.
+    reported_base_index: Option<(SessionId, Option<u32>)>,
     search_prompt: Option<SearchPrompt>,
+    command_prompt: Option<CommandPrompt>,
+    /// An open `confirm-before` question, shown in the status line.
+    confirm: Option<PendingConfirm>,
+    /// Command lines run from the prompt, oldest first.
+    prompt_history: VecDeque<String>,
+    command_runner: Option<Arc<dyn CommandRunner>>,
+    chooser: Option<Chooser>,
+    status_message: Option<StatusMessage>,
     hints_node: Option<NodeId>,
     copy: CopyModeState,
     /// The divider being dragged with the mouse, from the press on it until
     /// the button is released.
     divider_drag: Option<DividerDrag>,
     terminal_output: VecDeque<Vec<u8>>,
+    /// Passthrough writes from panes, oldest first, waiting for the next frame.
+    pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
+    pending_passthrough_bytes: usize,
+    /// The buffer whose passthrough write last reached the host terminal: the
+    /// pane a host reply to a query sent through passthrough is meant for.
+    last_passthrough_buffer: Option<BufferId>,
+    /// The client's attach queries whose late replies are still expected.
+    pending_attach_queries: PendingAttachQueries,
+    /// Host terminal output that must follow the frame `render_session` last
+    /// returned (see [`ConfiguredClient::drain_frame_output`]).
+    frame_output: Vec<u8>,
+    /// What the host terminal was detected to support, before config
+    /// overrides.
+    detected_host: HostCapabilities,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
     /// child), drained into `notifications` on the next input/event tick.
     background_notifications: Arc<Mutex<Vec<String>>>,
+    /// Set once the session this client showed was destroyed and
+    /// `detach-on-destroy` left it nowhere to go (see [`Self::should_exit`]).
+    exit_requested: bool,
 }
 
 impl<T> ConfiguredClient<T>
@@ -121,27 +191,75 @@ where
             client,
             config,
             input_state: InputState::default(),
-            renderer: Renderer,
             notifications: Vec::new(),
             active_session_id: None,
             previous_session_id: None,
             viewport: None,
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
+            reported_base_index: None,
             search_prompt: None,
+            command_prompt: None,
+            confirm: None,
+            prompt_history: VecDeque::new(),
+            command_runner: None,
+            chooser: None,
+            status_message: None,
             hints_node: None,
             copy: CopyModeState::default(),
             divider_drag: None,
             terminal_output: VecDeque::new(),
+            pending_passthrough: Vec::new(),
+            pending_passthrough_bytes: 0,
+            last_passthrough_buffer: None,
+            pending_attach_queries: PendingAttachQueries::default(),
+            frame_output: Vec::new(),
+            detected_host: HostCapabilities::default(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
+            exit_requested: false,
         }
+    }
+
+    /// Whether the interactive client should exit: the session it showed was
+    /// destroyed and, per the `detach-on-destroy` setting, it detaches rather
+    /// than moving to another session, or no other session is left.
+    pub fn should_exit(&self) -> bool {
+        self.exit_requested
     }
 
     /// Record the socket this client is attached to, so `run_shell` children can
     /// drive Embers via `$EMBERS_SOCKET` and the `embers` CLI (tmux `run-shell`).
     pub fn set_socket_path(&mut self, socket_path: PathBuf) {
         self.socket_path = Some(socket_path);
+    }
+
+    /// Install what runs command lines from the command prompt and
+    /// `action.run_command`. Without one, those report that commands are
+    /// unavailable.
+    pub fn set_command_runner(&mut self, runner: Arc<dyn CommandRunner>) {
+        self.command_runner = Some(runner);
+    }
+
+    /// The open session/window/pane picker, if any.
+    pub fn chooser(&self) -> Option<&Chooser> {
+        self.chooser.as_ref()
+    }
+
+    /// The open command prompt, if any.
+    pub fn command_prompt(&self) -> Option<&CommandPrompt> {
+        self.command_prompt.as_ref()
+    }
+
+    /// Where the terminal cursor belongs in the status line, as a display
+    /// column, while the command prompt is open.
+    pub fn status_cursor(&self) -> Option<u16> {
+        let column = match (&self.command_prompt, &self.confirm) {
+            (Some(prompt), _) => prompt.cursor_column(),
+            (None, Some(confirm)) => UnicodeWidthStr::width(confirm.prompt.as_str()),
+            (None, None) => return None,
+        };
+        Some(u16::try_from(column).unwrap_or(u16::MAX))
     }
 
     pub fn client(&self) -> &MuxClient<T> {
@@ -187,8 +305,137 @@ where
         self.previous_session_id
     }
 
+    /// Show `text` in the status line for `duration` (tmux `display-message`).
+    /// Control characters are replaced, so the text cannot reach the host
+    /// terminal as escape sequences.
+    pub fn show_message(&mut self, text: &str, duration: Duration) {
+        self.status_message = Some(StatusMessage {
+            text: crate::grid::replace_controls(text).into_owned(),
+            until: Instant::now() + duration,
+        });
+    }
+
+    /// The `display-message` text in the status line, if it has not expired.
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message
+            .as_ref()
+            .filter(|message| message.until > Instant::now())
+            .map(|message| message.text.as_str())
+    }
+
+    /// Drop a `display-message` whose time is up. Returns `true` when one was
+    /// dropped, so the caller redraws the status line.
+    pub fn expire_status_message(&mut self) -> bool {
+        if self
+            .status_message
+            .as_ref()
+            .is_some_and(|message| message.until <= Instant::now())
+        {
+            self.status_message = None;
+            return true;
+        }
+        false
+    }
+
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
         self.terminal_output.drain(..).collect()
+    }
+
+    /// Host terminal output to write right after the frame `render_session`
+    /// returned, unlike [`ConfiguredClient::drain_terminal_output`], which goes
+    /// before it: passthrough sequences from programs in panes. Each one from a
+    /// pane on screen starts by moving the cursor to that pane's cursor, so the
+    /// caller puts its own cursor back afterwards. Empty when there is nothing
+    /// to write.
+    pub fn drain_frame_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.frame_output)
+    }
+
+    /// Record what detection found the host terminal supports. Until this is
+    /// called the client assumes it supports everything.
+    pub fn set_host_capabilities(&mut self, detected: HostCapabilities) {
+        self.detected_host = detected;
+    }
+
+    /// What the host terminal supports: what detection found, with the
+    /// config's `set_terminal_features` overrides applied.
+    pub fn host_capabilities(&self) -> HostCapabilities {
+        self.detected_host.with_overrides(
+            self.config
+                .active_script()
+                .loaded_config()
+                .terminal_features,
+        )
+    }
+
+    /// Which panes may write to the host terminal through passthrough: the
+    /// config's choice, or none when the host does not support passthrough.
+    fn passthrough_mode(&self) -> PassthroughMode {
+        if !self.host_capabilities().passthrough {
+            return PassthroughMode::Off;
+        }
+        self.config.active_script().loaded_config().passthrough
+    }
+
+    /// Hold passthrough writes from `buffer_id` for the next frame. The pane is
+    /// refreshed first, so that frame shows everything the program printed
+    /// before them.
+    async fn queue_passthrough(&mut self, event: &PassthroughEvent) {
+        if self.passthrough_mode() == PassthroughMode::Off || self.active_session_id.is_none() {
+            return;
+        }
+        let buffer_id = event.buffer_id;
+        if let Err(error) = self.client.refresh_buffer_snapshot(buffer_id).await {
+            warn!(%error, %buffer_id, "refreshing a pane for passthrough failed");
+        }
+        for write in &event.writes {
+            if self.pending_passthrough_bytes + write.bytes.len() > MAX_PENDING_PASSTHROUGH_BYTES {
+                warn!(%buffer_id, "too much passthrough waiting for a frame; dropping");
+                continue;
+            }
+            self.pending_passthrough_bytes += write.bytes.len();
+            self.pending_passthrough.push((buffer_id, write.clone()));
+        }
+    }
+
+    /// Turn the held passthrough writes into output for the frame drawn from
+    /// `presentation`. A write from a pane on screen goes to that pane's
+    /// cursor (tmux `allow-passthrough on`); one from a pane that is not is
+    /// written where the cursor is with `all`, and dropped otherwise.
+    fn flush_passthrough(&mut self, presentation: &PresentationModel) {
+        if self.pending_passthrough.is_empty() {
+            return;
+        }
+        let mode = self.passthrough_mode();
+        let pending = std::mem::take(&mut self.pending_passthrough);
+        self.pending_passthrough_bytes = 0;
+        let mut output = Vec::new();
+        for (buffer_id, write) in pending {
+            let cursor = presentation
+                .leaves
+                .iter()
+                .find(|leaf| leaf.buffer_id == buffer_id)
+                .and_then(|leaf| passthrough_cursor(leaf, write.cursor, presentation.viewport));
+            match (mode, cursor) {
+                (PassthroughMode::On | PassthroughMode::All, Some((x, y))) => {
+                    output.extend_from_slice(
+                        format!("\x1b[{};{}H", u32::from(y) + 1, u32::from(x) + 1).as_bytes(),
+                    );
+                    output.extend_from_slice(&write.bytes);
+                }
+                (PassthroughMode::All, None) => output.extend_from_slice(&write.bytes),
+                _ => continue,
+            }
+            self.last_passthrough_buffer = Some(buffer_id);
+        }
+        if output.is_empty() {
+            return;
+        }
+        // Hide the cursor while it jumps around, and leave the pen at its
+        // default: the next frame assumes both.
+        self.frame_output.extend_from_slice(b"\x1b[?25l");
+        self.frame_output.extend_from_slice(&output);
+        self.frame_output.extend_from_slice(b"\x1b[0m");
     }
 
     /// Emit an OSC 2 window-title update naming the given session, so the host
@@ -221,9 +468,20 @@ where
             .get(&session_id)
             .map(|session| session.name.as_str())
             .unwrap_or("<missing>");
+        if let Some(prompt) = &self.command_prompt {
+            return prompt.display();
+        }
+        if let Some(confirm) = &self.confirm {
+            return confirm.prompt.clone();
+        }
         if let Some(prompt) = &self.search_prompt {
             let prefix = if prompt.backward { '?' } else { '/' };
             return format!("[{session_name}] {prefix}{}", prompt.query);
+        }
+        if let Some(message) = &self.status_message
+            && message.until > Instant::now()
+        {
+            return message.text.clone();
         }
         match self.notifications.last() {
             Some(message) => format!("[{session_name}] {message}"),
@@ -247,6 +505,19 @@ where
         // legacy form up front so every downstream path — binding tokenization,
         // hints label matching, and search input — treats both encodings alike.
         let key = normalize_text_key(key);
+
+        if self.input_state.current_mode() == PROMPT_MODE {
+            if let Some(confirm) = self.confirm.take() {
+                return self
+                    .answer_confirm(session_id, viewport, confirm, key)
+                    .await;
+            }
+            return self.handle_prompt_key(session_id, key).await;
+        }
+
+        if self.input_state.current_mode() == TREE_MODE {
+            return self.handle_chooser_key(session_id, viewport, key).await;
+        }
 
         if self.input_state.current_mode() == SEARCH_MODE {
             return self
@@ -374,6 +645,20 @@ where
     ) -> Result<()> {
         self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
+        if self.input_state.current_mode() == PROMPT_MODE {
+            if let Some(prompt) = &mut self.command_prompt {
+                prompt.insert(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
+        if self.input_state.current_mode() == TREE_MODE {
+            if let Some(chooser) = &mut self.chooser
+                && chooser.editing_filter
+            {
+                chooser.filter.push_str(&String::from_utf8_lossy(&bytes));
+            }
+            return Ok(());
+        }
         if self.input_state.current_mode() == SEARCH_MODE {
             return self.handle_search_paste(session_id, viewport, bytes).await;
         }
@@ -530,6 +815,52 @@ where
             .await
     }
 
+    /// Record the attach queries the host had not answered when attaching
+    /// stopped waiting, so their late replies are dropped (see
+    /// [`ConfiguredClient::handle_host_reply`]).
+    pub fn set_pending_attach_queries(&mut self, pending: PendingAttachQueries) {
+        self.pending_attach_queries = pending;
+    }
+
+    /// Deliver `bytes`, a reply from the host terminal (a DCS, APC or OSC
+    /// string, or a CSI report), to the pane it is meant for. A reply is not
+    /// typed input: it is never copied to synchronized panes, inserted into
+    /// the command prompt or chooser filter, or matched against bindings.
+    /// A reply to one of the client's own attach queries that is still
+    /// pending is dropped, and the query marked answered (see
+    /// [`PendingAttachQueries`]); an identical reply after that is a pane's.
+    ///
+    /// The host only answers what it was sent, and the only queries that do
+    /// not come from the client come from panes through passthrough, so a
+    /// reply goes to the pane whose passthrough write last reached the host.
+    /// When there is none, or its buffer is gone, it goes to the focused pane.
+    pub async fn handle_host_reply(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        if self
+            .pending_attach_queries
+            .take_reply(&bytes, Instant::now())
+        {
+            debug!("dropped a reply to the attach queries");
+            return Ok(());
+        }
+        self.set_active_view(session_id, viewport);
+        let source = self
+            .last_passthrough_buffer
+            .filter(|buffer_id| self.client.state().buffers.contains_key(buffer_id));
+        let buffer_id = match source {
+            Some(buffer_id) => buffer_id,
+            None => {
+                let presentation = self.prepare_presentation(session_id, viewport).await?;
+                self.resolve_buffer_id(None, &presentation)?
+            }
+        };
+        self.send_input(session_id, vec![(buffer_id, bytes)]).await
+    }
+
     pub async fn process_next_event(&mut self) -> Result<ServerEvent> {
         let event = self.next_event().await?;
         self.handle_event(&event).await?;
@@ -590,6 +921,12 @@ where
     }
 
     pub async fn handle_event(&mut self, event: &ServerEvent) -> Result<()> {
+        // The server is stopping on purpose and about to close the
+        // connection: nothing is left to ask it, so just leave.
+        if matches!(event, ServerEvent::ServerShutdown) {
+            self.exit_requested = true;
+            return Ok(());
+        }
         self.drain_background_notifications();
         let previous_render_activity = match event {
             ServerEvent::RenderInvalidated(render) => self
@@ -617,10 +954,21 @@ where
                     self.set_active_session(session_id);
                     self.emit_terminal_title(session_id);
                 }
+                // The session this client showed was destroyed: move on as
+                // detach-on-destroy says.
+                None if changed.previous_session_id.is_some_and(|session_id| {
+                    !self.client.state().sessions.contains_key(&session_id)
+                }) =>
+                {
+                    self.leave_destroyed_session().await?
+                }
                 // The server detached this client from every session; drop the
                 // now-stale active session instead of leaving it dangling.
                 None => self.clear_active_session(),
             }
+        }
+        if let ServerEvent::DisplayMessage(message) = event {
+            self.show_message(&message.message, display_duration(message.duration_ms));
         }
         // A program in a pane set the clipboard (OSC 52): pass it on to the
         // host terminal unless the config turned that off.
@@ -628,6 +976,9 @@ where
             && self.config.active_script().loaded_config().clipboard
         {
             self.enqueue_osc52(clipboard.selection, &clipboard.text);
+        }
+        if let ServerEvent::Passthrough(passthrough) = event {
+            self.queue_passthrough(passthrough).await;
         }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
@@ -709,9 +1060,28 @@ where
             }
         }
 
-        Ok(self
-            .renderer
-            .render_with_tab_bars(self.client.state(), &presentation, &custom_bars))
+        let renderer = Renderer::new(
+            self.config
+                .active_script()
+                .loaded_config()
+                .theme
+                .pane_borders,
+        );
+        let mut grid =
+            renderer.render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+        self.flush_passthrough(&presentation);
+        if let Some(chooser) = &mut self.chooser {
+            let rows = chooser.rows(self.client.state(), self.active_session_id, {
+                self.config
+                    .active_script()
+                    .loaded_config()
+                    .base_index
+                    .or_else(crate::numbering::base_index_from_env)
+            });
+            chooser.render(&mut grid, chooser_area(viewport), &rows);
+            grid.set_cursor(None);
+        }
+        Ok(grid)
     }
 
     pub fn reload_config(&mut self) -> Result<()> {
@@ -751,6 +1121,9 @@ where
         } else {
             self.input_state.set_mode(NORMAL_MODE);
             self.search_prompt = None;
+            self.command_prompt = None;
+            self.confirm = None;
+            self.chooser = None;
             // Also drop any active hints overlay so it can't outlive its mode.
             if let Some(node_id) = self.hints_node.take()
                 && let Some(state) = self.client.state_mut().view_state_mut(node_id)
@@ -965,6 +1338,69 @@ where
                         .await
                         .map(|_| ()),
                 },
+                Action::CommandPrompt {
+                    prompt,
+                    initial,
+                    template,
+                } => {
+                    let label =
+                        self.expand_format(current_session_id, prompt.as_deref().unwrap_or(":"));
+                    let initial = self.expand_format(current_session_id, &initial);
+                    // Return to copy mode when opened from it; the other
+                    // modes that read keys themselves are left for normal.
+                    let mode = self.input_state.current_mode();
+                    let return_mode =
+                        if mode == SEARCH_MODE || mode == HINTS_MODE || mode == PROMPT_MODE {
+                            NORMAL_MODE.to_owned()
+                        } else {
+                            mode.to_owned()
+                        };
+                    self.search_prompt = None;
+                    let prompt = CommandPrompt::new(label, initial, template, return_mode);
+                    self.command_prompt = Some(
+                        match self.config.active_script().loaded_config().status_keys {
+                            StatusKeys::Vi => prompt.with_vi_keys(),
+                            StatusKeys::Emacs => prompt,
+                        },
+                    );
+                    self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::Confirm { prompt, actions } => {
+                    let prompt = self.expand_format(current_session_id, &prompt);
+                    let mode = self.input_state.current_mode();
+                    let return_mode =
+                        if mode == SEARCH_MODE || mode == HINTS_MODE || mode == PROMPT_MODE {
+                            NORMAL_MODE.to_owned()
+                        } else {
+                            mode.to_owned()
+                        };
+                    self.search_prompt = None;
+                    self.command_prompt = None;
+                    self.confirm = Some(PendingConfirm {
+                        prompt,
+                        actions,
+                        return_mode,
+                    });
+                    self.input_state.set_mode(PROMPT_MODE);
+                    Ok(())
+                }
+                Action::ChooseTree { scope } => {
+                    self.open_chooser(scope, current_session_id);
+                    Ok(())
+                }
+                Action::RunCommand { command } => {
+                    self.run_command_line(current_session_id, &command).await;
+                    Ok(())
+                }
+                Action::DisplayMessage {
+                    message,
+                    duration_ms,
+                } => {
+                    let text = self.expand_format(current_session_id, &message);
+                    self.show_message(&text, display_duration(duration_ms.unwrap_or(0)));
+                    Ok(())
+                }
                 Action::EnterHints { action } => match (current_session_id, current_viewport) {
                     (Some(session_id), Some(viewport)) => {
                         let presentation = self.prepare_presentation(session_id, viewport).await?;
@@ -1026,25 +1462,25 @@ where
             Action::CloseFloating {
                 floating_id: Some(floating_id),
             } => {
-                self.client
-                    .request_message(ClientMessage::Floating(FloatingRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        floating_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await?;
+                self.close_floating(floating_id, false).await?;
+                Ok(None)
+            }
+            Action::KillFloating {
+                floating_id: Some(floating_id),
+            } => {
+                self.close_floating(floating_id, true).await?;
                 Ok(None)
             }
             Action::CloseView {
                 node_id: Some(node_id),
             } => {
-                self.client
-                    .request_message(ClientMessage::Node(NodeRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        node_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await?;
+                self.close_view(node_id, false).await?;
+                Ok(None)
+            }
+            Action::KillView {
+                node_id: Some(node_id),
+            } => {
+                self.close_view(node_id, true).await?;
                 Ok(None)
             }
             Action::KillBuffer {
@@ -1242,8 +1678,7 @@ where
         let copy_modes = [COPY_MODE, SELECT_MODE];
         if copy_modes.contains(&mode.as_str()) {
             if let Some((session_id, viewport)) = session_id.zip(viewport)
-                && let Ok(presentation) =
-                    PresentationModel::project(self.client.state(), session_id, viewport)
+                && let Ok(presentation) = self.project(session_id, viewport)
                 && let Some(leaf) = presentation.focused_leaf()
             {
                 self.ensure_copy_cursor(leaf.node_id);
@@ -1252,6 +1687,92 @@ where
             self.clear_copy_views().await?;
         }
         Ok(actions)
+    }
+
+    /// Close a view. With `kill`, also end the programs of the buffers it
+    /// showed; otherwise they keep running, detached.
+    async fn close_view(&mut self, node_id: NodeId, kill: bool) -> Result<()> {
+        let shown = buffer_ids_in_subtree(self.client.state().nodes.values(), node_id);
+        self.client
+            .request_message(ClientMessage::Node(NodeRequest::Close {
+                request_id: self.client.next_request_id(),
+                node_id,
+            }))
+            .await?;
+        if kill {
+            self.kill_detached_buffers(shown).await?;
+        }
+        self.client.resync_all_sessions().await
+    }
+
+    /// Close a floating window. With `kill`, also end the programs of the
+    /// buffers it showed; otherwise they keep running, detached.
+    async fn close_floating(&mut self, floating_id: FloatingId, kill: bool) -> Result<()> {
+        let shown = self
+            .client
+            .state()
+            .floating
+            .get(&floating_id)
+            .map(|floating| {
+                buffer_ids_in_subtree(self.client.state().nodes.values(), floating.root_node_id)
+            })
+            .unwrap_or_default();
+        self.client
+            .request_message(ClientMessage::Floating(FloatingRequest::Close {
+                request_id: self.client.next_request_id(),
+                floating_id,
+            }))
+            .await?;
+        if kill {
+            self.kill_detached_buffers(shown).await?;
+        }
+        self.client.resync_all_sessions().await
+    }
+
+    /// End the programs of buffers whose views were just closed. Each is
+    /// detached by then; one that is attached again by the time it is checked
+    /// is shown somewhere else and keeps running, and one whose program already
+    /// ended needs nothing. One left `Interrupted` (its keeper is gone) has no
+    /// program, but is killed too so the server removes it.
+    async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
+        for buffer_id in buffer_ids {
+            let buffer = match self
+                .client
+                .request_message(ClientMessage::Buffer(BufferRequest::Get {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                }))
+                .await
+            {
+                Ok(ServerResponse::Buffer(response)) => response.buffer,
+                Ok(_) => continue,
+                // Gone already: a history view's buffer goes with its view.
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
+            if buffer.attachment_node_id.is_some()
+                || !matches!(
+                    buffer.state,
+                    BufferRecordState::Running | BufferRecordState::Interrupted
+                )
+            {
+                continue;
+            }
+            match self
+                .client
+                .request_message(ClientMessage::Buffer(BufferRequest::Kill {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    force: false,
+                }))
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if error.is_not_found() || error.is_conflict() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn execute_action(
@@ -1268,6 +1789,7 @@ where
                 };
                 self.focus_node(session_id, node_id).await
             }
+            Action::LastPane => self.focus_last_pane(session_id).await,
             Action::ScrollLineUp => {
                 let leaf = self.focused_leaf(presentation)?;
                 self.scroll_view_by(leaf.node_id, -1).await
@@ -1594,92 +2116,55 @@ where
                 .await
             }
             Action::CloseFloating { floating_id } => {
-                let floating_id = floating_id
-                    .or_else(|| presentation.focused_floating_id())
-                    .ok_or_else(|| MuxError::invalid_input("no floating window is focused"))?;
-                self.client
-                    .request_message(ClientMessage::Floating(FloatingRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        floating_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await
+                let floating_id = focused_floating_target(floating_id, presentation)?;
+                self.close_floating(floating_id, false).await
+            }
+            Action::KillFloating { floating_id } => {
+                let floating_id = focused_floating_target(floating_id, presentation)?;
+                self.close_floating(floating_id, true).await
             }
             Action::CloseView { node_id } => {
-                let node_id = node_id
-                    .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
-                    .ok_or_else(|| MuxError::invalid_input("no focused node to close"))?;
-                self.client
-                    .request_message(ClientMessage::Node(NodeRequest::Close {
-                        request_id: self.client.next_request_id(),
-                        node_id,
-                    }))
-                    .await?;
-                self.client.resync_all_sessions().await
+                let node_id = focused_view_target(node_id, presentation)?;
+                self.close_view(node_id, false).await
+            }
+            Action::KillView { node_id } => {
+                let node_id = focused_view_target(node_id, presentation)?;
+                self.close_view(node_id, true).await
             }
             Action::InsertTabAfter {
                 tabs_node_id,
                 title,
                 child,
             } => {
-                let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let placement = PanePlacement::Tab {
-                    tabs_node_id: tabs.node_id,
-                };
-                let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child, placement)
-                    .await?;
-                let result = self
-                    .client
-                    .request_message(ClientMessage::Node(NodeRequest::AddTab {
-                        request_id: self.client.next_request_id(),
-                        tabs_node_id: tabs.node_id,
-                        title: title.unwrap_or_else(|| "tab".to_owned()),
-                        buffer_id: Some(buffer.id()),
-                        child_node_id: None,
-                        index: u32::try_from(tabs.active.saturating_add(1)).map_err(|_| {
-                            MuxError::invalid_input("tab index exceeds protocol limits")
-                        })?,
-                    }))
-                    .await;
-                rollback_created_buffer_on_error(
-                    self,
-                    buffer.created_by_helper(),
-                    "insert tab",
-                    result,
-                )
-                .await?;
-                self.client.resync_all_sessions().await
+                self.insert_tab(session_id, presentation, tabs_node_id, title, child, true)
+                    .await
             }
             Action::InsertTabBefore {
                 tabs_node_id,
                 title,
                 child,
             } => {
-                let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
-                let placement = PanePlacement::Tab {
-                    tabs_node_id: tabs.node_id,
-                };
+                self.insert_tab(session_id, presentation, tabs_node_id, title, child, false)
+                    .await
+            }
+            Action::NewWindow { title, child } => {
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child, placement)
+                    .resolve_tree_buffer(session_id, presentation, child, PanePlacement::RootTab)
                     .await?;
                 let result = self
                     .client
-                    .request_message(ClientMessage::Node(NodeRequest::AddTab {
+                    .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
                         request_id: self.client.next_request_id(),
-                        tabs_node_id: tabs.node_id,
-                        title: title.unwrap_or_else(|| "tab".to_owned()),
+                        session_id,
+                        title: title.unwrap_or_else(|| "window".to_owned()),
                         buffer_id: Some(buffer.id()),
                         child_node_id: None,
-                        index: u32::try_from(tabs.active).map_err(|_| {
-                            MuxError::invalid_input("tab index exceeds protocol limits")
-                        })?,
                     }))
                     .await;
                 rollback_created_buffer_on_error(
                     self,
                     buffer.created_by_helper(),
-                    "insert tab",
+                    "new window",
                     result,
                 )
                 .await?;
@@ -2073,30 +2558,17 @@ where
     }
 
     /// Send each `(buffer, bytes)` pair, then refresh the buffers that took
-    /// input and the session. The first pair is the pane the input was aimed
-    /// at and its failure is returned; a synchronized copy that fails (for
-    /// example because that pane's program exited) is only logged.
+    /// input and the session. A pane that refuses its input (see
+    /// `write_input`) is skipped and the others still get theirs.
     async fn send_input(
         &mut self,
         session_id: SessionId,
         sends: Vec<(BufferId, Vec<u8>)>,
     ) -> Result<()> {
         let mut sent = Vec::with_capacity(sends.len());
-        for (index, (buffer_id, bytes)) in sends.into_iter().enumerate() {
-            let result = self
-                .client
-                .request_message(ClientMessage::Input(InputRequest::Send {
-                    request_id: self.client.next_request_id(),
-                    buffer_id,
-                    bytes,
-                }))
-                .await;
-            match result {
-                Ok(_) => sent.push(buffer_id),
-                Err(error) if index == 0 => return Err(error),
-                Err(error) => {
-                    warn!("failed to send synchronized input to buffer {buffer_id}: {error}");
-                }
+        for (buffer_id, bytes) in sends {
+            if self.write_input(buffer_id, bytes).await? {
+                sent.push(buffer_id);
             }
         }
         for buffer_id in sent {
@@ -2173,6 +2645,115 @@ where
         }
     }
 
+    /// Insert a tab after (or before) the active tab of `tabs_node_id`, or of
+    /// the innermost tabs holding the focus. When the focus is in the
+    /// session's layout but in no tabs, the session has a single window,
+    /// whose root is not tabbed: the tab is then added as a second window,
+    /// beside that one, rather than failing.
+    async fn insert_tab(
+        &mut self,
+        session_id: SessionId,
+        presentation: &PresentationModel,
+        tabs_node_id: Option<NodeId>,
+        title: Option<String>,
+        child: TreeSpec,
+        after: bool,
+    ) -> Result<()> {
+        if tabs_node_id.is_none()
+            && presentation.focused_tabs().is_none()
+            && presentation
+                .focused_leaf()
+                .is_some_and(|leaf| leaf.floating_id.is_none())
+        {
+            return self
+                .insert_beside_only_window(session_id, presentation, title, child, after)
+                .await;
+        }
+        let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
+        let placement = PanePlacement::Tab {
+            tabs_node_id: tabs.node_id,
+        };
+        let buffer = self
+            .resolve_tree_buffer(session_id, presentation, child, placement)
+            .await?;
+        let index = if after {
+            tabs.active.saturating_add(1)
+        } else {
+            tabs.active
+        };
+        let result = self
+            .client
+            .request_message(ClientMessage::Node(NodeRequest::AddTab {
+                request_id: self.client.next_request_id(),
+                tabs_node_id: tabs.node_id,
+                title: title.unwrap_or_else(|| "tab".to_owned()),
+                buffer_id: Some(buffer.id()),
+                child_node_id: None,
+                index: u32::try_from(index)
+                    .map_err(|_| MuxError::invalid_input("tab index exceeds protocol limits"))?,
+            }))
+            .await;
+        rollback_created_buffer_on_error(self, buffer.created_by_helper(), "insert tab", result)
+            .await?;
+        self.client.resync_all_sessions().await
+    }
+
+    /// Add a second window to a session that has one, after it or before it.
+    async fn insert_beside_only_window(
+        &mut self,
+        session_id: SessionId,
+        presentation: &PresentationModel,
+        title: Option<String>,
+        child: TreeSpec,
+        after: bool,
+    ) -> Result<()> {
+        let old_root = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.root_node_id)
+            .ok_or_else(|| MuxError::not_found(format!("session {session_id} is not cached")))?;
+        let buffer = self
+            .resolve_tree_buffer(session_id, presentation, child, PanePlacement::RootTab)
+            .await?;
+        let result = self
+            .client
+            .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
+                request_id: self.client.next_request_id(),
+                session_id,
+                title: title.unwrap_or_else(|| "tab".to_owned()),
+                buffer_id: Some(buffer.id()),
+                child_node_id: None,
+            }))
+            .await;
+        rollback_created_buffer_on_error(self, buffer.created_by_helper(), "insert tab", result)
+            .await?;
+        self.client.resync_all_sessions().await?;
+        if after {
+            return Ok(());
+        }
+        // The new window was appended; move it in front of the old one.
+        let new_window = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+            .and_then(|root| root.tabs.as_ref())
+            .and_then(|tabs| tabs.tabs.last())
+            .map(|tab| tab.child_id)
+            .ok_or_else(|| MuxError::protocol("new window was not added to root tabs"))?;
+        self.client
+            .request_message(ClientMessage::Node(NodeRequest::MoveNodeBefore {
+                request_id: self.client.next_request_id(),
+                node_id: new_window,
+                sibling_node_id: old_root,
+            }))
+            .await?;
+        self.client.resync_all_sessions().await
+    }
+
     fn resolve_tabs_target(
         &self,
         presentation: &PresentationModel,
@@ -2207,6 +2788,7 @@ where
                                             tab.child_id,
                                         ),
                                         synchronize_panes: tab.synchronize_panes,
+                                        pane: None,
                                     })
                                     .collect(),
                                 active: usize::try_from(tabs.active).unwrap_or(0),
@@ -2228,13 +2810,23 @@ where
         }
     }
 
+    /// Project `session_id` the way this client draws it, with the root tab
+    /// bar where the config puts it.
+    fn project(&self, session_id: SessionId, viewport: Size) -> Result<PresentationModel> {
+        PresentationModel::project_with(
+            self.client.state(),
+            session_id,
+            viewport,
+            self.config.active_script().loaded_config().tab_bar_position,
+        )
+    }
+
     async fn prepare_presentation(
         &mut self,
         session_id: SessionId,
         viewport: Size,
     ) -> Result<PresentationModel> {
-        let mut presentation =
-            PresentationModel::project(self.client.state(), session_id, viewport)?;
+        let mut presentation = self.project(session_id, viewport)?;
         let invalidated = presentation
             .leaves
             .iter()
@@ -2250,7 +2842,7 @@ where
             self.client.refresh_buffer_snapshot(buffer_id).await?;
         }
         if !self.client.state().invalidated_buffers.is_empty() {
-            presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+            presentation = self.project(session_id, viewport)?;
         }
         self.refresh_local_viewports(&presentation).await?;
         Ok(presentation)
@@ -2263,8 +2855,7 @@ where
         event: Option<EventInfo>,
     ) -> Context {
         let context = if let Some((session_id, viewport)) = session_id.zip(viewport)
-            && let Ok(presentation) =
-                PresentationModel::project(self.client.state(), session_id, viewport)
+            && let Ok(presentation) = self.project(session_id, viewport)
         {
             Context::from_state_with_mode(
                 self.client.state(),
@@ -2302,6 +2893,9 @@ where
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Passthrough(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::DisplayMessage(_) => self.active_session_id,
+            ServerEvent::ServerShutdown => None,
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -2413,6 +3007,51 @@ where
             }
             self.active_session_id = Some(session_id);
         }
+    }
+
+    /// Leave the active session after the server destroyed it, as the
+    /// `detach-on-destroy` setting says: switch to another session, or ask the
+    /// interactive client to exit when it detaches or no session is left.
+    async fn leave_destroyed_session(&mut self) -> Result<()> {
+        let Some(destroyed) = self.active_session_id.take() else {
+            return Ok(());
+        };
+        self.cancel_active_hints();
+        let sessions = &self.client.state().sessions;
+        let remaining = sessions.keys().copied().collect::<Vec<_>>();
+        let previous = self
+            .previous_session_id
+            .filter(|session_id| sessions.contains_key(session_id));
+        let target = match self
+            .config
+            .active_script()
+            .loaded_config()
+            .detach_on_destroy
+        {
+            DetachOnDestroy::On => None,
+            DetachOnDestroy::Off => previous.or_else(|| remaining.first().copied()),
+            DetachOnDestroy::Previous => remaining
+                .iter()
+                .rev()
+                .find(|session_id| **session_id < destroyed)
+                .or(remaining.last())
+                .copied(),
+            DetachOnDestroy::Next => remaining
+                .iter()
+                .find(|session_id| **session_id > destroyed)
+                .or(remaining.first())
+                .copied(),
+        };
+        // `last_session` keeps toggling to the session before the destroyed
+        // one, unless that is where the client goes now.
+        self.previous_session_id = previous.filter(|session_id| Some(*session_id) != target);
+        let Some(target) = target else {
+            self.exit_requested = true;
+            return Ok(());
+        };
+        self.client.switch_current_session(target).await?;
+        self.active_session_id = Some(target);
+        Ok(())
     }
 
     /// Drop the active session (e.g. the server detached this client), keeping
@@ -2658,7 +3297,8 @@ where
     /// from the CLI can be spawned at the size this client will draw them.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
         self.report_viewport(session_id, viewport).await;
-        let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+        self.report_base_index(session_id).await;
+        let presentation = self.project(session_id, viewport)?;
         for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
             let result = self
                 .client
@@ -2675,6 +3315,38 @@ where
             }
         }
         Ok(())
+    }
+
+    /// Tell the server the base index this client numbers windows from, so
+    /// `embers` commands run without `--base-index` or `EMBERS_BASE_INDEX`
+    /// number them the same way. Sent when it differs from what the server
+    /// has for the session.
+    async fn report_base_index(&mut self, session_id: SessionId) {
+        let base_index = self.base_index();
+        let known = self
+            .client
+            .state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.base_index);
+        if self.reported_base_index == Some((session_id, base_index))
+            || known.is_none_or(|known| known == base_index)
+        {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Session(SessionRequest::SetBaseIndex {
+                request_id: self.client.next_request_id(),
+                session_id,
+                base_index,
+            }))
+            .await;
+        match result {
+            Ok(_) => self.reported_base_index = Some((session_id, base_index)),
+            // Only CLI window numbers depend on it; retried on the next sync.
+            Err(error) => warn!("failed to report base index of session {session_id}: {error}"),
+        }
     }
 
     async fn report_viewport(&mut self, session_id: SessionId, viewport: Size) {
@@ -2825,6 +3497,346 @@ where
         Ok(())
     }
 
+    /// Expand `template` as a format for the focused pane of `session_id`, or
+    /// leave it as is without a session.
+    fn expand_format(&self, session_id: Option<SessionId>, template: &str) -> String {
+        session_id
+            .or(self.active_session_id)
+            .and_then(|session_id| {
+                crate::format::FormatContext::from_state(
+                    self.client.state(),
+                    session_id,
+                    None,
+                    self.base_index(),
+                )
+            })
+            .map(|context| crate::format::expand_format(template, &context))
+            .unwrap_or_else(|| template.to_owned())
+    }
+
+    fn open_chooser(&mut self, scope: ChooserScope, session_id: Option<SessionId>) {
+        let mode = self.input_state.current_mode();
+        let return_mode = if [SEARCH_MODE, HINTS_MODE, PROMPT_MODE, TREE_MODE].contains(&mode) {
+            NORMAL_MODE.to_owned()
+        } else {
+            mode.to_owned()
+        };
+        self.search_prompt = None;
+        self.command_prompt = None;
+        self.confirm = None;
+        self.chooser = Some(Chooser::open(
+            scope,
+            self.client.state(),
+            session_id.or(self.active_session_id),
+            self.base_index(),
+            return_mode,
+        ));
+        self.input_state.set_mode(TREE_MODE);
+    }
+
+    fn close_chooser(&mut self) {
+        if let Some(chooser) = self.chooser.take() {
+            self.input_state.set_mode(chooser.return_mode);
+        } else {
+            self.input_state.set_mode(NORMAL_MODE);
+        }
+    }
+
+    async fn handle_chooser_key(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        key: KeyEvent,
+    ) -> Result<()> {
+        let base_index = self.base_index();
+        let rows = match &self.chooser {
+            Some(chooser) => chooser.rows(self.client.state(), self.active_session_id, base_index),
+            None => {
+                self.input_state.set_mode(NORMAL_MODE);
+                return Ok(());
+            }
+        };
+        let chooser = self.chooser.as_mut().expect("checked chooser");
+
+        if let Some(item) = chooser.confirm_kill.take() {
+            if matches!(key, KeyEvent::Char('y' | 'Y')) {
+                self.kill_chooser_item(item).await;
+            }
+            return Ok(());
+        }
+
+        if chooser.editing_filter {
+            match key {
+                KeyEvent::Char(ch) => chooser.filter.push(ch),
+                KeyEvent::Bytes(bytes) => chooser.filter.push_str(&String::from_utf8_lossy(&bytes)),
+                KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
+                    if chooser.filter.pop().is_none() {
+                        chooser.editing_filter = false;
+                    }
+                }
+                KeyEvent::Ctrl('u') => chooser.filter.clear(),
+                KeyEvent::Escape => {
+                    chooser.filter.clear();
+                    chooser.editing_filter = false;
+                }
+                KeyEvent::Up => chooser.move_by(&rows, -1),
+                KeyEvent::Down => chooser.move_by(&rows, 1),
+                // Enter ends filtering; a second Enter chooses.
+                KeyEvent::Enter | KeyEvent::Tab => chooser.editing_filter = false,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        let page = isize::try_from(chooser_area(viewport).size.height.saturating_sub(3).max(1))
+            .unwrap_or(1);
+        match key {
+            KeyEvent::Char('j') | KeyEvent::Down | KeyEvent::Ctrl('n') => chooser.move_by(&rows, 1),
+            KeyEvent::Char('k') | KeyEvent::Up | KeyEvent::Ctrl('p') => chooser.move_by(&rows, -1),
+            KeyEvent::PageDown | KeyEvent::Ctrl('d') => chooser.move_by(&rows, page),
+            KeyEvent::PageUp | KeyEvent::Ctrl('u') => chooser.move_by(&rows, -page),
+            KeyEvent::Char('g') | KeyEvent::Home => chooser.select_first(&rows),
+            KeyEvent::Char('G') | KeyEvent::End => chooser.select_last(&rows),
+            KeyEvent::Char('l' | '+') | KeyEvent::Right => chooser.expand(&rows),
+            KeyEvent::Char('h' | '-') | KeyEvent::Left => chooser.collapse(&rows),
+            KeyEvent::Char('/') => chooser.editing_filter = true,
+            KeyEvent::Char('x') => match chooser.target(self.client.state(), &rows) {
+                Some(item) if !item.exists(self.client.state()) => self.report_gone_item(item),
+                target => chooser.confirm_kill = target,
+            },
+            KeyEvent::Escape if !chooser.filter.is_empty() => chooser.filter.clear(),
+            KeyEvent::Char('q') | KeyEvent::Escape | KeyEvent::Ctrl('c') => self.close_chooser(),
+            KeyEvent::Enter => {
+                let selected = chooser.target(self.client.state(), &rows);
+                self.close_chooser();
+                if let Some(item) = selected {
+                    self.choose_item(session_id, item).await?;
+                }
+            }
+            // Any other text starts a filter, so typing a name finds it.
+            KeyEvent::Char(ch) if !ch.is_control() => {
+                chooser.editing_filter = true;
+                chooser.filter.push(ch);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Say that a picker item closed before it could be acted on.
+    fn report_gone_item(&mut self, item: ChooserItem) {
+        self.show_message(
+            &format!("{} no longer exists", item.kind()),
+            DEFAULT_DISPLAY_TIME,
+        );
+    }
+
+    /// Switch to the chosen session, window or pane, like Enter in tmux
+    /// `choose-tree`. An item that has closed is reported, not replaced.
+    async fn choose_item(&mut self, session_id: SessionId, item: ChooserItem) -> Result<()> {
+        if !item.exists(self.client.state()) {
+            self.report_gone_item(item);
+            return Ok(());
+        }
+        let target_session = item.session_id();
+        if target_session != session_id || self.active_session_id != Some(target_session) {
+            self.perform_session_switch(target_session).await?;
+        }
+        match item {
+            ChooserItem::Session(_) => Ok(()),
+            ChooserItem::Window(session_id, window_id) => {
+                let state = self.client.state();
+                let has_root_tabs = state
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| state.nodes.get(&session.root_node_id))
+                    .is_some_and(|root| root.tabs.is_some());
+                let position = window_position(state, session_id, window_id);
+                let Some(position) = position.filter(|_| has_root_tabs) else {
+                    if position.is_none() {
+                        self.report_gone_item(item);
+                    }
+                    return Ok(());
+                };
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(position).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
+            ChooserItem::Pane(session_id, node_id) => self.focus_node(session_id, node_id).await,
+        }
+    }
+
+    /// Kill a picker item with the same commands as the CLI (`kill-session`,
+    /// `kill-window`, `kill-pane`), so it behaves exactly as they do. An item
+    /// that has closed is reported, not replaced: a window is killed by the
+    /// number it has now.
+    async fn kill_chooser_item(&mut self, item: ChooserItem) {
+        if !item.exists(self.client.state()) {
+            self.report_gone_item(item);
+            return;
+        }
+        let base_index = self.base_index().unwrap_or(0);
+        let argv: Vec<String> = match item {
+            ChooserItem::Session(_) => vec!["kill-session".to_owned()],
+            ChooserItem::Window(session_id, window_id) => {
+                let Some(position) = window_position(self.client.state(), session_id, window_id)
+                else {
+                    self.report_gone_item(item);
+                    return;
+                };
+                vec![
+                    "kill-window".to_owned(),
+                    "-t".to_owned(),
+                    crate::numbering::window_number(position, Some(base_index)).to_string(),
+                ]
+            }
+            ChooserItem::Pane(_, node_id) => {
+                vec!["kill-pane".to_owned(), "-t".to_owned(), node_id.to_string()]
+            }
+        };
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: Some(item.session_id()),
+            client_id: self.client.cached_client_id(),
+            // An explicit base index makes the window number unambiguous.
+            base_index: Some(base_index),
+        };
+        if let Err(error) = runner.run(argv, context).await {
+            self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME);
+        }
+    }
+
+    /// Answer a `confirm-before` question: `y` runs its actions, any other
+    /// key cancels it, as in tmux.
+    async fn answer_confirm(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        confirm: PendingConfirm,
+        key: KeyEvent,
+    ) -> Result<()> {
+        self.input_state.set_mode(confirm.return_mode);
+        if key != KeyEvent::Char('y') {
+            return Ok(());
+        }
+        self.execute_actions(Some(session_id), Some(viewport), confirm.actions)
+            .await
+    }
+
+    async fn handle_prompt_key(&mut self, session_id: SessionId, key: KeyEvent) -> Result<()> {
+        let Some(prompt) = self.command_prompt.as_mut() else {
+            self.input_state.set_mode(NORMAL_MODE);
+            return Ok(());
+        };
+        let history = &self.prompt_history;
+        if prompt.vi_key(&key, history) {
+            return Ok(());
+        }
+        match key {
+            KeyEvent::Enter => return self.commit_command_prompt(session_id).await,
+            KeyEvent::Escape | KeyEvent::Ctrl('c') | KeyEvent::Ctrl('g') => {
+                let return_mode = prompt.return_mode.clone();
+                self.command_prompt = None;
+                self.input_state.set_mode(return_mode);
+            }
+            KeyEvent::Char(ch) => prompt.insert(ch.encode_utf8(&mut [0; 4])),
+            KeyEvent::Bytes(bytes) => prompt.insert(&String::from_utf8_lossy(&bytes)),
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => prompt.backspace(),
+            KeyEvent::Delete | KeyEvent::Ctrl('d') => prompt.delete(),
+            KeyEvent::Left | KeyEvent::Ctrl('b') => prompt.left(),
+            KeyEvent::Right | KeyEvent::Ctrl('f') => prompt.right(),
+            KeyEvent::Home | KeyEvent::Ctrl('a') => prompt.home(),
+            KeyEvent::End | KeyEvent::Ctrl('e') => prompt.end(),
+            KeyEvent::Ctrl('u') => prompt.kill_to_start(),
+            KeyEvent::Ctrl('k') => prompt.kill_to_end(),
+            KeyEvent::Ctrl('w') => prompt.delete_word(),
+            KeyEvent::Up | KeyEvent::Ctrl('p') => prompt.history_up(history),
+            KeyEvent::Down | KeyEvent::Ctrl('n') => prompt.history_down(history),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn commit_command_prompt(&mut self, session_id: SessionId) -> Result<()> {
+        let Some(prompt) = self.command_prompt.take() else {
+            return Ok(());
+        };
+        self.input_state.set_mode(prompt.return_mode.clone());
+        // Only lines typed as commands are worth recalling; rename prompts
+        // and other templates are not.
+        if prompt.template.is_none() {
+            record_history(&mut self.prompt_history, &prompt.input);
+        }
+        self.run_command_line(Some(session_id), &prompt.command_line())
+            .await;
+        Ok(())
+    }
+
+    /// Run `line` through the command runner and show its output, or its
+    /// error, in the status line.
+    async fn run_command_line(&mut self, session_id: Option<SessionId>, line: &str) {
+        let argv = match shell_words::split(line) {
+            Ok(argv) => argv,
+            Err(error) => {
+                self.show_message(&format!("{error}"), DEFAULT_DISPLAY_TIME);
+                return;
+            }
+        };
+        if argv.is_empty() {
+            return;
+        }
+        // The picker belongs to this client, so its commands open it here
+        // rather than going through the runner.
+        let scope = match argv[0].as_str() {
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-s") => {
+                Some(ChooserScope::Sessions)
+            }
+            "choose-tree" if argv[1..].iter().any(|arg| arg == "-w") => Some(ChooserScope::Windows),
+            "choose-tree" => Some(ChooserScope::Tree),
+            "choose-window" => Some(ChooserScope::Windows),
+            "choose-session" => Some(ChooserScope::Sessions),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            self.open_chooser(scope, session_id);
+            return;
+        }
+        let Some(runner) = self.command_runner.clone() else {
+            self.show_message(
+                "commands are not available in this client",
+                DEFAULT_DISPLAY_TIME,
+            );
+            return;
+        };
+        let context = CommandContext {
+            session_id: session_id.or(self.active_session_id),
+            client_id: self.client.cached_client_id(),
+            base_index: self.base_index(),
+        };
+        match runner.run(argv, context).await {
+            Ok(output) => {
+                let output = output.lines().collect::<Vec<_>>().join("; ");
+                if !output.trim().is_empty() {
+                    self.show_message(&output, DEFAULT_DISPLAY_TIME);
+                }
+            }
+            Err(error) => self.show_message(&error.to_string(), DEFAULT_DISPLAY_TIME),
+        }
+    }
+
     /// Open the search prompt. The prompt starts empty, as in vim and tmux;
     /// committing it empty clears the search.
     async fn enter_search_mode(
@@ -2878,7 +3890,7 @@ where
                 }
                 Ok(())
             }
-            KeyEvent::Backspace => {
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
                 if let Some(prompt) = &mut self.search_prompt {
                     prompt.query.pop();
                 }
@@ -3031,7 +4043,7 @@ where
                 self.cancel_hints(node_id);
                 Ok(())
             }
-            KeyEvent::Backspace => {
+            KeyEvent::Backspace | KeyEvent::Ctrl('h') => {
                 if let Some(state) = self
                     .client
                     .state_mut()
@@ -3910,6 +4922,38 @@ where
             .push_back(format!("\x1b]52;{parameter};{encoded}\x07").into_bytes());
     }
 
+    /// Focus the pane focused before the current one in the session's
+    /// focused window (tmux `select-pane -l`). The server keeps the focus
+    /// history; with no last pane this does nothing.
+    async fn focus_last_pane(&mut self, session_id: SessionId) -> Result<()> {
+        let previous_buffer = self.focused_buffer_for_session(session_id);
+        match self
+            .client
+            .request_message(ClientMessage::Node(NodeRequest::FocusLast {
+                request_id: self.client.next_request_id(),
+                session_id,
+            }))
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        self.client.resync_session(session_id).await?;
+
+        let new_buffer = self.focused_buffer_for_session(session_id);
+        if new_buffer != previous_buffer {
+            for (buffer_id, focused) in [(previous_buffer, false), (new_buffer, true)] {
+                if let Some(buffer_id) = buffer_id
+                    && self.maybe_send_focus_sequence(buffer_id, focused).await?
+                {
+                    self.client.refresh_buffer_snapshot(buffer_id).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
         self.focus_node_with_shortcut(session_id, node_id, true)
             .await
@@ -4005,19 +5049,32 @@ where
         } else {
             b"\x1b[O".to_vec()
         };
-        self.send_input_only(buffer_id, bytes).await?;
-        Ok(true)
+        self.write_input(buffer_id, bytes).await
     }
 
-    async fn send_input_only(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<()> {
-        self.client
+    /// Write `bytes` to `buffer_id`'s program and report whether it took
+    /// them. Like tmux, input for a pane that cannot take it (its program has
+    /// exited under `remain-on-exit`, or the buffer is gone) is dropped: the
+    /// server's refusal is only logged, so keys, pastes, mouse and focus
+    /// reports aimed at a dead pane never end the client. A transport failure
+    /// is still returned.
+    async fn write_input(&self, buffer_id: BufferId, bytes: Vec<u8>) -> Result<bool> {
+        match self
+            .client
             .request_message(ClientMessage::Input(InputRequest::Send {
                 request_id: self.client.next_request_id(),
                 buffer_id,
                 bytes,
             }))
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(MuxError::Wire(error)) => {
+                debug!("dropped input for buffer {buffer_id}: {error}");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn record_notification(&mut self, message: impl Into<String>) {
@@ -4058,6 +5115,28 @@ fn action_is_local_terminal_action(action: &Action) -> bool {
         | Action::CancelSelection => true,
         _ => false,
     }
+}
+
+/// The floating window a close or kill action targets: the given one, or the
+/// focused one.
+fn focused_floating_target(
+    floating_id: Option<FloatingId>,
+    presentation: &PresentationModel,
+) -> Result<FloatingId> {
+    floating_id
+        .or_else(|| presentation.focused_floating_id())
+        .ok_or_else(|| MuxError::invalid_input("no floating window is focused"))
+}
+
+/// The view a close or kill action targets: the given node, or the focused
+/// leaf.
+fn focused_view_target(
+    node_id: Option<NodeId>,
+    presentation: &PresentationModel,
+) -> Result<NodeId> {
+    node_id
+        .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
+        .ok_or_else(|| MuxError::invalid_input("no focused node to close"))
 }
 
 fn action_requires_local_context(action: &Action) -> bool {
@@ -4293,6 +5372,15 @@ fn prepend_actions_with_limit(
     Ok(())
 }
 
+/// A `display-message` time in milliseconds, 0 meaning the default.
+fn display_duration(duration_ms: u32) -> Duration {
+    if duration_ms == 0 {
+        DEFAULT_DISPLAY_TIME
+    } else {
+        Duration::from_millis(u64::from(duration_ms))
+    }
+}
+
 fn format_notification(level: NotifyLevel, message: &str) -> String {
     match level {
         NotifyLevel::Info => message.to_owned(),
@@ -4363,7 +5451,17 @@ fn key_event_to_token(key: KeyEvent) -> Result<KeyToken> {
         KeyEvent::Backspace => Ok(KeyToken::Backspace),
         KeyEvent::Escape => Ok(KeyToken::Escape),
         KeyEvent::Ctrl(ch) => Ok(KeyToken::Ctrl(ch.to_ascii_lowercase())),
-        KeyEvent::Alt(ch) => Ok(KeyToken::Alt(ch.to_ascii_lowercase())),
+        // A legacy host sends Alt+Shift+h as ESC H; keep the shift so it
+        // matches `<M-H>` and is not taken for `<M-h>`.
+        KeyEvent::Alt(ch) if ch.is_ascii_uppercase() => Ok(KeyToken::Key {
+            code: crate::input::KeyCode::Char(ch.to_ascii_lowercase()),
+            mods: crate::input::Modifiers {
+                alt: true,
+                shift: true,
+                ..crate::input::Modifiers::NONE
+            },
+        }),
+        KeyEvent::Alt(ch) => Ok(KeyToken::Alt(ch)),
         KeyEvent::Up => Ok(KeyToken::Up),
         KeyEvent::Down => Ok(KeyToken::Down),
         KeyEvent::Left => Ok(KeyToken::Left),
@@ -4532,6 +5630,9 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
         ServerEvent::Clipboard(_) => "clipboard",
+        ServerEvent::DisplayMessage(_) => "display_message",
+        ServerEvent::Passthrough(_) => "passthrough",
+        ServerEvent::ServerShutdown => "server_shutdown",
     }
 }
 
@@ -4567,6 +5668,8 @@ fn event_info(
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Passthrough(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::DisplayMessage(_) | ServerEvent::ServerShutdown => {}
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;
@@ -4692,6 +5795,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_alt_shift_letters_keep_their_shift() {
+        use super::sequence_to_bytes;
+        use crate::input::{KeyCode, Modifiers};
+        let alt_shift_h = KeyToken::Key {
+            code: KeyCode::Char('h'),
+            mods: Modifiers {
+                alt: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        };
+        // ESC H from a legacy host is Alt+Shift+h, matching `<M-H>`, not `<M-h>`.
+        assert_eq!(key_event_to_token(KeyEvent::Alt('H')).unwrap(), alt_shift_h);
+        assert_eq!(
+            key_event_to_token(KeyEvent::Alt('h')).unwrap(),
+            KeyToken::Alt('h')
+        );
+        // The CSI-u report of the same chord resolves to the same token.
+        assert_eq!(
+            key_event_to_token(KeyEvent::Key {
+                code: KeyCode::Char('h'),
+                mods: Modifiers {
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            })
+            .unwrap(),
+            alt_shift_h
+        );
+        // Unbound, it reaches the pane as ESC H again.
+        assert_eq!(sequence_to_bytes(&[alt_shift_h], 0).unwrap(), b"\x1bH");
+    }
+
+    #[test]
     fn normalize_text_key_maps_unmodified_csi_u_to_legacy() {
         use super::normalize_text_key;
         use crate::input::{KeyCode, Modifiers};
@@ -4787,6 +5925,17 @@ mod tests {
                 mods: ctrl_shift,
             }
         );
+        // `<C-T>` names the same key.
+        assert_eq!(
+            crate::input::parse_key_sequence("<C-T>").unwrap(),
+            vec![
+                key_event_to_token(KeyEvent::Key {
+                    code: KeyCode::Char('t'),
+                    mods: ctrl_shift,
+                })
+                .unwrap()
+            ]
+        );
     }
 
     #[test]
@@ -4875,6 +6024,7 @@ mod tests {
                     pipe: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location,
                 false,

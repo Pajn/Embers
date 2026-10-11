@@ -2,8 +2,8 @@ use std::path::Path;
 
 use embers_client::input::KeyParseError;
 use embers_client::{
-    Action, InputResolution, KeyToken, PresentationModel, ScriptEngine, ScriptHarness,
-    TabBarContext,
+    Action, InputResolution, KeyToken, PassthroughMode, PresentationModel, ScriptEngine,
+    ScriptHarness, TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::Size;
@@ -240,11 +240,147 @@ fn formatter_functions_build_bar_specs_from_runtime_context() {
 }
 
 #[test]
+fn tab_bar_formatters_read_the_pane_each_tab_shows() {
+    let source = LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: None,
+        source: r#"
+            fn format_tabs(ctx) {
+                let left = [];
+                for tab in ctx.tabs() {
+                    let cwd = tab.cwd();
+                    let cwd = if cwd == () { "-" } else { cwd };
+                    left.push(ui.segment(`${tab.process_name()}@${cwd}:${tab.pane_title()}|`));
+                }
+                ui.bar(left, [], [])
+            }
+            tabbar.set_formatter(format_tabs);
+        "#
+        .to_owned(),
+        source_hash: 0,
+    };
+    let engine = ScriptEngine::load(&source).unwrap();
+    let mut state = demo_state();
+    state
+        .buffers
+        .get_mut(&embers_core::BufferId(1))
+        .unwrap()
+        .cwd = None;
+    state
+        .buffers
+        .get_mut(&embers_core::BufferId(4))
+        .unwrap()
+        .foreground_command = Some(vec!["nvim".to_owned()]);
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+
+    let bar = engine
+        .format_tab_bar(TabBarContext::from_frame(
+            presentation.root_tabs.as_ref().unwrap(),
+            "normal",
+            80,
+        ))
+        .unwrap()
+        .unwrap();
+    let text: String = bar
+        .left
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect();
+    assert_eq!(text, "sh@-:shell|nvim@/tmp:logs-long-title|");
+}
+
+#[test]
+fn theme_sets_pane_border_colors() {
+    use embers_client::{Color, PaneBorderColors, TerminalColor};
+
+    let harness = ScriptHarness::load(
+        r##"
+            theme.set_pane_border_color("brightblack");
+            theme.set_pane_active_border_color("#ca9ee6");
+        "##,
+    )
+    .unwrap();
+    assert_eq!(
+        harness.engine().loaded_config().theme.pane_borders,
+        PaneBorderColors {
+            inactive: Some(TerminalColor::Indexed(8)),
+            active: Some(TerminalColor::Rgb(Color {
+                red: 0xca,
+                green: 0x9e,
+                blue: 0xe6,
+            })),
+        }
+    );
+
+    // Both default to unset, which keeps the dim dividers.
+    let plain = ScriptHarness::load("").unwrap();
+    assert_eq!(
+        plain.engine().loaded_config().theme.pane_borders,
+        PaneBorderColors::default()
+    );
+
+    for bad in [
+        r#"theme.set_pane_border_color("mauve");"#,
+        r##"theme.set_pane_active_border_color("#12");"##,
+    ] {
+        assert!(ScriptHarness::load(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn status_keys_choose_the_prompt_key_table() {
+    use embers_client::StatusKeys;
+
+    let keys = |source: &str| {
+        ScriptHarness::load(source).map(|harness| harness.engine().loaded_config().status_keys)
+    };
+    assert_eq!(keys("").unwrap(), StatusKeys::Emacs);
+    assert_eq!(keys(r#"set_status_keys("vi");"#).unwrap(), StatusKeys::Vi);
+    assert_eq!(
+        keys(r#"set_status_keys("emacs");"#).unwrap(),
+        StatusKeys::Emacs
+    );
+    assert!(keys(r#"set_status_keys("vim");"#).is_err());
+}
+
+#[test]
 fn harness_rejects_empty_notation_without_panicking() {
     let mut harness = ScriptHarness::load("").unwrap();
 
     assert_eq!(
         harness.resolve_notation("normal", "").unwrap_err(),
         KeyParseError::EmptySequence
+    );
+}
+
+#[test]
+fn passthrough_is_off_unless_the_config_turns_it_on() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .unwrap()
+        .loaded_config()
+        .passthrough
+    };
+
+    // Like tmux's allow-passthrough: a program in a pane cannot write to the
+    // host terminal unless the user allows it.
+    assert_eq!(load(""), PassthroughMode::Off);
+    assert_eq!(load(r#"set_allow_passthrough("on");"#), PassthroughMode::On);
+    assert_eq!(
+        load(r#"set_allow_passthrough("all");"#),
+        PassthroughMode::All
     );
 }

@@ -7,6 +7,9 @@ async fn popup_commands_round_trip_through_cli() {
     let server = TestServer::start().await.expect("start server");
 
     run_cli(&server, ["new-session", "alpha"]);
+    // A window keeps the session alive once the popup, its only other pane,
+    // is gone.
+    run_cli(&server, ["new-window", "-t", "alpha", "--", "/bin/sh"]);
     let created = run_cli(
         &server,
         [

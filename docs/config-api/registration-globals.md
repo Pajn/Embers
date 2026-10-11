@@ -29,6 +29,13 @@ Bind a key notation to an [`Action`], a string action name, or an array of actio
 Use the `Action` overload for inline builders such as `action.focus_left()`, the string
 overload for a named action registered with `define_action`, or an array to chain multiple
 actions in sequence.
+
+A notation is a sequence of keys: plain characters, and names or modified keys in angle
+brackets, such as `<Enter>`, `<C-a>`, `<M-h>`, `<S-Left>`, `<C-S-Tab>` or `<F5>`
+(`C` Ctrl, `M` or `A` Alt, `S` Shift, `D` Super). As in tmux, an uppercase letter is the
+shifted key: `<M-H>` is Alt+Shift+h and `<C-H>` is Ctrl+Shift+h, the same as `<C-S-h>`.
+Legacy terminals send the same bytes for Ctrl+Shift+h as for Ctrl+h, so `<C-H>` and other
+Ctrl+Shift bindings only fire from a host terminal with the kitty keyboard protocol.
 </div>
 <div group="bind" id="bind-Example" class="tabcontent"  style="display: none;" >
 
@@ -114,6 +121,59 @@ Attach a callback to an emitted event such as `buffer_bell`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_allow_passthrough </h2>
+
+```rust,ignore
+fn set_allow_passthrough(mode: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_allow_passthrough', 'Description')">
+Description
+</button>
+<button group="set_allow_passthrough" id="link-set_allow_passthrough-Example"  class="tablinks"
+    onclick="openTab(event, 'set_allow_passthrough', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_allow_passthrough" id="set_allow_passthrough-Description" class="tabcontent"  style="display: block;" >
+Choose which panes may write to the host terminal through tmux
+passthrough, like tmux's `allow-passthrough`.
+
+Programs that run under tmux wrap sequences meant for the outer
+terminal, such as kitty graphics images or desktop notifications, as
+`ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+terminal running the client, with its cursor at the pane's cursor so
+images land where the program put them. Kitty graphics commands sent
+without the wrapper are passed on the same way.
+
+- `"off"` (the default, as in tmux): drop them.
+- `"on"`: only from panes that are on screen.
+- `"all"`: from every pane in the client's session, on screen or not.
+  Sequences from a pane that is not on screen are written without
+  moving the cursor.
+
+Passthrough is off by default because it lets any program on screen,
+or `cat` of an untrusted file, write raw sequences to the terminal,
+bypassing `set_clipboard(false)` and the filtering Embers applies to
+pane output. Turning it on only has an effect when the terminal is
+known to support passthrough (see `set_terminal_features`).
+</div>
+<div group="set_allow_passthrough" id="set_allow_passthrough-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_allow_passthrough("on");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_base_index </h2>
 
 ```rust,ignore
@@ -142,10 +202,11 @@ closing one renumbers the windows after it, like tmux with
 `renumber-windows on`.
 
 This setting covers the client and the commands it runs from the command
-prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
-instead; set that variable where the server and your shells start to use
-the same numbering everywhere. Without this call the client uses
-`EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+prompt. The client also reports it to the server for the session it
+shows, and the `embers` CLI numbers that session's windows from it
+unless `EMBERS_BASE_INDEX` or `--base-index` overrides it. Without this
+call the client uses `EMBERS_BASE_INDEX` when it is set, and numbers
+windows from 0 otherwise.
 </div>
 <div group="set_base_index" id="set_base_index-Example" class="tabcontent"  style="display: none;" >
 
@@ -199,6 +260,50 @@ set_clipboard(false);
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_detach_on_destroy </h2>
+
+```rust,ignore
+fn set_detach_on_destroy(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_detach_on_destroy', 'Description')">
+Description
+</button>
+<button group="set_detach_on_destroy" id="link-set_detach_on_destroy-Example"  class="tablinks"
+    onclick="openTab(event, 'set_detach_on_destroy', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Description" class="tabcontent"  style="display: block;" >
+Choose where the client goes when the session it shows is destroyed,
+like tmux's `detach-on-destroy`. A session is destroyed when its last
+pane closes, because the pane's program exited or the pane was killed,
+or when the session is killed.
+
+- `"on"` (the default): detach; the client exits.
+- `"off"`: switch to the session the client showed before, or else the
+  first remaining session.
+- `"previous"` / `"next"`: switch to the session listed before or after
+  the destroyed one (`embers list-sessions` order), wrapping around.
+
+When no other session is left, the client exits whatever the setting.
+</div>
+<div group="set_detach_on_destroy" id="set_detach_on_destroy-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_detach_on_destroy("off");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_leader </h2>
 
 ```rust,ignore
@@ -224,6 +329,97 @@ Set the leader sequence used in binding notations.
 
 ```rhai
 set_leader("<C-a>");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_status_keys </h2>
+
+```rust,ignore
+fn set_status_keys(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_status_keys" id="link-set_status_keys-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_status_keys', 'Description')">
+Description
+</button>
+<button group="set_status_keys" id="link-set_status_keys-Example"  class="tablinks"
+    onclick="openTab(event, 'set_status_keys', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_status_keys" id="set_status_keys-Description" class="tabcontent"  style="display: block;" >
+Choose the keys the command prompt and the rename prompts are edited
+with, like tmux's `status-keys`.
+
+- `"emacs"` (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+  other keys listed in the command prompt docs.
+- `"vi"`: the prompt opens in insert mode, where those keys work too.
+  Esc switches to normal mode, which has `h` `l` `w` `b` `e` `0` `$`
+  to move, `x` `dw` `D` to delete, `cw` `C` to change, `i` `a` `I`
+  `A` to insert again and `k` `j` for older and newer history lines.
+  Esc in normal mode cancels the prompt; Enter runs it in either mode.
+
+The copy-mode search prompt keeps its own keys.
+</div>
+<div group="set_status_keys" id="set_status_keys-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_status_keys("vi");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
+
+```rust,ignore
+fn set_terminal_features(features: Map)
+```
+
+<div>
+<div class="tab">
+<button group="set_terminal_features" id="link-set_terminal_features-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_terminal_features', 'Description')">
+Description
+</button>
+<button group="set_terminal_features" id="link-set_terminal_features-Example"  class="tablinks"
+    onclick="openTab(event, 'set_terminal_features', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_terminal_features" id="set_terminal_features-Description" class="tabcontent"  style="display: block;" >
+Say what the terminal running the client supports, overriding what
+Embers detected when it attached.
+
+Embers asks the terminal at attach and otherwise goes by `TERM` and
+`TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+named capability on (`true`) or off (`false`); capabilities not named
+stay as detected. Like tmux's `terminal-features`.
+
+- `underline_styles`: double, curly, dotted and dashed underlines
+  (`CSI 4:n m`). Without it every underline is plain.
+- `underline_color`: colored underlines (`CSI 58:...m`). Without it
+  underlines take the text color.
+- `hyperlinks`: OSC 8 links. Without it links are plain text.
+- `passthrough`: sequences programs send for the terminal, such as
+  images (see `set_allow_passthrough`). Without it they are dropped.
+</div>
+<div group="set_terminal_features" id="set_terminal_features-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_terminal_features(#{ hyperlinks: true, passthrough: false });
 ```
 
 </div>

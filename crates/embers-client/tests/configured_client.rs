@@ -184,6 +184,7 @@ fn second_session_state() -> embers_client::ClientState {
             focused_floating_id: None,
             zoomed_node_id: None,
             viewport: None,
+            base_index: None,
         },
     );
     state.nodes.insert(
@@ -225,6 +226,7 @@ fn second_session_state() -> embers_client::ClientState {
             pipe: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
     state.snapshots.insert(
@@ -312,6 +314,61 @@ async fn configured_keybinding_executes_live_focus_action() {
 }
 
 #[tokio::test]
+async fn last_pane_action_asks_the_server_for_the_previous_pane() {
+    let transport = ScriptedTransport::default();
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::FocusLast {
+            request_id: RequestId(1),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(1),
+        }),
+    );
+    let focused_state = root_focus_state();
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(2),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(2),
+            snapshot: session_snapshot_from_state(&focused_state, SESSION_ID),
+        }),
+    );
+
+    let mut client = MuxClient::new(transport.clone());
+    *client.state_mut() = demo_state();
+    let (config, _tempdir) =
+        manager_from_source(r#"bind("normal", "<C-\\>", action.last_pane());"#);
+    let mut configured = ConfiguredClient::new(client, config);
+
+    configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl('\\'),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        configured
+            .client()
+            .state()
+            .sessions
+            .get(&SESSION_ID)
+            .and_then(|session| session.focused_leaf_id),
+        Some(LEFT_LEAF_ID)
+    );
+    assert!(configured.notifications().is_empty());
+    transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
 async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
     let transport = FakeTransport::default();
     let state = demo_state();
@@ -338,6 +395,41 @@ async fn unmapped_keys_forward_to_the_focused_buffer_in_normal_mode() {
         transport.requests(),
         expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, b"x")
     );
+}
+
+#[tokio::test]
+async fn unmapped_ctrl_h_and_backspace_reach_the_buffer_as_their_own_bytes() {
+    for (key, bytes) in [
+        (KeyEvent::Ctrl('h'), b"\x08".as_slice()),
+        (KeyEvent::Backspace, b"\x7f".as_slice()),
+    ] {
+        let transport = FakeTransport::default();
+        let state = demo_state();
+        push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+
+        let client = MuxClient::new(transport.clone());
+        let (config, _tempdir) = manager_from_source("");
+        let mut configured = ConfiguredClient::new(client, config);
+        *configured.client_mut().state_mut() = state;
+
+        configured
+            .handle_key(
+                SESSION_ID,
+                Size {
+                    width: 80,
+                    height: 20,
+                },
+                key.clone(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            transport.requests(),
+            expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, bytes),
+            "{key:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -501,6 +593,70 @@ async fn configured_render_uses_scripted_tab_bars() {
 
     assert!(rendered.contains("ROOT workspace"));
     assert!(rendered.contains("NESTED logs-long-title"));
+}
+
+#[tokio::test]
+async fn tab_bar_at_the_bottom_moves_drawing_and_mouse_targets() {
+    let viewport = Size {
+        width: 80,
+        height: 20,
+    };
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&BufferId(4))
+        .unwrap()
+        .mouse_reporting = true;
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    transport.push_response(ServerResponse::VisibleSnapshot(
+        visible_snapshot_from_state(&state, BufferId(4), RequestId(2)),
+    ));
+    transport.push_response(ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+        request_id: RequestId(3),
+        snapshot: session_snapshot_from_state(&state, SESSION_ID),
+    }));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(r#"tabbar.set_position("bottom");"#);
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state.clone();
+
+    // The root tab bar is the last row of the grid; panes start at the top.
+    let grid = configured
+        .render_session(SESSION_ID, viewport)
+        .await
+        .unwrap();
+    let lines = grid.lines();
+    assert!(lines[19].contains("workspace"), "{lines:#?}");
+    assert!(!lines[0].contains("workspace"), "{lines:#?}");
+
+    // A click is hit-tested against the drawn layout: the focused pane's
+    // first content row is one row higher than with the bar on top.
+    let top = PresentationModel::project(&state, SESSION_ID, viewport).unwrap();
+    let focused = top.focused_leaf().unwrap().clone();
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            viewport,
+            MouseEvent {
+                row: focused.rect.origin.y as u16,
+                column: focused.rect.origin.x as u16,
+                modifiers: MouseModifiers::default(),
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.requests()[0],
+        ClientMessage::Input(InputRequest::Send {
+            request_id: RequestId(1),
+            buffer_id: BufferId(4),
+            bytes: b"\x1b[<0;1;1M".to_vec(),
+        })
+    );
 }
 
 #[tokio::test]
@@ -1255,6 +1411,71 @@ async fn render_invalidated_events_use_their_buffer_session_context() {
     );
 }
 
+fn not_found(request_id: u64, message: &str) -> ServerResponse {
+    ServerResponse::Error(embers_protocol::ErrorResponse {
+        request_id: Some(RequestId(request_id)),
+        error: embers_core::WireError::new(embers_core::ErrorCode::NotFound, message),
+    })
+}
+
+#[tokio::test]
+async fn events_about_a_buffer_or_session_that_is_gone_drop_it() {
+    // A pane whose command exits is removed with its buffer, and a session
+    // whose last pane closed with it, before the client asks about them.
+    let state = second_session_state();
+    let transport = FakeTransport::default();
+    transport.push_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+        buffer_id: SECOND_BUFFER_ID,
+    }));
+    transport.push_response(not_found(1, "unknown buffer"));
+    // The session showing the buffer is refreshed so no view is left pointing
+    // at a buffer the client no longer has.
+    transport.push_response(not_found(2, "unknown session"));
+    transport.push_response(not_found(3, "unknown buffer"));
+    transport.push_event(ServerEvent::NodeChanged(NodeChangedEvent {
+        session_id: SECOND_SESSION_ID,
+    }));
+    transport.push_response(not_found(4, "unknown session"));
+    transport.push_response(ServerResponse::Buffers(BuffersResponse {
+        request_id: RequestId(5),
+        buffers: Vec::new(),
+    }));
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source("");
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    configured
+        .process_next_event()
+        .await
+        .expect("a removed buffer is not an error");
+    assert!(
+        !configured
+            .client()
+            .state()
+            .buffers
+            .contains_key(&SECOND_BUFFER_ID)
+    );
+    assert!(
+        !configured.client().state().nodes.values().any(|node| node
+            .buffer_view
+            .as_ref()
+            .is_some_and(|view| view.buffer_id == SECOND_BUFFER_ID)),
+        "no view shows the removed buffer"
+    );
+    configured
+        .process_next_event()
+        .await
+        .expect("a removed session is not an error");
+    assert!(
+        !configured
+            .client()
+            .state()
+            .sessions
+            .contains_key(&SECOND_SESSION_ID)
+    );
+}
+
 #[tokio::test]
 async fn ready_events_are_handled_as_one_batch_with_one_refresh_per_buffer() {
     let state = second_session_state();
@@ -1511,6 +1732,7 @@ async fn detached_buffer_events_do_not_fall_back_to_the_active_session() {
             pipe: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     }));
     let client = MuxClient::new(transport);
@@ -2780,4 +3002,197 @@ async fn detached_client_changed_unzoom_actions_require_current_session_context(
     ));
     assert!(configured.notifications().is_empty());
     transport.assert_exhausted().expect("all requests consumed");
+}
+
+/// Queue the response to a buffer `Get` sent after a kill action closed the
+/// buffer's view: detached and still running.
+fn push_detached_running_buffer(
+    transport: &FakeTransport,
+    state: &embers_client::ClientState,
+    buffer_id: BufferId,
+) {
+    let mut response = buffer_response_from_state(state, buffer_id, RequestId(0));
+    response.buffer.attachment_node_id = None;
+    response.buffer.state = BufferRecordState::Running;
+    transport.push_response(ServerResponse::Buffer(response));
+}
+
+fn kill_requests(buffer_id: BufferId, get_id: u64) -> [ClientMessage; 2] {
+    [
+        ClientMessage::Buffer(embers_protocol::BufferRequest::Get {
+            request_id: RequestId(get_id),
+            buffer_id,
+        }),
+        ClientMessage::Buffer(embers_protocol::BufferRequest::Kill {
+            request_id: RequestId(get_id + 1),
+            buffer_id,
+            force: false,
+        }),
+    ]
+}
+
+async fn press_bound_action(configured: &mut ConfiguredClient<FakeTransport>, key: char) {
+    // The resync after the action has no queued responses and fails; only the
+    // requests the action itself sends matter here.
+    let _ = configured
+        .handle_key(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+            KeyEvent::Ctrl(key),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn kill_view_closes_the_view_and_kills_its_buffer() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    push_detached_running_buffer(&transport, &state, FOCUSED_BUFFER_ID);
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_pane(ctx) { action.kill_view() }
+            define_action("kill-pane", kill_pane);
+            bind("normal", "<C-x>", "kill-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Node(NodeRequest::Close {
+        request_id: RequestId(1),
+        node_id: FOCUSED_LEAF_ID,
+    })];
+    expected.extend(kill_requests(FOCUSED_BUFFER_ID, 2));
+    assert_eq!(requests[..expected.len()], expected[..]);
+}
+
+#[tokio::test]
+async fn kill_view_removes_an_interrupted_buffer() {
+    // A buffer whose keeper is gone (left `Interrupted` with restore off) has
+    // no program to end, but killing its view must still remove it.
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    let mut response = buffer_response_from_state(&state, FOCUSED_BUFFER_ID, RequestId(0));
+    response.buffer.attachment_node_id = None;
+    response.buffer.state = BufferRecordState::Interrupted;
+    transport.push_response(ServerResponse::Buffer(response));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_pane(ctx) { action.kill_view() }
+            define_action("kill-pane", kill_pane);
+            bind("normal", "<C-x>", "kill-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Node(NodeRequest::Close {
+        request_id: RequestId(1),
+        node_id: FOCUSED_LEAF_ID,
+    })];
+    expected.extend(kill_requests(FOCUSED_BUFFER_ID, 2));
+    assert_eq!(requests[..expected.len()], expected[..]);
+}
+
+#[tokio::test]
+async fn close_view_only_detaches_its_buffer() {
+    let transport = FakeTransport::default();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn close_pane(ctx) { action.close_view() }
+            define_action("close-pane", close_pane);
+            bind("normal", "<C-x>", "close-pane");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    assert_eq!(
+        requests[0],
+        ClientMessage::Node(NodeRequest::Close {
+            request_id: RequestId(1),
+            node_id: FOCUSED_LEAF_ID,
+        })
+    );
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientMessage::Buffer(embers_protocol::BufferRequest::Kill { .. })
+        )),
+        "close_view must not kill: {requests:?}"
+    );
+}
+
+#[tokio::test]
+async fn kill_floating_closes_the_popup_and_kills_its_buffers() {
+    let transport = FakeTransport::default();
+    let state = demo_state();
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(1),
+    }));
+    push_detached_running_buffer(&transport, &state, BufferId(5));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(3),
+    }));
+    push_detached_running_buffer(&transport, &state, BufferId(6));
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(5),
+    }));
+
+    let client = MuxClient::new(transport.clone());
+    let (config, _tempdir) = manager_from_source(
+        r#"
+            fn kill_popup(ctx) { action.kill_floating_id(90) }
+            define_action("kill-popup", kill_popup);
+            bind("normal", "<C-x>", "kill-popup");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(client, config);
+    *configured.client_mut().state_mut() = state;
+
+    press_bound_action(&mut configured, 'x').await;
+
+    let requests = transport.requests();
+    let mut expected = vec![ClientMessage::Floating(
+        embers_protocol::FloatingRequest::Close {
+            request_id: RequestId(1),
+            floating_id: embers_core::FloatingId(90),
+        },
+    )];
+    expected.extend(kill_requests(BufferId(5), 2));
+    expected.extend(kill_requests(BufferId(6), 4));
+    assert_eq!(requests[..expected.len()], expected[..]);
 }

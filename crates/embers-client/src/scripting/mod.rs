@@ -22,6 +22,7 @@ pub use model::{
     NotifyLevel, TabSpec, TabsSpec, TreeSpec,
 };
 pub use types::{
-    BarSegment, BarSpec, BarTarget, LoadedConfig, ModeHooks, MouseSettings, PaletteError, RgbColor,
-    ScriptFunctionRef, StyleSpec, ThemeSpec,
+    BarSegment, BarSpec, BarTarget, DetachOnDestroy, LoadedConfig, ModeHooks, MouseSettings,
+    PaletteError, PaneBorderColors, PassthroughMode, RgbColor, ScriptFunctionRef, StyleSpec,
+    ThemeSpec,
 };

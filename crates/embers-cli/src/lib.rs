@@ -1,7 +1,7 @@
 mod automation;
 mod interactive;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroU64;
@@ -17,8 +17,9 @@ use std::process::{Command as ProcessCommand, Stdio};
 use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
-    ClientState, NavigationDirection, PanePlacement, PresentationModel, SplitResize,
-    drawn_viewport, spawn_pty_size, window_number, window_position,
+    ClientState, CommandContext, CommandRunner, FormatContext, NavigationDirection, PanePlacement,
+    PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size, window_number,
+    window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -26,15 +27,18 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, BufferLocation, BufferLocationAttachment,
-    BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason, BufferRequest,
-    BufferResponse, ClientMessage, ClientRecord, ClientRequest, FloatingRecord, FloatingRequest,
-    FloatingResponse, NodeBreakDestination, NodeJoinPlacement, NodeRequest, PingRequest,
-    ProtocolClient, ServerResponse, SessionRecord, SessionRequest, SessionSnapshot,
-    SnapshotResponse, SynchronizePanesMode,
+    BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason,
+    BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest,
+    FloatingRecord, FloatingRequest, FloatingResponse, KillServerRequest, NodeBreakDestination,
+    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
+    SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
 };
-use embers_server::{SOCKET_ENV_VAR, Server, ServerConfig};
+use embers_server::{BUFFER_ENV_VAR, SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
 use tracing::warn;
+
+/// What `display-message` shows without a message, like tmux's default.
+const DEFAULT_DISPLAY_MESSAGE: &str = "[#S] #I:#W, current pane #D - (#{pane_current_command})";
 
 /// Environment variable selecting the tracing filter (e.g. `info`, `embers=debug`).
 pub const EMBERS_LOG_ENV_VAR: &str = "EMBERS_LOG";
@@ -137,6 +141,11 @@ pub enum Command {
         #[arg(default_value = "phase0")]
         payload: String,
     },
+    /// Stop the server and end every program it runs. Unlike stopping the
+    /// server with a signal, nothing is left for a restarted server to
+    /// reattach to or restore.
+    #[command(name = "kill-server")]
+    KillServer,
     #[command(name = "new-session")]
     NewSession { name: String },
     #[command(name = "list-sessions")]
@@ -147,11 +156,15 @@ pub enum Command {
         target: String,
     },
     #[command(name = "kill-session")]
+    /// Close a session and end the programs in its panes and popups.
     KillSession {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
         #[arg(long)]
         force: bool,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "rename-session")]
     RenameSession {
@@ -176,11 +189,15 @@ pub enum Command {
     },
     #[command(name = "list-clients")]
     ListClients,
+    /// Detach a client. From the command prompt the client defaults to the
+    /// one the prompt belongs to.
     #[command(name = "detach-client")]
-    DetachClient { client_id: u64 },
+    DetachClient { client_id: Option<u64> },
+    /// Show session `-t` on a client. From the command prompt the client
+    /// defaults to the one the prompt belongs to.
     #[command(name = "switch-client")]
     SwitchClient {
-        client_id: u64,
+        client_id: Option<u64>,
         #[arg(short = 't', long = "target")]
         target: String,
     },
@@ -218,9 +235,13 @@ pub enum Command {
         title: String,
     },
     #[command(name = "kill-window")]
+    /// Close a window and end the programs in its panes.
     KillWindow {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "split-window")]
     SplitWindow {
@@ -238,10 +259,14 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
+    /// Focus a pane, or with `-l` the pane focused before the current one in
+    /// the session's current window (tmux `select-pane -l`).
     #[command(name = "select-pane")]
     SelectPane {
-        #[arg(short = 't', long = "target")]
-        target: String,
+        #[arg(short = 't', long = "target", required_unless_present = "last")]
+        target: Option<String>,
+        #[arg(short = 'l', long = "last", conflicts_with = "target")]
+        last: bool,
     },
     /// Resize a pane like tmux: `-L/-R/-U/-D [N]` moves its border N cells
     /// (default 1), `-Z` toggles zoom, and `--sizes` sets the parent split's
@@ -287,9 +312,13 @@ pub enum Command {
         target: Option<String>,
     },
     #[command(name = "kill-pane")]
+    /// Close a pane and end its program.
     KillPane {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the program running as a detached buffer instead.
+        #[arg(long)]
+        detach: bool,
     },
     #[command(name = "display-popup")]
     DisplayPopup {
@@ -309,9 +338,31 @@ pub enum Command {
         command: Vec<String>,
     },
     #[command(name = "kill-popup")]
+    /// Close a popup and end the programs in it.
     KillPopup {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
+        /// Keep the programs running as detached buffers instead.
+        #[arg(long)]
+        detach: bool,
+    },
+    /// Show a message in the status line of the clients showing the target
+    /// pane's session (or of client `-c`) for a few seconds, like tmux. `-p`
+    /// prints it instead. The message may use `#S`, `#I`, `#W`, `#D`, `#T`,
+    /// `#{pane_current_path}` and `#{pane_current_command}`.
+    #[command(name = "display-message", visible_alias = "display")]
+    DisplayMessage {
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(short = 'c', long = "client")]
+        client: Option<NonZeroU64>,
+        #[arg(short = 'p', long = "print")]
+        print: bool,
+        /// How long to show the message, in milliseconds.
+        #[arg(short = 'd', long = "duration", value_name = "MS")]
+        duration: Option<u32>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        message: Vec<String>,
     },
     /// Set an environment variable for panes created later in a session, or in
     /// every session with `-g`, like tmux. `-u` unsets it.
@@ -471,6 +522,11 @@ pub enum JoinPlacementArg {
 async fn execute(socket: &Path, command: Command, base_index: Option<u32>) -> Result<String> {
     let mut connection = CliConnection::connect(socket).await?;
     connection.base_index = base_index;
+    connection.pane_buffer = pane_buffer(
+        std::env::var(BUFFER_ENV_VAR).ok().as_deref(),
+        std::env::var_os(SOCKET_ENV_VAR).as_deref(),
+        socket,
+    );
     execute_command(&mut connection, command).await
 }
 
@@ -496,6 +552,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 ))),
             }
         }
+        Command::KillServer => {
+            connection
+                .request(ClientMessage::KillServer(KillServerRequest {
+                    request_id: new_request_id(),
+                }))
+                .await?;
+            Ok(String::new())
+        }
         Command::NewSession { name } => {
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::Create {
@@ -517,15 +581,29 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             connection.resolve_session_record(Some(&target)).await?;
             Ok(String::new())
         }
-        Command::KillSession { target, force } => {
-            let session = connection.resolve_session_record(target.as_deref()).await?;
+        Command::KillSession {
+            target,
+            force,
+            detach,
+        } => {
+            let snapshot = connection
+                .resolve_session_snapshot(target.as_deref())
+                .await?;
+            let shown = snapshot
+                .buffers
+                .iter()
+                .map(|buffer| buffer.id)
+                .collect::<Vec<_>>();
             connection
                 .request(ClientMessage::Session(SessionRequest::Close {
                     request_id: new_request_id(),
-                    session_id: session.id,
+                    session_id: snapshot.session.id,
                     force,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
         Command::RenameSession { target, name } => {
@@ -581,8 +659,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(format_clients(&clients, &sessions))
         }
         Command::DetachClient { client_id } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             connection
                 .request(ClientMessage::Client(ClientRequest::Detach {
                     request_id: new_request_id(),
@@ -592,8 +669,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             Ok(String::new())
         }
         Command::SwitchClient { client_id, target } => {
-            let client_id = NonZeroU64::new(client_id)
-                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero"))?;
+            let client_id = connection.client_id_or_default(client_id)?;
             let session = connection.resolve_session_record(Some(&target)).await?;
             match connection
                 .request(ClientMessage::Client(ClientRequest::Switch {
@@ -770,7 +846,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 value,
                 unset,
             } => {
-                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
                 let value = if unset {
                     None
                 } else {
@@ -803,7 +879,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 }
             }
             BufferCommand::ShowOptions { target } => {
-                let buffer_id = connection.resolve_pane(target.as_deref()).await?.buffer_id;
+                let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
                 let response = connection
                     .request(ClientMessage::Buffer(BufferRequest::Get {
                         request_id: new_request_id(),
@@ -985,14 +1061,15 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
-            let number = window_number(index as usize, connection.base_index);
+            let number = window_number(index as usize, connection.base_index_for(&snapshot));
             Ok(format!("{number}\t{title}"))
         }
         Command::ListWindows { target } => {
             let snapshot = connection
                 .resolve_session_snapshot(target.as_deref())
                 .await?;
-            Ok(format_windows(&snapshot, connection.base_index)?)
+            let base_index = connection.base_index_for(&snapshot);
+            Ok(format_windows(&snapshot, base_index)?)
         }
         Command::SelectWindow { target } => {
             let window = connection.resolve_window(Some(&target)).await?;
@@ -1039,8 +1116,9 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 .is_some_and(|tab| tab.synchronize_panes);
             Ok(if enabled { "on" } else { "off" }.to_owned())
         }
-        Command::KillWindow { target } => {
+        Command::KillWindow { target, detach } => {
             let window = connection.resolve_window(target.as_deref()).await?;
+            let shown = buffer_ids_in_subtree(&window.snapshot.nodes, window.child_id);
             connection
                 .request(ClientMessage::Session(SessionRequest::CloseRootTab {
                     request_id: new_request_id(),
@@ -1048,6 +1126,9 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     index: window.index,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
         Command::SplitWindow {
@@ -1111,7 +1192,20 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let leaf_ids = visible_leaf_ids(&window.snapshot, window.child_id)?;
             Ok(format_panes(&window.snapshot, &leaf_ids)?)
         }
-        Command::SelectPane { target } => {
+        Command::SelectPane { target: None, .. } => {
+            let session = connection.resolve_session_record(None).await?;
+            connection
+                .request(ClientMessage::Node(NodeRequest::FocusLast {
+                    request_id: new_request_id(),
+                    session_id: session.id,
+                }))
+                .await?;
+            Ok(String::new())
+        }
+        Command::SelectPane {
+            target: Some(target),
+            ..
+        } => {
             let pane = connection.resolve_pane(Some(&target)).await?;
             connection
                 .request(ClientMessage::Node(NodeRequest::Focus {
@@ -1195,7 +1289,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             enter,
             keys,
         } => {
-            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
             if keys.is_empty() && !enter {
                 return Err(MuxError::invalid_input(
                     "send-keys requires at least one key or --enter",
@@ -1208,24 +1302,24 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             connection
                 .request(ClientMessage::Input(embers_protocol::InputRequest::Send {
                     request_id: new_request_id(),
-                    buffer_id: pane.buffer_id,
+                    buffer_id,
                     bytes,
                 }))
                 .await?;
             Ok(String::new())
         }
         Command::CapturePane { target } => {
-            let pane = connection.resolve_pane(target.as_deref()).await?;
+            let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
             let response = connection
                 .request(ClientMessage::Buffer(BufferRequest::Capture {
                     request_id: new_request_id(),
-                    buffer_id: pane.buffer_id,
+                    buffer_id,
                 }))
                 .await?;
             let snapshot = expect_capture(response, "capture-pane")?;
             Ok(snapshot.lines.join("\n"))
         }
-        Command::KillPane { target } => {
+        Command::KillPane { target, detach } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
             connection
                 .request(ClientMessage::Node(NodeRequest::Close {
@@ -1233,6 +1327,11 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     node_id: pane.leaf_id,
                 }))
                 .await?;
+            if !detach {
+                connection
+                    .kill_detached_buffers(vec![pane.buffer_id])
+                    .await?;
+            }
             Ok(String::new())
         }
         Command::DisplayPopup {
@@ -1280,6 +1379,60 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             )
             .await?;
             Ok(popup.id.to_string())
+        }
+        Command::DisplayMessage {
+            target,
+            client,
+            print,
+            duration,
+            message,
+        } => {
+            let client = client.or(connection.default_client);
+            let template = if message.is_empty() {
+                DEFAULT_DISPLAY_MESSAGE.to_owned()
+            } else {
+                message.join(" ")
+            };
+            let pane = match (&target, client) {
+                (None, Some(client_id)) => {
+                    let session_id = connection
+                        .client_record(client_id)
+                        .await?
+                        .current_session_id
+                        .ok_or_else(|| {
+                            MuxError::not_found(format!("client {client_id} shows no session"))
+                        })?;
+                    let snapshot = connection.session_snapshot(session_id).await?;
+                    let pane_id = snapshot
+                        .session
+                        .focused_leaf_id
+                        .ok_or_else(|| MuxError::not_found("session has no focused pane"))?;
+                    resolved_pane(snapshot, pane_id)?
+                }
+                _ => connection.resolve_pane(target.as_deref()).await?,
+            };
+            let session_id = pane.snapshot.session.id;
+            let base_index = connection.base_index_for(&pane.snapshot);
+            let mut state = ClientState::default();
+            state.apply_session_snapshot(pane.snapshot);
+            let text =
+                FormatContext::from_state(&state, session_id, Some(pane.leaf_id), base_index)
+                    .map(|context| expand_format(&template, &context))
+                    .unwrap_or(template);
+            if print {
+                return Ok(text);
+            }
+            let response = connection
+                .request(ClientMessage::Client(ClientRequest::DisplayMessage {
+                    request_id: new_request_id(),
+                    client_id: client,
+                    session_id: client.is_none().then_some(session_id),
+                    message: text,
+                    duration_ms: duration.unwrap_or(0),
+                }))
+                .await?;
+            expect_ok(response, "display-message")?;
+            Ok(String::new())
         }
         Command::SetEnvironment {
             target,
@@ -1355,14 +1508,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     .join("\n")),
             }
         }
-        Command::KillPopup { target } => {
+        Command::KillPopup { target, detach } => {
             let popup = connection.resolve_popup(target.as_deref()).await?;
+            let snapshot = connection.session_snapshot(popup.session_id).await?;
+            let shown = buffer_ids_in_subtree(&snapshot.nodes, popup.root_node_id);
             connection
                 .request(ClientMessage::Floating(FloatingRequest::Close {
                     request_id: new_request_id(),
                     floating_id: popup.id,
                 }))
                 .await?;
+            if !detach {
+                connection.kill_detached_buffers(shown).await?;
+            }
             Ok(String::new())
         }
     }
@@ -1419,6 +1577,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     automation::run(socket, target, all_sessions).await
                 }
                 Some(Command::Serve) => run_server(socket, &log_filter).await,
+                Some(Command::KillServer) => kill_server(&socket).await,
                 Some(command) => {
                     ensure_server_process(&socket, &log_filter).await?;
                     let output = execute(&socket, command, base_index).await?;
@@ -1593,8 +1752,39 @@ async fn run_server(socket_path: PathBuf, log_filter: &str) -> Result<()> {
         .is_some_and(|parent| parent == default_runtime_dir().as_path());
     let _pid = ServerPidFile::create(&pid_path(&socket_path), secure_parent)?;
     let handle = Server::new(ServerConfig::new(socket_path)).start().await?;
-    wait_for_shutdown_signal().await?;
+    // Stop on a signal, or when a client stops the server (kill-server).
+    tokio::select! {
+        result = wait_for_shutdown_signal() => result?,
+        () = handle.stopped() => {}
+    }
     handle.shutdown().await
+}
+
+/// How long `kill-server` waits for the server to stop listening.
+const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ask the server on `socket_path` to stop and end every program it runs, then
+/// wait until it no longer accepts connections, so a following command does
+/// not reach the old server. Never starts a server.
+async fn kill_server(socket_path: &Path) -> Result<()> {
+    if !server_is_available(socket_path).await {
+        return Err(MuxError::not_found(format!(
+            "no embers server is listening on {}",
+            socket_path.display()
+        )));
+    }
+    execute(socket_path, Command::KillServer, None).await?;
+    let deadline = tokio::time::Instant::now() + KILL_SERVER_TIMEOUT;
+    while server_is_available(socket_path).await {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MuxError::timeout(format!(
+                "embers server on {} did not stop",
+                socket_path.display()
+            )));
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 /// Routes panics in the detached server through `tracing` (chained after the
@@ -1782,12 +1972,112 @@ impl Drop for ServerPidFile {
     }
 }
 
+/// Runs command prompt lines (tmux `:`) for the interactive client. The words
+/// are parsed with the CLI's own definitions and executed like CLI commands
+/// over a connection of their own, with the client's session and the client
+/// itself as the default targets.
+pub struct PromptCommandRunner {
+    socket_path: PathBuf,
+}
+
+impl PromptCommandRunner {
+    pub fn new(socket_path: PathBuf) -> Self {
+        Self { socket_path }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandRunner for PromptCommandRunner {
+    async fn run(&self, argv: Vec<String>, context: CommandContext) -> Result<String> {
+        let cli = Cli::try_parse_from(std::iter::once("embers".to_owned()).chain(argv))
+            .map_err(|error| MuxError::invalid_input(clap_error_summary(&error)))?;
+        if let Some(flag) = prompt_ignored_global_flag(&cli) {
+            return Err(MuxError::invalid_input(format!(
+                "{flag} cannot be used from the command prompt"
+            )));
+        }
+        let base_index = cli.base_index.or(context.base_index);
+        let command = cli
+            .command
+            .ok_or_else(|| MuxError::invalid_input("no command given"))?;
+        if let Some(name) = interactive_command_name(&command) {
+            return Err(MuxError::invalid_input(format!(
+                "{name} cannot be run from the command prompt"
+            )));
+        }
+        let mut connection = CliConnection::connect(&self.socket_path).await?;
+        connection.base_index = base_index;
+        connection.default_session = context.session_id;
+        connection.default_client = context.client_id.and_then(NonZeroU64::new);
+        execute_command(&mut connection, command).await
+    }
+}
+
+/// A global flag a prompt line gave that the prompt cannot honour: it always
+/// talks to the attached server, with the client's config and logging. Such
+/// lines are refused rather than run with the flag silently dropped.
+fn prompt_ignored_global_flag(cli: &Cli) -> Option<&'static str> {
+    if cli.socket.is_some() {
+        Some("--socket")
+    } else if cli.config.is_some() {
+        Some("--config")
+    } else if cli.log.is_some() {
+        Some("--log")
+    } else if cli.verbose != 0 {
+        Some("--verbose")
+    } else {
+        None
+    }
+}
+
+/// The one-line gist of a clap error, for the status line.
+fn clap_error_summary(error: &clap::Error) -> String {
+    let rendered = error.to_string();
+    let line = rendered.lines().next().unwrap_or_default();
+    line.strip_prefix("error: ").unwrap_or(line).to_owned()
+}
+
+fn interactive_command_name(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Attach { .. } => Some("attach"),
+        Command::Serve => Some("__serve"),
+        Command::RuntimeKeeper { .. } => Some("__runtime-keeper"),
+        Command::Automation { .. } => Some("automation"),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct CliConnection {
     client: ProtocolClient,
-    /// Window base index (tmux `base-index`); `None` keeps the legacy
-    /// numbering described in [`embers_client::numbering`].
+    /// Window base index (tmux `base-index`) from `--base-index` or
+    /// `EMBERS_BASE_INDEX`. `None` uses the one the session's client reported
+    /// to the server, if any, else the legacy numbering described in
+    /// [`embers_client::numbering`].
     base_index: Option<u32>,
+    /// The session commands without a session target apply to, when set by
+    /// the command prompt; otherwise such commands need the only session.
+    default_session: Option<SessionId>,
+    /// The client that client commands apply to by default, when set by the
+    /// command prompt.
+    default_client: Option<NonZeroU64>,
+    /// The buffer of the pane the command runs in, when it runs inside a pane
+    /// of this server (see [`pane_buffer`]). Commands given no target act on
+    /// that pane, its window and its session, like tmux with `TMUX_PANE`.
+    pane_buffer: Option<BufferId>,
+}
+
+/// The buffer a command run inside a pane belongs to: `EMBERS_BUFFER`, which
+/// the server sets in every pane, taken only when the pane's `EMBERS_SOCKET`
+/// is the socket the command talks to. A command aimed at another server, or
+/// run outside any pane, has none.
+fn pane_buffer(
+    buffer: Option<&str>,
+    pane_socket: Option<&OsStr>,
+    socket: &Path,
+) -> Option<BufferId> {
+    let buffer_id = buffer?.trim().parse::<u64>().ok()?;
+    (Path::new(pane_socket?) == socket).then_some(BufferId(buffer_id))
 }
 
 impl CliConnection {
@@ -1798,7 +2088,51 @@ impl CliConnection {
         Ok(Self {
             client,
             base_index: None,
+            default_session: None,
+            default_client: None,
+            pane_buffer: None,
         })
+    }
+
+    /// The base index windows of `snapshot`'s session are numbered from:
+    /// `--base-index` or `EMBERS_BASE_INDEX` when given, else the one the
+    /// client showing the session reported to the server.
+    fn base_index_for(&self, snapshot: &SessionSnapshot) -> Option<u32> {
+        self.base_index.or(snapshot.session.base_index)
+    }
+
+    fn client_id_or_default(&self, client_id: Option<u64>) -> Result<NonZeroU64> {
+        match client_id {
+            Some(client_id) => NonZeroU64::new(client_id)
+                .ok_or_else(|| MuxError::invalid_input("client id must be non-zero")),
+            None => self
+                .default_client
+                .ok_or_else(|| MuxError::invalid_input("a client id is required")),
+        }
+    }
+
+    /// Where the pane the command runs in is shown, if it runs in one.
+    async fn pane_location(&mut self) -> Result<Option<BufferLocation>> {
+        let Some(buffer_id) = self.pane_buffer else {
+            return Ok(None);
+        };
+        let response = self
+            .request(ClientMessage::Buffer(BufferRequest::GetLocation {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await?;
+        expect_buffer_location(response, "buffer location").map(Some)
+    }
+
+    /// The buffer a buffer-level command acts on: the target pane's, else the
+    /// buffer of the pane the command runs in (shown or not), else the
+    /// focused pane's.
+    async fn resolve_buffer(&mut self, target: Option<&str>) -> Result<BufferId> {
+        match (target, self.pane_buffer) {
+            (None, Some(buffer_id)) => Ok(buffer_id),
+            _ => Ok(self.resolve_pane(target).await?.buffer_id),
+        }
     }
 
     async fn request(&mut self, message: ClientMessage) -> Result<ServerResponse> {
@@ -1839,6 +2173,65 @@ impl CliConnection {
                 "unexpected response to list-clients: {other:?}"
             ))),
         }
+    }
+
+    async fn client_record(&mut self, client_id: NonZeroU64) -> Result<ClientRecord> {
+        match self
+            .request(ClientMessage::Client(ClientRequest::Get {
+                request_id: new_request_id(),
+                client_id: Some(client_id),
+            }))
+            .await?
+        {
+            ServerResponse::Client(response) => Ok(response.client),
+            other => Err(MuxError::protocol(format!(
+                "unexpected response to client get: {other:?}"
+            ))),
+        }
+    }
+
+    /// End the programs of buffers whose views a kill command just closed.
+    /// Each is detached by then; one that is attached again by the time it is
+    /// checked is shown somewhere else and keeps running, and one whose program
+    /// already ended needs nothing. One left `Interrupted` (its keeper is gone)
+    /// has no program, but is killed too so the server removes it.
+    async fn kill_detached_buffers(&mut self, buffer_ids: Vec<BufferId>) -> Result<()> {
+        for buffer_id in buffer_ids {
+            let buffer = match self
+                .request(ClientMessage::Buffer(BufferRequest::Get {
+                    request_id: new_request_id(),
+                    buffer_id,
+                }))
+                .await
+            {
+                Ok(ServerResponse::Buffer(response)) => response.buffer,
+                Ok(_) => continue,
+                // Gone already: a history view's buffer goes with its view.
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error),
+            };
+            if buffer.attachment_node_id.is_some()
+                || !matches!(
+                    buffer.state,
+                    BufferRecordState::Running | BufferRecordState::Interrupted
+                )
+            {
+                continue;
+            }
+            match self
+                .request(ClientMessage::Buffer(BufferRequest::Kill {
+                    request_id: new_request_id(),
+                    buffer_id,
+                    force: false,
+                }))
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if error.is_not_found() || error.is_conflict() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn session_snapshot(&mut self, session_id: SessionId) -> Result<SessionSnapshot> {
@@ -1916,12 +2309,34 @@ impl CliConnection {
     }
 
     async fn resolve_session_record(&mut self, target: Option<&str>) -> Result<SessionRecord> {
+        let pane_session = match target {
+            None => self
+                .pane_location()
+                .await?
+                .and_then(BufferLocation::session_id),
+            Some(_) => None,
+        };
         let sessions = self.list_sessions().await?;
+        if let Some(session_id) = pane_session {
+            return sessions
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| MuxError::not_found(format!("session {session_id} was not found")));
+        }
         match target {
             Some(target) => sessions
                 .into_iter()
                 .find(|session| session.name == target)
                 .ok_or_else(|| MuxError::not_found(format!("session '{target}' was not found"))),
+            None if self
+                .default_session
+                .is_some_and(|id| sessions.iter().any(|session| session.id == id)) =>
+            {
+                Ok(sessions
+                    .into_iter()
+                    .find(|session| Some(session.id) == self.default_session)
+                    .expect("checked default session"))
+            }
             None => match sessions.as_slice() {
                 [session] => Ok(session.clone()),
                 [] => Err(MuxError::not_found("no sessions exist")),
@@ -1938,13 +2353,31 @@ impl CliConnection {
     }
 
     async fn resolve_window(&mut self, target: Option<&str>) -> Result<ResolvedWindow> {
+        if target.is_none()
+            && let Some(BufferLocationAttachment::Session {
+                session_id,
+                node_id,
+            }) = self
+                .pane_location()
+                .await?
+                .map(|location| location.attachment)
+        {
+            let snapshot = self.session_snapshot(session_id).await?;
+            let (index, child_id) = window_containing(&snapshot, node_id)?;
+            return Ok(ResolvedWindow {
+                snapshot,
+                index,
+                child_id,
+            });
+        }
         let (session_target, selector) = split_scoped_target(target);
         let snapshot = self
             .resolve_session_snapshot(session_target.as_deref())
             .await?;
+        let base_index = self.base_index_for(&snapshot);
         let (index, child_id) = {
             if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref(), self.base_index)?;
+                let index = resolve_window_index(root_tabs, selector.as_deref(), base_index)?;
                 let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
                     MuxError::not_found(format!(
                         "window index {index} is not present in session {}",
@@ -1954,8 +2387,7 @@ impl CliConnection {
                 (index, tab.child_id)
             } else {
                 let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index =
-                    resolve_single_window_index(&title, selector.as_deref(), self.base_index)?;
+                let index = resolve_single_window_index(&title, selector.as_deref(), base_index)?;
                 (index, snapshot.session.root_node_id)
             }
         };
@@ -1979,6 +2411,18 @@ impl CliConnection {
                 resolved_pane(snapshot, pane_id)
             }
             None => {
+                if let Some(location) = self.pane_location().await? {
+                    let (Some(session_id), Some(pane_id)) =
+                        (location.session_id(), location.node_id())
+                    else {
+                        return Err(MuxError::not_found(format!(
+                            "buffer {} of this pane ({BUFFER_ENV_VAR}) is not shown in a session",
+                            location.buffer_id
+                        )));
+                    };
+                    let snapshot = self.session_snapshot(session_id).await?;
+                    return resolved_pane(snapshot, pane_id);
+                }
                 let snapshot = self.resolve_session_snapshot(None).await?;
                 let pane_id = snapshot
                     .session
@@ -2011,6 +2455,18 @@ impl CliConnection {
                 }
             }
             None => {
+                if let Some(BufferLocationAttachment::Floating {
+                    session_id,
+                    floating_id,
+                    ..
+                }) = self
+                    .pane_location()
+                    .await?
+                    .map(|location| location.attachment)
+                {
+                    let snapshot = self.session_snapshot(session_id).await?;
+                    return floating_record(&snapshot, floating_id).cloned();
+                }
                 let snapshot = self.resolve_session_snapshot(None).await?;
                 let popup_id = snapshot
                     .session
@@ -2063,6 +2519,32 @@ struct ResolvedPane {
     snapshot: SessionSnapshot,
     leaf_id: NodeId,
     buffer_id: BufferId,
+}
+
+/// The root window holding `node_id`: its index and the node it shows.
+fn window_containing(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<(u32, NodeId)> {
+    let Some((tabs_node, tabs)) = root_tabs(snapshot)? else {
+        return Ok((0, snapshot.session.root_node_id));
+    };
+    let mut child_id = node_id;
+    loop {
+        let parent_id = node_record(snapshot, child_id)?.parent_id.ok_or_else(|| {
+            MuxError::not_found(format!("node {node_id} is not in a window of its session"))
+        })?;
+        if parent_id == tabs_node.id {
+            break;
+        }
+        child_id = parent_id;
+    }
+    let index = tabs
+        .tabs
+        .iter()
+        .position(|tab| tab.child_id == child_id)
+        .ok_or_else(|| MuxError::protocol(format!("window of node {node_id} is not a root tab")))?;
+    Ok((
+        u32::try_from(index).expect("tab index fits into protocol width"),
+        child_id,
+    ))
 }
 
 fn resolved_pane(snapshot: SessionSnapshot, pane_id: NodeId) -> Result<ResolvedPane> {
@@ -2238,6 +2720,18 @@ fn format_buffer_details(
         let serialized_args =
             serde_json::to_string(&buffer.command).expect("buffer commands serialize to JSON");
         lines.push(format!("command\t{serialized_args}"));
+    }
+    // What runs in the foreground now, like tmux's `pane_current_command`,
+    // and the job's whole command line when it is not the buffer's own.
+    if let Some(name) = buffer.process_name() {
+        let serialized_name =
+            serde_json::to_string(&name).expect("program names serialize to JSON");
+        lines.push(format!("current_command\t{serialized_name}"));
+    }
+    if let Some(foreground) = &buffer.foreground_command {
+        let serialized_foreground =
+            serde_json::to_string(foreground).expect("foreground commands serialize to JSON");
+        lines.push(format!("foreground_command\t{serialized_foreground}"));
     }
     if let Some(cwd) = &buffer.cwd {
         let serialized_cwd =
@@ -2856,9 +3350,21 @@ mod tests {
     use super::{
         BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
         JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
-        resolve_single_window_index, resolve_window_index, split_scoped_required,
+        pane_buffer, resolve_single_window_index, resolve_window_index, split_scoped_required,
         split_scoped_target,
     };
+
+    #[test]
+    fn pane_buffer_is_only_taken_for_the_panes_own_server() {
+        let socket = Path::new("/run/embers/embers.sock");
+        let same = Some(std::ffi::OsStr::new("/run/embers/embers.sock"));
+        let other = Some(std::ffi::OsStr::new("/run/embers/other.sock"));
+        assert_eq!(pane_buffer(Some("7"), same, socket), Some(BufferId(7)));
+        assert_eq!(pane_buffer(Some("7"), other, socket), None);
+        assert_eq!(pane_buffer(Some("7"), None, socket), None);
+        assert_eq!(pane_buffer(None, same, socket), None);
+        assert_eq!(pane_buffer(Some("%7"), same, socket), None);
+    }
 
     #[test]
     fn parser_accepts_global_socket_after_subcommand() {
@@ -3032,6 +3538,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -3069,6 +3576,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -3093,6 +3601,58 @@ mod tests {
     }
 
     #[test]
+    fn buffer_details_show_the_foreground_command() {
+        let buffer = |foreground_command: Option<Vec<String>>| BufferRecord {
+            id: BufferId(10),
+            title: "shell".to_owned(),
+            command: vec!["/bin/zsh".to_owned()],
+            cwd: None,
+            kind: BufferRecordKind::Pty,
+            pid: None,
+            env: Default::default(),
+            state: BufferRecordState::Running,
+            attachment_node_id: Some(NodeId(6)),
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            exit_code: None,
+            pipe: None,
+            user_options: Default::default(),
+            foreground_command,
+        };
+        let location = BufferLocation::session(BufferId(10), SessionId(1), NodeId(6));
+        let row = |details: &str, name: &str| {
+            details
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}\t")))
+                .map(str::to_owned)
+        };
+
+        // The shell runs Neovim as its foreground job.
+        let details = format_buffer_details(
+            &buffer(Some(vec!["nvim".to_owned(), "notes.txt".to_owned()])),
+            &location,
+        );
+        assert_eq!(
+            row(&details, "current_command").as_deref(),
+            Some("\"nvim\"")
+        );
+        let foreground: Vec<String> = serde_json::from_str(
+            &row(&details, "foreground_command").expect("foreground_command row present"),
+        )
+        .expect("foreground_command row uses JSON");
+        assert_eq!(foreground, ["nvim", "notes.txt"]);
+
+        // The shell itself is in the foreground.
+        let details = format_buffer_details(&buffer(None), &location);
+        assert_eq!(row(&details, "current_command").as_deref(), Some("\"zsh\""));
+        assert_eq!(row(&details, "foreground_command"), None);
+    }
+
+    #[test]
     fn buffer_details_title_and_cwd_rows_use_json() {
         let details = format_buffer_details(
             &BufferRecord {
@@ -3114,6 +3674,7 @@ mod tests {
                 exit_code: None,
                 pipe: None,
                 user_options: Default::default(),
+                foreground_command: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );

@@ -625,6 +625,37 @@ async fn buffer_children_inherit_default_term_and_socket_env() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_children_see_their_own_buffer_id() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let script = "printf 'BUFFER:%s:\\n' \"$EMBERS_BUFFER\"";
+    let first = create_buffer(&mut connection, &["/bin/sh", "-lc", script]).await;
+    // An env hint cannot point a pane at another buffer.
+    let second = create_buffer_with_env(
+        &mut connection,
+        &["/bin/sh", "-lc", script],
+        &[("EMBERS_BUFFER", "999")],
+    )
+    .await;
+
+    for buffer in [first, second] {
+        let snapshot = wait_for_capture_contains(&mut connection, buffer.id, "BUFFER:").await;
+        let text = snapshot.lines.join("\n");
+        let expected = format!("BUFFER:{}:", buffer.id.0);
+        assert!(
+            text.contains(&expected),
+            "expected {expected:?} in {text:?}"
+        );
+    }
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_env_hint_overrides_default_term() {
     let _guard = acquire_test_lock().await.expect("acquire test lock");
     let server = TestServer::start().await.expect("start server");
@@ -806,6 +837,89 @@ async fn pid_polling_reports_shell_cwd() {
     .await;
 
     wait_for_cwd(&mut connection, buffer.id, &expected).await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+async fn wait_for_foreground_command(
+    connection: &mut TestConnection,
+    buffer_id: embers_core::BufferId,
+    expected: Option<Vec<String>>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let buffer = get_buffer(connection, buffer_id).await;
+        if buffer.foreground_command == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground command stayed {:?}, expected {expected:?}",
+            buffer.foreground_command
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_record_reports_the_job_a_shell_runs() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let buffer = create_buffer(&mut connection, &["/bin/sh"]).await;
+    wait_for_foreground_command(&mut connection, buffer.id, None).await;
+
+    send_input(&mut connection, buffer.id, "sleep 30\r").await;
+    wait_for_foreground_command(
+        &mut connection,
+        buffer.id,
+        Some(vec!["sleep".to_owned(), "30".to_owned()]),
+    )
+    .await;
+
+    // Back at the prompt, the shell itself is in the foreground again.
+    send_input(&mut connection, buffer.id, "\u{3}").await;
+    wait_for_foreground_command(&mut connection, buffer.id, None).await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bell_is_reported_even_when_more_output_follows_before_a_poll() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    // The bell and the output after it arrive in separate reads, well within
+    // one status poll of each other.
+    let buffer = create_buffer(
+        &mut connection,
+        &[
+            "/bin/sh",
+            "-c",
+            "sleep 0.3; printf '\\a'; sleep 0.002; printf 'after-''bell\\n'; sleep 30",
+        ],
+    )
+    .await;
+    let _ = wait_for_capture_contains(&mut connection, buffer.id, "after-bell").await;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let activity = get_buffer(&mut connection, buffer.id).await.activity;
+        if activity == embers_core::ActivityState::Bell {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the bell was lost: buffer activity is {activity:?}"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
 
     server.shutdown().await.expect("shutdown server");
 }

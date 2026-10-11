@@ -11,7 +11,7 @@ use crate::environment::EnvironmentStore;
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
-    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    RemainOnExit, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
     CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
@@ -54,6 +54,21 @@ enum NodeOwnerSnapshot {
     },
 }
 
+/// What [`ServerState::dispose_exited_buffers`] cleaned up.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DisposedBuffers {
+    /// Buffers whose records were removed.
+    pub removed_buffers: Vec<BufferId>,
+    /// Sessions in which a view was closed.
+    pub changed_sessions: BTreeSet<SessionId>,
+}
+
+impl DisposedBuffers {
+    pub fn is_empty(&self) -> bool {
+        self.removed_buffers.is_empty() && self.changed_sessions.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerState {
     pub sessions: BTreeMap<SessionId, Session>,
@@ -66,6 +81,12 @@ pub struct ServerState {
     /// The viewport most recently reported for any session, which new
     /// sessions start with.
     last_viewport: Option<Size>,
+    /// The base index last reported for any session, which new sessions
+    /// start with.
+    last_base_index: Option<u32>,
+    /// Whether exited buffers that do not set the `remain-on-exit` option
+    /// stay in their views; the server sets it from its config.
+    pub remain_on_exit: RemainOnExit,
     session_ids: IdAllocator<SessionId>,
     buffer_ids: IdAllocator<BufferId>,
     node_ids: IdAllocator<NodeId>,
@@ -87,6 +108,8 @@ impl ServerState {
             floating: BTreeMap::new(),
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_base_index: None,
+            remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(1),
             buffer_ids: IdAllocator::new(1),
             node_ids: IdAllocator::new(1),
@@ -176,6 +199,8 @@ impl ServerState {
             floating,
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_base_index: None,
+            remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
             buffer_ids: IdAllocator::new(next_buffer_id.max(safe_next_buffer_id)),
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
@@ -410,10 +435,22 @@ impl ServerState {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: self.last_viewport,
+                base_index: self.last_base_index,
+                focus_history: Vec::new(),
                 created_at: Timestamp::now(),
             },
         );
         session_id
+    }
+
+    pub fn set_session_base_index(
+        &mut self,
+        session_id: SessionId,
+        base_index: Option<u32>,
+    ) -> Result<()> {
+        self.session_mut(session_id)?.base_index = base_index;
+        self.last_base_index = base_index;
+        Ok(())
     }
 
     pub fn set_session_viewport(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
@@ -476,6 +513,75 @@ impl ServerState {
         self.buffers
             .remove(&buffer_id)
             .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))
+    }
+
+    /// Clean up PTY buffers whose command has exited, like tmux with
+    /// `remain-on-exit off`:
+    ///
+    /// - an attached exited buffer has its view closed and its record removed,
+    ///   unless it [remains on exit](Buffer::remains_on_exit) (its option, or
+    ///   else [`Self::remain_on_exit`]), in which case it stays in its view
+    ///   until that view is closed
+    /// - a detached exited buffer has its record removed, unless it has never
+    ///   been attached: buffers are created detached and attached by a later
+    ///   request, and one whose command exits in between is kept until it is
+    ///   shown
+    /// - a helper buffer (a history view) whose view closed has its record
+    ///   removed: it only exists to be shown
+    ///
+    /// Run after every change that can exit, attach or detach a buffer.
+    pub fn dispose_exited_buffers(&mut self) -> DisposedBuffers {
+        let mut disposed = DisposedBuffers::default();
+        let closed_helpers = self
+            .buffers
+            .values()
+            .filter(|buffer| {
+                matches!(buffer.kind, BufferKind::Helper(_))
+                    && matches!(buffer.attachment, BufferAttachment::Detached)
+            })
+            .map(|buffer| buffer.id)
+            .collect::<Vec<_>>();
+        for buffer_id in closed_helpers {
+            if self.remove_buffer(buffer_id).is_ok() {
+                disposed.removed_buffers.push(buffer_id);
+            }
+        }
+        let exited = self
+            .buffers
+            .values()
+            .filter(|buffer| {
+                matches!(buffer.kind, BufferKind::Pty)
+                    && matches!(buffer.state, BufferState::Exited(_))
+            })
+            .map(|buffer| {
+                (
+                    buffer.id,
+                    buffer.attachment.clone(),
+                    buffer.ever_attached,
+                    buffer.remains_on_exit(self.remain_on_exit),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (buffer_id, attachment, ever_attached, remains_on_exit) in exited {
+            match attachment {
+                BufferAttachment::Attached(_) if remains_on_exit => continue,
+                BufferAttachment::Attached(view_id) => {
+                    let Ok(session_id) = self.node_session_id(view_id) else {
+                        continue;
+                    };
+                    if self.close_node(view_id).is_err() {
+                        continue;
+                    }
+                    disposed.changed_sessions.insert(session_id);
+                }
+                BufferAttachment::Detached if !ever_attached => continue,
+                BufferAttachment::Detached => {}
+            }
+            if self.remove_buffer(buffer_id).is_ok() {
+                disposed.removed_buffers.push(buffer_id);
+            }
+        }
+        disposed
     }
 
     pub fn mark_buffer_running(&mut self, buffer_id: BufferId, pid: Option<u32>) -> Result<()> {
@@ -1347,6 +1453,24 @@ impl ServerState {
         Ok(seen.into_iter().collect())
     }
 
+    /// Whether the session shows at least one pane, in a window or a popup.
+    pub fn session_has_panes(&self, session_id: SessionId) -> bool {
+        self.session_node_ids(session_id).is_ok_and(|node_ids| {
+            node_ids
+                .iter()
+                .any(|node_id| matches!(self.nodes.get(node_id), Some(Node::BufferView(_))))
+        })
+    }
+
+    /// Every session that shows at least one pane.
+    pub fn sessions_with_panes(&self) -> BTreeSet<SessionId> {
+        self.sessions
+            .keys()
+            .copied()
+            .filter(|session_id| self.session_has_panes(*session_id))
+            .collect()
+    }
+
     pub fn session_buffer_ids(&self, session_id: SessionId) -> Result<Vec<BufferId>> {
         let mut buffers = BTreeSet::new();
         for node_id in self.session_node_ids(session_id)? {
@@ -1381,7 +1505,14 @@ impl ServerState {
             }
         }
 
-        self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Attached(node_id);
+        self.set_buffer_attached(buffer_id, node_id)?;
+        Ok(())
+    }
+
+    fn set_buffer_attached(&mut self, buffer_id: BufferId, view_id: NodeId) -> Result<()> {
+        let buffer = self.buffer_mut(buffer_id)?;
+        buffer.attachment = BufferAttachment::Attached(view_id);
+        buffer.ever_attached = true;
         Ok(())
     }
 
@@ -1715,7 +1846,7 @@ impl ServerState {
                 }
                 return Err(error);
             }
-            self.buffer_mut(buffer_id)?.attachment = BufferAttachment::Attached(new_view);
+            self.set_buffer_attached(buffer_id, new_view)?;
         }
         self.normalize_zoomed_node(target_session)?;
         Ok(())
@@ -1732,8 +1863,14 @@ impl ServerState {
         self.ensure_leaf_belongs_to(leaf_id, session_id)?;
         self.ensure_leaf_is_focusable(session_id, leaf_id)?;
         let buffer_id = self.buffer_view_buffer_id(leaf_id)?;
+        let previous_leaf = self.session(session_id)?.focused_leaf;
         self.clear_session_focus(session_id)?;
         self.set_leaf_focus(leaf_id, true)?;
+        if let Some(previous_leaf) = previous_leaf
+            && previous_leaf != leaf_id
+        {
+            self.remember_focus(session_id, previous_leaf)?;
+        }
 
         let floating_owner = self.floating_id_for_node(leaf_id)?;
         {
@@ -1772,6 +1909,69 @@ impl ServerState {
         self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
 
         Ok(())
+    }
+
+    /// The pane focused before the current one in the focused pane's window,
+    /// like tmux's last pane: the newest pane in the session's focus history
+    /// that still exists and is in that window. `None` when the focus is in
+    /// a popup or no other pane of the window was focused.
+    pub fn last_pane(&self, session_id: SessionId) -> Result<Option<NodeId>> {
+        let session = self.session(session_id)?;
+        let Some(focused) = session.focused_leaf else {
+            return Ok(None);
+        };
+        let Some(window) = self.window_of_leaf(session_id, focused)? else {
+            return Ok(None);
+        };
+        for &candidate in session.focus_history.iter().rev() {
+            if candidate == focused
+                || !matches!(self.nodes.get(&candidate), Some(Node::BufferView(_)))
+            {
+                continue;
+            }
+            if self.window_of_leaf(session_id, candidate)? == Some(window) {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Focus the window's last pane (tmux `select-pane -l`).
+    pub fn focus_last_pane(&mut self, session_id: SessionId) -> Result<()> {
+        let Some(leaf_id) = self.last_pane(session_id)? else {
+            return Err(MuxError::not_found("no last pane"));
+        };
+        self.focus_leaf(session_id, leaf_id)
+    }
+
+    /// Most entries kept in a session's focus history.
+    const FOCUS_HISTORY_LIMIT: usize = 64;
+
+    fn remember_focus(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
+        let mut history = std::mem::take(&mut self.session_mut(session_id)?.focus_history);
+        history.retain(|&entry| entry != leaf_id && self.nodes.contains_key(&entry));
+        history.push(leaf_id);
+        if history.len() > Self::FOCUS_HISTORY_LIMIT {
+            history.drain(..history.len() - Self::FOCUS_HISTORY_LIMIT);
+        }
+        self.session_mut(session_id)?.focus_history = history;
+        Ok(())
+    }
+
+    /// The window a leaf of the session's layout is in: the root tab holding
+    /// it, or the root itself when the session has one window. `None` for a
+    /// leaf in a popup or outside the session.
+    fn window_of_leaf(&self, session_id: SessionId, leaf_id: NodeId) -> Result<Option<NodeId>> {
+        let root = self.session(session_id)?.root_node;
+        let root_is_tabs = matches!(self.node(root)?, Node::Tabs(_));
+        let mut current = leaf_id;
+        loop {
+            match self.node_parent(current)? {
+                Some(parent) if parent == root && root_is_tabs => return Ok(Some(current)),
+                Some(parent) => current = parent,
+                None => return Ok((current == root).then_some(root)),
+            }
+        }
     }
 
     pub fn switch_tab(&mut self, tabs_id: NodeId, index: usize) -> Result<()> {

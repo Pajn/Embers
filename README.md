@@ -12,6 +12,15 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Layout saved as it changes and panes restored after a crash or reboot, tmux-resurrect style
 - Scrollback, visible snapshots, search, and a vi-style copy mode with mouse selection (see
   [`docs/copy-mode.md`](docs/copy-mode.md))
+- A session/window/pane picker, a command prompt that runs the CLI's commands,
+  `display-message` and session environments, as in tmux (see
+  [`docs/commands.md`](docs/commands.md))
+- OSC 52 clipboard writes and opt-in tmux-style passthrough (`ESC P tmux; ... ESC \`, off by
+  default as in tmux) from programs in panes to the outer terminal, for images and notifications
+  (see [`docs/configuration.md`](docs/configuration.md#passthrough))
+- Underline styles and colors, OSC 8 hyperlinks and passthrough sent only to outer terminals that
+  support them, detected when the client attaches (see
+  [`docs/configuration.md`](docs/configuration.md#the-host-terminal))
 - Scriptable Rhai config for key bindings, modes, actions, themes, tab bars, and hooks
 - CLI commands for scripting and automation
 - FlatBuffers protocol shared by the client and server crates
@@ -80,19 +89,40 @@ embers --socket /tmp/my-embers.sock list-sessions
 EMBERS_SOCKET=/tmp/my-embers.sock embers attach
 ```
 
-Windows are numbered from 0 unless a base index is set (`EMBERS_BASE_INDEX=1`,
-`--base-index 1`, or `set_base_index(1)` in the config), as with tmux's
-`base-index`. Closing a window renumbers the ones after it. See
+Windows are numbered from 0 unless a base index is set (`set_base_index(1)` in
+the config, which the client reports to the server for the CLI to use, or
+`EMBERS_BASE_INDEX=1` or `--base-index 1`), as with tmux's `base-index`. Closing a window renumbers the ones after it. See
 [`docs/commands.md`](docs/commands.md).
+
+The same commands can be typed at the client's command prompt, tmux's
+`prefix :`, bound with `action.command_prompt()`. See
+[`docs/commands.md`](docs/commands.md#command-prompt).
 
 Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`, `set-environment`, `show-environment`
 - `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`, `synchronize-panes`
-- `pane`: `split-window`, `list-panes`, `select-pane`, `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
+- `pane`: `split-window`, `list-panes`, `select-pane` (`-t`, or `-l` for the last pane), `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
+- `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
+- `server`: `kill-server` (stop the server and every program it runs; attached clients print
+  `[server exited]` and exit)
+
+As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
+programs they show; pass `--detach` to keep them running as detached buffers
+instead. A pane closes when its program exits, unless its buffer has
+`remain-on-exit` set (`embers buffer set-option remain-on-exit on`). A session
+whose last pane closes is destroyed; an attached client then exits, or moves to
+another session with `set_detach_on_destroy("off")` (or `"previous"`/`"next"`)
+in the config file, like tmux's `detach-on-destroy`.
+
+Every pane's processes get `EMBERS_SOCKET` and `EMBERS_BUFFER`, the id of the
+pane's buffer, much like tmux's `TMUX` and `TMUX_PANE`. A command run inside a
+pane without `-t` acts on that pane, its window and its session rather than on
+the focused ones, so a script or editor in a pane can run, for example,
+`embers buffer set-option is-vim 1` to mark its own pane.
 
 ## Logging
 
@@ -157,7 +187,7 @@ Embers loads configuration in this order:
 
 User config is loaded as an overlay on top of the built-in defaults. The built-in config enables mouse behavior (including drag-to-copy), scroll/search modes, and tmux `copy-mode-vi` style bindings for copy mode, described in [`docs/copy-mode.md`](docs/copy-mode.md).
 
-This repository includes a fuller example at [`config.rhai`](config.rhai). It defines a tmux-inspired leader, smart navigation for Vim/Neovim panes, split/tab helpers, popup helpers, history views, and a custom tab bar/theme.
+This repository includes a fuller example at [`config.rhai`](config.rhai): a typical tmux setup translated to Embers, section by section, with a note for each tmux setting that works differently or has no equivalent. It has a `C-a` prefix, splits and windows that open in the pane's directory, popups for tools such as lazygit, history views, smart-splits.nvim navigation, and a Catppuccin tab bar that labels windows from their panes. The tests in `crates/embers-client/tests/repo_config.rs` load it.
 
 Run with an explicit config while developing:
 
@@ -217,7 +247,7 @@ The docs directory contains design notes that are useful when changing behavior:
 - [`docs/terminal-backend-boundary.md`](docs/terminal-backend-boundary.md): server/backend responsibility boundary
 - [`docs/terminal-capture-model.md`](docs/terminal-capture-model.md): terminal capture and snapshot model
 - [`docs/input-routing.md`](docs/input-routing.md): input routing model
-- [`docs/layout-controls.md`](docs/layout-controls.md): pane resizing, divider dragging, and synchronize-panes
+- [`docs/layout-controls.md`](docs/layout-controls.md): pane resizing, divider dragging and colors, and synchronize-panes
 - [`docs/activity-bell-policy.md`](docs/activity-bell-policy.md): activity and bell state policy
 - [`docs/render-source-contract.md`](docs/render-source-contract.md): rendering source-of-truth contract
 

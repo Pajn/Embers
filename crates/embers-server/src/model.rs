@@ -19,6 +19,14 @@ pub struct Session {
     /// The area an attached client last drew this session in. Panes created
     /// without a client use it to start at their drawn size.
     pub viewport: Option<Size>,
+    /// The window base index of the client that last showed this session
+    /// (tmux `base-index`), so the CLI numbers windows as that client does.
+    pub base_index: Option<u32>,
+    /// Panes focused before the current one, oldest first, without repeats.
+    /// The newest one in the focused pane's window is that window's last pane
+    /// (tmux `select-pane -l`). Kept in memory only; entries for closed panes
+    /// are skipped when read and pruned when the list grows.
+    pub focus_history: Vec<NodeId>,
     pub created_at: Timestamp,
 }
 
@@ -89,7 +97,54 @@ pub struct Buffer {
     pub kind: BufferKind,
     pub pipe: Option<BufferPipe>,
     pub created_at: Timestamp,
+    /// Whether the buffer has been shown in a view since it was created. A
+    /// buffer is created detached and attached by a later request, so an exit
+    /// before its first attachment does not remove it (see
+    /// [`ServerState::dispose_exited_buffers`](crate::ServerState::dispose_exited_buffers)).
+    /// Not persisted: a restored buffer was created by an earlier server, so
+    /// it counts as shown and is cleaned up like any other.
+    pub ever_attached: bool,
+    /// The bell count of the buffer's runtime as last applied, so a bell is
+    /// recorded once even when later output replaced the runtime's activity
+    /// before it was reported. Not persisted: each runtime counts from its
+    /// own start, and attaching one sets this from its status.
+    pub runtime_bell_sequence: u64,
 }
+
+/// Buffer option that keeps an exited buffer in its view instead of closing
+/// the view, like tmux's `remain-on-exit`: `on` always, `failed` only when the
+/// command did not exit with status 0. Any other value means off; unset, the
+/// server-wide default applies (see [`RemainOnExit`]).
+pub const REMAIN_ON_EXIT_OPTION: &str = "remain-on-exit";
+
+/// A `remain-on-exit` setting: whether an exited buffer stays in its view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemainOnExit {
+    /// Close the view and remove the buffer.
+    #[default]
+    Off,
+    /// Keep the dead pane.
+    On,
+    /// Keep the dead pane only when the command did not exit with status 0.
+    Failed,
+}
+
+impl RemainOnExit {
+    /// Parse an option value: `on` and `failed`, anything else is off.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "on" => Self::On,
+            "failed" => Self::Failed,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// Buffer option Neovim sets on its own pane, like tmux's `@pane-is-vim`, so
+/// smart navigation can tell it runs there. It describes the program running
+/// in the buffer rather than the pane, so it is dropped when a restore starts
+/// a fresh process in the buffer.
+pub const IS_VIM_OPTION: &str = "is-vim";
 
 impl Buffer {
     pub(crate) fn new(
@@ -116,6 +171,25 @@ impl Buffer {
             kind: BufferKind::Pty,
             pipe: None,
             created_at: Timestamp::now(),
+            ever_attached: false,
+            runtime_bell_sequence: 0,
+        }
+    }
+
+    /// Whether this buffer stays in its view after its command exits, per its
+    /// [`REMAIN_ON_EXIT_OPTION`], or `default` when the option is not set.
+    pub fn remains_on_exit(&self, default: RemainOnExit) -> bool {
+        let setting = self
+            .user_options
+            .get(REMAIN_ON_EXIT_OPTION)
+            .map_or(default, |value| RemainOnExit::parse(value));
+        match setting {
+            RemainOnExit::On => true,
+            RemainOnExit::Failed => match &self.state {
+                BufferState::Exited(exited) => exited.exit_code != Some(0),
+                _ => true,
+            },
+            RemainOnExit::Off => false,
         }
     }
 
@@ -147,10 +221,15 @@ impl fmt::Debug for Buffer {
             .field("kind", &self.kind)
             .field("pipe", &self.pipe)
             .field("created_at", &self.created_at)
+            .field("ever_attached", &self.ever_attached)
+            .field("runtime_bell_sequence", &self.runtime_bell_sequence)
             .finish()
     }
 }
 
+// `ever_attached` and `runtime_bell_sequence` are left out: they are
+// bookkeeping that is not persisted, so a saved and restored buffer still
+// compares equal to the original.
 impl PartialEq for Buffer {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id

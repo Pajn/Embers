@@ -8,21 +8,22 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    BufferId, ClipboardWrite, ErrorCode, MuxError, PtySize, RequestId, Result, SnapshotLine,
-    WireError, request_span,
+    BufferId, ClipboardWrite, ErrorCode, MuxError, PassthroughWrite, PtySize, RequestId, Result,
+    SnapshotLine, WireError, request_span,
 };
 use embers_protocol::{
     BufferCreatedEvent, BufferDetachedEvent, BufferHistoryPlacement, BufferHistoryScope,
     BufferLocation, BufferLocationAttachment, BufferLocationResponse, BufferPipeChangedEvent,
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
-    EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest, FloatingResponse,
-    FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse, PingResponse,
-    ProtocolError, RawFrame, RenderInvalidatedEvent, ScrollbackSliceResponse, ServerEnvelope,
-    ServerEvent, ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent,
-    SessionRequest, SessionSnapshotResponse, SessionsResponse, SnapshotResponse,
-    SubscriptionAckResponse, SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message,
-    encode_server_envelope, read_frame, write_frame_no_flush,
+    DisplayMessageEvent, EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest,
+    FloatingResponse, FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse,
+    PassthroughEvent, PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent,
+    ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent,
+    SessionCreatedEvent, SessionRenamedEvent, SessionRequest, SessionSnapshotResponse,
+    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode,
+    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
+    write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -30,11 +31,15 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::config::{ResourceLimits, RestoreConfig};
+use crate::config::{BUFFER_ENV_VAR, ResourceLimits, RestoreConfig};
 use crate::model::{
-    BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope, Node,
+    BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
+    IS_VIM_OPTION, Node,
 };
-use crate::persist::{encode_workspace, load_workspace, write_workspace};
+use crate::persist::{
+    PersistedWorkspace, encode_persisted_workspace, load_workspace, same_saved_state,
+    write_workspace,
+};
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
@@ -63,6 +68,16 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 1024;
 /// so a burst costs one write, and a crash loses at most this much.
 const WORKSPACE_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// [`WORKSPACE_SAVE_DELAY`] for changes to a buffer's title, working directory
+/// or foreground command. Programs change these continuously (a progress
+/// display in the title, a shell prompt that sets it), and losing the last
+/// moment of them in a crash costs little.
+const WORKSPACE_METADATA_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long a connection gets to write the shutdown notice to its client when
+/// the server stops, before it is closed anyway.
+const SHUTDOWN_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Test hook: while the file this variable names exists, the workspace saver
 /// skips its saves (and with them the exit acknowledgements that follow a
 /// save). Tests use it to stand in for a crash that lands between the server
@@ -88,6 +103,34 @@ const MAX_USER_OPTION_VALUE_LEN: usize = 4096;
 /// fails the request. We stop adding records past this budget (kept comfortably
 /// under the frame cap to absorb estimation slack) rather than emit a dead frame.
 const BUFFERS_RESPONSE_BUDGET: usize = 7 * 1024 * 1024;
+
+/// Payload budget for one `PassthroughEvent`. One write is at most
+/// `MAX_PASSTHROUGH_BYTES` (4 MiB), so a lone write always fits; several
+/// smaller ones share an event up to this size, which leaves room for framing
+/// under the protocol frame cap (`MAX_FRAME_LEN`, 8 MiB).
+const PASSTHROUGH_EVENT_BUDGET: usize = 6 * 1024 * 1024;
+
+/// Split passthrough writes, in order, into groups that each fit one event.
+fn batch_passthrough_writes(writes: Vec<PassthroughWrite>) -> Vec<Vec<PassthroughWrite>> {
+    // Per-write cost of the cursor, vector entry and table overhead.
+    const WRITE_OVERHEAD: usize = 32;
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut batch_bytes = 0;
+    for write in writes {
+        let cost = write.bytes.len() + WRITE_OVERHEAD;
+        if !batch.is_empty() && batch_bytes + cost > PASSTHROUGH_EVENT_BUDGET {
+            batches.push(std::mem::take(&mut batch));
+            batch_bytes = 0;
+        }
+        batch_bytes += cost;
+        batch.push(write);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
 
 /// Conservative upper bound on a `BufferRecord`'s flatbuffers-encoded size, used
 /// to keep `BuffersResponse` under [`BUFFERS_RESPONSE_BUDGET`]. It overestimates
@@ -133,10 +176,11 @@ impl Server {
             std::fs::remove_file(&self.config.socket_path)?;
         }
 
-        let restored_state = load_workspace(&self.config.workspace_path)?;
+        let mut state = load_workspace(&self.config.workspace_path)?.unwrap_or_default();
+        state.remain_on_exit = self.config.remain_on_exit;
         let socket_path = self.config.socket_path.clone();
         let mut runtime = Runtime::new(
-            restored_state.unwrap_or_default(),
+            state,
             self.config.socket_path.clone(),
             self.config.workspace_path.clone(),
             self.config.runtime_dir.clone(),
@@ -148,6 +192,9 @@ impl Server {
             std::env::var_os(HOLD_WORKSPACE_SAVES_ENV_VAR).map(PathBuf::from);
         let runtime = Arc::new(runtime);
         runtime.restore_buffer_runtimes().await?;
+        // Clean up buffers that are done: exited while the server was away, or
+        // saved exited and detached. No client is connected yet to tell.
+        runtime.dispose_exited_buffers(&mut Vec::new()).await;
         // Record what the restore changed (reattached pids, restarted panes).
         runtime.mark_workspace_dirty();
         let workspace_saver = runtime.spawn_workspace_saver();
@@ -155,6 +202,7 @@ impl Server {
         set_socket_permissions(&self.config.socket_path)?;
         let shutdown_signal = runtime.shutdown.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let mut stop_requested = runtime.shutdown.subscribe();
 
         let join = tokio::spawn(async move {
             let _cleanup = SocketCleanup::new(socket_path.clone());
@@ -164,6 +212,11 @@ impl Server {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
                         debug!("server shutdown requested");
+                        break;
+                    }
+                    // A client asked the server to stop (kill-server).
+                    () = wait_for_shutdown(&mut stop_requested) => {
+                        debug!("server stop requested by a client");
                         break;
                     }
                     result = listener.accept() => {
@@ -178,7 +231,11 @@ impl Server {
                             .await;
 
                         let write_runtime = runtime.clone();
-                        let write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        let mut write_handle = tokio::spawn(write_loop(writer, outbound_rx));
+                        // Held until the shutdown notice is flushed, so the
+                        // server does not exit first; released right away
+                        // otherwise.
+                        let flush_task = runtime.connection_tasks.enter();
                         let read_runtime = runtime.clone();
                         let connection_task = runtime.connection_tasks.enter();
                         let read_handle = tokio::spawn(async move {
@@ -206,7 +263,22 @@ impl Server {
                             };
                             let _ = stopped_tx.send(());
 
+                            if exit == ConnectionExit::ServerStopped {
+                                // Dropping the connection's subscriptions drops
+                                // the last senders, so the writer ends once it
+                                // has written what is queued.
+                                write_runtime.cleanup_connection(connection_id).await;
+                                if tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, &mut write_handle)
+                                    .await
+                                    .is_err()
+                                {
+                                    write_handle.abort();
+                                }
+                                return;
+                            }
+                            drop(flush_task);
                             match exit {
+                                ConnectionExit::ServerStopped => {}
                                 ConnectionExit::SelfDetached => match write_handle.await {
                                     Ok(Ok(())) => {}
                                     Ok(Err(error)) => {
@@ -241,8 +313,18 @@ impl Server {
             if let Err(error) = workspace_saver.await {
                 error!(%error, "workspace saver panicked");
             }
-            runtime.shutdown_runtimes().await;
+            let kill = runtime.kill_on_shutdown.load(Ordering::Acquire);
+            runtime.shutdown_runtimes(kill).await;
             runtime.quiesce_state_tasks().await;
+            if kill {
+                // Every program is gone, so there is nothing for a restarted
+                // server to restore.
+                return match std::fs::remove_file(&runtime.workspace_path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.into()),
+                };
+            }
             let persisted = runtime.persist_workspace().await;
             // Keepers the final save did not release stay up for the next server.
             runtime
@@ -277,6 +359,14 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// Resolves once the server has been asked to stop, whether through
+    /// [`Self::shutdown`] or by a client (`kill-server`). The caller still
+    /// calls [`Self::shutdown`] to wait for it to finish.
+    pub async fn stopped(&self) {
+        let mut stopped = self.shutdown_signal.subscribe();
+        wait_for_shutdown(&mut stopped).await;
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
@@ -395,14 +485,21 @@ struct Runtime {
     /// Signalled whenever the workspace changes in a way worth saving; the
     /// workspace saver batches these into one write.
     workspace_dirty: Notify,
-    /// The bytes last written to the workspace file. Held across a whole save so
-    /// saves never interleave, and used to skip writing identical contents.
-    last_saved_workspace: Mutex<Option<Vec<u8>>>,
+    /// Signalled when only buffer metadata (title, working directory,
+    /// foreground command) changed; saved after a longer delay.
+    workspace_metadata_dirty: Notify,
+    /// The workspace last written to the workspace file. Held across a whole
+    /// save so saves never interleave, and used to skip writing a workspace
+    /// that has not changed in a way worth saving (see [`same_saved_state`]).
+    last_saved_workspace: Mutex<Option<PersistedWorkspace>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
     shutdown: ShutdownSignal,
+    /// Set by `kill-server`: shutting down then ends every buffer's program and
+    /// keeper and discards the workspace instead of leaving them to restore.
+    kill_on_shutdown: AtomicBool,
     connection_tasks: TaskCounter,
     state_tasks: TaskCounter,
 }
@@ -494,12 +591,14 @@ impl Runtime {
             },
             hold_saves_while: None,
             workspace_dirty: Notify::new(),
+            workspace_metadata_dirty: Notify::new(),
             last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
             shutdown: ShutdownSignal::new(),
+            kill_on_shutdown: AtomicBool::new(false),
             connection_tasks: TaskCounter::default(),
             state_tasks: TaskCounter::default(),
         }
@@ -507,21 +606,28 @@ impl Runtime {
 }
 
 impl Runtime {
-    /// Write the workspace file, then tell the keepers this save released (see
-    /// [`Self::await_saved_exit`]) that they are no longer needed.
+    /// Write the workspace file unless it already holds the current state,
+    /// then tell the keepers this save released (see
+    /// [`Self::await_saved_exit`]) that they are no longer needed. Only a
+    /// snapshot of the state is taken under the state lock; encoding and the
+    /// write happen outside it.
     async fn persist_workspace(&self) -> Result<()> {
         let mut last_saved = self.last_saved_workspace.lock().await;
-        let (bytes, released) = {
+        let (persisted, released) = {
             let state = self.state.lock().await;
-            (encode_workspace(&state)?, self.exits_recorded_in(&state))
+            (state.to_persisted(), self.exits_recorded_in(&state))
         };
-        if last_saved.as_deref() != Some(bytes.as_slice()) {
+        if !last_saved
+            .as_ref()
+            .is_some_and(|saved| same_saved_state(saved, &persisted))
+        {
             let path = self.workspace_path.clone();
-            let bytes =
-                tokio::task::spawn_blocking(move || write_workspace(&path, &bytes).map(|()| bytes))
-                    .await
-                    .map_err(|error| MuxError::internal(error.to_string()))??;
-            *last_saved = Some(bytes);
+            let persisted = tokio::task::spawn_blocking(move || {
+                write_workspace(&path, &encode_persisted_workspace(&persisted)?).map(|()| persisted)
+            })
+            .await
+            .map_err(|error| MuxError::internal(error.to_string()))??;
+            *last_saved = Some(persisted);
         }
         drop(last_saved);
         self.acknowledge_saved_exits(released).await;
@@ -610,26 +716,51 @@ impl Runtime {
         }
     }
 
-    /// Ask the workspace saver to write the workspace soon.
+    /// Ask the workspace saver to write the workspace soon: a change to the
+    /// layout, sessions or buffers, saved within [`WORKSPACE_SAVE_DELAY`].
     fn mark_workspace_dirty(&self) {
         self.workspace_dirty.notify_one();
     }
 
+    /// Ask the workspace saver to write the workspace eventually: a change to
+    /// a buffer's title, working directory or foreground command, which
+    /// programs can make many times a second. These are saved within
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`], so a burst of them costs one write.
+    fn mark_workspace_metadata_dirty(&self) {
+        self.workspace_metadata_dirty.notify_one();
+    }
+
     /// Saves the workspace after changes, so a crash or SIGKILL of the server
-    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of them. Stops at
-    /// shutdown, which writes the final state itself.
+    /// loses at most the last [`WORKSPACE_SAVE_DELAY`] of layout changes and
+    /// [`WORKSPACE_METADATA_SAVE_DELAY`] of title, directory and foreground
+    /// command changes. The wait starts at the first change and is not
+    /// extended by later ones, so a pane that never stops changing its title
+    /// is still saved regularly. Stops at shutdown, which writes the final
+    /// state itself.
     fn spawn_workspace_saver(self: &Arc<Self>) -> JoinHandle<()> {
         let runtime = self.clone();
         let mut shutdown = self.shutdown.subscribe();
         tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    () = runtime.workspace_dirty.notified() => {}
+                let delay = tokio::select! {
+                    () = runtime.workspace_dirty.notified() => WORKSPACE_SAVE_DELAY,
+                    () = runtime.workspace_metadata_dirty.notified() => {
+                        WORKSPACE_METADATA_SAVE_DELAY
+                    }
                     () = wait_for_shutdown(&mut shutdown) => return,
-                }
-                tokio::select! {
-                    () = tokio::time::sleep(WORKSPACE_SAVE_DELAY) => {}
-                    () = wait_for_shutdown(&mut shutdown) => return,
+                };
+                let mut deadline = tokio::time::Instant::now() + delay;
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(deadline) => break,
+                        // A layout change during a long wait is saved as
+                        // promptly as any other.
+                        () = runtime.workspace_dirty.notified() => {
+                            deadline = deadline
+                                .min(tokio::time::Instant::now() + WORKSPACE_SAVE_DELAY);
+                        }
+                        () = wait_for_shutdown(&mut shutdown) => return,
+                    }
                 }
                 if runtime
                     .hold_saves_while
@@ -675,6 +806,22 @@ impl Runtime {
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
         let clipboard_tasks = self.state_tasks.clone();
+        let passthrough_tasks = self.state_tasks.clone();
+        // Passthrough writes must reach clients in the order the program sent
+        // them (an image is many sequences), so unlike the other callbacks they
+        // go through one task per runtime instead of a task per call. The task
+        // ends when the callbacks, and with them the sender, are dropped.
+        let (passthrough_tx, mut passthrough_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(BufferId, Vec<PassthroughWrite>, TaskTicket)>();
+        let passthrough_runtime = self.clone();
+        std::mem::drop(output_handle.spawn(async move {
+            while let Some((buffer_id, writes, task)) = passthrough_rx.recv().await {
+                passthrough_runtime
+                    .forward_passthrough(buffer_id, writes)
+                    .await;
+                drop(task);
+            }
+        }));
 
         BufferRuntimeCallbacks {
             on_output: Arc::new(move |buffer_id, update| {
@@ -700,6 +847,12 @@ impl Runtime {
                     let _task = task;
                     runtime.forward_clipboard(buffer_id, write).await;
                 }));
+            }),
+            on_passthrough: Arc::new(move |buffer_id, writes| {
+                let task = passthrough_tasks.enter();
+                if passthrough_tx.send((buffer_id, writes, task)).is_err() {
+                    debug!(%buffer_id, "dropping passthrough: forwarder stopped");
+                }
             }),
         }
     }
@@ -789,20 +942,34 @@ impl Runtime {
         Ok(())
     }
 
-    /// Start a fresh process for every PTY buffer left `Interrupted`: its keeper
-    /// is gone, so it cannot be reattached. Restarts run concurrently so a
-    /// large workspace does not hold up startup.
+    /// Start a fresh process for every PTY buffer left `Interrupted` that a
+    /// pane shows: its keeper is gone, so it cannot be reattached. Restarts run
+    /// concurrently so a large workspace does not hold up startup.
+    ///
+    /// Like tmux-resurrect, only what is in the layout is restored. A detached
+    /// buffer has no place to come back to and its terminal contents are not
+    /// restored, so a fresh shell for it would only be a hidden process
+    /// nobody asked for; its record is dropped instead.
     async fn restart_interrupted_buffers(self: &Arc<Self>) {
         let interrupted: Vec<_> = {
-            let state = self.state.lock().await;
-            state
+            let mut state = self.state.lock().await;
+            let (attached, detached): (Vec<_>, Vec<_>) = state
                 .buffers
                 .values()
                 .filter(|buffer| {
                     matches!(buffer.state, BufferState::Interrupted(_))
                         && matches!(buffer.kind, BufferKind::Pty)
                 })
-                .map(|buffer| buffer.id)
+                .map(|buffer| (buffer.id, buffer.attachment.clone()))
+                .partition(|(_, attachment)| matches!(attachment, BufferAttachment::Attached(_)));
+            for (buffer_id, _) in detached {
+                if state.remove_buffer(buffer_id).is_ok() {
+                    info!(%buffer_id, "dropped detached buffer whose keeper was gone");
+                }
+            }
+            attached
+                .into_iter()
+                .map(|(buffer_id, _)| buffer_id)
                 .collect()
         };
         let mut restarts = tokio::task::JoinSet::new();
@@ -822,18 +989,18 @@ impl Runtime {
     /// last directory, keeping its id, title and place in the layout.
     async fn restart_buffer(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
         let plan = {
-            let mut state = self.state.lock().await;
-            let buffer = state
-                .buffers
-                .get_mut(&buffer_id)
-                .ok_or_else(|| MuxError::not_found(format!("unknown buffer {buffer_id}")))?;
-            let plan = plan_restore(buffer, &self.restore, &default_shell());
-            buffer.command = plan.command.clone();
-            buffer.cwd = plan.cwd.clone();
-            buffer.foreground_command = None;
-            plan
+            let state = self.state.lock().await;
+            plan_restore(state.buffer(buffer_id)?, &self.restore, &default_shell())
         };
-        self.spawn_buffer_runtime(buffer_id).await?;
+        // The record keeps its command and directory until the new keeper
+        // runs: a restore that fails leaves (and saves) the pane as it was,
+        // so a later restore can still bring back what it ran.
+        self.spawn_buffer_runtime_with(buffer_id, plan.command.clone(), plan.cwd.clone())
+            .await?;
+        if let Some(buffer) = self.state.lock().await.buffers.get_mut(&buffer_id) {
+            // The program that set it is gone; a rerun Neovim sets it again.
+            buffer.user_options.remove(IS_VIM_OPTION);
+        }
         info!(%buffer_id, command = ?plan.command, "restored buffer whose keeper was gone");
 
         if let Some(command_line) = plan.typed_command {
@@ -896,20 +1063,49 @@ impl Runtime {
                 Vec::new(),
                 None,
             ),
+            // The connection triggers the stop once this response is sent.
+            ClientMessage::KillServer(request) => {
+                self.kill_on_shutdown.store(true, Ordering::Release);
+                (
+                    ServerResponse::Ok(OkResponse {
+                        request_id: request.request_id,
+                    }),
+                    Vec::new(),
+                    None,
+                )
+            }
+            // These can attach or detach buffers, which can make an exited
+            // buffer due for cleanup (a dead pane closed, a buffer whose command
+            // exited before it was first shown now attached).
+            // Closing a view (the kill commands do) can also close a session's
+            // last pane, which destroys the session.
             ClientMessage::Session(request) => {
-                let (resp, events) = self.dispatch_session(request).await;
+                let closes = matches!(request, SessionRequest::CloseRootTab { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
+                let (resp, mut events) = self.dispatch_session(request).await;
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Buffer(request) => {
-                let (resp, events) = self.dispatch_buffer(connection_id, request).await;
+                let (resp, mut events) = self.dispatch_buffer(connection_id, request).await;
+                self.dispose_exited_buffers(&mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Node(request) => {
-                let (resp, events) = self.dispatch_node(request).await;
+                let closes = matches!(request, embers_protocol::NodeRequest::Close { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
+                let (resp, mut events) = self.dispatch_node(request).await;
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Floating(request) => {
-                let (resp, events) = self.dispatch_floating(request).await;
+                let closes = matches!(request, FloatingRequest::Close { .. });
+                let had_panes = self.sessions_with_panes_if(closes).await;
+                let (resp, mut events) = self.dispatch_floating(request).await;
+                self.dispose_exited_buffers(&mut events).await;
+                self.destroy_emptied_sessions(had_panes, &mut events).await;
                 (resp, events, None)
             }
             ClientMessage::Input(request) => {
@@ -1054,6 +1250,23 @@ impl Runtime {
                         None,
                     ),
                 }
+            }
+            ClientRequest::DisplayMessage {
+                request_id,
+                client_id,
+                session_id,
+                message,
+                duration_ms,
+            } => {
+                let event = ServerEvent::DisplayMessage(DisplayMessageEvent {
+                    message,
+                    duration_ms,
+                });
+                let response = match self.display_message(client_id, session_id, event).await {
+                    Ok(()) => ServerResponse::Ok(OkResponse { request_id }),
+                    Err(error) => mux_error_response(Some(request_id), error),
+                };
+                (response, Vec::new(), None)
             }
             ClientRequest::Switch {
                 request_id,
@@ -1242,6 +1455,18 @@ impl Runtime {
                 session_id,
                 viewport,
             } => match state.set_session_viewport(session_id, viewport) {
+                Ok(()) => {
+                    self.mark_workspace_dirty();
+                    (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+                }
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
+            // No event either: clients number windows from their own config.
+            SessionRequest::SetBaseIndex {
+                request_id,
+                session_id,
+                base_index,
+            } => match state.set_session_base_index(session_id, base_index) {
                 Ok(()) => {
                     self.mark_workspace_dirty();
                     (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
@@ -1557,11 +1782,8 @@ impl Runtime {
                 request_id,
                 buffer_id,
                 force: _,
-            } => match self.buffer_runtime(buffer_id).await {
-                Ok(runtime) => match runtime.kill().await {
-                    Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
-                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
-                },
+            } => match self.kill_buffer(buffer_id).await {
+                Ok(()) => (ServerResponse::Ok(OkResponse { request_id }), Vec::new()),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
             BufferRequest::Capture {
@@ -2075,6 +2297,32 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            embers_protocol::NodeRequest::FocusLast {
+                request_id,
+                session_id,
+            } => {
+                if let Err(error) = state.focus_last_pane(session_id) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+
+                match session_snapshot(&state, session_id) {
+                    Ok(snapshot) => {
+                        let mut events =
+                            vec![ServerEvent::NodeChanged(NodeChangedEvent { session_id })];
+                        if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                            events.push(ServerEvent::FocusChanged(focus_event));
+                        }
+                        (
+                            ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                                request_id,
+                                snapshot,
+                            }),
+                            events,
+                        )
+                    }
+                    Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+                }
+            }
             embers_protocol::NodeRequest::Close {
                 request_id,
                 node_id,
@@ -2464,16 +2712,39 @@ impl Runtime {
     }
 
     async fn spawn_buffer_runtime(self: &Arc<Self>, buffer_id: BufferId) -> Result<()> {
-        let (command, cwd, size, env_hints) = {
+        let (command, cwd) = {
             let state = self.state.lock().await;
-            let buffer = state.buffer(buffer_id)?.clone();
-            (buffer.command, buffer.cwd, buffer.pty_size, buffer.env)
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.command.clone(), buffer.cwd.clone())
+        };
+        self.spawn_buffer_runtime_with(buffer_id, command, cwd)
+            .await
+    }
+
+    /// Start a keeper for `buffer_id` running `command` in `cwd`. The buffer
+    /// record takes them as its command and directory only once the keeper
+    /// runs, so a spawn that fails leaves the record as it was.
+    async fn spawn_buffer_runtime_with(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        command: Vec<String>,
+        cwd: Option<PathBuf>,
+    ) -> Result<()> {
+        let (size, env_hints) = {
+            let state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            (buffer.pty_size, buffer.env.clone())
         };
 
         let mut buffer_env = self.buffer_env.clone();
         for (key, value) in env_hints {
             buffer_env.insert(key, OsString::from(value));
         }
+        // The buffer's own id goes in last so no hint can name another buffer.
+        buffer_env.insert(
+            BUFFER_ENV_VAR.to_owned(),
+            OsString::from(buffer_id.to_string()),
+        );
         let runtime = BufferRuntimeHandle::spawn(
             buffer_id,
             self.runtime_socket_path(buffer_id)?,
@@ -2501,7 +2772,14 @@ impl Runtime {
 
         {
             let mut state = self.state.lock().await;
-            if let Err(error) = state.mark_buffer_running(buffer_id, status.pid) {
+            // The status poller starts with the runtime and may already have
+            // recorded the exit of a command that ended at once. The buffer was
+            // still created, so keep it as exited instead of failing creation.
+            let already_exited = state
+                .buffer(buffer_id)
+                .is_ok_and(|buffer| matches!(buffer.state, BufferState::Exited(_)));
+            if !already_exited && let Err(error) = state.mark_buffer_running(buffer_id, status.pid)
+            {
                 drop(state);
                 let _ = runtime.kill().await;
                 let _ = runtime.join_threads().await;
@@ -2513,6 +2791,10 @@ impl Runtime {
                 buffer_id,
                 Some(runtime.socket_path().to_path_buf()),
             )?;
+            if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+                buffer.command = command;
+                buffer.cwd = cwd;
+            }
             apply_runtime_status(&mut state, buffer_id, &status);
         }
 
@@ -2553,6 +2835,36 @@ impl Runtime {
                 "buffer {buffer_id} has already exited"
             ))),
         }
+    }
+
+    /// End `buffer_id`'s program. A buffer left `Interrupted` (its keeper is
+    /// gone and restore is off or failed) has no program to end, so killing it
+    /// ends the buffer itself: a detached one is removed, and an attached one
+    /// is marked exited, which the exit cleanup then handles like any other
+    /// (closing its view unless it remains on exit). Without this, killing
+    /// its view would leave an orphaned record that a later restore brings
+    /// back.
+    async fn kill_buffer(&self, buffer_id: BufferId) -> Result<()> {
+        let runtime = self.buffer_runtimes.lock().await.get(&buffer_id).cloned();
+        if let Some(runtime) = runtime {
+            return runtime.kill().await;
+        }
+        {
+            let mut state = self.state.lock().await;
+            let buffer = state.buffer(buffer_id)?;
+            if matches!(buffer.state, BufferState::Interrupted(_)) {
+                if matches!(buffer.attachment, BufferAttachment::Detached) {
+                    state.remove_buffer(buffer_id)?;
+                } else {
+                    state.mark_buffer_exited(buffer_id, None)?;
+                }
+                drop(state);
+                info!(%buffer_id, "removed killed buffer whose keeper was gone");
+                self.mark_workspace_dirty();
+                return Ok(());
+            }
+        }
+        self.buffer_runtime(buffer_id).await?.kill().await
     }
 
     async fn ensure_buffer_accepts_input(&self, buffer_id: BufferId) -> Result<()> {
@@ -2715,7 +3027,10 @@ impl Runtime {
         };
         // A no-op set/unset leaves the record untouched, so don't invalidate
         // renders for it; only broadcast when the options actually changed.
+        // The only event is a render invalidation, which does not save the
+        // workspace by itself, so ask for that here.
         let events = if changed {
+            self.mark_workspace_dirty();
             vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
                 buffer_id,
             })]
@@ -3303,6 +3618,14 @@ impl Runtime {
             {
                 let sequence_advanced = update.sequence > buffer.last_snapshot_seq;
                 let sequence_current = update.sequence >= buffer.last_snapshot_seq;
+                // A bell counts even when its output's sequence was already
+                // applied (a capture syncs the status too) and later output
+                // replaced the runtime's activity before this update.
+                if update.bell_sequence > buffer.runtime_bell_sequence {
+                    buffer.runtime_bell_sequence = update.bell_sequence;
+                    buffer.activity = embers_core::ActivityState::Bell;
+                    render_invalidated = true;
+                }
                 if sequence_advanced {
                     buffer.last_snapshot_seq = update.sequence;
                     let next_activity = max_activity(buffer.activity, update.activity);
@@ -3338,6 +3661,9 @@ impl Runtime {
                     && foreground_command != buffer.foreground_command
                 {
                     buffer.foreground_command = foreground_command;
+                    // Clients read it to tell what runs in the pane (smart
+                    // navigation detecting Neovim), so they refetch the record.
+                    render_invalidated = true;
                     workspace_changed = true;
                 }
                 if sequence_current && let Some(pipe) = update.pipe {
@@ -3357,7 +3683,7 @@ impl Runtime {
             (render_invalidated, pipe_event, workspace_changed)
         };
         if workspace_changed {
-            self.mark_workspace_dirty();
+            self.mark_workspace_metadata_dirty();
         }
 
         let mut events = Vec::new();
@@ -3381,19 +3707,47 @@ impl Runtime {
     /// clients on other sessions are not. A write from a detached buffer, or
     /// one whose session no client is showing, is dropped.
     async fn forward_clipboard(&self, buffer_id: BufferId, write: ClipboardWrite) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
+            return;
+        };
+        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
+            buffer_id,
+            selection: write.selection,
+            text: write.text,
+        }));
+        self.send_to_clients(&client_ids, event).await;
+    }
+
+    /// Send passthrough writes from `buffer_id` to the same clients as a
+    /// clipboard write. Each client decides from its own layout whether the
+    /// pane is on screen (tmux `allow-passthrough on`) or forwards the writes
+    /// anyway (`all`). The writes go out in order, in as few events as fit a
+    /// protocol frame.
+    async fn forward_passthrough(&self, buffer_id: BufferId, writes: Vec<PassthroughWrite>) {
+        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
+            debug!(%buffer_id, "dropping passthrough: no client shows its session");
+            return;
+        };
+        for writes in batch_passthrough_writes(writes) {
+            let event = ServerEnvelope::Event(ServerEvent::Passthrough(PassthroughEvent {
+                buffer_id,
+                writes,
+            }));
+            self.send_to_clients(&client_ids, event).await;
+        }
+    }
+
+    /// The clients whose current session contains `buffer_id`, or `None` when
+    /// the buffer is detached or no client shows its session.
+    async fn clients_showing_buffer_session(&self, buffer_id: BufferId) -> Option<BTreeSet<u64>> {
         let session_id = {
             let state = self.state.lock().await;
-            let Ok(buffer) = state.buffer(buffer_id) else {
-                return;
-            };
+            let buffer = state.buffer(buffer_id).ok()?;
             let BufferAttachment::Attached(node_id) = buffer.attachment else {
-                debug!(%buffer_id, "dropping clipboard write from a detached buffer");
-                return;
+                return None;
             };
-            match state.node(node_id) {
-                Ok(node) => node.session_id(),
-                Err(_) => return,
-            }
+            state.node(node_id).ok()?.session_id()
         };
         let client_ids: BTreeSet<u64> = self
             .clients
@@ -3403,18 +3757,50 @@ impl Runtime {
             .filter(|(_, client)| client.current_session_id == Some(session_id))
             .map(|(&client_id, _)| client_id)
             .collect();
-        if client_ids.is_empty() {
-            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
-            return;
-        }
+        (!client_ids.is_empty()).then_some(client_ids)
+    }
 
-        let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
-            buffer_id,
-            selection: write.selection,
-            text: write.text,
-        }));
+    /// Send a `display-message` event to `client_id`, or to every client whose
+    /// current session is `session_id`. Fails when no such client exists, as
+    /// tmux does without a client to show the message on.
+    async fn display_message(
+        &self,
+        client_id: Option<std::num::NonZeroU64>,
+        session_id: Option<embers_core::SessionId>,
+        event: ServerEvent,
+    ) -> Result<()> {
+        let client_ids: BTreeSet<u64> = {
+            let clients = self.clients.lock().await;
+            match (client_id, session_id) {
+                (Some(client_id), _) => {
+                    if !clients.contains_key(&client_id.get()) {
+                        return Err(MuxError::not_found(format!("unknown client {client_id}")));
+                    }
+                    BTreeSet::from([client_id.get()])
+                }
+                (None, Some(session_id)) => clients
+                    .iter()
+                    .filter(|(_, client)| client.current_session_id == Some(session_id))
+                    .map(|(&client_id, _)| client_id)
+                    .collect(),
+                (None, None) => BTreeSet::new(),
+            }
+        };
+        if client_ids.is_empty() {
+            return Err(MuxError::not_found(
+                "no client is attached to show the message on",
+            ));
+        }
+        self.send_to_clients(&client_ids, ServerEnvelope::Event(event))
+            .await;
+        Ok(())
+    }
+
+    /// Send `event` once to each of `client_ids`, best effort: unlike
+    /// `broadcast`, a client too slow to take it misses it but stays attached.
+    async fn send_to_clients(&self, client_ids: &BTreeSet<u64>, event: ServerEnvelope) {
         // Events reach a client through its subscriptions; send through one per
-        // client so a client with several subscriptions still copies once.
+        // client so a client with several subscriptions gets it once.
         let mut delivered = BTreeSet::new();
         let subscriptions = self.subscriptions.lock().await;
         for subscription in subscriptions.values() {
@@ -3423,13 +3809,11 @@ impl Runtime {
             {
                 continue;
             }
-            // Best effort, unlike `broadcast`: a client too slow to take one
-            // clipboard write misses it but stays attached.
             if let Err(error) = subscription.sender.try_send(event.clone()) {
                 debug!(
                     connection_id = subscription.connection_id,
                     %error,
-                    "dropping clipboard write for client"
+                    "dropping event for slow client"
                 );
             }
         }
@@ -3521,7 +3905,129 @@ impl Runtime {
             if let Some(pipe_event) = pipe_event {
                 events.push(ServerEvent::BufferPipeChanged(pipe_event));
             }
-            self.broadcast(events, &[]).await;
+            if !should_interrupt {
+                self.dispose_exited_buffers(&mut events).await;
+            }
+            let retired_session_ids = closed_session_ids(&events);
+            self.broadcast(events, &retired_session_ids).await;
+        }
+    }
+
+    /// The sessions that show a pane, when a request is about to close a view
+    /// (`closes`); none otherwise.
+    async fn sessions_with_panes_if(&self, closes: bool) -> BTreeSet<embers_core::SessionId> {
+        if closes {
+            self.state.lock().await.sessions_with_panes()
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    /// Destroy every session in `had_panes` that no longer shows any pane,
+    /// like tmux destroys a session whose last window closed: its last pane's
+    /// command exited, or its view was closed (`kill-pane`, `kill-window` and
+    /// `kill-popup` close views, with or without `--detach`). Detaching or
+    /// moving a buffer out of its session does not count. A session that
+    /// never had a pane, such as one just created, is left alone.
+    ///
+    /// Clients on a destroyed session are left without one; the interactive
+    /// client then moves to another session or exits, per its
+    /// `detach-on-destroy` setting. Layout and focus events about a destroyed
+    /// session are dropped from `events`, so no client asks about it after
+    /// learning it is gone, and `SessionClosed` and `ClientChanged` events are
+    /// added.
+    async fn destroy_emptied_sessions(
+        &self,
+        had_panes: BTreeSet<embers_core::SessionId>,
+        events: &mut Vec<ServerEvent>,
+    ) {
+        let (destroyed, changed_clients) = {
+            let mut state = self.state.lock().await;
+            let mut clients = self.clients.lock().await;
+            let mut destroyed = Vec::new();
+            let mut changed_clients = Vec::new();
+            for session_id in had_panes {
+                if !state.sessions.contains_key(&session_id) || state.session_has_panes(session_id)
+                {
+                    continue;
+                }
+                if let Err(error) = state.close_session(session_id) {
+                    warn!(%session_id, %error, "failed to destroy session without panes");
+                    continue;
+                }
+                changed_clients.extend(Self::clear_client_session(&mut clients, session_id));
+                destroyed.push(session_id);
+            }
+            (destroyed, changed_clients)
+        };
+        if destroyed.is_empty() {
+            return;
+        }
+        info!(sessions = ?destroyed, "destroyed sessions whose last pane closed");
+        self.mark_workspace_dirty();
+        events.retain(|event| match event {
+            ServerEvent::NodeChanged(NodeChangedEvent { session_id })
+            | ServerEvent::FocusChanged(FocusChangedEvent { session_id, .. })
+            | ServerEvent::FloatingChanged(FloatingChangedEvent { session_id, .. }) => {
+                !destroyed.contains(session_id)
+            }
+            _ => true,
+        });
+        events.extend(
+            destroyed
+                .iter()
+                .map(|&session_id| ServerEvent::SessionClosed(SessionClosedEvent { session_id })),
+        );
+        events.extend(self.client_changed_events(changed_clients).await);
+    }
+
+    /// Apply [`ServerState::dispose_exited_buffers`]: close the views of
+    /// exited buffers and remove their records, then release the runtimes of
+    /// the removed buffers once a save records the removal, so their keepers
+    /// can exit (see [`Self::await_saved_exit`]). Adds the events that
+    /// describe the closed views to `events`, and destroys sessions whose last
+    /// pane this closed.
+    async fn dispose_exited_buffers(&self, events: &mut Vec<ServerEvent>) {
+        let (removed, changed_sessions) = {
+            let mut state = self.state.lock().await;
+            let disposed = state.dispose_exited_buffers();
+            for &session_id in &disposed.changed_sessions {
+                if !state.sessions.contains_key(&session_id) {
+                    continue;
+                }
+                events.push(ServerEvent::NodeChanged(NodeChangedEvent { session_id }));
+                if let Some(focus_event) = focus_changed_event(&state, session_id) {
+                    events.push(ServerEvent::FocusChanged(focus_event));
+                }
+            }
+            (disposed.removed_buffers, disposed.changed_sessions)
+        };
+        self.destroy_emptied_sessions(changed_sessions, events)
+            .await;
+        if removed.is_empty() {
+            return;
+        }
+        self.mark_workspace_dirty();
+        let runtimes = {
+            let mut runtimes = self.buffer_runtimes.lock().await;
+            removed
+                .iter()
+                .filter_map(|&buffer_id| {
+                    runtimes
+                        .remove(&buffer_id)
+                        .map(|runtime| (buffer_id, runtime))
+                })
+                .collect::<Vec<_>>()
+        };
+        // Until a save without the record has completed, a crash would leave
+        // it saved as running, so the keeper waits to be told. Dropping the
+        // last handle after that closes the keeper connection; with its child
+        // gone and no server attached, the keeper then exits.
+        for (buffer_id, runtime) in runtimes {
+            if let Err(error) = runtime.join_threads().await {
+                debug!(%error, "failed to join runtime threads of a removed buffer");
+            }
+            self.await_saved_exit(buffer_id, runtime);
         }
     }
 
@@ -3540,6 +4046,7 @@ impl Runtime {
                 pipe: Some(status.pipe.clone()),
                 cwd: Some(status.cwd.clone()),
                 foreground_command: Some(status.foreground_command.clone()),
+                bell_sequence: status.bell_sequence,
             },
         )
         .await;
@@ -3549,7 +4056,11 @@ impl Runtime {
         Ok(())
     }
 
-    async fn shutdown_runtimes(&self) {
+    /// Detach from every buffer runtime. With `kill` (kill-server) each keeper
+    /// is also told to end its program and exit, including those of removed
+    /// buffers still waiting for a save (see [`Self::await_saved_exit`]);
+    /// otherwise keepers keep running so a restarted server can reattach.
+    async fn shutdown_runtimes(&self, kill: bool) {
         let runtimes: Vec<_> = {
             let runtimes = self.buffer_runtimes.lock().await;
             let mut shutdown_intents = self
@@ -3560,11 +4071,31 @@ impl Runtime {
                 .iter()
                 .map(|(&buffer_id, runtime)| {
                     shutdown_intents.insert(buffer_id);
-                    runtime.clone()
+                    (buffer_id, runtime.clone())
                 })
                 .collect()
         };
-        for runtime in runtimes {
+        if kill {
+            let mut keepers = std::mem::take(
+                &mut *self
+                    .unsaved_exits
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            keepers.extend(runtimes.iter().cloned());
+            // Keepers stop concurrently: each may wait out a grace period for a
+            // program that ignores SIGHUP.
+            let mut terminations = tokio::task::JoinSet::new();
+            for runtime in keepers.into_values() {
+                terminations.spawn(async move {
+                    if let Err(error) = runtime.terminate().await {
+                        debug!(%error, "failed to terminate buffer runtime");
+                    }
+                });
+            }
+            while terminations.join_next().await.is_some() {}
+        }
+        for (_, runtime) in runtimes {
             if let Err(error) = runtime.join_threads().await {
                 debug!(%error, "failed to join buffer runtime threads during shutdown");
             }
@@ -3800,6 +4331,9 @@ fn location_is_root_tab(state: &ServerState, location: &BufferLocation) -> Resul
 enum ConnectionExit {
     Closed,
     SelfDetached,
+    /// The server is stopping; the connection's last event,
+    /// [`ServerEvent::ServerShutdown`], is queued and should be flushed.
+    ServerStopped,
 }
 
 fn closed_session_ids(events: &[ServerEvent]) -> Vec<embers_core::SessionId> {
@@ -3823,7 +4357,11 @@ async fn handle_connection(
     loop {
         let frame = tokio::select! {
             _ = wait_for_shutdown(&mut server_shutdown) => {
-                return Ok(ConnectionExit::Closed);
+                // Tell the client the server is stopping on purpose, so it can
+                // exit cleanly rather than report a lost server. Best effort:
+                // a client too slow to take it sees the connection close.
+                let _ = outbound.try_send(ServerEnvelope::Event(ServerEvent::ServerShutdown));
+                return Ok(ConnectionExit::ServerStopped);
             }
             _ = &mut shutdown => {
                 debug!(connection_id, "client detach requested");
@@ -3886,6 +4424,7 @@ async fn handle_connection(
         };
 
         let request_id = request.request_id();
+        let kill_server = matches!(request, ClientMessage::KillServer(_));
         let (response, events, deferred_shutdown) = runtime
             .dispatch_request(connection_id, &outbound, request)
             .instrument(request_span("handle_request", request_id))
@@ -3912,6 +4451,12 @@ async fn handle_connection(
         // Handle self-detach: trigger shutdown after response is sent
         if let Some(shutdown) = deferred_shutdown {
             let _ = shutdown.send(());
+            return Ok(ConnectionExit::SelfDetached);
+        }
+        // Stop the server only once the kill-server reply is queued, and let
+        // the writer flush it rather than abort it with the connection.
+        if kill_server {
+            runtime.shutdown.trigger();
             return Ok(ConnectionExit::SelfDetached);
         }
     }
@@ -4121,6 +4666,9 @@ fn apply_runtime_status(
 ) {
     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
         buffer.last_snapshot_seq = status.sequence;
+        // A newly attached runtime counts bells from its own start; its
+        // current activity below already says whether one is pending.
+        buffer.runtime_bell_sequence = status.bell_sequence;
         buffer.pipe = status.pipe.as_ref().map(model_pipe_from_runtime);
         buffer.foreground_command = status.foreground_command.clone();
     }
@@ -4827,6 +5375,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4853,6 +5402,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4920,6 +5470,7 @@ mod tests {
                     })),
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -4981,6 +5532,7 @@ mod tests {
                     })),
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -5036,6 +5588,7 @@ mod tests {
                     pipe: None,
                     cwd: None,
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -5049,6 +5602,121 @@ mod tests {
             .clone();
         assert_eq!(buffer.last_snapshot_seq, 6);
         assert_eq!(buffer.title, "");
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_keeps_a_bell_that_later_output_overwrote() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            state.create_buffer("shell", vec!["/bin/sh".to_owned()], None)
+        };
+        let update = |sequence, bell_sequence| BufferRuntimeUpdate {
+            sequence,
+            activity: ActivityState::Activity,
+            title: None,
+            pipe: None,
+            cwd: None,
+            foreground_command: None,
+            bell_sequence,
+        };
+        let activity = || async {
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists")
+                .activity
+        };
+
+        // A capture synced output after the bell before the poller reported
+        // it: the sequence is already applied, and the runtime's activity no
+        // longer says Bell, but its bell count advanced.
+        runtime.record_buffer_update(buffer_id, update(2, 0)).await;
+        assert_eq!(activity().await, ActivityState::Activity);
+        runtime.record_buffer_update(buffer_id, update(2, 1)).await;
+        assert_eq!(activity().await, ActivityState::Bell);
+
+        // Once focus clears it, the same bell is not applied again.
+        runtime
+            .state
+            .lock()
+            .await
+            .set_buffer_activity(buffer_id, ActivityState::Idle)
+            .expect("clear activity");
+        runtime.record_buffer_update(buffer_id, update(2, 1)).await;
+        assert_eq!(activity().await, ActivityState::Idle);
+    }
+
+    #[tokio::test]
+    async fn record_buffer_update_tells_clients_about_a_new_foreground_job() {
+        let runtime = Runtime::new(
+            ServerState::new(),
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let buffer_id = {
+            let mut state = runtime.state.lock().await;
+            let buffer_id = state.create_buffer("shell", vec!["/bin/sh".to_owned()], None);
+            state
+                .buffers
+                .get_mut(&buffer_id)
+                .expect("buffer is created")
+                .last_snapshot_seq = 5;
+            buffer_id
+        };
+        let (sender, mut receiver) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
+        runtime.subscriptions.lock().await.insert(
+            1,
+            Subscription {
+                connection_id: 1,
+                session_id: None,
+                sender,
+            },
+        );
+
+        // A job taking over the foreground prints nothing by itself, so the
+        // update does not advance the sequence.
+        runtime
+            .record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: 5,
+                    activity: ActivityState::Idle,
+                    title: None,
+                    pipe: None,
+                    cwd: None,
+                    foreground_command: Some(Some(vec!["nvim".to_owned()])),
+                    bell_sequence: 0,
+                },
+            )
+            .await;
+
+        let record = crate::protocol::buffer_record(
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists"),
+        );
+        assert_eq!(record.foreground_command, Some(vec!["nvim".to_owned()]));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ServerEnvelope::Event(ServerEvent::RenderInvalidated(event)))
+                if event.buffer_id == buffer_id
+        ));
     }
 
     #[tokio::test]
@@ -5089,6 +5757,7 @@ mod tests {
                     pipe: None,
                     cwd: Some(None),
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;
@@ -5113,6 +5782,7 @@ mod tests {
                     pipe: None,
                     cwd: Some(Some(PathBuf::from("/tmp/work"))),
                     foreground_command: None,
+                    bell_sequence: 0,
                 },
             )
             .await;

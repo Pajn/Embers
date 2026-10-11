@@ -3,13 +3,20 @@ use std::num::NonZeroU64;
 
 use embers_core::{
     ActivityState, BufferId, ClipboardSelection, CursorState, FloatGeometry, FloatingId, NodeId,
-    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
+    PassthroughWrite, PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, WireError,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PingRequest {
     pub request_id: RequestId,
     pub payload: String,
+}
+
+/// Stop the server and end every buffer's program and runtime keeper, unlike
+/// a clean shutdown, which leaves keepers running for the next server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KillServerRequest {
+    pub request_id: RequestId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,6 +86,14 @@ pub enum SessionRequest {
         session_id: SessionId,
         viewport: Size,
     },
+    /// Records the window base index (tmux `base-index`) of the client that
+    /// shows the session, so the CLI numbers windows the way that client
+    /// does. `None` means the client sets none.
+    SetBaseIndex {
+        request_id: RequestId,
+        session_id: SessionId,
+        base_index: Option<u32>,
+    },
     /// tmux `set-environment`: set `name` to `value`, or unset it when `value`
     /// is `None`, in a session's environment, or in the global environment when
     /// `session_id` is `None`. New buffers created for a session get the global
@@ -118,6 +133,7 @@ impl SessionRequest {
             | Self::CloseRootTab { request_id, .. }
             | Self::SetRootTabSynchronizePanes { request_id, .. }
             | Self::SetViewport { request_id, .. }
+            | Self::SetBaseIndex { request_id, .. }
             | Self::SetEnvironment { request_id, .. }
             | Self::ShowEnvironment { request_id, .. } => *request_id,
         }
@@ -449,6 +465,12 @@ pub enum NodeRequest {
         session_id: SessionId,
         node_id: NodeId,
     },
+    /// Focus the pane focused before the current one in the session's
+    /// focused window (tmux `select-pane -l`).
+    FocusLast {
+        request_id: RequestId,
+        session_id: SessionId,
+    },
     Close {
         request_id: RequestId,
         node_id: NodeId,
@@ -516,6 +538,7 @@ impl NodeRequest {
             | Self::AddTab { request_id, .. }
             | Self::SelectTab { request_id, .. }
             | Self::Focus { request_id, .. }
+            | Self::FocusLast { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
             | Self::Resize { request_id, .. }
@@ -638,6 +661,16 @@ pub enum ClientRequest {
         client_id: Option<NonZeroU64>,
         session_id: SessionId,
     },
+    /// tmux `display-message`: show `message` in the status line of
+    /// `client_id`, or of every client whose current session is `session_id`,
+    /// for `duration_ms` (0 for the client's default).
+    DisplayMessage {
+        request_id: RequestId,
+        client_id: Option<NonZeroU64>,
+        session_id: Option<SessionId>,
+        message: String,
+        duration_ms: u32,
+    },
 }
 
 impl ClientRequest {
@@ -646,7 +679,8 @@ impl ClientRequest {
             Self::List { request_id }
             | Self::Get { request_id, .. }
             | Self::Detach { request_id, .. }
-            | Self::Switch { request_id, .. } => *request_id,
+            | Self::Switch { request_id, .. }
+            | Self::DisplayMessage { request_id, .. } => *request_id,
         }
     }
 }
@@ -662,12 +696,14 @@ pub enum ClientMessage {
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     Client(ClientRequest),
+    KillServer(KillServerRequest),
 }
 
 impl ClientMessage {
     pub fn request_id(&self) -> RequestId {
         match self {
             Self::Ping(request) => request.request_id,
+            Self::KillServer(request) => request.request_id,
             Self::Session(request) => request.request_id(),
             Self::Buffer(request) => request.request_id(),
             Self::Node(request) => request.request_id(),
@@ -700,6 +736,9 @@ pub struct SessionRecord {
     /// The area the session was last drawn in by an attached client; see
     /// `SessionRequest::SetViewport`.
     pub viewport: Option<Size>,
+    /// The window base index of the client that last showed the session;
+    /// see `SessionRequest::SetBaseIndex`.
+    pub base_index: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -728,9 +767,26 @@ pub struct BufferRecord {
     pub exit_code: Option<i32>,
     pub env: BTreeMap<String, String>,
     pub user_options: BTreeMap<String, String>,
+    /// Command line of the job in the foreground of the buffer's PTY when that
+    /// is not the buffer's own process, for example a program its shell runs.
+    /// `None` while the buffer's own process is in the foreground.
+    pub foreground_command: Option<Vec<String>>,
 }
 
 impl BufferRecord {
+    /// Command line of what runs in the foreground of the buffer now: the
+    /// job its shell runs, or the buffer's own command when that is in the
+    /// foreground (a shell at its prompt, or a program started directly).
+    pub fn current_command(&self) -> &[String] {
+        self.foreground_command.as_deref().unwrap_or(&self.command)
+    }
+
+    /// Name of the program in the foreground of the buffer, like tmux's
+    /// `pane_current_command`. See [`program_name`].
+    pub fn process_name(&self) -> Option<String> {
+        program_name(self.current_command())
+    }
+
     pub fn validate(&self) -> std::result::Result<(), String> {
         if let Some(pipe) = &self.pipe {
             pipe.validate("buffer_record.pipe")?;
@@ -760,6 +816,19 @@ impl BufferRecord {
         }
         Ok(())
     }
+}
+
+/// Name of the program a command line runs: the file name of its first word,
+/// without the dash a login shell starts with (`-zsh` is `zsh`). `None` for
+/// an empty command.
+pub fn program_name(command: &[String]) -> Option<String> {
+    let program = command.first()?;
+    let program = program.strip_prefix('-').unwrap_or(program);
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -837,6 +906,39 @@ pub struct SessionSnapshot {
     pub nodes: Vec<NodeRecord>,
     pub buffers: Vec<BufferRecord>,
     pub floating: Vec<FloatingRecord>,
+}
+
+/// Buffers shown in the subtree of `nodes` rooted at `root`, including `root`
+/// itself when it is a buffer view, in node order.
+pub fn buffer_ids_in_subtree<'a>(
+    nodes: impl IntoIterator<Item = &'a NodeRecord>,
+    root: NodeId,
+) -> Vec<BufferId> {
+    let nodes = nodes.into_iter().collect::<Vec<_>>();
+    let parents = nodes
+        .iter()
+        .map(|node| (node.id, node.parent_id))
+        .collect::<BTreeMap<_, _>>();
+    let in_subtree = |mut node_id: NodeId| {
+        // Bounded by the node count, so a malformed parent cycle cannot hang.
+        for _ in 0..=parents.len() {
+            if node_id == root {
+                return true;
+            }
+            match parents.get(&node_id).copied().flatten() {
+                Some(parent) => node_id = parent,
+                None => return false,
+            }
+        }
+        false
+    };
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let view = node.buffer_view.as_ref()?;
+            in_subtree(node.id).then_some(view.buffer_id)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1146,6 +1248,25 @@ pub struct ClipboardEvent {
     pub text: String,
 }
 
+/// Sequences a program in a buffer sent for the host terminal (tmux
+/// passthrough and unwrapped kitty graphics commands), in order. Like [`ClipboardEvent`] it goes only to the clients
+/// whose current session contains the buffer; each decides from its own layout
+/// whether the pane is on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassthroughEvent {
+    pub buffer_id: BufferId,
+    pub writes: Vec<PassthroughWrite>,
+}
+
+/// A message to show in a client's status line (`display-message`). Sent only
+/// to the clients the request named, not broadcast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMessageEvent {
+    pub message: String,
+    /// How long to show it; 0 for the client's default.
+    pub duration_ms: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRenamedEvent {
     pub session_id: SessionId,
@@ -1172,6 +1293,12 @@ pub enum ServerEvent {
     RenderInvalidated(RenderInvalidatedEvent),
     ClientChanged(ClientChangedEvent),
     Clipboard(ClipboardEvent),
+    DisplayMessage(DisplayMessageEvent),
+    Passthrough(PassthroughEvent),
+    /// The server is stopping on purpose (`kill-server`, or a signal asking it
+    /// to): every connection is about to close. Sent to every connection, so a
+    /// client can tell this from the server crashing.
+    ServerShutdown,
 }
 
 impl ServerEvent {
@@ -1188,7 +1315,10 @@ impl ServerEvent {
             Self::FocusChanged(event) => Some(event.session_id),
             Self::RenderInvalidated(_) => None,
             Self::ClientChanged(event) => event.client.current_session_id,
-            Self::Clipboard(_) => None,
+            Self::Clipboard(_)
+            | Self::DisplayMessage(_)
+            | Self::Passthrough(_)
+            | Self::ServerShutdown => None,
         }
     }
 
@@ -1213,4 +1343,53 @@ impl ServerEvent {
 pub enum ServerEnvelope {
     Response(ServerResponse),
     Event(ServerEvent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(command: &[&str], foreground: Option<&[&str]>) -> BufferRecord {
+        let owned = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
+        BufferRecord {
+            id: BufferId(1),
+            title: "shell".to_owned(),
+            command: owned(command),
+            cwd: None,
+            pipe: None,
+            kind: BufferRecordKind::Pty,
+            state: BufferRecordState::Running,
+            pid: None,
+            attachment_node_id: None,
+            read_only: false,
+            helper_source_buffer_id: None,
+            helper_scope: None,
+            pty_size: PtySize::new(80, 24),
+            activity: ActivityState::Idle,
+            last_snapshot_seq: 0,
+            exit_code: None,
+            env: BTreeMap::new(),
+            user_options: BTreeMap::new(),
+            foreground_command: foreground.map(owned),
+        }
+    }
+
+    #[test]
+    fn process_name_is_the_foreground_program_without_path_or_login_dash() {
+        assert_eq!(
+            buffer(&["/bin/zsh"], None).process_name().as_deref(),
+            Some("zsh")
+        );
+        assert_eq!(
+            buffer(&["-zsh"], None).process_name().as_deref(),
+            Some("zsh")
+        );
+        assert_eq!(
+            buffer(&["/bin/zsh"], Some(&["/usr/bin/nvim", "notes.txt"]))
+                .process_name()
+                .as_deref(),
+            Some("nvim")
+        );
+        assert_eq!(buffer(&[], None).process_name(), None);
+    }
 }

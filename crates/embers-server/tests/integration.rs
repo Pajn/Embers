@@ -1,11 +1,14 @@
 mod buffer_lifecycle;
 mod buffer_move;
 mod client_sessions;
+mod exited_buffers;
 mod floating_windows;
 mod keeper_lifetime;
+mod keeper_spawn;
 mod model_state;
 mod nested_tabs;
 mod persistence;
 mod ping_server;
+mod session_destroy;
 mod session_root_tabs;
 mod split_layout;

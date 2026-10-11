@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d0750936.js";
+            window.path_to_searchindex_js = "searchindex-9c999019.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -175,12 +175,12 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="example"><a class="header" href="#example">Example</a></h1>
-<p>This is a trimmed example based on the repository fixture config. It shows the two main phases together.</p>
+<p>This is a trimmed example based on the repository’s <a href="../../config.rhai"><code>config.rhai</code></a>, which translates a typical tmux setup. It shows the two main phases together.</p>
 <pre><code class="language-rhai">set_leader("&lt;C-a&gt;");
 
 fn shell_tree(ctx) {
     tree.buffer_spawn(
-        ["/bin/zsh"],
+        ["zsh"],
         #{
             title: "shell",
             cwd: if ctx.current_buffer() == () { () } else { ctx.current_buffer().cwd() }

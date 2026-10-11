@@ -171,24 +171,105 @@ fn cancel_selection(_: ActionApi) -> Action;
 /// Chain multiple actions into one composite action.
 fn chain(_: ActionApi, actions: array) -> Action;
 
+/// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+/// (`prefix s`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>S", action.choose_session());
+/// ```
+fn choose_session(_: ActionApi) -> Action;
+
+/// Open the picker on a tree of every session, window and pane, like
+/// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+/// expand and collapse, Enter switches to the selected item, `x` kills it
+/// after asking, `/` or typing other text filters, and `q`/Esc closes.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>T", action.choose_tree());
+/// ```
+fn choose_tree(_: ActionApi) -> Action;
+
+/// Open the picker with every session expanded to its windows, like tmux
+/// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>\"", action.choose_window());
+/// ```
+fn choose_window(_: ActionApi) -> Action;
+
 /// Clear any partially-entered key sequence.
 fn clear_pending_keys(_: ActionApi) -> Action;
 
-/// Close the currently focused floating window.
+/// Close the currently focused floating window. Its buffers keep running,
+/// detached; use `kill_floating` to end them.
 fn close_floating(_: ActionApi) -> Action;
 
-/// Close a floating window by id.
+/// Close a floating window by id. Its buffers keep running, detached.
 fn close_floating_id(_: ActionApi, floating_id: int) -> Action;
 
-/// Close a view by node id.
+/// Close a view by node id. The buffers it shows keep running, detached.
 fn close_node(_: ActionApi, node_id: int) -> Action;
 
-/// Close the currently focused view.
+/// Close the currently focused view. Its buffer keeps running, detached;
+/// use `kill_view` to end it.
 fn close_view(_: ActionApi) -> Action;
+
+/// Open the command prompt (tmux `:`). Enter runs the typed line with the
+/// same commands and options as the `embers` CLI, such as
+/// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+/// commands without `-t` apply to the current session, window and pane.
+/// Up and Down browse earlier lines; Esc cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>:", action.command_prompt());
+/// ```
+fn command_prompt(_: ActionApi) -> Action;
+
+/// Open a prompt labelled `prompt` with `initial` typed (both may use
+/// formats); Enter runs `template` with `%%` replaced by the input as one
+/// word, like tmux `command-prompt -p prompt -I initial template`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+/// ```
+fn command_prompt_template(_: ActionApi, prompt: string, initial: string, template: string) -> Action;
+
+/// Open the command prompt with `initial` already typed, like tmux
+/// `command-prompt -I`. The text may use the formats `display_message`
+/// accepts, such as `#W`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.command_prompt_with("split-window -- ")
+/// ```
+fn command_prompt_with(_: ActionApi, initial: string) -> Action;
 
 /// Finalize the active search, keep the current match and cursor position, and leave search
 /// mode with the committed result in place.
 fn commit_search(_: ActionApi) -> Action;
+
+/// Ask before running `action`, like tmux `confirm-before`: `prompt` is
+/// shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+/// `action`, an action or an array of actions, runs only if the next key
+/// is `y`. Any other key cancels.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+/// ```
+fn confirm(_: ActionApi, prompt: string, action: ?) -> Action;
 
 /// Move to the first non-blank character of the line (`^`).
 fn copy_back_to_indentation(_: ActionApi) -> Action;
@@ -288,6 +369,29 @@ fn detach_buffer(_: ActionApi) -> Action;
 /// Detach a buffer by id.
 fn detach_buffer_id(_: ActionApi, buffer_id: int) -> Action;
 
+/// Show a message in the status line for a few seconds, like tmux
+/// `display-message`. The text may use the format variables `#S` (session),
+/// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+/// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+/// for the focused pane; `##` is a literal `#`.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("#S:#I #{pane_current_path}")
+/// ```
+fn display_message(_: ActionApi, message: string) -> Action;
+
+/// Show a message in the status line for `duration_ms` milliseconds, like
+/// tmux `display-message -d`. See `display_message(message)` for formats.
+///
+/// # Example
+///
+/// ```rhai
+/// action.display_message("saved", 1000)
+/// ```
+fn display_message(_: ActionApi, message: string, duration_ms: int) -> Action;
+
 /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
 /// following output and a cursor appears at the program's cursor; copy-mode
 /// motions move it. Does nothing on the alternate screen.
@@ -368,13 +472,26 @@ fn follow_output(_: ActionApi) -> Action;
 /// Insert a tab after a specific tabs node.
 fn insert_tab_after(_: ActionApi, tabs_node_id: int, title: string, tree: TreeSpec) -> Action;
 
-/// Insert a tab after the current tab in the focused tabs node.
+/// Insert a tab after the active tab of the innermost tabs that hold the
+/// focus, and select it. When the focus is inside nested tabs, the new tab
+/// is a nested tab there, not a window; use `new_window` for tmux's
+/// `new-window`. In a session with a single window, whose root is not
+/// tabbed, the new tab becomes a second window after that one.
+///
+/// # Example
+///
+/// ```rhai
+/// action.insert_tab_after_current("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+/// ```
 fn insert_tab_after_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Insert a tab before a specific tabs node.
 fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeSpec) -> Action;
 
-/// Insert a tab before the current tab.
+/// Insert a tab before the active tab of the innermost tabs that hold the
+/// focus, and select it. Like `insert_tab_after_current`, this makes a
+/// nested tab when the focus is in nested tabs, and a second window, before
+/// the only one, in a session with a single window.
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Attach a buffer at the current node.
@@ -387,6 +504,35 @@ fn kill_buffer(_: ActionApi) -> Action;
 
 /// Kill a buffer by id.
 fn kill_buffer_id(_: ActionApi, buffer_id: int) -> Action;
+
+/// Close the currently focused floating window and end the programs of the
+/// buffers it shows, like tmux's `kill-pane` for a popup.
+fn kill_floating(_: ActionApi) -> Action;
+
+/// Close a floating window by id and end the programs of the buffers it
+/// shows.
+fn kill_floating_id(_: ActionApi, floating_id: int) -> Action;
+
+/// Close a view by node id and end the programs of the buffers it shows. On
+/// a split or tabs node this ends every pane in it, like tmux's
+/// `kill-window`.
+fn kill_node(_: ActionApi, node_id: int) -> Action;
+
+/// Close the currently focused view and end its buffer's program, like
+/// tmux's `kill-pane`.
+fn kill_view(_: ActionApi) -> Action;
+
+/// Focus the pane that was focused before the current one in the current
+/// window, like tmux `select-pane -l`. Repeating it goes back and forth
+/// between two panes. Panes that were closed are skipped; with no other
+/// pane to go back to it does nothing.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>;", action.last_pane());
+/// ```
+fn last_pane(_: ActionApi) -> Action;
 
 /// Switch back to the previously active session (tmux `switch-client -l`).
 fn last_session(_: ActionApi) -> Action;
@@ -427,6 +573,17 @@ fn move_node_after(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 /// Move a node before a sibling.
 fn move_node_before(_: ActionApi, node_id: int, sibling_node_id: int) -> Action;
 
+/// Add a window to the current session, after its last window, and
+/// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
+/// new tab is always a window, even when the focus is in nested tabs.
+///
+/// # Example
+///
+/// ```rhai
+/// action.new_window("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+/// ```
+fn new_window(_: ActionApi, title: string, tree: TreeSpec) -> Action;
+
 /// Select the next tab in the currently focused tabs node.
 fn next_current_tabs(_: ActionApi) -> Action;
 
@@ -458,6 +615,26 @@ fn prev_session(_: ActionApi) -> Action;
 
 /// Select the previous tab in a specific tabs node.
 fn prev_tab(_: ActionApi, tabs_node_id: int) -> Action;
+
+/// Prompt for a new name for the current session, starting from its
+/// current name (tmux `prefix $`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>$", action.rename_session_prompt());
+/// ```
+fn rename_session_prompt(_: ActionApi) -> Action;
+
+/// Prompt for a new name for the current window, starting from its current
+/// name (tmux `prefix ,`).
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>,", action.rename_window_prompt());
+/// ```
+fn rename_window_prompt(_: ActionApi) -> Action;
 
 /// Replace the focused node with a new tree.
 fn replace_current_with(_: ActionApi, tree: TreeSpec) -> Action;
@@ -495,6 +672,16 @@ fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
 fn reveal_buffer(_: ActionApi, buffer_id: int) -> Action;
+
+/// Run a command line as if it was typed at the command prompt, like
+/// binding a tmux command. Output and errors are shown in the status line.
+///
+/// # Example
+///
+/// ```rhai
+/// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+/// ```
+fn run_command(_: ActionApi, command: string) -> Action;
 
 /// Run another named action by name.
 fn run_named_action(_: ActionApi, name: string) -> Action;
@@ -731,6 +918,12 @@ fn command(buffer: BufferRef) -> array;
 /// ReturnType: `string | ()`
 fn cwd(buffer: BufferRef) -> ?;
 
+/// Return the working directory of the pane the tab shows (see
+/// `pane_title`), like tmux's `#{pane_current_path}`.
+///
+/// ReturnType: `string | ()`
+fn cwd(tab: TabInfo) -> ?;
+
 /// Look up a single environment hint captured on the buffer.
 ///
 /// ReturnType: `string | ()`
@@ -748,6 +941,10 @@ fn floating(session: SessionRef) -> array;
 ///
 /// ReturnType: `int | ()`
 fn floating_id(event: EventInfo) -> ?;
+
+/// Return the command line of the program in the buffer's foreground: the
+/// job its shell runs, else the buffer's own command.
+fn foreground_command(buffer: BufferRef) -> array;
 
 /// Return the floating geometry map.
 fn geometry(floating: FloatingRef) -> map;
@@ -863,6 +1060,13 @@ fn node_id(event: EventInfo) -> ?;
 /// ```
 fn number(tab: TabInfo) -> int;
 
+/// Return the title of the pane the tab shows: the focused pane when the
+/// tab holds the focus, otherwise the pane its active nested tabs lead to
+/// (the first pane of a split).
+///
+/// ReturnType: `string | ()`
+fn pane_title(tab: TabInfo) -> ?;
+
 /// Return the parent node id, if any.
 ///
 /// ReturnType: `int | ()`
@@ -878,10 +1082,34 @@ fn pid(buffer: BufferRef) -> ?;
 /// ReturnType: `int | ()`
 fn previous_session_id(event: EventInfo) -> ?;
 
-/// Return the detected process name, if any.
+/// Return the name of the program in the buffer's foreground, like tmux's
+/// `pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+/// runs in a shell), else the buffer's own command (`"zsh"` at the
+/// prompt). Use `command()` for the command the buffer was started with.
 ///
 /// ReturnType: `string | ()`
+///
+/// # Example
+///
+/// ```rhai
+/// let buffer = ctx.current_buffer();
+/// if buffer != () && buffer.process_name() == "nvim" {
+///     action.send_keys_current("<C-h>")
+/// }
+/// ```
 fn process_name(buffer: BufferRef) -> ?;
+
+/// Return the name of the program in the foreground of the pane the tab
+/// shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+///
+/// ReturnType: `string | ()`
+///
+/// # Example
+///
+/// ```rhai
+/// let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
+/// ```
+fn process_name(tab: TabInfo) -> ?;
 
 /// Return the root node id.
 fn root_node(floating: FloatingRef) -> int;

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -15,15 +15,15 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, ClipboardWrite, Hyperlink, MuxError, PtySize, Result, SnapshotLine,
-    StyledRun, TerminalSnapshot,
+    ActivityState, BufferId, ClipboardWrite, CursorPosition, Hyperlink, MuxError, PassthroughWrite,
+    PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -34,8 +34,17 @@ use tracing::{debug, error};
 
 use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
 
-const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(25);
-const CONNECT_RETRY_ATTEMPTS: usize = 1200;
+/// How long spawning a buffer waits for its runtime keeper to report that it
+/// is ready (socket listening, child running) or that it failed to start.
+const KEEPER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Line a keeper process writes to its stdout once it is ready to serve.
+const KEEPER_READY_LINE: &str = "ready";
+/// Prefix of the line a keeper process writes to its stdout when it fails to
+/// start; the rest of the line is the error.
+const KEEPER_ERROR_PREFIX: &str = "error: ";
+/// Upper bound on the readiness report, so a misbehaving keeper cannot make the
+/// server buffer unbounded output.
+const KEEPER_READY_LINE_MAX: usize = 4096;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 const KEEPER_PIPE_WRITE_QUEUE_CAPACITY: usize = 64;
@@ -53,9 +62,9 @@ const KEEPER_WRITE_QUEUE_CAPACITY: usize = 64;
 /// needed: whether its child is still running and its socket is still the one it
 /// bound (servers only ever reattach through that socket).
 const KEEPER_SOCKET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-/// How long an unreachable keeper waits for its child to exit after SIGHUP
-/// before escalating to SIGKILL.
-const KEEPER_ORPHAN_KILL_GRACE: Duration = Duration::from_secs(2);
+/// How long a keeper waits for its child to exit after SIGHUP, when told to
+/// kill it or when it finds itself unreachable, before escalating to SIGKILL.
+const KEEPER_KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct BufferRuntimeUpdate {
@@ -70,6 +79,10 @@ pub struct BufferRuntimeUpdate {
     /// (`value` is `None` once the pane's own process is in the foreground
     /// again); `None` when it is unchanged.
     pub foreground_command: Option<Option<Vec<String>>>,
+    /// The runtime's [`BufferRuntimeStatus::bell_sequence`]. The server marks
+    /// the buffer `Bell` whenever this advances, so a bell is not lost when
+    /// later output replaced `activity` before it was reported.
+    pub bell_sequence: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +98,13 @@ pub struct BufferRuntimeStatus {
     /// Count of OSC 52 clipboard writes the keeper has seen. The poller fetches
     /// the latest write whenever this advances.
     pub clipboard_sequence: u64,
+    /// Count of output chunks that rang the bell since the runtime started.
+    /// `activity` only describes the latest chunk, so this is what tells a
+    /// reader that a bell rang since it last looked.
+    pub bell_sequence: u64,
+    /// Number of the latest passthrough write the keeper has queued. The poller
+    /// fetches the queued writes whenever this advances.
+    pub passthrough_sequence: u64,
     /// Command line of the job in the PTY's foreground when that is not the
     /// pane's own process, for example a program a shell is running.
     pub foreground_command: Option<Vec<String>>,
@@ -132,6 +152,10 @@ pub struct BufferRuntimeCallbacks {
     pub on_exit: Arc<dyn Fn(BufferId, Option<i32>) + Send + Sync>,
     /// A program in the buffer wrote to the clipboard with OSC 52.
     pub on_clipboard: Arc<dyn Fn(BufferId, ClipboardWrite) + Send + Sync>,
+    /// A program in the buffer sent sequences for the host terminal (tmux
+    /// passthrough), in the order it sent them. Called once per poll with
+    /// every write the poll fetched.
+    pub on_passthrough: Arc<dyn Fn(BufferId, Vec<PassthroughWrite>) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -174,10 +198,20 @@ enum KeeperRequest {
     StopPipe,
     StopPipeAfterExit,
     Kill,
+    /// Stop the child (SIGHUP, then SIGKILL) and exit, for kill-server. An
+    /// older keeper rejects it; the server then falls back to `Kill` followed
+    /// by `ExitRecorded`.
+    Shutdown,
     /// Fetch the latest OSC 52 clipboard write. Only sent once a status reply
     /// reports a `clipboard_sequence`, which keepers without clipboard
     /// forwarding never do.
     Clipboard,
+    /// Take the queued passthrough writes numbered above `after`, oldest first;
+    /// writes up to `after` are dropped. Only sent once a status reply reports
+    /// a `passthrough_sequence`.
+    Passthrough {
+        after: u64,
+    },
     /// The server has saved a workspace that no longer needs this keeper: the
     /// buffer is recorded as exited, or its record no longer refers to the
     /// keeper. Once its child has exited and no server is attached, the keeper
@@ -189,6 +223,7 @@ enum KeeperRequest {
 enum KeeperResponse {
     Status(KeeperStatus),
     Clipboard(Option<KeeperClipboard>),
+    Passthrough(Vec<KeeperPassthrough>),
     Snapshot(KeeperSnapshot),
     VisibleSnapshot(TerminalSnapshot),
     ScrollbackSlice(KeeperScrollbackSlice),
@@ -214,9 +249,16 @@ struct KeeperStatus {
     // asked for clipboard writes.
     #[serde(default)]
     clipboard_sequence: u64,
+    // Defaulted for keepers that predate passthrough forwarding.
+    #[serde(default)]
+    passthrough_sequence: u64,
     // Defaulted for keepers that predate foreground command reporting.
     #[serde(default)]
     foreground_command: Option<Vec<String>>,
+    // Defaulted for keepers that predate bell counting; they report 0, so
+    // only their latest activity is seen.
+    #[serde(default)]
+    bell_sequence: u64,
 }
 
 /// The latest OSC 52 clipboard write a keeper has seen. The payload is held
@@ -226,6 +268,94 @@ struct KeeperStatus {
 struct KeeperClipboard {
     sequence: u64,
     write: ClipboardWrite,
+}
+
+/// A queued passthrough write. Unlike clipboard writes every one is kept, since
+/// image protocols send one image as many sequences.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct KeeperPassthrough {
+    sequence: u64,
+    /// Base64 in keeper JSON: a byte array would take up to four times the room.
+    #[serde(with = "base64_bytes")]
+    bytes: Vec<u8>,
+    cursor: CursorPosition,
+}
+
+/// Most passthrough bytes a keeper queues for the server. Past this the oldest
+/// writes are dropped, which bounds memory while no server is attached.
+const MAX_QUEUED_PASSTHROUGH_BYTES: usize = 8 * 1024 * 1024;
+
+/// Most passthrough bytes one `Passthrough` reply carries (at least one write is
+/// always sent). Base64 grows it by a third, which stays inside the keeper
+/// frame cap (16 MiB); the poller asks again for the rest.
+const MAX_PASSTHROUGH_REPLY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Passthrough writes waiting for the server, oldest first, numbered from 1.
+#[derive(Debug, Default)]
+struct PassthroughQueue {
+    last_sequence: u64,
+    entries: VecDeque<KeeperPassthrough>,
+    bytes: usize,
+}
+
+impl PassthroughQueue {
+    fn push(&mut self, write: PassthroughWrite) {
+        self.last_sequence += 1;
+        self.bytes += write.bytes.len();
+        self.entries.push_back(KeeperPassthrough {
+            sequence: self.last_sequence,
+            bytes: write.bytes,
+            cursor: write.cursor,
+        });
+        while self.bytes > MAX_QUEUED_PASSTHROUGH_BYTES
+            && let Some(dropped) = self.entries.pop_front()
+        {
+            debug!(
+                sequence = dropped.sequence,
+                "passthrough queue full; dropping oldest write"
+            );
+            self.bytes -= dropped.bytes.len();
+        }
+    }
+
+    /// Remove and return the writes numbered above `after`, oldest first, up to
+    /// [`MAX_PASSTHROUGH_REPLY_BYTES`]. Writes up to `after` are dropped.
+    fn take_after(&mut self, after: u64) -> Vec<KeeperPassthrough> {
+        let mut taken = Vec::new();
+        let mut taken_bytes = 0;
+        while let Some(entry) = self.entries.front() {
+            if entry.sequence > after
+                && !taken.is_empty()
+                && taken_bytes + entry.bytes.len() > MAX_PASSTHROUGH_REPLY_BYTES
+            {
+                break;
+            }
+            let entry = self.entries.pop_front().expect("front entry exists");
+            self.bytes -= entry.bytes.len();
+            if entry.sequence > after {
+                taken_bytes += entry.bytes.len();
+                taken.push(entry);
+            }
+        }
+        taken
+    }
+}
+
+/// Serde helper that writes bytes as one base64 string.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -293,6 +423,8 @@ struct KeeperRuntime {
     pipe: Mutex<Option<KeeperPipe>>,
     sequence: AtomicU64,
     activity: Mutex<ActivityState>,
+    /// Output chunks that rang the bell; see [`BufferRuntimeStatus::bell_sequence`].
+    bell_sequence: AtomicU64,
     clipboard: Mutex<Option<KeeperClipboard>>,
     exit_code: Mutex<Option<Option<i32>>>,
     /// Set once a server reports, with `KeeperRequest::ExitRecorded`, that its
@@ -307,6 +439,9 @@ struct KeeperSurface {
     router: RawByteRouter,
     backend: Box<dyn TerminalBackend>,
     size: PtySize,
+    /// Passthrough writes the router took out of the output, kept under the
+    /// surface lock the read loop already holds.
+    passthrough: PassthroughQueue,
 }
 
 struct KeeperPipe {
@@ -504,6 +639,21 @@ impl BufferRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
+    /// Tell the keeper to end its program and exit (kill-server). Unlike
+    /// [`Self::kill`], the keeper does not stay to serve captures.
+    pub async fn terminate(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.shutdown()
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
     pub async fn resize(&self, size: PtySize) -> Result<()> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -649,7 +799,9 @@ impl KeeperConnection {
                 pipe: status.pipe,
                 cwd: status.cwd,
                 clipboard_sequence: status.clipboard_sequence,
+                passthrough_sequence: status.passthrough_sequence,
                 foreground_command: status.foreground_command,
+                bell_sequence: status.bell_sequence,
             }),
             other => Err(MuxError::protocol(format!(
                 "unexpected runtime keeper status response: {other_kind}",
@@ -666,6 +818,32 @@ impl KeeperConnection {
                 other_kind = keeper_response_kind(&other)
             ))),
         }
+    }
+
+    fn passthrough(&mut self, after: u64) -> Result<Vec<KeeperPassthrough>> {
+        match self.request(KeeperRequest::Passthrough { after })? {
+            KeeperResponse::Passthrough(writes) => Ok(writes),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper passthrough response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
+    /// Fetch every passthrough write numbered above `after`, up to `latest`,
+    /// over as many requests as it takes.
+    fn passthrough_since(&mut self, after: u64, latest: u64) -> Result<Vec<KeeperPassthrough>> {
+        let mut writes = Vec::new();
+        let mut after = after;
+        while after < latest {
+            let batch = self.passthrough(after)?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            after = last.sequence;
+            writes.extend(batch);
+        }
+        Ok(writes)
     }
 
     fn write(&mut self, bytes: Vec<u8>) -> Result<()> {
@@ -735,6 +913,26 @@ impl KeeperConnection {
         }
     }
 
+    fn shutdown(&mut self) -> Result<()> {
+        match self.request(KeeperRequest::Shutdown) {
+            Ok(KeeperResponse::Ok) => Ok(()),
+            Ok(other) => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper shutdown response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+            // A keeper that predates `Shutdown` rejects it. End its child, then
+            // release it: a keeper that knows `ExitRecorded` only exits once a
+            // server has acknowledged the exit, and after kill-server none
+            // will. One older still rejects `ExitRecorded` too, harmlessly; it
+            // exits once its child has and no server is left.
+            Err(_) => {
+                self.kill()?;
+                let _ = self.exit_recorded();
+                Ok(())
+            }
+        }
+    }
+
     fn exit_recorded(&mut self) -> Result<()> {
         match self.request(KeeperRequest::ExitRecorded)? {
             KeeperResponse::Ok => Ok(()),
@@ -792,15 +990,18 @@ impl KeeperSurface {
             router: RawByteRouter::default(),
             backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
             size,
+            passthrough: PassthroughQueue::default(),
         }
     }
 
     /// Ingest PTY output and return the resulting activity, any terminal replies
     /// the emulator generated (device-attribute / cursor-position / mode
     /// queries), and any clipboard write. The caller writes the replies back to
-    /// the PTY master.
+    /// the PTY master. Passthrough sequences are queued for the server.
     fn route_output(&mut self, bytes: &[u8]) -> BackendEvents {
-        self.router.route_output(self.backend.as_mut(), bytes);
+        for write in self.router.route_output(self.backend.as_mut(), bytes) {
+            self.passthrough.push(write);
+        }
         self.backend.take_events()
     }
 
@@ -1024,7 +1225,64 @@ const KEEPER_PTY_MAX_RETRIES: usize = 3;
 /// Delay between PTY allocation retries
 const KEEPER_PTY_RETRY_DELAY: Duration = Duration::from_millis(100);
 
+/// Run a runtime keeper process. Reports on stdout, as a single line, once the
+/// keeper is ready to serve or why it failed to start; the spawning server
+/// waits for that line (see [`wait_for_keeper_ready`]).
 pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
+    let mut readiness = KeeperReadiness::Stdout { reported: false };
+    let result = serve_runtime_keeper(cli, &mut readiness);
+    if let Err(error) = &result {
+        readiness.report(Err(error.to_string()));
+    }
+    result
+}
+
+/// Where a keeper reports whether it started. A keeper process reports on its
+/// stdout; an in-process keeper thread reports over a channel.
+enum KeeperReadiness {
+    Stdout { reported: bool },
+    Channel(Option<SyncSender<std::result::Result<(), String>>>),
+}
+
+impl KeeperReadiness {
+    /// Report the start result. Only the first report counts.
+    fn report(&mut self, result: std::result::Result<(), String>) {
+        match self {
+            Self::Stdout { reported } => {
+                if std::mem::replace(reported, true) {
+                    return;
+                }
+                let line = match result {
+                    Ok(()) => format!("{KEEPER_READY_LINE}\n"),
+                    Err(error) => format!("{KEEPER_ERROR_PREFIX}{}\n", error.replace('\n', " ")),
+                };
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(line.as_bytes());
+                let _ = stdout.flush();
+                drop(stdout);
+                release_stdout();
+            }
+            Self::Channel(sender) => {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(result);
+                }
+            }
+        }
+    }
+}
+
+/// Point stdout at `/dev/null` once readiness is reported, so the keeper does
+/// not hold the server's end of the readiness pipe open for its whole life.
+fn release_stdout() {
+    if let Ok(null) = fs::OpenOptions::new().write(true).open("/dev/null") {
+        // SAFETY: plain fd duplication onto stdout; `null` stays open for the call.
+        unsafe {
+            libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO);
+        }
+    }
+}
+
+fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) -> Result<()> {
     let Some(program) = cli.command.first() else {
         return Err(MuxError::invalid_input(
             "runtime keeper command must not be empty",
@@ -1104,7 +1362,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     // handler holds a lock across a blocking write. The only senders live in the
     // shared runtime; the thread ends once the last runtime reference is dropped.
     let (write_tx, write_rx) = sync_channel(KEEPER_WRITE_QUEUE_CAPACITY);
-    let writer_join = thread::Builder::new()
+    let _writer = thread::Builder::new()
         .name(format!("keeper-writer-{}", cli.socket_path.display()))
         .spawn(move || keeper_writer_loop(writer, write_rx))
         .map_err(|error| MuxError::internal(error.to_string()))?;
@@ -1117,6 +1375,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         pipe: Mutex::new(None),
         sequence: AtomicU64::new(0),
         activity: Mutex::new(ActivityState::Idle),
+        bell_sequence: AtomicU64::new(0),
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         exit_recorded: AtomicBool::new(false),
@@ -1124,7 +1383,7 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     });
 
     let reader_runtime = runtime.clone();
-    let reader_join = thread::Builder::new()
+    let _reader = thread::Builder::new()
         .name(format!("keeper-reader-{}", cli.socket_path.display()))
         .spawn(move || keeper_read_loop(reader_runtime, reader))
         .map_err(|error| MuxError::internal(error.to_string()))?;
@@ -1142,8 +1401,10 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
     // unreachable. Until a server has saved the exit the keeper stays, so a
     // restart reads the exit and sees the pane as exited rather than
     // interrupted, even if the server that first read it crashed.
-    let mut terminate = false;
-    while !terminate {
+    // The socket is listening and the child is running: from here on a server
+    // can connect at any time.
+    readiness.report(Ok(()));
+    loop {
         if !wait_for_keeper_client(&listener, KEEPER_SOCKET_CHECK_INTERVAL)? {
             if runtime.exit_recorded.load(Ordering::Acquire) && runtime.child_exited() {
                 debug!(
@@ -1160,23 +1421,24 @@ pub fn run_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
                 socket_path = %cli.socket_path.display(),
                 "runtime keeper socket removed or replaced; stopping unreachable runtime"
             );
-            stop_unreachable_runtime(&runtime, wait_join);
+            stop_runtime_child(&runtime, wait_join);
             return Ok(());
         }
-        // On both early returns above the reader thread is left to finish on
-        // its own: it only ends once every holder of the PTY slave has closed
-        // it, which a surviving grandchild may never do.
+        // On every return from this loop the reader and writer threads are
+        // left to finish on their own: the reader only ends once every holder
+        // of the PTY slave has closed it, which a surviving grandchild may
+        // never do.
         let (mut stream, _) = listener.accept()?;
-        terminate = handle_keeper_client(runtime.clone(), &mut stream)?;
+        if handle_keeper_client(runtime.clone(), &mut stream)? {
+            // The server asked this keeper to shut down (kill-server).
+            debug!(
+                socket_path = %cli.socket_path.display(),
+                "runtime keeper shutdown requested; stopping runtime"
+            );
+            stop_runtime_child(&runtime, wait_join);
+            return Ok(());
+        }
     }
-
-    let _ = reader_join.join();
-    let _ = wait_join.join();
-    // Drop the last runtime reference so the write channel disconnects and the
-    // writer thread finishes draining before we join it.
-    drop(runtime);
-    let _ = writer_join.join();
-    Ok(())
 }
 
 fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) -> Result<bool> {
@@ -1254,8 +1516,10 @@ fn handle_keeper_request(
         )),
         KeeperRequest::Kill => {
             runtime.kill()?;
+            escalate_kill(runtime.clone());
             Ok((KeeperResponse::Ok, false))
         }
+        KeeperRequest::Shutdown => Ok((KeeperResponse::Ok, true)),
         KeeperRequest::Clipboard => Ok((
             KeeperResponse::Clipboard(
                 runtime
@@ -1263,6 +1527,17 @@ fn handle_keeper_request(
                     .lock()
                     .map_err(|_| MuxError::internal("runtime keeper clipboard lock poisoned"))?
                     .clone(),
+            ),
+            false,
+        )),
+        KeeperRequest::Passthrough { after } => Ok((
+            KeeperResponse::Passthrough(
+                runtime
+                    .surface
+                    .lock()
+                    .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?
+                    .passthrough
+                    .take_after(after),
             ),
             false,
         )),
@@ -1307,6 +1582,7 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper activity lock poisoned"))?;
         let sequence = self.sequence.load(Ordering::Relaxed);
+        let bell_sequence = self.bell_sequence.load(Ordering::Relaxed);
         let clipboard_sequence = self
             .clipboard
             .lock()
@@ -1315,6 +1591,7 @@ impl KeeperRuntime {
             .map_or(0, |clipboard| clipboard.sequence);
         let title = surface.backend.metadata().title.clone();
         let reported_cwd = surface.router.reported_cwd();
+        let passthrough_sequence = surface.passthrough.last_sequence;
         drop(surface);
         let running = exit_code.is_none();
         // Prefer an OSC 7 report from the shell (handles ssh'd shells reporting
@@ -1352,7 +1629,9 @@ impl KeeperRuntime {
             pipe,
             cwd,
             clipboard_sequence,
+            passthrough_sequence,
             foreground_command,
+            bell_sequence,
         })
     }
 
@@ -1427,6 +1706,7 @@ impl KeeperRuntime {
         Ok(surface.capture_scrollback_slice(start_line, line_count))
     }
 
+    /// Send the child SIGHUP, like a terminal hanging up.
     fn kill(&self) -> Result<()> {
         self.ensure_running()?;
         let mut killer = self
@@ -1528,6 +1808,11 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                 {
                     pipe.write(bytes);
                 }
+                // Count bells before the sequence advances, so a status read
+                // that sees the new sequence also sees the bell.
+                if activity == ActivityState::Bell {
+                    runtime.bell_sequence.fetch_add(1, Ordering::Relaxed);
+                }
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
@@ -1605,11 +1890,12 @@ fn socket_identity(path: &Path) -> Option<(u64, u64)> {
     Some((metadata.dev(), metadata.ino()))
 }
 
-/// Stop the child of a keeper that no server can reach any more: SIGHUP like a
-/// regular kill, then SIGKILL if the child ignores it, and wait for it to exit.
-fn stop_unreachable_runtime(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
+/// Stop the child of a keeper that is about to exit, because no server can
+/// reach it any more or the server asked it to shut down: SIGHUP like a regular
+/// kill, then SIGKILL if the child ignores it, and wait for it to exit.
+fn stop_runtime_child(runtime: &KeeperRuntime, wait_join: thread::JoinHandle<()>) {
     let _ = runtime.kill();
-    let deadline = Instant::now() + KEEPER_ORPHAN_KILL_GRACE;
+    let deadline = Instant::now() + KEEPER_KILL_GRACE;
     while !wait_join.is_finished() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
     }
@@ -1623,6 +1909,37 @@ fn stop_unreachable_runtime(runtime: &KeeperRuntime, wait_join: thread::JoinHand
         }
     }
     let _ = wait_join.join();
+}
+
+/// Follow up a requested kill: a child still running [`KEEPER_KILL_GRACE`]
+/// after its SIGHUP gets SIGKILL. A program may ignore SIGHUP, and a shell
+/// can lose one that arrives while it is still starting up, so without this
+/// `kill-pane` could leave the program running.
+fn escalate_kill(runtime: Arc<KeeperRuntime>) {
+    let spawned = thread::Builder::new()
+        .name("keeper-kill-escalation".to_owned())
+        .spawn(move || {
+            let deadline = Instant::now() + KEEPER_KILL_GRACE;
+            while Instant::now() < deadline {
+                if runtime.ensure_running().is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            if runtime.ensure_running().is_ok()
+                && let Some(pid) = runtime.pid.and_then(|pid| libc::pid_t::try_from(pid).ok())
+            {
+                // SAFETY: plain signal delivery. The wait thread records the
+                // exit as soon as it has reaped the child, and the child was
+                // still recorded as running just above, so `pid` still names it.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        debug!(%error, "failed to start kill escalation");
+    }
 }
 
 fn keeper_wait_loop(runtime: Arc<KeeperRuntime>, mut child: Box<dyn Child + Send + Sync>) {
@@ -1650,59 +1967,56 @@ fn validate_pipe_command(command: &[String]) -> Result<()> {
 fn notify_pipe_removed(
     callbacks: &BufferRuntimeCallbacks,
     buffer_id: BufferId,
-    last_sequence: &mut u64,
-    activity: ActivityState,
-    last_pipe: &mut Option<BufferRuntimePipeStatus>,
+    last: &mut BufferRuntimeStatus,
     saw_exit: bool,
 ) {
-    if last_pipe.is_none() && saw_exit {
+    if last.pipe.is_none() && saw_exit {
         return;
     }
-    *last_sequence = last_sequence.saturating_add(1);
+    last.sequence = last.sequence.saturating_add(1);
     (callbacks.on_output)(
         buffer_id,
         BufferRuntimeUpdate {
-            sequence: *last_sequence,
-            activity,
+            sequence: last.sequence,
+            activity: last.activity,
             title: None,
             pipe: Some(None),
             cwd: None,
             foreground_command: None,
+            bell_sequence: last.bell_sequence,
         },
     );
-    *last_pipe = None;
+    last.pipe = None;
 }
 
-/// Compute the update to emit when a freshly polled status differs from the
-/// last one reported to the callbacks, or `None` when nothing changed. Only the
-/// fields that actually changed are populated, so a cwd-only change — which does
-/// not advance `sequence` — is still emitted and distinguishable from no change.
+/// Compute the update to emit when a freshly polled status differs from
+/// `last`, the status last reported to the callbacks, or `None` when nothing
+/// changed. Only the fields that actually changed are populated, so a cwd-only
+/// change — which does not advance `sequence` — is still emitted and
+/// distinguishable from no change.
 fn status_update_delta(
     status: &BufferRuntimeStatus,
-    last_sequence: u64,
-    last_title: &Option<String>,
-    last_activity: ActivityState,
-    last_pipe: &Option<BufferRuntimePipeStatus>,
-    last_cwd: &Option<PathBuf>,
-    last_foreground: &Option<Vec<String>>,
+    last: &BufferRuntimeStatus,
 ) -> Option<BufferRuntimeUpdate> {
-    let changed = status.sequence != last_sequence
-        || status.title != *last_title
-        || status.activity != last_activity
-        || status.pipe != *last_pipe
-        || status.cwd != *last_cwd
-        || status.foreground_command != *last_foreground;
+    let changed = status.sequence != last.sequence
+        || status.bell_sequence != last.bell_sequence
+        || status.title != last.title
+        || status.activity != last.activity
+        || status.pipe != last.pipe
+        || status.cwd != last.cwd
+        || status.foreground_command != last.foreground_command;
     if !changed {
         return None;
     }
     Some(BufferRuntimeUpdate {
         sequence: status.sequence,
         activity: status.activity,
-        title: (status.title != *last_title).then(|| status.title.clone()),
-        pipe: (status.pipe != *last_pipe).then(|| status.pipe.clone()),
-        cwd: (status.cwd != *last_cwd).then(|| status.cwd.clone()),
-        foreground_command: (status.foreground_command != *last_foreground)
+        title: (status.title != last.title).then(|| status.title.clone()),
+        pipe: (status.pipe != last.pipe).then(|| status.pipe.clone()),
+        cwd: (status.cwd != last.cwd).then(|| status.cwd.clone()),
+        foreground_command: (status.foreground_command != last.foreground_command)
             .then(|| status.foreground_command.clone()),
+        bell_sequence: status.bell_sequence,
     })
 }
 
@@ -1714,20 +2028,20 @@ fn spawn_status_poller(
     thread::Builder::new()
         .name(format!("buffer-{}-poller", inner.buffer_id))
         .spawn(move || {
-            let mut last_sequence = initial.sequence;
-            let mut last_title = initial.title.clone();
-            let mut last_activity = initial.activity;
-            let mut last_pipe = initial.pipe.clone();
             // Seed from the attach-time status so a reattaching server does not
             // replay a clipboard write that was already delivered (or dropped).
             let mut last_clipboard = initial.clipboard_sequence;
-            // Seed as unknown (not `initial.cwd`) so the first poll always reports
-            // the current directory: an OSC 7 report or pid resolution may already
-            // be present at attach, and the buffer record must still learn it.
-            let mut last_cwd: Option<PathBuf> = None;
-            // The attaching server applies `initial` itself, foreground included.
-            let mut last_foreground = initial.foreground_command.clone();
+            // Likewise for passthrough: what a keeper queued before this server
+            // attached was meant for a frame that is long gone.
+            let mut last_passthrough = initial.passthrough_sequence;
             let mut saw_exit = !initial.running;
+            // The attaching server applies `initial` itself, foreground and bell
+            // count included. Seed cwd as unknown (not `initial.cwd`) so the
+            // first poll always reports the current directory: an OSC 7 report
+            // or pid resolution may already be present at attach, and the
+            // buffer record must still learn it.
+            let mut last = initial;
+            last.cwd = None;
 
             while !inner.stop.load(Ordering::Relaxed) {
                 let status = {
@@ -1741,26 +2055,25 @@ fn spawn_status_poller(
                         } else {
                             None
                         };
-                        Ok((status, clipboard))
+                        let passthrough = if status.passthrough_sequence > last_passthrough {
+                            connection
+                                .passthrough_since(last_passthrough, status.passthrough_sequence)?
+                        } else {
+                            Vec::new()
+                        };
+                        Ok((status, clipboard, passthrough))
                     }) {
                         Ok(status) => status,
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
-                            notify_pipe_removed(
-                                &callbacks,
-                                inner.buffer_id,
-                                &mut last_sequence,
-                                last_activity,
-                                &mut last_pipe,
-                                saw_exit,
-                            );
+                            notify_pipe_removed(&callbacks, inner.buffer_id, &mut last, saw_exit);
                             (callbacks.on_exit)(inner.buffer_id, None);
                             break;
                         }
                     }
                 };
 
-                let (status, clipboard) = status;
+                let (status, clipboard, passthrough) = status;
                 if let Some(clipboard) = clipboard
                     && clipboard.sequence > last_clipboard
                 {
@@ -1768,22 +2081,29 @@ fn spawn_status_poller(
                     (callbacks.on_clipboard)(inner.buffer_id, clipboard.write);
                 }
 
-                if let Some(update) = status_update_delta(
-                    &status,
-                    last_sequence,
-                    &last_title,
-                    last_activity,
-                    &last_pipe,
-                    &last_cwd,
-                    &last_foreground,
-                ) {
+                if let Some(update) = status_update_delta(&status, &last) {
                     (callbacks.on_output)(inner.buffer_id, update);
-                    last_sequence = status.sequence;
-                    last_title = status.title.clone();
-                    last_activity = status.activity;
-                    last_pipe = status.pipe.clone();
-                    last_cwd = status.cwd.clone();
-                    last_foreground = status.foreground_command.clone();
+                    last = status.clone();
+                }
+
+                // After the output update, though clients do not rely on that
+                // order: a client refreshes the buffer itself before it draws
+                // the frame these writes follow.
+                // A fetch may return writes queued after the status reply.
+                last_passthrough = passthrough
+                    .last()
+                    .map_or(0, |write| write.sequence)
+                    .max(status.passthrough_sequence)
+                    .max(last_passthrough);
+                if !passthrough.is_empty() {
+                    let writes = passthrough
+                        .into_iter()
+                        .map(|write| PassthroughWrite {
+                            bytes: write.bytes,
+                            cursor: write.cursor,
+                        })
+                        .collect();
+                    (callbacks.on_passthrough)(inner.buffer_id, writes);
                 }
 
                 if !saw_exit && !status.running {
@@ -1939,23 +2259,85 @@ fn resolve_pid_argv(_pid: u32) -> Option<Vec<String>> {
     None
 }
 
+/// Connect to a keeper's socket. Callers only connect once the keeper is known
+/// to be listening (a freshly spawned keeper has reported readiness; a restored
+/// one was already serving), so a failure is final rather than retried.
 fn connect_to_keeper(socket_path: &Path) -> Result<UnixStream> {
-    for _ in 0..CONNECT_RETRY_ATTEMPTS {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => return Ok(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                thread::sleep(CONNECT_RETRY_DELAY);
+    Ok(UnixStream::connect(socket_path)?)
+}
+
+/// Wait for a freshly spawned keeper to report on `pipe` (its stdout) that it
+/// is ready, or why it failed to start.
+///
+/// The keeper's socket file appears at `bind`, before the keeper listens on
+/// it, and a connect in between is refused; the keeper also still has to open
+/// a PTY and start the child, either of which can fail. Waiting for the
+/// keeper's own report covers both instead of guessing from connect errors.
+fn wait_for_keeper_ready<P: Read + AsRawFd>(mut pipe: P, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut line = Vec::new();
+    let mut chunk = [0_u8; 256];
+    while !line.contains(&b'\n') {
+        if line.len() > KEEPER_READY_LINE_MAX {
+            return Err(MuxError::protocol(
+                "runtime keeper readiness report is too long",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(MuxError::timeout(
+                "timed out waiting for the runtime keeper to start",
+            ));
+        }
+        // Not readable yet (timed out or interrupted): re-check the deadline.
+        if !wait_readable(pipe.as_raw_fd(), remaining)? {
+            continue;
+        }
+        match pipe.read(&mut chunk) {
+            Ok(0) => {
+                return Err(MuxError::pty("runtime keeper exited before it was ready"));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                return Err(error.into());
-            }
+            Ok(read) => line.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error.into()),
         }
     }
-    Err(MuxError::timeout(format!(
-        "timed out connecting to runtime keeper {}",
-        socket_path.display()
-    )))
+    let end = line
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(line.len());
+    let report = String::from_utf8_lossy(&line[..end]);
+    if report == KEEPER_READY_LINE {
+        return Ok(());
+    }
+    match report.strip_prefix(KEEPER_ERROR_PREFIX) {
+        Some(error) => Err(MuxError::pty(format!(
+            "runtime keeper failed to start: {error}"
+        ))),
+        None => Err(MuxError::protocol(format!(
+            "unexpected runtime keeper readiness report {report:?}"
+        ))),
+    }
+}
+
+/// Wait up to `timeout` for `fd` to become readable (or reach end of file).
+fn wait_readable(fd: libc::c_int, timeout: Duration) -> Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `poll_fd` is a valid pollfd for an fd the caller keeps open.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(error.into());
+    }
+    Ok(ready > 0)
 }
 
 fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
@@ -1982,21 +2364,65 @@ fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
         keeper.arg("--");
         keeper.args(&cli.command);
         keeper.stdin(Stdio::null());
-        keeper.stdout(Stdio::null());
+        keeper.stdout(Stdio::piped());
         keeper.stderr(Stdio::null());
-        keeper.spawn()?;
-        return Ok(());
+        let mut child = keeper.spawn()?;
+        let ready = match child.stdout.take() {
+            Some(stdout) => wait_for_keeper_ready(stdout, KEEPER_READY_TIMEOUT),
+            None => Err(MuxError::internal("runtime keeper stdout was not piped")),
+        };
+        if ready.is_err() {
+            // A keeper that reported a failure exits by itself; one that never
+            // reported is stuck, so make sure it goes away either way.
+            let _ = child.kill();
+        }
+        reap_keeper_process(child);
+        return ready;
     }
 
+    let (ready_tx, ready_rx) = sync_channel(1);
     thread::Builder::new()
         .name(format!("runtime-keeper-{}", cli.socket_path.display()))
         .spawn(move || {
-            if let Err(error) = run_runtime_keeper(cli) {
+            let mut readiness = KeeperReadiness::Channel(Some(ready_tx));
+            if let Err(error) = serve_runtime_keeper(cli, &mut readiness) {
                 error!(%error, "runtime keeper thread failed");
+                readiness.report(Err(error.to_string()));
             }
         })
         .map_err(|error| MuxError::internal(error.to_string()))?;
-    Ok(())
+    match ready_rx.recv_timeout(KEEPER_READY_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(MuxError::pty(format!(
+            "runtime keeper failed to start: {error}"
+        ))),
+        Err(RecvTimeoutError::Timeout) => Err(MuxError::timeout(
+            "timed out waiting for the runtime keeper to start",
+        )),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(MuxError::pty("runtime keeper exited before it was ready"))
+        }
+    }
+}
+
+/// Stack size for the threads that reap keeper processes; they only block in
+/// `waitpid`.
+const KEEPER_REAPER_STACK_SIZE: usize = 64 * 1024;
+
+/// Wait for a spawned keeper process on a background thread, so it is reaped
+/// whenever it exits instead of lingering as a zombie while the server runs.
+/// A keeper that outlives the server is reparented and reaped by init.
+fn reap_keeper_process(mut child: std::process::Child) {
+    let pid = child.id();
+    let spawned = thread::Builder::new()
+        .name(format!("keeper-reaper-{pid}"))
+        .stack_size(KEEPER_REAPER_STACK_SIZE)
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    if let Err(error) = spawned {
+        error!(%error, pid, "failed to start keeper reaper thread");
+    }
 }
 
 fn resolve_runtime_keeper_executable() -> Option<PathBuf> {
@@ -2136,6 +2562,7 @@ fn keeper_response_kind(response: &KeeperResponse) -> &'static str {
     match response {
         KeeperResponse::Status(_) => "status",
         KeeperResponse::Clipboard(_) => "clipboard",
+        KeeperResponse::Passthrough(_) => "passthrough",
         KeeperResponse::Snapshot(_) => "snapshot",
         KeeperResponse::VisibleSnapshot(_) => "visible_snapshot",
         KeeperResponse::ScrollbackSlice(_) => "scrollback_slice",
@@ -2203,8 +2630,57 @@ mod tests {
         BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
         BufferRuntimePipeStopReason, BufferRuntimeStatus, KEEPER_PIPE_WRITE_QUEUE_CAPACITY,
         KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
-        spawn_status_poller, status_update_delta,
+        spawn_status_poller, status_update_delta, wait_for_keeper_ready,
     };
+
+    #[test]
+    fn keeper_readiness_accepts_ready_report_split_across_reads() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        let sender = thread::spawn(move || {
+            writer.write_all(b"rea").expect("write first half");
+            thread::sleep(Duration::from_millis(20));
+            writer.write_all(b"dy\n").expect("write second half");
+            writer
+        });
+        wait_for_keeper_ready(reader, Duration::from_secs(5)).expect("keeper reported ready");
+        drop(sender.join());
+    }
+
+    #[test]
+    fn keeper_readiness_surfaces_reported_start_error() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair");
+        writer
+            .write_all(b"error: no such program /missing\n")
+            .expect("write error report");
+        let error = wait_for_keeper_ready(reader, Duration::from_secs(5))
+            .expect_err("start error is reported");
+        assert!(
+            error.to_string().contains("no such program /missing"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keeper_readiness_fails_when_keeper_exits_without_reporting() {
+        let (reader, writer) = UnixStream::pair().expect("socket pair");
+        drop(writer);
+        let error = wait_for_keeper_ready(reader, Duration::from_secs(5))
+            .expect_err("silent exit is an error");
+        assert!(
+            error.to_string().contains("exited before it was ready"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn keeper_readiness_times_out_on_a_silent_keeper() {
+        let (reader, _writer) = UnixStream::pair().expect("socket pair");
+        let started = Instant::now();
+        let error = wait_for_keeper_ready(reader, Duration::from_millis(100))
+            .expect_err("silent keeper times out");
+        assert!(matches!(error, MuxError::Timeout(_)), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn scrollback_slice_carries_hyperlinks_through_keeper_json() {
@@ -2234,8 +2710,24 @@ mod tests {
             pipe: None,
             cwd: cwd.map(std::path::PathBuf::from),
             clipboard_sequence: 0,
+            bell_sequence: 0,
+            passthrough_sequence: 0,
             foreground_command: None,
         }
+    }
+
+    /// The status last reported for a shell buffer titled "shell".
+    fn last_status(
+        sequence: u64,
+        activity: ActivityState,
+        cwd: Option<std::path::PathBuf>,
+        bell_sequence: u64,
+    ) -> BufferRuntimeStatus {
+        let mut status = status_with_cwd(sequence, None);
+        status.activity = activity;
+        status.cwd = cwd;
+        status.bell_sequence = bell_sequence;
+        status
     }
 
     #[test]
@@ -2244,12 +2736,12 @@ mod tests {
         let status = status_with_cwd(7, Some("/new"));
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/old")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/old")),
+                0,
+            ),
         )
         .expect("cwd change should emit an update even at the same sequence");
         assert_eq!(update.sequence, 7);
@@ -2265,12 +2757,12 @@ mod tests {
         let status = status_with_cwd(7, None);
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/old")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/old")),
+                0,
+            ),
         )
         .expect("cwd clear should emit an update even at the same sequence");
         assert_eq!(update.cwd, Some(None));
@@ -2281,14 +2773,27 @@ mod tests {
         let status = status_with_cwd(7, Some("/same"));
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/same")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/same")),
+                0,
+            ),
         );
         assert!(update.is_none());
+    }
+
+    #[test]
+    fn status_update_delta_carries_a_bell_that_later_output_overwrote() {
+        // The bell rang, then more output arrived before the poll, so the
+        // latest activity is plain output; the bell count still advanced.
+        let mut status = status_with_cwd(8, None);
+        status.activity = ActivityState::Activity;
+        status.bell_sequence = 1;
+        let update =
+            status_update_delta(&status, &last_status(8, ActivityState::Activity, None, 0))
+                .expect("a new bell should emit an update");
+        assert_eq!(update.bell_sequence, 1);
     }
 
     #[test]
@@ -2297,12 +2802,12 @@ mod tests {
         status.foreground_command = Some(vec!["vim".to_owned(), "notes.txt".to_owned()]);
         let update = status_update_delta(
             &status,
-            7,
-            &Some("shell".to_owned()),
-            ActivityState::Idle,
-            &None,
-            &Some(std::path::PathBuf::from("/same")),
-            &None,
+            &last_status(
+                7,
+                ActivityState::Idle,
+                Some(std::path::PathBuf::from("/same")),
+                0,
+            ),
         )
         .expect("a new foreground job should emit an update");
         assert_eq!(
@@ -2456,6 +2961,7 @@ mod tests {
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
+                on_passthrough: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2467,6 +2973,8 @@ mod tests {
                 pipe: None,
                 cwd: None,
                 clipboard_sequence: 0,
+                bell_sequence: 0,
+                passthrough_sequence: 0,
                 foreground_command: None,
             },
         )
@@ -2515,6 +3023,7 @@ mod tests {
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
+                on_passthrough: Arc::new(|_, _| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -2532,6 +3041,8 @@ mod tests {
                 }),
                 cwd: None,
                 clipboard_sequence: 0,
+                bell_sequence: 0,
+                passthrough_sequence: 0,
                 foreground_command: None,
             },
         )
@@ -2585,8 +3096,9 @@ mod tests {
         );
     }
 
-    /// Run a keeper on a thread of this process for `command`, returning its
-    /// socket path and a receiver that yields once the keeper has returned.
+    /// Run a keeper on a thread of this process for `command` and wait until
+    /// it is ready, returning its socket path and a receiver that yields once
+    /// the keeper has returned.
     fn start_in_process_keeper(
         dir: &std::path::Path,
         command: &[&str],
@@ -2599,18 +3111,17 @@ mod tests {
             env: BTreeMap::new(),
             size: embers_core::PtySize::new(80, 24),
         };
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (done_tx, done_rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = super::run_runtime_keeper(cli);
+            let mut readiness = super::KeeperReadiness::Channel(Some(ready_tx));
+            let _ = super::serve_runtime_keeper(cli, &mut readiness);
             let _ = done_tx.send(());
         });
-        // The keeper binds its socket before it listens, so a connect in
-        // between is refused; wait until it accepts connections.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(&socket_path).is_err() {
-            assert!(Instant::now() < deadline, "keeper never started listening");
-            thread::sleep(Duration::from_millis(10));
-        }
+        ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("keeper reports readiness")
+            .expect("keeper starts");
         (socket_path, done_rx)
     }
 
@@ -2655,6 +3166,45 @@ mod tests {
         done.recv_timeout(Duration::from_secs(10))
             .expect("keeper should retire once its exit was acknowledged and the server left");
         assert!(!socket_path.exists(), "a retired keeper removes its socket");
+    }
+
+    /// Serve `stream` like a keeper that knows `ExitRecorded` but predates
+    /// `Shutdown`: any other request is answered with an error, as an unknown
+    /// variant would be. Returns the requests it received, by name.
+    fn serve_keeper_without_shutdown(mut stream: UnixStream) -> Vec<String> {
+        let mut received = Vec::new();
+        while let Ok(Some(request)) = read_message::<serde_json::Value>(&mut stream) {
+            let name = match &request {
+                serde_json::Value::String(name) => name.clone(),
+                other => other.to_string(),
+            };
+            let response = match name.as_str() {
+                "Kill" | "ExitRecorded" => super::KeeperResponse::Ok,
+                _ => super::KeeperResponse::Error {
+                    message: format!("unknown variant `{name}`"),
+                },
+            };
+            received.push(name);
+            if super::write_message(&mut stream, &response).is_err() {
+                break;
+            }
+        }
+        received
+    }
+
+    #[test]
+    fn shutdown_of_a_keeper_without_shutdown_kills_and_releases_it() {
+        let (server, keeper) = UnixStream::pair().expect("socket pair");
+        let keeper = thread::spawn(move || serve_keeper_without_shutdown(keeper));
+        let mut connection = KeeperConnection { stream: server };
+        connection.shutdown().expect("fallback shutdown succeeds");
+        drop(connection);
+        // Killing the child alone would leave such a keeper waiting for a
+        // server to record the exit, which after kill-server never comes.
+        assert_eq!(
+            keeper.join().expect("fake keeper"),
+            ["Shutdown", "Kill", "ExitRecorded"]
+        );
     }
 
     #[test]

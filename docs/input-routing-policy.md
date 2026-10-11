@@ -16,7 +16,9 @@ Today, routing is decided before the protocol request is sent. The server does n
 
 For normal key events, `ConfiguredClient::handle_key` follows this order:
 
-1. If the client is in search mode, search-prompt handling wins.
+1. If the command prompt is open (`prompt` mode), its line editor takes the
+   key; if the picker is open (`tree` mode), the picker takes it; if the
+   client is in search mode, search-prompt handling wins.
 2. Otherwise, the key is resolved against the current mode's bindings.
 3. Exact matches execute configured actions.
 4. Prefix matches stay pending and do not forward bytes yet.
@@ -34,6 +36,9 @@ Built-in fallback policy is:
 - `copy`: ignore
 - `search`: ignore
 - `select`: ignore
+- `hints`: ignore
+- `prompt`: ignore (the command prompt edits its line itself)
+- `tree`: ignore (the picker handles its own keys)
 
 Changing modes clears any pending key sequence. Reloading config also clears pending input if the current mode still exists, or resets the client back to `normal` if it no longer does.
 
@@ -81,6 +86,8 @@ So scripted terminal input uses the same protocol/runtime path as unmapped passt
 - paste uses `handle_paste`; if the focused buffer has bracketed paste enabled, Embers wraps the payload in `ESC [ 200~` / `ESC [ 201~`
 - focus events use `handle_focus_event`; they forward `ESC [ I` / `ESC [ O` only when the program requested focus reporting
 - mouse events use `handle_mouse`; they either drive local scroll/focus behavior or send encoded mouse bytes when mouse reporting is enabled. In panes without mouse reporting, left-button drags and double/triple clicks drive copy-mode selection instead; once a drag selection starts, its drag and release events stay with that pane until release
+- host terminal replies (DCS, APC and OSC strings, and CSI reports with a private marker) use `handle_host_reply`; they are not typed input, so they skip the current mode, bindings and synchronize-panes, and go only to the pane whose passthrough last reached the host, or the focused pane when there is none. A reply is dropped instead when it answers one of the client's own attach-time queries (XTVERSION, XTGETTCAP for the capabilities it asks about, DA1) that is still unanswered: each query takes one reply, within a bounded time after attaching, and identical replies after that go to the pane like any other (see `docs/configuration.md#the-host-terminal`)
+- input of any kind for a pane that refuses it, such as a dead pane kept by `remain-on-exit`, is dropped
 
 ## Code anchors
 

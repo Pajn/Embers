@@ -1,4 +1,4 @@
-use embers_client::PresentationModel;
+use embers_client::{PresentationModel, TabBarPosition};
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, PtySize, SessionId, Size, SplitDirection,
 };
@@ -54,6 +54,107 @@ fn projects_nested_tabs_in_split_and_tracks_focus_path() {
 
     assert_eq!(left_leaf.rect.origin.x, 0);
     assert!(right_leaf.rect.origin.x > left_leaf.rect.origin.x);
+}
+
+#[test]
+fn root_tab_bar_can_sit_at_the_bottom() {
+    let state = demo_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let top = PresentationModel::project(&state, SESSION_ID, viewport).unwrap();
+    let bottom =
+        PresentationModel::project_with(&state, SESSION_ID, viewport, TabBarPosition::Bottom)
+            .unwrap();
+
+    assert_eq!(top.root_tabs.as_ref().unwrap().rect.origin.y, 0);
+    assert_eq!(bottom.root_tabs.as_ref().unwrap().rect.origin.y, 13);
+    // Nested tab bars stay at the top of their own area.
+    let nested = |model: &PresentationModel| {
+        model
+            .tab_bars
+            .iter()
+            .find(|bar| bar.node_id == NESTED_TABS_ID)
+            .unwrap()
+            .rect
+    };
+    assert_eq!(nested(&top).origin.y, 1);
+    assert_eq!(nested(&bottom).origin.y, 0);
+
+    // The window's panes and dividers move up a row and keep their sizes, so
+    // PTY sizes do not depend on where the bar is. Popups keep their place.
+    assert_eq!(top.leaves.len(), bottom.leaves.len());
+    for (top_leaf, bottom_leaf) in top.leaves.iter().zip(&bottom.leaves) {
+        assert_eq!(top_leaf.node_id, bottom_leaf.node_id);
+        let shift = if top_leaf.floating_id.is_some() { 0 } else { 1 };
+        assert_eq!(bottom_leaf.rect.origin.y, top_leaf.rect.origin.y - shift);
+        assert_eq!(bottom_leaf.rect.size, top_leaf.rect.size);
+        assert_eq!(bottom_leaf.pty_size(), top_leaf.pty_size());
+    }
+    for (top_divider, bottom_divider) in top.dividers.iter().zip(&bottom.dividers) {
+        let shift = if top_divider.floating_id.is_some() {
+            0
+        } else {
+            1
+        };
+        assert_eq!(
+            bottom_divider.rect.origin.y,
+            top_divider.rect.origin.y - shift
+        );
+    }
+    assert_eq!(top.floating, bottom.floating);
+}
+
+#[test]
+fn tabs_report_the_pane_they_show() {
+    let mut state = demo_state();
+    let shell = state.buffers.get_mut(&BufferId(1)).unwrap();
+    shell.title = "shell title".to_owned();
+    shell.command = vec!["-zsh".to_owned()];
+    shell.cwd = Some("/srv/app".to_owned());
+    let editor = state.buffers.get_mut(&BufferId(4)).unwrap();
+    editor.foreground_command = Some(vec!["nvim".to_owned(), "notes.txt".to_owned()]);
+    let project = |state: &embers_client::ClientState| {
+        PresentationModel::project(
+            state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .expect("projection succeeds")
+    };
+    let pane = |presentation: &PresentationModel, tabs: NodeId, index: usize| {
+        let frame = presentation
+            .tab_bars
+            .iter()
+            .find(|frame| frame.node_id == tabs)
+            .expect("tabs are projected");
+        frame.tabs[index].pane.clone().expect("tab shows a pane")
+    };
+
+    let presentation = project(&state);
+    // A hidden window shows its only pane.
+    let hidden = pane(&presentation, ROOT_TABS_ID, 0);
+    assert_eq!(hidden.title, "shell title");
+    assert_eq!(hidden.process_name.as_deref(), Some("zsh"));
+    assert_eq!(hidden.cwd.as_deref(), Some("/srv/app"));
+    // The window holding the focus shows the focused pane, also through its
+    // nested tabs.
+    let focused = pane(&presentation, ROOT_TABS_ID, 1);
+    assert_eq!(focused.process_name.as_deref(), Some("nvim"));
+    assert_eq!(focused.title, "logs-long-title");
+    assert_eq!(
+        pane(&presentation, NESTED_TABS_ID, 0).title,
+        "build",
+        "a hidden nested tab shows its own pane"
+    );
+
+    state.sessions.get_mut(&SESSION_ID).unwrap().focused_leaf_id = Some(LEFT_LEAF_ID);
+    let presentation = project(&state);
+    assert_eq!(pane(&presentation, ROOT_TABS_ID, 1).title, "editor");
 }
 
 #[test]
@@ -292,6 +393,7 @@ fn foreign_session_zoom_targets_are_ignored() {
             exit_code: None,
             pipe: None,
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
 

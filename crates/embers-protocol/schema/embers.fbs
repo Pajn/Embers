@@ -11,6 +11,8 @@ enum MessageKind : ubyte {
   SubscribeRequest = 7,
   UnsubscribeRequest = 8,
   ClientRequest = 9,
+  // Carries no table: the envelope's request_id is the whole request.
+  KillServerRequest = 10,
 
   PingResponse = 20,
   OkResponse = 21,
@@ -43,6 +45,11 @@ enum MessageKind : ubyte {
   ClientChangedEvent = 49,
   BufferPipeChangedEvent = 50,
   ClipboardEvent = 51,
+  DisplayMessageEvent = 52,
+  PassthroughEvent = 53,
+  // Carries no table: the server is stopping on purpose and is about to
+  // close every connection.
+  ServerShutdownEvent = 54,
 }
 
 enum ErrorCodeWire : ubyte {
@@ -71,6 +78,7 @@ enum SessionOp : ubyte {
   SetViewport = 10,
   SetEnvironment = 11,
   ShowEnvironment = 12,
+  SetBaseIndex = 13,
 }
 
 enum SynchronizePanesModeWire : ubyte {
@@ -119,6 +127,7 @@ enum NodeOp : ubyte {
   JoinBufferAtNode = 18,
   MoveNodeBefore = 19,
   MoveNodeAfter = 20,
+  FocusLast = 21,
 }
 
 enum FloatingOp : ubyte {
@@ -138,6 +147,7 @@ enum ClientOp : ubyte {
   Get = 1,
   Detach = 2,
   Switch = 3,
+  DisplayMessage = 4,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -236,6 +246,9 @@ table SessionRequest {
   viewport_rows:ushort = 0 (id: 10);
   // SetEnvironment: the value to set; absent unsets `name`.
   env_value:string (id: 11);
+  // SetBaseIndex: the number of the first window, when has_base_index.
+  base_index:uint = 0 (id: 12);
+  has_base_index:bool = false (id: 13);
 }
 
 table BufferRequest {
@@ -321,6 +334,9 @@ table ClientRequest {
   op:ClientOp = List;
   client_id:ulong = 0;
   session_id:ulong = 0;
+  // DisplayMessage: the text to show and for how long (0 = client default).
+  message:string;
+  duration_ms:uint = 0;
 }
 
 table PingResponse {
@@ -344,6 +360,8 @@ table SessionRecord {
   zoomed_node_id:ulong = 0 (id: 6);
   viewport_cols:ushort = 0 (id: 7);
   viewport_rows:ushort = 0 (id: 8);
+  base_index:uint = 0 (id: 9);
+  has_base_index:bool = false (id: 10);
 }
 
 table BufferRecord {
@@ -371,6 +389,8 @@ table BufferRecord {
   pipe:BufferPipeRecord (id: 21);
   user_option_keys:[string] (id: 22);
   user_option_values:[string] (id: 23);
+  // Absent while the buffer's own process is in the foreground.
+  foreground_command:[string] (id: 24);
 }
 
 table BufferPipeRecord {
@@ -647,6 +667,29 @@ table ClipboardEvent {
   text:string;
 }
 
+// One sequence for the host terminal, the unwrapped payload of a tmux
+// passthrough (`ESC P tmux; ... ESC \`) or an unwrapped kitty graphics command,
+// with the pane cursor at the point it ended.
+table PassthroughWrite {
+  data:[ubyte];
+  cursor_row:ushort;
+  cursor_col:ushort;
+}
+
+// Passthrough sequences from a program in `buffer_id`, in order, sent only to
+// the clients currently showing that buffer's session.
+table PassthroughEvent {
+  buffer_id:ulong;
+  writes:[PassthroughWrite];
+}
+
+// A message for a client to show in its status line (`display-message`),
+// sent only to the clients the request named.
+table DisplayMessageEvent {
+  message:string;
+  duration_ms:uint = 0;
+}
+
 table SessionRenamedEvent {
   session_id:ulong;
   name:string;
@@ -701,6 +744,8 @@ table Envelope {
   buffer_pipe_changed_event:BufferPipeChangedEvent (id: 38);
   clipboard_event:ClipboardEvent (id: 39);
   environment_response:EnvironmentResponse (id: 40);
+  display_message_event:DisplayMessageEvent (id: 41);
+  passthrough_event:PassthroughEvent (id: 42);
 }
 
 root_type Envelope;

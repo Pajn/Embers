@@ -16,6 +16,44 @@ use embers_protocol::{
 use crate::support::{FOCUSED_BUFFER_ID, SESSION_ID, demo_state};
 
 #[test]
+fn confirm_wraps_an_action_or_a_list_of_actions() {
+    let engine = load_engine(
+        r#"
+            fn kill(ctx) { action.confirm("kill? (y/n)", action.run_command("kill-pane")) }
+            fn several(ctx) {
+                action.confirm("go?", [action.focus_left(), action.run_command("kill-pane")])
+            }
+            define_action("kill", kill);
+            define_action("several", several);
+        "#,
+    );
+    let context = demo_context();
+    assert_eq!(
+        engine.run_named_action("kill", context.clone()).unwrap(),
+        vec![Action::Confirm {
+            prompt: "kill? (y/n)".to_owned(),
+            actions: vec![Action::RunCommand {
+                command: "kill-pane".to_owned(),
+            }],
+        }]
+    );
+    assert_eq!(
+        engine.run_named_action("several", context).unwrap(),
+        vec![Action::Confirm {
+            prompt: "go?".to_owned(),
+            actions: vec![
+                Action::FocusDirection {
+                    direction: NavigationDirection::Left,
+                },
+                Action::RunCommand {
+                    command: "kill-pane".to_owned(),
+                },
+            ],
+        }]
+    );
+}
+
+#[test]
 fn action_helpers_roundtrip_to_typed_actions() {
     let engine = load_engine(
         r#"
@@ -868,6 +906,55 @@ fn query_api_supports_smart_nav_style_scripts() {
             keys: vec![KeyToken::Char('h')],
         }]
     );
+}
+
+#[test]
+fn buffer_process_name_follows_the_foreground_job() {
+    let engine = load_engine(
+        r#"
+            fn describe(ctx) {
+                let buffer = ctx.current_buffer();
+                let command = buffer.foreground_command();
+                action.notify("info", buffer.process_name() + ":" + command[command.len - 1])
+            }
+            define_action("describe", describe);
+        "#,
+    );
+    let run = |command: &[&str], foreground: Option<&[&str]>| {
+        let mut state = demo_state();
+        let buffer = state.buffers.get_mut(&FOCUSED_BUFFER_ID).unwrap();
+        buffer.command = command.iter().map(|arg| (*arg).to_owned()).collect();
+        buffer.foreground_command =
+            foreground.map(|command| command.iter().map(|arg| (*arg).to_owned()).collect());
+        let presentation = PresentationModel::project(
+            &state,
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .unwrap();
+        engine
+            .run_named_action("describe", Context::from_state(&state, Some(&presentation)))
+            .unwrap()
+    };
+    let notified = |message: &str| {
+        vec![Action::Notify {
+            level: NotifyLevel::Info,
+            message: message.to_owned(),
+        }]
+    };
+
+    // A shell at its prompt: the pane's own command.
+    assert_eq!(run(&["/bin/zsh", "-l"], None), notified("zsh:-l"));
+    // A job the shell runs, like tmux's pane_current_command.
+    assert_eq!(
+        run(&["/bin/zsh"], Some(&["/usr/local/bin/nvim", "notes.txt"])),
+        notified("nvim:notes.txt")
+    );
+    // A login shell's argv[0] starts with a dash.
+    assert_eq!(run(&["-zsh"], None), notified("zsh:-zsh"));
 }
 
 #[test]

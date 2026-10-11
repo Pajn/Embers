@@ -1,6 +1,6 @@
 use embers_client::{
-    PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind, SelectionPoint,
-    SelectionState,
+    HostCapabilities, PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind,
+    SelectionPoint, SelectionState,
 };
 use embers_core::{
     CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
@@ -41,7 +41,7 @@ fn render_focused_with_lines(lines: Vec<SnapshotLine>) -> embers_client::RenderG
         },
     )
     .expect("projection succeeds");
-    Renderer.render(&state, &presentation)
+    Renderer::default().render(&state, &presentation)
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn renders_hint_labels_over_matches() {
         },
     )
     .expect("projection succeeds");
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     let rendered = grid.render();
     // The label 'a' is drawn over the first cell of the match (the URL's 'h'),
     // leaving the rest of the matched text in place.
@@ -95,7 +95,7 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
 
     let grid = renderer.render(&state, &presentation);
 
@@ -121,6 +121,112 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
 }
 
 #[test]
+fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
+    use embers_client::{PaneBorderColors, TerminalColor};
+
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let active = TerminalColor::Indexed(5);
+    let inactive = TerminalColor::Indexed(8);
+    let renderer = Renderer {
+        pane_borders: PaneBorderColors {
+            active: Some(active),
+            inactive: Some(inactive),
+        },
+    };
+
+    let grid = renderer.render(&state, &presentation);
+
+    // The divider is column 13. The focused pane on its right starts at row 2,
+    // under its nested tab bar: the divider is active alongside it only.
+    assert_eq!(
+        grid.render().lines().nth(2).unwrap().chars().nth(13),
+        Some('|')
+    );
+    for row in 2..5 {
+        let style = grid.cell_style(13, row).unwrap();
+        assert_eq!(style.fg, Some(active), "row {row}");
+        assert!(!style.dim, "row {row}");
+    }
+    assert_eq!(grid.cell_style(13, 1).unwrap().fg, Some(inactive));
+
+    // Without theme colors every divider cell stays dim and uncolored.
+    let plain = Renderer::default().render(&state, &presentation);
+    for row in 1..5 {
+        let style = plain.cell_style(13, row).unwrap();
+        assert_eq!(style.fg, None, "row {row}");
+        assert!(style.dim, "row {row}");
+    }
+}
+
+#[test]
+fn titles_from_programs_cannot_reach_the_host_as_escape_sequences() {
+    use embers_client::{BarSegment, BarSpec, StyleSpec};
+    use std::collections::BTreeMap;
+
+    // Programs set pane titles with OSC 2, so a title can carry sequences of
+    // its own; so can window titles and what tab bar formatters build.
+    let evil = "evil\x1b]2;pwned\x07\x1b[2J";
+    let mut state = demo_state();
+    for buffer in state.buffers.values_mut() {
+        buffer.title = evil.to_owned();
+    }
+    for tab in &mut state
+        .nodes
+        .get_mut(&ROOT_TABS_ID)
+        .unwrap()
+        .tabs
+        .as_mut()
+        .unwrap()
+        .tabs
+    {
+        tab.title = evil.to_owned();
+    }
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let custom = BTreeMap::from([(
+        ROOT_TABS_ID,
+        BarSpec {
+            left: vec![BarSegment {
+                text: evil.to_owned(),
+                style: StyleSpec::default(),
+                target: None,
+            }],
+            center: Vec::new(),
+            right: Vec::new(),
+        },
+    )]);
+
+    for grid in [
+        Renderer::default().render(&state, &presentation),
+        Renderer::default().render_with_tab_bars(&state, &presentation, &custom),
+    ] {
+        let rendered = grid.render();
+        assert!(rendered.contains("evil ]2;pwned  [2J"), "{rendered}");
+        for line in grid.ansi_lines() {
+            assert!(!line.contains('\x07'), "{line:?}");
+            assert!(!line.contains("\x1b]"), "{line:?}");
+            assert!(!line.contains("\x1b[2J"), "{line:?}");
+        }
+    }
+}
+
+#[test]
 fn default_tab_bar_marks_synchronized_windows() {
     let mut state = demo_state();
     let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();
@@ -135,7 +241,7 @@ fn default_tab_bar_marks_synchronized_windows() {
     )
     .expect("projection succeeds");
 
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
 
     assert!(
         grid.render()
@@ -157,7 +263,7 @@ fn truncates_titles_in_narrow_viewports() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
 
     let grid = renderer.render(&state, &presentation);
 
@@ -185,7 +291,7 @@ fn renderer_emits_styles_and_tracks_cursor_position() {
         },
     )
     .expect("projection succeeds");
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let focused_leaf = presentation.focused_leaf().expect("focused leaf");
 
     let grid = renderer.render(&state, &presentation);
@@ -232,7 +338,7 @@ fn renderer_shows_scroll_indicator_and_search_highlights() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
@@ -266,7 +372,7 @@ fn renderer_uses_snapshot_lines_for_overlays_when_visible_lines_are_empty() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
@@ -303,7 +409,7 @@ fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
         },
     )
     .unwrap();
-    let renderer = Renderer;
+    let renderer = Renderer::default();
     let grid = renderer.render(&state, &presentation);
 
     assert!(grid.cursor().is_none());
@@ -340,7 +446,7 @@ fn renderer_draws_the_copy_mode_cursor_instead_of_the_program_cursor() {
     )
     .unwrap();
     let leaf = presentation.focused_leaf().unwrap().clone();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
 
     assert_eq!(
         grid.cursor(),
@@ -385,7 +491,7 @@ fn selection_composes_with_content_color() {
         },
     )
     .unwrap();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     let ansi = grid.ansi_lines();
 
     // The selected span keeps its red foreground and gains reverse — the two
@@ -529,6 +635,59 @@ fn renders_osc8_hyperlinks_and_closes_them() {
 }
 
 #[test]
+fn hosts_without_support_get_plain_underlines_and_no_links() {
+    let mut curly = styled_line("diag", TermColor::Default, CellAttrs::CURLY_UNDERLINE);
+    curly.runs[0].underline_color = TermColor::Indexed(3);
+    let linked = linked_line(
+        "docs here",
+        4,
+        Hyperlink {
+            id: None,
+            uri: "https://example.com/docs".to_owned(),
+        },
+    );
+    let grid = render_focused_with_lines(vec![curly, linked]);
+
+    let ansi = grid.ansi_lines_for(HostCapabilities::NONE).join("\n");
+    assert!(
+        ansi.contains("\x1b[4mdiag"),
+        "expected a plain underline in {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[4:"),
+        "underline style leaked: {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[58"),
+        "underline color leaked: {ansi:?}"
+    );
+    assert!(!ansi.contains("\x1b]8;"), "hyperlink leaked: {ansi:?}");
+    assert!(ansi.contains("docs here"));
+
+    // Each capability is independent: styles without colors.
+    let ansi = grid
+        .ansi_lines_for(HostCapabilities {
+            underline_styles: true,
+            ..HostCapabilities::NONE
+        })
+        .join("\n");
+    assert!(
+        ansi.contains("\x1b[4:3mdiag"),
+        "expected a curly underline in {ansi:?}"
+    );
+    assert!(
+        !ansi.contains("\x1b[58"),
+        "underline color leaked: {ansi:?}"
+    );
+
+    // Full support is what `ansi_lines` renders.
+    assert_eq!(
+        grid.ansi_lines_for(HostCapabilities::ALL),
+        grid.ansi_lines()
+    );
+}
+
+#[test]
 fn osc8_emission_strips_control_characters() {
     // A URI cannot smuggle a terminator or a new escape sequence to the host.
     let grid = render_focused_with_lines(vec![linked_line(
@@ -571,7 +730,7 @@ fn scrolled_styled_view_keeps_color() {
         },
     )
     .unwrap();
-    let grid = Renderer.render(&state, &presentation);
+    let grid = Renderer::default().render(&state, &presentation);
     assert!(
         grid.ansi_lines()
             .iter()

@@ -475,12 +475,36 @@ mod documented_ref_api {
         buffer.pid.map(dynamic_u32).unwrap_or(Dynamic::UNIT)
     }
 
-    /// Return the detected process name, if any.
+    /// Return the name of the program in the buffer's foreground, like tmux's
+    /// `pane_current_command`: the job its shell runs (`"nvim"` while Neovim
+    /// runs in a shell), else the buffer's own command (`"zsh"` at the
+    /// prompt). Use `command()` for the command the buffer was started with.
     ///
     /// ReturnType: `string | ()`
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let buffer = ctx.current_buffer();
+    /// if buffer != () && buffer.process_name() == "nvim" {
+    ///     action.send_keys_current("<C-h>")
+    /// }
+    /// ```
     #[rhai_fn(name = "process_name")]
     pub fn buffer_process_name(buffer: &mut BufferRef) -> Dynamic {
         dynamic_option_string(buffer.process_name())
+    }
+
+    /// Return the command line of the program in the buffer's foreground: the
+    /// job its shell runs, else the buffer's own command.
+    #[rhai_fn(name = "foreground_command")]
+    pub fn buffer_foreground_command(buffer: &mut BufferRef) -> Array {
+        buffer
+            .current_command()
+            .iter()
+            .cloned()
+            .map(Dynamic::from)
+            .collect()
     }
 
     /// Return the controlling TTY path, if any.
@@ -837,6 +861,40 @@ mod documented_ref_api {
         tab.synchronize_panes
     }
 
+    /// Return the title of the pane the tab shows: the focused pane when the
+    /// tab holds the focus, otherwise the pane its active nested tabs lead to
+    /// (the first pane of a split).
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "pane_title")]
+    pub fn tab_pane_title(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().map(|pane| pane.title.clone()))
+    }
+
+    /// Return the name of the program in the foreground of the pane the tab
+    /// shows (see `pane_title`), like tmux's `#{pane_current_command}`.
+    ///
+    /// ReturnType: `string | ()`
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = if tab.process_name() == "nvim" { "editor" } else { tab.title() };
+    /// ```
+    #[rhai_fn(name = "process_name")]
+    pub fn tab_process_name(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().and_then(|pane| pane.process_name.clone()))
+    }
+
+    /// Return the working directory of the pane the tab shows (see
+    /// `pane_title`), like tmux's `#{pane_current_path}`.
+    ///
+    /// ReturnType: `string | ()`
+    #[rhai_fn(name = "cwd")]
+    pub fn tab_cwd(tab: &mut TabInfo) -> Dynamic {
+        dynamic_option_string(tab.pane.as_ref().and_then(|pane| pane.cwd.clone()))
+    }
+
     /// Return the formatter viewport width in cells.
     #[rhai_fn(name = "viewport_width")]
     pub fn bar_viewport_width(bar: &mut TabBarContext) -> i64 {
@@ -992,6 +1050,40 @@ mod documented_action_api {
         with_call_position(ctx, || Ok(Action::Chain(parse_action_array(actions)?)))
     }
 
+    /// Ask before running `action`, like tmux `confirm-before`: `prompt` is
+    /// shown in the status line, expanded as a format (`#W`, `#D`, ...), and
+    /// `action`, an action or an array of actions, runs only if the next key
+    /// is `y`. Any other key cancels.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
+    /// ```
+    #[rhai_fn(return_raw, name = "confirm")]
+    pub fn confirm(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        prompt: &str,
+        action: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            let actions = if let Some(action) = action.clone().try_cast::<Action>() {
+                vec![action]
+            } else if let Some(actions) = action.try_cast::<Array>() {
+                parse_action_array(actions)?
+            } else {
+                return Err(runtime_error(
+                    "confirm expects an Action or an array of Actions",
+                ));
+            };
+            Ok(Action::Confirm {
+                prompt: prompt.to_owned(),
+                actions,
+            })
+        })
+    }
+
     /// Enter a specific input mode by name.
     #[rhai_fn(name = "enter_mode")]
     pub fn enter_mode(_: &mut ActionApi, mode: &str) -> Action {
@@ -1067,6 +1159,207 @@ mod documented_action_api {
         Action::RunShell {
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()],
         }
+    }
+
+    /// Open the command prompt (tmux `:`). Enter runs the typed line with the
+    /// same commands and options as the `embers` CLI, such as
+    /// `split-window --horizontal`, `rename-window logs` or `select-window -t 2`;
+    /// commands without `-t` apply to the current session, window and pane.
+    /// Up and Down browse earlier lines; Esc cancels.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>:", action.command_prompt());
+    /// ```
+    #[rhai_fn(name = "command_prompt")]
+    pub fn command_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: String::new(),
+            template: None,
+        }
+    }
+
+    /// Open the command prompt with `initial` already typed, like tmux
+    /// `command-prompt -I`. The text may use the formats `display_message`
+    /// accepts, such as `#W`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_with("split-window -- ")
+    /// ```
+    #[rhai_fn(name = "command_prompt_with")]
+    pub fn command_prompt_with(_: &mut ActionApi, initial: &str) -> Action {
+        Action::CommandPrompt {
+            prompt: None,
+            initial: initial.to_owned(),
+            template: None,
+        }
+    }
+
+    /// Open a prompt labelled `prompt` with `initial` typed (both may use
+    /// formats); Enter runs `template` with `%%` replaced by the input as one
+    /// word, like tmux `command-prompt -p prompt -I initial template`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.command_prompt_template("(new window) ", "", "new-window --title %%")
+    /// ```
+    #[rhai_fn(name = "command_prompt_template")]
+    pub fn command_prompt_template(
+        _: &mut ActionApi,
+        prompt: &str,
+        initial: &str,
+        template: &str,
+    ) -> Action {
+        Action::CommandPrompt {
+            prompt: Some(prompt.to_owned()),
+            initial: initial.to_owned(),
+            template: Some(template.to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current window, starting from its current
+    /// name (tmux `prefix ,`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>,", action.rename_window_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_window_prompt")]
+    pub fn rename_window_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-window) ".to_owned()),
+            initial: "#W".to_owned(),
+            template: Some("rename-window -- %%".to_owned()),
+        }
+    }
+
+    /// Prompt for a new name for the current session, starting from its
+    /// current name (tmux `prefix $`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>$", action.rename_session_prompt());
+    /// ```
+    #[rhai_fn(name = "rename_session_prompt")]
+    pub fn rename_session_prompt(_: &mut ActionApi) -> Action {
+        Action::CommandPrompt {
+            prompt: Some("(rename-session) ".to_owned()),
+            initial: "#S".to_owned(),
+            template: Some("rename-session -- %%".to_owned()),
+        }
+    }
+
+    /// Open the picker on a tree of every session, window and pane, like
+    /// tmux `choose-tree`. `j`/`k` or the arrows move, `l`/`h` (or Right/Left)
+    /// expand and collapse, Enter switches to the selected item, `x` kills it
+    /// after asking, `/` or typing other text filters, and `q`/Esc closes.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>T", action.choose_tree());
+    /// ```
+    #[rhai_fn(name = "choose_tree")]
+    pub fn choose_tree(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Tree,
+        }
+    }
+
+    /// Open the picker with every session expanded to its windows, like tmux
+    /// `choose-tree -w` (`prefix w`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>\"", action.choose_window());
+    /// ```
+    #[rhai_fn(name = "choose_window")]
+    pub fn choose_window(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Windows,
+        }
+    }
+
+    /// Open the picker on the sessions, collapsed, like tmux `choose-tree -s`
+    /// (`prefix s`). See `choose_tree` for the keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>S", action.choose_session());
+    /// ```
+    #[rhai_fn(name = "choose_session")]
+    pub fn choose_session(_: &mut ActionApi) -> Action {
+        Action::ChooseTree {
+            scope: crate::chooser::ChooserScope::Sessions,
+        }
+    }
+
+    /// Run a command line as if it was typed at the command prompt, like
+    /// binding a tmux command. Output and errors are shown in the status line.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>E", action.run_command("set-environment -g EDITOR nvim"));
+    /// ```
+    #[rhai_fn(name = "run_command")]
+    pub fn run_command(_: &mut ActionApi, command: &str) -> Action {
+        Action::RunCommand {
+            command: command.to_owned(),
+        }
+    }
+
+    /// Show a message in the status line for a few seconds, like tmux
+    /// `display-message`. The text may use the format variables `#S` (session),
+    /// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
+    /// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
+    /// for the focused pane; `##` is a literal `#`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("#S:#I #{pane_current_path}")
+    /// ```
+    #[rhai_fn(name = "display_message")]
+    pub fn display_message(_: &mut ActionApi, message: &str) -> Action {
+        Action::DisplayMessage {
+            message: message.to_owned(),
+            duration_ms: None,
+        }
+    }
+
+    /// Show a message in the status line for `duration_ms` milliseconds, like
+    /// tmux `display-message -d`. See `display_message(message)` for formats.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.display_message("saved", 1000)
+    /// ```
+    #[rhai_fn(return_raw, name = "display_message")]
+    pub fn display_message_for(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        message: &str,
+        duration_ms: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::DisplayMessage {
+                message: message.to_owned(),
+                duration_ms: Some(u32::try_from(duration_ms).map_err(|_| {
+                    super::runtime_error("display time must be between 0 and 4294967295 ms")
+                })?),
+            })
+        })
     }
 
     /// Set an environment variable for panes created later in the current
@@ -1193,6 +1486,21 @@ mod documented_action_api {
         Action::FocusDirection {
             direction: NavigationDirection::Down,
         }
+    }
+
+    /// Focus the pane that was focused before the current one in the current
+    /// window, like tmux `select-pane -l`. Repeating it goes back and forth
+    /// between two panes. Panes that were closed are skipped; with no other
+    /// pane to go back to it does nothing.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>;", action.last_pane());
+    /// ```
+    #[rhai_fn(name = "last_pane")]
+    pub fn last_pane(_: &mut ActionApi) -> Action {
+        Action::LastPane
     }
 
     /// Select a tab by index in a specific tabs node.
@@ -1351,11 +1659,38 @@ mod documented_action_api {
         })
     }
 
-    /// Insert a tab after the current tab in the focused tabs node.
+    /// Insert a tab after the active tab of the innermost tabs that hold the
+    /// focus, and select it. When the focus is inside nested tabs, the new tab
+    /// is a nested tab there, not a window; use `new_window` for tmux's
+    /// `new-window`. In a session with a single window, whose root is not
+    /// tabbed, the new tab becomes a second window after that one.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.insert_tab_after_current("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+    /// ```
     #[rhai_fn(name = "insert_tab_after_current")]
     pub fn insert_tab_after_current(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
         Action::InsertTabAfter {
             tabs_node_id: None,
+            title: Some(title.to_owned()),
+            child: tree,
+        }
+    }
+
+    /// Add a window to the current session, after its last window, and
+    /// select it (tmux `new-window`). Unlike `insert_tab_after_current`, the
+    /// new tab is always a window, even when the focus is in nested tabs.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.new_window("logs", tree.buffer_spawn(["tail", "-f", "app.log"]))
+    /// ```
+    #[rhai_fn(name = "new_window")]
+    pub fn new_window(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
+        Action::NewWindow {
             title: Some(title.to_owned()),
             child: tree,
         }
@@ -1379,7 +1714,10 @@ mod documented_action_api {
         })
     }
 
-    /// Insert a tab before the current tab.
+    /// Insert a tab before the active tab of the innermost tabs that hold the
+    /// focus, and select it. Like `insert_tab_after_current`, this makes a
+    /// nested tab when the focus is in nested tabs, and a second window, before
+    /// the only one, in a session with a single window.
     #[rhai_fn(name = "insert_tab_before_current")]
     pub fn insert_tab_before_current(_: &mut ActionApi, title: &str, tree: TreeSpec) -> Action {
         Action::InsertTabBefore {
@@ -1429,13 +1767,36 @@ mod documented_action_api {
         })
     }
 
-    /// Close the currently focused floating window.
+    /// Close the currently focused floating window. Its buffers keep running,
+    /// detached; use `kill_floating` to end them.
     #[rhai_fn(name = "close_floating")]
     pub fn close_floating(_: &mut ActionApi) -> Action {
         Action::CloseFloating { floating_id: None }
     }
 
-    /// Close a floating window by id.
+    /// Close the currently focused floating window and end the programs of the
+    /// buffers it shows, like tmux's `kill-pane` for a popup.
+    #[rhai_fn(name = "kill_floating")]
+    pub fn kill_floating(_: &mut ActionApi) -> Action {
+        Action::KillFloating { floating_id: None }
+    }
+
+    /// Close a floating window by id and end the programs of the buffers it
+    /// shows.
+    #[rhai_fn(return_raw, name = "kill_floating_id")]
+    pub fn kill_floating_id(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        floating_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::KillFloating {
+                floating_id: Some(parse_floating_id(floating_id)?),
+            })
+        })
+    }
+
+    /// Close a floating window by id. Its buffers keep running, detached.
     #[rhai_fn(return_raw, name = "close_floating_id")]
     pub fn close_floating_id(
         ctx: NativeCallContext,
@@ -1449,13 +1810,14 @@ mod documented_action_api {
         })
     }
 
-    /// Close the currently focused view.
+    /// Close the currently focused view. Its buffer keeps running, detached;
+    /// use `kill_view` to end it.
     #[rhai_fn(name = "close_view")]
     pub fn close_view(_: &mut ActionApi) -> Action {
         Action::CloseView { node_id: None }
     }
 
-    /// Close a view by node id.
+    /// Close a view by node id. The buffers it shows keep running, detached.
     #[rhai_fn(return_raw, name = "close_node")]
     pub fn close_node(
         ctx: NativeCallContext,
@@ -1464,6 +1826,29 @@ mod documented_action_api {
     ) -> RhaiResultOf<Action> {
         with_call_position(ctx, || {
             Ok(Action::CloseView {
+                node_id: Some(parse_node_id(node_id)?),
+            })
+        })
+    }
+
+    /// Close the currently focused view and end its buffer's program, like
+    /// tmux's `kill-pane`.
+    #[rhai_fn(name = "kill_view")]
+    pub fn kill_view(_: &mut ActionApi) -> Action {
+        Action::KillView { node_id: None }
+    }
+
+    /// Close a view by node id and end the programs of the buffers it shows. On
+    /// a split or tabs node this ends every pane in it, like tmux's
+    /// `kill-window`.
+    #[rhai_fn(return_raw, name = "kill_node")]
+    pub fn kill_node(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        node_id: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::KillView {
                 node_id: Some(parse_node_id(node_id)?),
             })
         })

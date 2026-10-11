@@ -1,9 +1,12 @@
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
 
 use embers_core::{CellAttrs, CursorShape, Hyperlink, Rect, SnapshotLine, StyledRun, TermColor};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use crate::host_terminal::HostCapabilities;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Color {
@@ -94,6 +97,17 @@ impl CellStyle {
 
     pub fn is_plain(self) -> bool {
         self == Self::default()
+    }
+
+    /// This style as a host terminal with `host`'s capabilities can show it.
+    pub fn for_host(mut self, host: HostCapabilities) -> Self {
+        if !host.underline_styles && !self.underline.is_none() {
+            self.underline = UnderlineStyle::Single;
+        }
+        if !host.underline_color {
+            self.underline_color = None;
+        }
+        self
     }
 }
 
@@ -196,6 +210,15 @@ impl RenderGrid {
 
     pub fn set_cursor(&mut self, cursor: Option<GridCursor>) {
         self.cursor = cursor.filter(|cursor| cursor.x < self.width && cursor.y < self.height);
+    }
+
+    /// The style of the cell at `x`, `y`, if it is inside the grid.
+    pub fn cell_style(&self, x: u16, y: u16) -> Option<CellStyle> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let index = usize::from(y) * usize::from(self.width) + usize::from(x);
+        self.cells.get(index).map(|cell| cell.style)
     }
 
     pub fn put_char(&mut self, x: u16, y: u16, ch: char) {
@@ -460,7 +483,17 @@ impl RenderGrid {
             .collect()
     }
 
+    /// The rows as text with the escape sequences that style them, for a host
+    /// terminal that supports everything Embers can emit.
     pub fn ansi_lines(&self) -> Vec<String> {
+        self.ansi_lines_for(HostCapabilities::ALL)
+    }
+
+    /// The rows as text with escape sequences, for a host terminal with
+    /// `host`'s capabilities: without underline styles every underline is
+    /// plain, without underline color it follows the text, and without
+    /// hyperlinks linked text is plain text.
+    pub fn ansi_lines_for(&self, host: HostCapabilities) -> Vec<String> {
         (0..self.height)
             .map(|row| {
                 let start = usize::from(row) * usize::from(self.width);
@@ -472,9 +505,10 @@ impl RenderGrid {
                     if cell.continuation {
                         continue;
                     }
-                    write_style_transition(&mut output, current_style, cell.style);
-                    current_style = cell.style;
-                    if cell.link.as_ref() != current_link {
+                    let style = cell.style.for_host(host);
+                    write_style_transition(&mut output, current_style, style);
+                    current_style = style;
+                    if host.hyperlinks && cell.link.as_ref() != current_link {
                         current_link = cell.link.as_ref();
                         write_hyperlink(&mut output, current_link.map(Arc::as_ref));
                     }
@@ -548,6 +582,22 @@ impl RenderGrid {
 
     fn index(&self, x: u16, y: u16) -> usize {
         usize::from(y) * usize::from(self.width) + usize::from(x)
+    }
+}
+
+/// `text` with each control character replaced by a space. Text that comes
+/// from programs in panes, such as titles set with OSC 2, goes through this
+/// before it is drawn as chrome, so it cannot reach the host terminal as
+/// escape sequences or move its cursor.
+pub fn replace_controls(text: &str) -> Cow<'_, str> {
+    if text.chars().any(char::is_control) {
+        Cow::Owned(
+            text.chars()
+                .map(|ch| if ch.is_control() { ' ' } else { ch })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
     }
 }
 

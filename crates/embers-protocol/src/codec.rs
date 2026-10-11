@@ -1,9 +1,10 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorShape, CursorState, ErrorCode,
-    FloatGeometry, FloatingId, Hyperlink, NodeId, PtySize, RequestId, SessionId, Size,
-    SnapshotLine, SplitDirection, StyledRun, TermColor, WireError,
+    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    CursorState, ErrorCode, FloatGeometry, FloatingId, Hyperlink, NodeId, PassthroughWrite,
+    PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor,
+    WireError,
 };
 use flatbuffers::FlatBufferBuilder;
 use thiserror::Error;
@@ -254,7 +255,8 @@ fn validate_session_request(req: &SessionRequest) -> Result<(), ProtocolError> {
         | SessionRequest::SelectRootTab { session_id, .. }
         | SessionRequest::RenameRootTab { session_id, .. }
         | SessionRequest::CloseRootTab { session_id, .. }
-        | SessionRequest::SetRootTabSynchronizePanes { session_id, .. } => {
+        | SessionRequest::SetRootTabSynchronizePanes { session_id, .. }
+        | SessionRequest::SetBaseIndex { session_id, .. } => {
             validate_required_session_id(*session_id, "session_request.session_id")
         }
         SessionRequest::SetViewport {
@@ -329,7 +331,9 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
 
 fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
     match req {
-        NodeRequest::GetTree { session_id, .. } | NodeRequest::Unzoom { session_id, .. } => {
+        NodeRequest::GetTree { session_id, .. }
+        | NodeRequest::Unzoom { session_id, .. }
+        | NodeRequest::FocusLast { session_id, .. } => {
             validate_required_session_id(*session_id, "node_request.session_id")
         }
         NodeRequest::Split {
@@ -440,6 +444,19 @@ fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
         }
         ClientRequest::Switch { session_id, .. } => {
             validate_required_session_id(*session_id, "client_request.session_id")
+        }
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => {
+            validate_optional_session_id(*session_id, "client_request.session_id")?;
+            if client_id.is_none() && session_id.is_none() {
+                return Err(ProtocolError::InvalidMessage(
+                    "display message requires a client_id or session_id",
+                ));
+            }
+            Ok(())
         }
     }
 }
@@ -887,6 +904,14 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
         ClientMessage::Subscribe(req) => encode_subscribe_request(&mut builder, req),
         ClientMessage::Unsubscribe(req) => encode_unsubscribe_request(&mut builder, req),
         ClientMessage::Client(req) => encode_client_request(&mut builder, req)?,
+        ClientMessage::KillServer(req) => fb::Envelope::create(
+            &mut builder,
+            &fb::EnvelopeArgs {
+                request_id: req.request_id.into(),
+                kind: fb::MessageKind::KillServerRequest,
+                ..Default::default()
+            },
+        ),
     };
 
     builder.finish(envelope, Some("EMBR"));
@@ -941,6 +966,23 @@ fn encode_client_request<'a>(
             client_id.map(|id| id.get()).unwrap_or(0),
             (*session_id).into(),
         ),
+        ClientRequest::DisplayMessage {
+            client_id,
+            session_id,
+            ..
+        } => (
+            fb::ClientOp::DisplayMessage,
+            client_id.map(|id| id.get()).unwrap_or(0),
+            session_id.map_or(0, u64::from),
+        ),
+    };
+    let (message, duration_ms) = match req {
+        ClientRequest::DisplayMessage {
+            message,
+            duration_ms,
+            ..
+        } => (Some(builder.create_string(message)), *duration_ms),
+        _ => (None, 0),
     };
 
     let client_req = fb::ClientRequest::create(
@@ -949,6 +991,8 @@ fn encode_client_request<'a>(
             op,
             client_id,
             session_id,
+            message,
+            duration_ms,
         },
     );
 
@@ -1091,6 +1135,16 @@ fn encode_session_request<'a>(
             false,
             0,
         ),
+        SessionRequest::SetBaseIndex { session_id, .. } => (
+            fb::SessionOp::SetBaseIndex,
+            (*session_id).into(),
+            0,
+            0,
+            None,
+            None,
+            false,
+            0,
+        ),
         SessionRequest::SetEnvironment {
             session_id, name, ..
         } => (
@@ -1117,6 +1171,10 @@ fn encode_session_request<'a>(
     let (viewport_cols, viewport_rows) = match req {
         SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
         _ => (0, 0),
+    };
+    let base_index = match req {
+        SessionRequest::SetBaseIndex { base_index, .. } => *base_index,
+        _ => None,
     };
     let synchronize_panes = match req {
         SessionRequest::SetRootTabSynchronizePanes { mode, .. } => match mode {
@@ -1150,6 +1208,8 @@ fn encode_session_request<'a>(
             viewport_cols,
             viewport_rows,
             env_value,
+            base_index: base_index.unwrap_or(0),
+            has_base_index: base_index.is_some(),
         },
     );
 
@@ -1808,6 +1868,10 @@ fn validate_server_event(event: &ServerEvent) -> Result<(), ProtocolError> {
         ServerEvent::Clipboard(event) => {
             validate_required_buffer_id(event.buffer_id, "clipboard_event.buffer_id")
         }
+        ServerEvent::DisplayMessage(_) | ServerEvent::ServerShutdown => Ok(()),
+        ServerEvent::Passthrough(event) => {
+            validate_required_buffer_id(event.buffer_id, "passthrough_event.buffer_id")
+        }
         ServerEvent::ClientChanged(event) => {
             validate_client_record(&event.client)?;
             validate_optional_session_id(
@@ -2353,6 +2417,30 @@ fn encode_node_request<'a>(
         ),
         NodeRequest::Unzoom { session_id, .. } => (
             fb::NodeOp::Unzoom,
+            (*session_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::FocusLast { session_id, .. } => (
+            fb::NodeOp::FocusLast,
             (*session_id).into(),
             0,
             0,
@@ -3420,6 +3508,67 @@ fn encode_server_event<'a>(
                 },
             )
         }
+        ServerEvent::Passthrough(e) => {
+            let writes = e
+                .writes
+                .iter()
+                .map(|write| {
+                    let data = builder.create_vector(&write.bytes);
+                    fb::PassthroughWrite::create(
+                        builder,
+                        &fb::PassthroughWriteArgs {
+                            data: Some(data),
+                            cursor_row: write.cursor.row,
+                            cursor_col: write.cursor.col,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            let writes = builder.create_vector(&writes);
+            let event = fb::PassthroughEvent::create(
+                builder,
+                &fb::PassthroughEventArgs {
+                    buffer_id: e.buffer_id.into(),
+                    writes: Some(writes),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::PassthroughEvent,
+                    passthrough_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerEvent::DisplayMessage(e) => {
+            let message = builder.create_string(&e.message);
+            let event = fb::DisplayMessageEvent::create(
+                builder,
+                &fb::DisplayMessageEventArgs {
+                    message: Some(message),
+                    duration_ms: e.duration_ms,
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: 0,
+                    kind: fb::MessageKind::DisplayMessageEvent,
+                    display_message_event: Some(event),
+                    ..Default::default()
+                },
+            )
+        }
+        ServerEvent::ServerShutdown => fb::Envelope::create(
+            builder,
+            &fb::EnvelopeArgs {
+                request_id: 0,
+                kind: fb::MessageKind::ServerShutdownEvent,
+                ..Default::default()
+            },
+        ),
         ServerEvent::ClientChanged(e) => {
             let client = encode_client_record(builder, &e.client);
             let event = fb::ClientChangedEvent::create(
@@ -3464,6 +3613,8 @@ fn encode_session_record<'a>(
             zoomed_node_id: record.zoomed_node_id.map(|n| n.into()).unwrap_or(0),
             viewport_cols: record.viewport.map_or(0, |viewport| viewport.width),
             viewport_rows: record.viewport.map_or(0, |viewport| viewport.height),
+            base_index: record.base_index.unwrap_or(0),
+            has_base_index: record.base_index.is_some(),
         },
     )
 }
@@ -3488,6 +3639,11 @@ fn encode_buffer_record<'a>(
     let user_option_values_vec = record.user_options.values().cloned().collect::<Vec<_>>();
     let user_option_keys = create_string_vector(builder, &user_option_keys_vec);
     let user_option_values = create_string_vector(builder, &user_option_values_vec);
+    let foreground_command = record
+        .foreground_command
+        .as_ref()
+        .filter(|command| !command.is_empty())
+        .map(|command| create_string_vector(builder, command));
 
     let state = match record.state {
         BufferRecordState::Created => fb::BufferStateWire::Created,
@@ -3544,6 +3700,7 @@ fn encode_buffer_record<'a>(
             env_values: Some(env_values),
             user_option_keys: Some(user_option_keys),
             user_option_values: Some(user_option_values),
+            foreground_command,
         },
     )
 }
@@ -3850,6 +4007,14 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         },
                     }
                 }
+                fb::SessionOp::SetBaseIndex => SessionRequest::SetBaseIndex {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "session_request.session_id",
+                    )?,
+                    base_index: req.has_base_index().then(|| req.base_index()),
+                },
                 fb::SessionOp::SetViewport => {
                     validate_cells(
                         req.viewport_cols(),
@@ -4216,6 +4381,13 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         "node_request.session_id",
                     )?,
                 },
+                fb::NodeOp::FocusLast => NodeRequest::FocusLast {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                },
                 fb::NodeOp::ToggleZoom => NodeRequest::ToggleZoom {
                     request_id,
                     node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
@@ -4344,6 +4516,9 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
             };
             Ok(ClientMessage::Input(input_request))
         }
+        fb::MessageKind::KillServerRequest => {
+            Ok(ClientMessage::KillServer(KillServerRequest { request_id }))
+        }
         fb::MessageKind::SubscribeRequest => {
             let req = required(envelope.subscribe_request(), "subscribe_request")?;
             Ok(ClientMessage::Subscribe(SubscribeRequest {
@@ -4388,6 +4563,21 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                             req.session_id(),
                             "client_request.session_id",
                         )?,
+                    }
+                }
+                fb::ClientOp::DisplayMessage => {
+                    let session_id = (req.session_id() != 0).then(|| SessionId(req.session_id()));
+                    if client_id.is_none() && session_id.is_none() {
+                        return Err(ProtocolError::InvalidMessage(
+                            "display message requires a client_id or session_id",
+                        ));
+                    }
+                    ClientRequest::DisplayMessage {
+                        request_id,
+                        client_id,
+                        session_id,
+                        message: required(req.message(), "client_request.message")?.to_owned(),
+                        duration_ms: req.duration_ms(),
                     }
                 }
                 _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
@@ -4814,6 +5004,45 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                 },
             )))
         }
+        fb::MessageKind::PassthroughEvent => {
+            let event = required(envelope.passthrough_event(), "passthrough_event")?;
+            let writes = event
+                .writes()
+                .map(|writes| {
+                    writes
+                        .iter()
+                        .map(|write| PassthroughWrite {
+                            bytes: write
+                                .data()
+                                .map(|data| data.bytes().to_vec())
+                                .unwrap_or_default(),
+                            cursor: CursorPosition {
+                                row: write.cursor_row(),
+                                col: write.cursor_col(),
+                            },
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(ServerEnvelope::Event(ServerEvent::Passthrough(
+                PassthroughEvent {
+                    buffer_id: BufferId(event.buffer_id()),
+                    writes,
+                },
+            )))
+        }
+        fb::MessageKind::DisplayMessageEvent => {
+            let event = required(envelope.display_message_event(), "display_message_event")?;
+            Ok(ServerEnvelope::Event(ServerEvent::DisplayMessage(
+                DisplayMessageEvent {
+                    message: required(event.message(), "display_message_event.message")?.to_owned(),
+                    duration_ms: event.duration_ms(),
+                },
+            )))
+        }
+        fb::MessageKind::ServerShutdownEvent => {
+            Ok(ServerEnvelope::Event(ServerEvent::ServerShutdown))
+        }
         fb::MessageKind::ClientChangedEvent => {
             let event = required(envelope.client_changed_event(), "client_changed_event")?;
             let client = required(event.client(), "client_changed_event.client")?;
@@ -4868,6 +5097,7 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
             "session_record.viewport",
         )?
         .map(|(width, height)| Size { width, height }),
+        base_index: record.has_base_index().then(|| record.base_index()),
     })
 }
 
@@ -4896,6 +5126,10 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         record.user_option_values(),
         "buffer_record.user_options",
     )?;
+    let foreground_command = record
+        .foreground_command()
+        .map(|command| command.iter().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|command| !command.is_empty());
     let kind = match record.kind() {
         fb::BufferKindWire::Pty => BufferRecordKind::Pty,
         fb::BufferKindWire::Helper => BufferRecordKind::Helper,
@@ -4947,6 +5181,7 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         },
         env,
         user_options,
+        foreground_command,
     };
     record
         .validate()
@@ -5247,6 +5482,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5286,6 +5522,7 @@ mod tests {
             exit_code: None,
             env: BTreeMap::new(),
             user_options: Default::default(),
+            foreground_command: None,
         };
 
         let error = record
@@ -5665,6 +5902,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5703,6 +5941,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5742,6 +5981,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -5771,6 +6011,7 @@ mod tests {
                         exit_code: None,
                         env: Default::default(),
                         user_options: Default::default(),
+                        foreground_command: None,
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -5799,6 +6040,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -5847,6 +6089,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -5890,6 +6133,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -5929,6 +6173,7 @@ mod tests {
                 exit_code: None,
                 env: Default::default(),
                 user_options: Default::default(),
+                foreground_command: None,
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -5965,6 +6210,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -5991,6 +6237,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6032,6 +6279,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6058,6 +6306,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))
@@ -6131,6 +6380,7 @@ mod tests {
                     focused_floating_id: None,
                     zoomed_node_id: Some(NodeId(0)),
                     viewport: None,
+                    base_index: None,
                 }],
             }),
         ))
@@ -6157,6 +6407,7 @@ mod tests {
                     exit_code: None,
                     env: Default::default(),
                     user_options: Default::default(),
+                    foreground_command: None,
                 },
             }),
         ))

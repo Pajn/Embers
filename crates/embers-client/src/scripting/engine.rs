@@ -19,8 +19,13 @@ use super::error::ScriptError;
 use super::runtime::{
     normalize_actions, normalize_bar, register_runtime_api, registration_scope, runtime_scope,
 };
+use crate::command_prompt::StatusKeys;
+use crate::host_terminal::TerminalFeatures;
+use crate::presentation::TabBarPosition;
+
 use super::types::{
-    HintsSettings, LoadedConfig, ModeHooks, MouseSettings, RgbColor, ScriptFunctionRef, ThemeSpec,
+    DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
+    RgbColor, ScriptFunctionRef, ThemeSpec, parse_terminal_color,
 };
 use super::{Action, Context, RhaiResultOf, ScriptResult, TabBarContext};
 type SharedRegistration = Arc<Mutex<RegistrationState>>;
@@ -256,11 +261,16 @@ struct RegistrationState {
     named_actions: BTreeMap<String, ScriptFunctionRef>,
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
+    tab_bar_position: TabBarPosition,
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
     clipboard: Option<bool>,
     base_index: Option<u32>,
+    passthrough: Option<PassthroughMode>,
+    terminal_features: TerminalFeatures,
+    detach_on_destroy: DetachOnDestroy,
+    status_keys: StatusKeys,
 }
 
 impl RegistrationState {
@@ -361,11 +371,16 @@ impl RegistrationState {
             named_actions: self.named_actions,
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
+            tab_bar_position: self.tab_bar_position,
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
             clipboard: self.clipboard.unwrap_or(true),
             base_index: self.base_index,
+            passthrough: self.passthrough.unwrap_or_default(),
+            terminal_features: self.terminal_features,
+            detach_on_destroy: self.detach_on_destroy,
+            status_keys: self.status_keys,
         })
     }
 }
@@ -429,7 +444,7 @@ fn validate_action_refs(
                     format!("binding references unknown action '{name}'"),
                 ));
             }
-            Action::Chain(actions) => {
+            Action::Chain(actions) | Action::Confirm { actions, .. } => {
                 validate_action_refs(source, position, named_actions, actions)?;
             }
             _ => {}
@@ -481,6 +496,20 @@ impl TabbarApi {
         )?);
         Ok(())
     }
+
+    fn set_position(&self, position: Position, value: &str) -> ScriptResult<()> {
+        let Some(tab_bar) = TabBarPosition::parse(value) else {
+            return Err(runtime_error(
+                format!("tab bar position must be \"top\" or \"bottom\", not \"{value}\""),
+                position,
+            ));
+        };
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .tab_bar_position = tab_bar;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -510,6 +539,29 @@ impl ThemeApi {
                 ));
             }
             registration.theme.palette.insert(name.to_string(), color);
+        }
+        Ok(())
+    }
+
+    fn set_pane_border_color(
+        &self,
+        position: Position,
+        active: bool,
+        value: &str,
+    ) -> ScriptResult<()> {
+        let color = parse_terminal_color(value).map_err(|_| {
+            runtime_error(
+                format!("pane border color must be '#RRGGBB' or an ANSI color name such as \"magenta\" or \"brightblack\", not \"{value}\""),
+                position,
+            )
+        })?;
+        let registration = clone_active_registration(position)?;
+        let mut registration = registration.lock().expect("registration lock");
+        let borders = &mut registration.theme.pane_borders;
+        if active {
+            borders.active = Some(color);
+        } else {
+            borders.inactive = Some(color);
         }
         Ok(())
     }
@@ -659,6 +711,13 @@ mod registration_globals {
     /// Use the `Action` overload for inline builders such as `action.focus_left()`, the string
     /// overload for a named action registered with `define_action`, or an array to chain multiple
     /// actions in sequence.
+    ///
+    /// A notation is a sequence of keys: plain characters, and names or modified keys in angle
+    /// brackets, such as `<Enter>`, `<C-a>`, `<M-h>`, `<S-Left>`, `<C-S-Tab>` or `<F5>`
+    /// (`C` Ctrl, `M` or `A` Alt, `S` Shift, `D` Super). As in tmux, an uppercase letter is the
+    /// shifted key: `<M-H>` is Alt+Shift+h and `<C-H>` is Ctrl+Shift+h, the same as `<C-S-h>`.
+    /// Legacy terminals send the same bytes for Ctrl+Shift+h as for Ctrl+h, so `<C-H>` and other
+    /// Ctrl+Shift bindings only fire from a host terminal with the kitty keyboard protocol.
     ///
     /// # Example
     ///
@@ -811,10 +870,11 @@ mod registration_globals {
     /// `renumber-windows on`.
     ///
     /// This setting covers the client and the commands it runs from the command
-    /// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
-    /// instead; set that variable where the server and your shells start to use
-    /// the same numbering everywhere. Without this call the client uses
-    /// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+    /// prompt. The client also reports it to the server for the session it
+    /// shows, and the `embers` CLI numbers that session's windows from it
+    /// unless `EMBERS_BASE_INDEX` or `--base-index` overrides it. Without this
+    /// call the client uses `EMBERS_BASE_INDEX` when it is set, and numbers
+    /// windows from 0 otherwise.
     ///
     /// # Example
     ///
@@ -843,6 +903,169 @@ mod registration_globals {
             .base_index = Some(index);
         Ok(())
     }
+
+    /// Choose which panes may write to the host terminal through tmux
+    /// passthrough, like tmux's `allow-passthrough`.
+    ///
+    /// Programs that run under tmux wrap sequences meant for the outer
+    /// terminal, such as kitty graphics images or desktop notifications, as
+    /// `ESC P tmux; ... ESC \`. Embers unwraps them and writes them to the
+    /// terminal running the client, with its cursor at the pane's cursor so
+    /// images land where the program put them. Kitty graphics commands sent
+    /// without the wrapper are passed on the same way.
+    ///
+    /// - `"off"` (the default, as in tmux): drop them.
+    /// - `"on"`: only from panes that are on screen.
+    /// - `"all"`: from every pane in the client's session, on screen or not.
+    ///   Sequences from a pane that is not on screen are written without
+    ///   moving the cursor.
+    ///
+    /// Passthrough is off by default because it lets any program on screen,
+    /// or `cat` of an untrusted file, write raw sequences to the terminal,
+    /// bypassing `set_clipboard(false)` and the filtering Embers applies to
+    /// pane output. Turning it on only has an effect when the terminal is
+    /// known to support passthrough (see `set_terminal_features`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_allow_passthrough("on");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:10
+    #[rhai_fn(return_raw, global, name = "set_allow_passthrough")]
+    pub fn set_allow_passthrough(ctx: NativeCallContext, mode: &str) -> RhaiResultOf<()> {
+        let mode = PassthroughMode::parse(mode).ok_or_else(|| {
+            runtime_error(
+                format!("allow-passthrough must be \"on\", \"off\" or \"all\", not \"{mode}\""),
+                ctx.call_position(),
+            )
+        })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .passthrough = Some(mode);
+        Ok(())
+    }
+
+    /// Say what the terminal running the client supports, overriding what
+    /// Embers detected when it attached.
+    ///
+    /// Embers asks the terminal at attach and otherwise goes by `TERM` and
+    /// `TERM_PROGRAM`, and leaves out what it cannot confirm. This sets each
+    /// named capability on (`true`) or off (`false`); capabilities not named
+    /// stay as detected. Like tmux's `terminal-features`.
+    ///
+    /// - `underline_styles`: double, curly, dotted and dashed underlines
+    ///   (`CSI 4:n m`). Without it every underline is plain.
+    /// - `underline_color`: colored underlines (`CSI 58:...m`). Without it
+    ///   underlines take the text color.
+    /// - `hyperlinks`: OSC 8 links. Without it links are plain text.
+    /// - `passthrough`: sequences programs send for the terminal, such as
+    ///   images (see `set_allow_passthrough`). Without it they are dropped.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_terminal_features(#{ hyperlinks: true, passthrough: false });
+    /// ```
+    ///
+    /// # rhai-autodocs:index:11
+    #[rhai_fn(return_raw, global, name = "set_terminal_features")]
+    pub fn set_terminal_features(ctx: NativeCallContext, features: Map) -> RhaiResultOf<()> {
+        let registration = clone_active_registration(ctx.call_position())?;
+        let mut registration = registration.lock().expect("registration lock");
+        for (name, value) in features {
+            let enabled = value.as_bool().map_err(|_| {
+                runtime_error(
+                    format!("terminal feature '{name}' must be true or false"),
+                    ctx.call_position(),
+                )
+            })?;
+            if !registration.terminal_features.set(&name, enabled) {
+                return Err(runtime_error(
+                    format!(
+                        "unknown terminal feature '{name}'; expected one of {}",
+                        TerminalFeatures::NAMES.join(", ")
+                    ),
+                    ctx.call_position(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Choose where the client goes when the session it shows is destroyed,
+    /// like tmux's `detach-on-destroy`. A session is destroyed when its last
+    /// pane closes, because the pane's program exited or the pane was killed,
+    /// or when the session is killed.
+    ///
+    /// - `"on"` (the default): detach; the client exits.
+    /// - `"off"`: switch to the session the client showed before, or else the
+    ///   first remaining session.
+    /// - `"previous"` / `"next"`: switch to the session listed before or after
+    ///   the destroyed one (`embers list-sessions` order), wrapping around.
+    ///
+    /// When no other session is left, the client exits whatever the setting.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_detach_on_destroy("off");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:12
+    #[rhai_fn(return_raw, global, name = "set_detach_on_destroy")]
+    pub fn set_detach_on_destroy(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(setting) = DetachOnDestroy::parse(value) else {
+            return Err(runtime_error(
+                format!(
+                    "set_detach_on_destroy expects \"on\", \"off\", \"previous\" or \"next\", got {value:?}"
+                ),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .detach_on_destroy = setting;
+        Ok(())
+    }
+
+    /// Choose the keys the command prompt and the rename prompts are edited
+    /// with, like tmux's `status-keys`.
+    ///
+    /// - `"emacs"` (the default): Left/Right, C-a/C-e, C-w, C-u, C-k and the
+    ///   other keys listed in the command prompt docs.
+    /// - `"vi"`: the prompt opens in insert mode, where those keys work too.
+    ///   Esc switches to normal mode, which has `h` `l` `w` `b` `e` `0` `$`
+    ///   to move, `x` `dw` `D` to delete, `cw` `C` to change, `i` `a` `I`
+    ///   `A` to insert again and `k` `j` for older and newer history lines.
+    ///   Esc in normal mode cancels the prompt; Enter runs it in either mode.
+    ///
+    /// The copy-mode search prompt keeps its own keys.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_status_keys("vi");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:13
+    #[rhai_fn(return_raw, global, name = "set_status_keys")]
+    pub fn set_status_keys(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(keys) = StatusKeys::parse(value) else {
+            return Err(runtime_error(
+                format!("set_status_keys expects \"emacs\" or \"vi\", got {value:?}"),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .status_keys = keys;
+        Ok(())
+    }
 }
 
 #[export_module]
@@ -860,6 +1083,28 @@ mod tabbar_registration_api {
     ) -> RhaiResultOf<()> {
         tabbar.set_formatter(ctx.call_position(), callback)
     }
+
+    /// Put the session's tab bar, its list of windows, at the `"top"` (the
+    /// default) or `"bottom"` of the screen, like tmux's `status-position`.
+    /// At the bottom it sits just above the status line, where the command
+    /// prompt and messages appear. Tab bars of nested tabs stay at the top of
+    /// their own area.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// tabbar.set_position("bottom");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:20
+    #[rhai_fn(return_raw, name = "set_position")]
+    pub fn set_position(
+        ctx: NativeCallContext,
+        tabbar: TabbarApi,
+        value: &str,
+    ) -> RhaiResultOf<()> {
+        tabbar.set_position(ctx.call_position(), value)
+    }
 }
 
 #[export_module]
@@ -872,6 +1117,48 @@ mod theme_registration_api {
     #[rhai_fn(return_raw, name = "set_palette")]
     pub fn set_palette(ctx: NativeCallContext, theme: ThemeApi, palette: Map) -> RhaiResultOf<()> {
         theme.set_palette(ctx.call_position(), palette)
+    }
+
+    /// Color the dividers between panes, except next to the focused pane,
+    /// like tmux's `pane-border-style fg=...`. Takes `"#RRGGBB"` or one of
+    /// the sixteen ANSI color names (`"black"` to `"white"` and
+    /// `"brightblack"` to `"brightwhite"`), which follow the terminal's color
+    /// scheme. Without it dividers are drawn dim.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_pane_border_color("brightblack");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_pane_border_color")]
+    pub fn set_pane_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_pane_border_color(ctx.call_position(), false, color)
+    }
+
+    /// Color the divider cells next to the focused pane, like tmux's
+    /// `pane-active-border-style fg=...`. Takes the same colors as
+    /// `set_pane_border_color`. Without it they are drawn like the others.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// theme.set_pane_active_border_color("magenta");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:21
+    #[rhai_fn(return_raw, name = "set_pane_active_border_color")]
+    pub fn set_pane_active_border_color(
+        ctx: NativeCallContext,
+        theme: ThemeApi,
+        color: &str,
+    ) -> RhaiResultOf<()> {
+        theme.set_pane_border_color(ctx.call_position(), true, color)
     }
 }
 

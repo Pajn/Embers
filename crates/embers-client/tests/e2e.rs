@@ -92,6 +92,24 @@ async fn create_buffer_with_command(
     }
 }
 
+/// Keep `buffer_id` in its pane after its command exits (`remain-on-exit on`),
+/// so a test can still render the output of a command that has finished.
+async fn remain_on_exit(connection: &mut TestConnection, buffer_id: BufferId) {
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id,
+            key: "remain-on-exit".to_owned(),
+            value: Some("on".to_owned()),
+        }))
+        .await
+        .expect("set remain-on-exit succeeds");
+    assert!(
+        matches!(response, ServerResponse::Buffer(_)),
+        "expected buffer response, got {response:?}"
+    );
+}
+
 async fn session_snapshot_by_name(connection: &mut TestConnection, name: &str) -> SessionSnapshot {
     let response = connection
         .request(&ClientMessage::Session(SessionRequest::List {
@@ -170,7 +188,7 @@ async fn render_session(
         },
     )
     .expect("projection succeeds");
-    Renderer.render(client.state(), &model).render()
+    Renderer::default().render(client.state(), &model).render()
 }
 
 async fn poll_for_tab_activity(
@@ -808,6 +826,20 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
         .await
         .expect("buffer survives floating move");
 
+    // The popup is the session's only pane; a window keeps the session once
+    // the popup closes, since closing a session's last pane destroys it.
+    let keep = create_buffer(&mut connection, "keep").await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "keep".to_owned(),
+            buffer_id: Some(keep.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add keep window succeeds");
+
     let _ = connection
         .request(&ClientMessage::Floating(FloatingRequest::Close {
             request_id: new_request_id(),
@@ -1066,6 +1098,7 @@ async fn fullscreen_fixture_enters_alternate_screen_and_restores_primary_screen(
         fullscreen_fixture_command("fullscreen-live-title", "primary-restored-title", "3.0"),
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1137,6 +1170,7 @@ async fn hidden_fullscreen_buffer_reveals_live_alternate_screen_coherently() {
         ),
     )
     .await;
+    remain_on_exit(&mut connection, hidden_buffer.id).await;
     let fixture = create_hidden_tab_fixture_with_buffer(&mut connection, hidden_buffer).await;
 
     wait_for_visible_snapshot(
@@ -1210,6 +1244,7 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
         ],
     )
     .await;
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1265,6 +1300,8 @@ async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
         vec!["/bin/sh".to_owned(), "-lc".to_owned(), script.to_owned()],
     )
     .await;
+    // The script may finish before the pane is rendered.
+    remain_on_exit(&mut connection, buffer.id).await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
@@ -1305,7 +1342,7 @@ async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
         },
     )
     .expect("projection succeeds");
-    let grid = Renderer.render(client.state(), &model);
+    let grid = Renderer::default().render(client.state(), &model);
     let rendered = (grid.ansi_lines().join("\n"), grid.render());
 
     server.shutdown().await.expect("server shuts down");
@@ -1461,6 +1498,607 @@ async fn osc52_from_pane_is_dropped_when_clipboard_is_off() {
         "expected no OSC 52 in {:?}",
         String::from_utf8_lossy(&output)
     );
+}
+
+/// What a client wrote to its host terminal after drawing a pane whose program
+/// sent a tmux passthrough sequence.
+struct PassthroughOutput {
+    /// Bytes written after the frame.
+    frame_output: Vec<u8>,
+    /// The 1-based host position of the pane's cell (row 3, column 5), or
+    /// `None` when the pane was not on screen.
+    pane_cursor: Option<(i32, i32)>,
+}
+
+/// Attach a configured client to a session whose pane runs `script` once it
+/// reads a line, trigger it, wait for the client to handle the passthrough
+/// event that marks the end of the script's output (`ESC ] 9 ; done BEL`),
+/// then draw a frame. With `hidden`, the pane is in a background window.
+async fn pane_passthrough_output(
+    config_source: &str,
+    script: &str,
+    hidden: bool,
+) -> PassthroughOutput {
+    pane_passthrough_output_on_host(
+        config_source,
+        script,
+        hidden,
+        embers_client::HostCapabilities::ALL,
+    )
+    .await
+}
+
+/// [`pane_passthrough_output`] for a client whose host terminal was detected
+/// to support `host`.
+async fn pane_passthrough_output_on_host(
+    config_source: &str,
+    script: &str,
+    hidden: bool,
+    host: embers_client::HostCapabilities,
+) -> PassthroughOutput {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "images",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "read _; {script}; printf '\\033Ptmux;\\033\\033]9;done\\007\\033\\\\'; sleep 5"
+            ),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "images".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add images tab succeeds");
+    if hidden {
+        let front = create_buffer(&mut connection, "front").await;
+        let _ = connection
+            .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+                request_id: new_request_id(),
+                session_id: session.session.id,
+                title: "front".to_owned(),
+                buffer_id: Some(front.id),
+                child_node_id: None,
+            }))
+            .await
+            .expect("add front tab succeeds");
+        let _ = connection
+            .request(&ClientMessage::Session(SessionRequest::SelectRootTab {
+                request_id: new_request_id(),
+                session_id: session.session.id,
+                index: 1,
+            }))
+            .await
+            .expect("select front tab succeeds");
+    }
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(config_dir.path().join("config.rhai"), config_source).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(host);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    // Draw once so the client knows its layout before the program writes.
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("first frame");
+    let _ = configured.drain_frame_output();
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("start the script");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "passthrough event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        if let Some(embers_protocol::ServerEvent::Passthrough(event)) = event
+            && event
+                .writes
+                .iter()
+                .any(|write| write.bytes == b"\x1b]9;done\x07")
+        {
+            break;
+        }
+    }
+    let _ = configured.drain_terminal_output();
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("frame after passthrough");
+    let frame_output = configured.drain_frame_output();
+
+    let model =
+        PresentationModel::project(configured.client().state(), session.session.id, viewport)
+            .expect("projection succeeds");
+    let pane_cursor = model
+        .leaves
+        .iter()
+        .find(|leaf| leaf.buffer_id == buffer.id)
+        .map(|leaf| (leaf.rect.origin.y + 1 + 2 + 1, leaf.rect.origin.x + 4 + 1));
+    assert_eq!(pane_cursor.is_none(), hidden, "pane visibility");
+    server.shutdown().await.expect("server shuts down");
+    PassthroughOutput {
+        frame_output,
+        pane_cursor,
+    }
+}
+
+/// A kitty graphics command wrapped for tmux, as image.nvim sends it under tmux:
+/// every ESC in the payload doubled.
+const WRAPPED_KITTY_IMAGE: &str =
+    "printf '\\033[3;5H\\033Ptmux;\\033\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\033\\\\\\033\\\\'";
+
+/// Config that turns passthrough on; it is off by default.
+const PASSTHROUGH_ON: &str = "set_allow_passthrough(\"on\");";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_reaches_the_host_at_the_pane_cursor() {
+    let output = pane_passthrough_output(PASSTHROUGH_ON, WRAPPED_KITTY_IMAGE, false).await;
+    let (row, col) = output.pane_cursor.expect("pane on screen");
+    let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
+    assert!(
+        contains_subslice(&output.frame_output, expected.as_bytes()),
+        "expected {expected:?} in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+    // Unwrapped: no tmux introducer or doubled ESC reaches the host.
+    assert!(!contains_subslice(&output.frame_output, b"tmux;"));
+    assert!(!contains_subslice(&output.frame_output, b"\x1b\x1b"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn raw_kitty_graphics_reach_the_host_at_the_pane_cursor() {
+    // Sent without the tmux wrapper, as a program that does not know it runs
+    // in a multiplexer would.
+    let script = "printf '\\033[3;5H\\033_Gf=100,a=T;iVBORw0KGgo=\\033\\\\'";
+    let output = pane_passthrough_output(PASSTHROUGH_ON, script, false).await;
+    let (row, col) = output.pane_cursor.expect("pane on screen");
+    let expected = format!("\x1b[{row};{col}H\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\");
+    assert!(
+        contains_subslice(&output.frame_output, expected.as_bytes()),
+        "expected {expected:?} in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_is_dropped_when_off() {
+    // Off is the default, as in tmux.
+    for config in ["", "set_allow_passthrough(\"off\");"] {
+        let output = pane_passthrough_output(config, WRAPPED_KITTY_IMAGE, false).await;
+        assert!(
+            output.frame_output.is_empty(),
+            "expected no output with {config:?}, got {:?}",
+            String::from_utf8_lossy(&output.frame_output)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_needs_a_host_that_supports_it() {
+    use embers_client::HostCapabilities;
+
+    let output = pane_passthrough_output_on_host(
+        PASSTHROUGH_ON,
+        WRAPPED_KITTY_IMAGE,
+        false,
+        HostCapabilities::NONE,
+    )
+    .await;
+    assert!(
+        output.frame_output.is_empty(),
+        "expected no output for an unsupported host, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+
+    // The config can say the host supports it after all.
+    let output = pane_passthrough_output_on_host(
+        "set_allow_passthrough(\"on\"); set_terminal_features(#{ passthrough: true });",
+        WRAPPED_KITTY_IMAGE,
+        false,
+        HostCapabilities::NONE,
+    )
+    .await;
+    assert!(contains_subslice(
+        &output.frame_output,
+        b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tmux_passthrough_from_a_hidden_pane_needs_all() {
+    let output = pane_passthrough_output(PASSTHROUGH_ON, WRAPPED_KITTY_IMAGE, true).await;
+    assert!(
+        output.frame_output.is_empty(),
+        "`on` forwards only from panes on screen, got {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+
+    let output =
+        pane_passthrough_output("set_allow_passthrough(\"all\");", WRAPPED_KITTY_IMAGE, true).await;
+    // Written as it is, in order, without moving the cursor: there is no pane
+    // on screen to put it in.
+    assert!(
+        contains_subslice(
+            &output.frame_output,
+            b"\x1b_Gf=100,a=T;iVBORw0KGgo=\x1b\\\x1b]9;done\x07"
+        ),
+        "expected both writes in {:?}",
+        String::from_utf8_lossy(&output.frame_output)
+    );
+    assert!(!contains_subslice(&output.frame_output, b"H\x1b_G"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_tmux_passthrough_is_dropped() {
+    // One byte over the 4 MiB cap, then a small sequence that must still pass.
+    let script = format!(
+        "printf '\\033Ptmux;'; head -c {} /dev/zero | tr '\\0' x; printf '\\033\\\\'",
+        embers_core::MAX_PASSTHROUGH_BYTES + 1
+    );
+    let output = pane_passthrough_output(PASSTHROUGH_ON, &script, false).await;
+    assert!(
+        !contains_subslice(&output.frame_output, b"xxxx"),
+        "oversized payload was forwarded"
+    );
+    assert!(contains_subslice(&output.frame_output, b"\x1b]9;done\x07"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inserting_a_tab_next_to_the_only_window_adds_a_window() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(
+        &server,
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--title",
+            "one",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        r#"
+            bind("normal", "a", action.insert_tab_after_current("after", tree.buffer_spawn(["/bin/sh"])));
+            bind("normal", "b", action.insert_tab_before_current("before", tree.buffer_spawn(["/bin/sh"])));
+        "#,
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+    let windows = || {
+        stdout(&run_cli(
+            &server,
+            &["--base-index", "0", "list-windows", "-t", "alpha"],
+        ))
+        .trim()
+        .to_owned()
+    };
+
+    // With one window the session's root is not tabbed, so there are no
+    // focused tabs; the new tab becomes a second window after it...
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('a'))
+        .await
+        .expect("insert after");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows(), "0\t0\tone\n1\t1\tafter");
+
+    // ...or before it.
+    run_cli(
+        &server,
+        &["--base-index", "0", "kill-window", "-t", "alpha:1"],
+    );
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('b'))
+        .await
+        .expect("insert before");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows(), "0\t1\tbefore\n1\t0\tone");
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_reports_its_base_index_to_the_server() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tempdir.path().join("config.rhai"), "set_base_index(1);").expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let base_index = |snapshot: SessionSnapshot| snapshot.session.base_index;
+    assert_eq!(
+        base_index(session_snapshot_by_name(&mut connection, "alpha").await),
+        None
+    );
+
+    // Drawing the session reports the base index along with the viewport.
+    configured
+        .sync_pty_sizes(
+            alpha,
+            Size {
+                width: 80,
+                height: 24,
+            },
+        )
+        .await
+        .expect("sync");
+    assert_eq!(
+        base_index(session_snapshot_by_name(&mut connection, "alpha").await),
+        Some(1)
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_replies_go_to_the_pane_whose_passthrough_asked() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    // Sends a kitty graphics query through passthrough, then shows whatever
+    // it is sent back.
+    let asking = create_buffer_with_command(
+        &mut connection,
+        "asking",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "read _; stty raw -echo; \
+             printf '\\033Ptmux;\\033\\033_Gi=31,a=q;\\033\\033\\\\\\033\\\\'; \
+             printf '\\033Ptmux;\\033\\033]9;done\\007\\033\\\\'; cat -v"
+                .to_owned(),
+        ],
+    )
+    .await;
+    let snapshot = match connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "images".to_owned(),
+            buffer_id: Some(asking.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add tab succeeds")
+    {
+        ServerResponse::SessionSnapshot(response) => response.snapshot,
+        other => panic!("expected session snapshot response, got {other:?}"),
+    };
+    // The focused pane, which did not ask.
+    let focused = create_buffer_with_command(
+        &mut connection,
+        "focused",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "stty raw -echo; cat -v".to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Node(NodeRequest::Split {
+            request_id: new_request_id(),
+            leaf_node_id: snapshot.session.focused_leaf_id.expect("focused leaf"),
+            direction: SplitDirection::Vertical,
+            new_buffer_id: focused.id,
+        }))
+        .await
+        .expect("split succeeds");
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        "set_allow_passthrough(\"on\");",
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(embers_client::HostCapabilities::ALL);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("first frame");
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: asking.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("start the script");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "passthrough event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        if let Some(embers_protocol::ServerEvent::Passthrough(event)) = event
+            && event
+                .writes
+                .iter()
+                .any(|write| write.bytes == b"\x1b]9;done\x07")
+        {
+            break;
+        }
+    }
+    // Drawing the frame writes the query to the host.
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("frame after passthrough");
+    assert!(contains_subslice(
+        &configured.drain_frame_output(),
+        b"\x1b_Gi=31,a=q;\x1b\\"
+    ));
+
+    configured
+        .handle_host_reply(
+            session.session.id,
+            viewport,
+            b"\x1b_Gi=31;OK\x1b\\".to_vec(),
+        )
+        .await
+        .expect("reply delivered");
+
+    let _ = wait_for_visible_snapshot(
+        &mut connection,
+        asking.id,
+        Duration::from_secs(5),
+        |snapshot| lines_text(&snapshot.lines).contains("^[_Gi=31;OK^[\\"),
+    )
+    .await;
+    let focused_text = match connection
+        .request(&ClientMessage::Buffer(BufferRequest::CaptureVisible {
+            request_id: new_request_id(),
+            buffer_id: focused.id,
+        }))
+        .await
+        .expect("capture focused pane")
+    {
+        ServerResponse::VisibleSnapshot(snapshot) => lines_text(&snapshot.lines),
+        other => panic!("expected visible snapshot, got {other:?}"),
+    };
+    assert!(
+        !focused_text.contains("Gi=31"),
+        "the focused pane got the reply: {focused_text:?}"
+    );
+    server.shutdown().await.expect("server shuts down");
 }
 
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
@@ -2353,6 +2991,103 @@ async fn action_created_panes_start_at_their_drawn_size() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_window_action_adds_a_window_in_the_given_directory() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let workdir = tempdir.path().join("work");
+    std::fs::create_dir(&workdir).expect("create workdir");
+    // The pane reports its directory resolved, as on macOS where /tmp is a link.
+    let workdir = workdir.canonicalize().expect("canonical workdir");
+    let script = format!(
+        r#"
+            fn new_window(ctx) {{
+                action.new_window("work", tree.buffer_spawn(["/bin/sh"], #{{ cwd: "{}" }}))
+            }}
+            define_action("new-window", new_window);
+            bind("normal", "w", "new-window");
+        "#,
+        workdir.display()
+    );
+    std::fs::write(tempdir.path().join("config.rhai"), script).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    let windows = || {
+        stdout(&run_cli(&server, &["list-windows", "-t", "alpha"]))
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+
+    configured
+        .handle_key(alpha, viewport, KeyEvent::Char('w'))
+        .await
+        .expect("action runs");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    let listed = windows();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed[1].contains("work"), "appended last: {listed:?}");
+    let buffer = newest_buffer(&mut connection, "alpha").await;
+    let shown = stdout(&run_cli(
+        &server,
+        &["buffer", "show", &buffer.0.to_string()],
+    ));
+    assert!(
+        shown.contains(&format!("cwd\t\"{}\"", workdir.display())),
+        "{shown}"
+    );
+
+    // With one window left the session is no longer tabbed; a new window
+    // still goes next to it rather than failing.
+    run_cli(&server, &["kill-window", "-t", "alpha:work"]);
+    assert_eq!(windows().len(), 1);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .handle_key(alpha, viewport, KeyEvent::Char('w'))
+        .await
+        .expect("action runs");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+    assert_eq!(windows().len(), 2);
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn most_recently_active_client_owns_the_pane_pty_size() {
     use embers_client::{ConfiguredClient, KeyEvent};
 
@@ -2424,5 +3159,133 @@ async fn most_recently_active_client_owns_the_pane_pty_size() {
         .expect("clear typed key");
     assert_stty_size(&mut connection, buffer_id, 101, 29).await;
 
+    server.shutdown().await.expect("server shuts down");
+}
+
+/// A client attached to session "beta" of three ("alpha", "beta", "gamma"),
+/// having come there from "alpha", with `set_detach_on_destroy` as given.
+async fn client_on_beta_of_three(
+    server: &TestServer,
+    detach_on_destroy: Option<&str>,
+) -> (
+    embers_client::ConfiguredClient<embers_client::SocketTransport>,
+    tempfile::TempDir,
+) {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    two_sessions_with_shells(server);
+    run_cli(server, &["new-session", "gamma"]);
+    run_cli(server, &["new-window", "-t", "gamma", "--", "/bin/sh"]);
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let setting = detach_on_destroy
+        .map(|value| format!("set_detach_on_destroy(\"{value}\");"))
+        .unwrap_or_default();
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        format!(
+            r#"
+                {setting}
+                fn go_beta(ctx) {{ action.switch_session("beta") }}
+                define_action("go-beta", go_beta);
+                bind("normal", "o", "go-beta");
+            "#
+        ),
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let size = Size {
+        width: 80,
+        height: 24,
+    };
+    configured
+        .render_session(alpha, size)
+        .await
+        .expect("render alpha");
+    configured
+        .handle_key(alpha, size, KeyEvent::Char('o'))
+        .await
+        .expect("switch to beta");
+    let beta = session_id_by_name(configured.client(), "beta");
+    assert_eq!(configured.active_session_id(), Some(beta));
+    (configured, tempdir)
+}
+
+/// End the only pane of "beta" by typing `exit` into its shell, and handle
+/// events until the client has left "beta".
+async fn exit_beta(
+    server: &TestServer,
+    configured: &mut embers_client::ConfiguredClient<embers_client::SocketTransport>,
+) {
+    let beta = session_id_by_name(configured.client(), "beta");
+    let pane = configured.client().state().sessions[&beta]
+        .focused_leaf_id
+        .expect("beta has a pane");
+    run_cli(
+        server,
+        &["send-keys", "-t", &pane.to_string(), "--enter", "exit"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while configured.active_session_id() == Some(beta) {
+        assert!(Instant::now() < deadline, "client stayed on beta");
+        let _ = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("handle event");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroyed_session_moves_the_client_per_detach_on_destroy() {
+    for (setting, expected) in [("off", "alpha"), ("previous", "alpha"), ("next", "gamma")] {
+        let server = TestServer::start().await.expect("server starts");
+        let (mut configured, _tempdir) = client_on_beta_of_three(&server, Some(setting)).await;
+
+        exit_beta(&server, &mut configured).await;
+
+        let expected_id = session_id_by_name(configured.client(), expected);
+        assert_eq!(
+            configured.active_session_id(),
+            Some(expected_id),
+            "{setting}"
+        );
+        assert!(!configured.should_exit(), "{setting}");
+        let clients = stdout(&run_cli(&server, &["list-clients"]));
+        assert!(
+            clients.contains(&format!(":{expected}\t")),
+            "{setting}: the server has the client on {expected}: {clients}"
+        );
+        server.shutdown().await.expect("server shuts down");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destroyed_session_detaches_the_client_by_default() {
+    let server = TestServer::start().await.expect("server starts");
+    let (mut configured, _tempdir) = client_on_beta_of_three(&server, None).await;
+
+    exit_beta(&server, &mut configured).await;
+
+    assert_eq!(configured.active_session_id(), None);
+    assert!(configured.should_exit());
     server.shutdown().await.expect("server shuts down");
 }

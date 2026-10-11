@@ -285,6 +285,11 @@ fn event_value(event: &ServerEvent) -> Value {
             "client": client_value(&event.client),
             "previous_session_id": event.previous_session_id.map(u64::from),
         }),
+        ServerEvent::DisplayMessage(event) => json!({
+            "type": "display_message",
+            "message": event.message,
+            "duration_ms": event.duration_ms,
+        }),
         // The clipboard text itself is left out of the event stream.
         ServerEvent::Clipboard(event) => json!({
             "type": "clipboard",
@@ -292,6 +297,14 @@ fn event_value(event: &ServerEvent) -> Value {
             "selection": event.selection.osc52_parameter().to_string(),
             "bytes": event.text.len(),
         }),
+        // Like clipboard text, the passthrough payloads are left out.
+        ServerEvent::Passthrough(event) => json!({
+            "type": "passthrough",
+            "buffer_id": u64::from(event.buffer_id),
+            "writes": event.writes.len(),
+            "bytes": event.writes.iter().map(|write| write.bytes.len()).sum::<usize>(),
+        }),
+        ServerEvent::ServerShutdown => json!({ "type": "server_shutdown" }),
     }
 }
 

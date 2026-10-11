@@ -164,50 +164,97 @@ fn process_exists(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
+/// Stop detached `__serve` processes left behind by earlier tests whose temp
+/// directory is gone, for example after a test panicked before its cleanup.
+///
+/// Only servers run from this build's `embers` binary are considered, so
+/// servers of other checkouts or a real installation are never touched, and
+/// only once their socket directory no longer exists, which a running test
+/// keeps alive. Runtime keepers need no reaping here: a keeper whose socket
+/// was removed with its directory stops its child and exits by itself.
 fn reap_stale_helper_processes() {
-    if let Ok(output) = Command::new("ps").args(["-eo", "pid,args"]).output() {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let Some((pid, socket_path, helper_kind)) = parse_helper_process(line) else {
-                continue;
-            };
-            let Some(parent) = socket_path.parent() else {
-                continue;
-            };
-            if parent.exists() {
-                continue;
-            }
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).output();
-            tracing::debug!(
-                pid,
-                helper = helper_kind,
-                socket = %socket_path.display(),
-                "killed stale helper process"
-            );
+    let binary = crate::cargo_bin_path("embers");
+    let Ok(output) = Command::new("ps").args(["-eo", "pid,args"]).output() else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((pid, socket_path)) = stale_server_candidate(line, &binary) else {
+            continue;
+        };
+        if socket_path.parent().is_none_or(Path::exists) {
+            continue;
         }
+        terminate_process(pid);
+        tracing::debug!(
+            pid,
+            socket = %socket_path.display(),
+            "stopped stale __serve process"
+        );
     }
 }
 
-fn parse_helper_process(line: &str) -> Option<(i32, std::path::PathBuf, &'static str)> {
-    let line = line.trim();
-    let is_server = line.contains("__serve");
-    let is_runtime_keeper = line.contains("__runtime-keeper");
-    if !is_server && !is_runtime_keeper {
-        return None;
-    }
-
+/// Parse a `ps -eo pid,args` line into the pid and `--socket` path of a
+/// `__serve` process run from `binary`. Anything else, including runtime
+/// keepers and servers run from other binaries, yields `None`.
+fn stale_server_candidate(line: &str, binary: &Path) -> Option<(i32, std::path::PathBuf)> {
     let mut fields = line.split_whitespace();
     let pid = fields.next()?.parse::<i32>().ok()?;
     let args = fields.collect::<Vec<_>>();
+    if Path::new(args.first()?) != binary || !args.contains(&"__serve") {
+        return None;
+    }
     let socket_path = args.windows(2).find_map(|window| {
         (window[0] == "--socket").then_some(std::path::PathBuf::from(window[1]))
     })?;
-    Some((
-        pid,
-        socket_path,
-        if is_server {
-            "__serve"
-        } else {
-            "__runtime-keeper"
-        },
-    ))
+    Some((pid, socket_path))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::stale_server_candidate;
+
+    const BINARY: &str = "/build/target/debug/embers";
+
+    #[test]
+    fn matches_servers_run_from_this_build() {
+        assert_eq!(
+            stale_server_candidate(
+                "  4242 /build/target/debug/embers __serve --socket /tmp/run/mux.sock",
+                Path::new(BINARY),
+            ),
+            Some((4242, PathBuf::from("/tmp/run/mux.sock")))
+        );
+    }
+
+    #[test]
+    fn ignores_servers_run_from_other_binaries() {
+        for line in [
+            "4242 /other/target/debug/embers __serve --socket /tmp/run/mux.sock",
+            "4242 embers __serve --socket /tmp/run/mux.sock",
+        ] {
+            assert_eq!(
+                stale_server_candidate(line, Path::new(BINARY)),
+                None,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_runtime_keepers_and_other_processes() {
+        for line in [
+            "4242 /build/target/debug/embers __runtime-keeper --keeper-socket /tmp/run/mux.runtimes/buffer-1.sock --cols 80 --rows 24 -- /bin/sh",
+            "4242 /build/target/debug/embers --socket /tmp/run/mux.sock list-sessions",
+            "4242 /bin/sh -c echo __serve --socket /tmp/run/mux.sock",
+            "PID ARGS",
+        ] {
+            assert_eq!(
+                stale_server_candidate(line, Path::new(BINARY)),
+                None,
+                "{line}"
+            );
+        }
+    }
 }

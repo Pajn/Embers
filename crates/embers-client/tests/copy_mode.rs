@@ -476,8 +476,9 @@ async fn backward_search_moves_the_cursor_and_reverses_n() {
     press(&mut client, chars("G")).await;
     assert_eq!(cursor(&client), (9, 0));
 
-    let mut keys = chars("?o");
-    keys.push(KeyEvent::Enter);
+    // Backspace and C-h both delete from the search prompt.
+    let mut keys = chars("?oxy");
+    keys.extend([KeyEvent::Backspace, KeyEvent::Ctrl('h'), KeyEvent::Enter]);
     press(&mut client, keys).await;
     assert_eq!(client.current_mode(), "copy");
     assert_eq!(cursor(&client), (6, 2));

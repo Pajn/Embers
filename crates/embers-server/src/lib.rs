@@ -17,13 +17,14 @@ pub use buffer_runtime::{
     run_runtime_keeper,
 };
 pub use config::{
-    DEFAULT_RESTORE_COMMANDS, RESTORE_COMMANDS_ENV_VAR, RESTORE_ENV_VAR, ResourceLimits,
-    RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
+    BUFFER_ENV_VAR, DEFAULT_RESTORE_COMMANDS, REMAIN_ON_EXIT_ENV_VAR, RESTORE_COMMANDS_ENV_VAR,
+    RESTORE_ENV_VAR, ResourceLimits, RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
 };
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
-    BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, InterruptedBuffer, Node,
-    RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, IS_VIM_OPTION,
+    InterruptedBuffer, Node, REMAIN_ON_EXIT_OPTION, RemainOnExit, RunningBuffer, Session,
+    SplitNode, TabEntry, TabsNode,
 };
 pub use server::{Server, ServerHandle};
 pub use state::ServerState;

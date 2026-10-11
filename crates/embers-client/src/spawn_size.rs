@@ -40,6 +40,10 @@ pub enum PanePlacement {
 /// hidden behind a zoom is not drawn. `None` when the session or target is
 /// unknown or the new pane would not be drawn, in which case the server
 /// default applies and the client resizes the pane when it shows it.
+///
+/// The root tab bar takes one row at the top or the bottom alike
+/// ([`crate::TabBarPosition`]), so sizes do not depend on where the client
+/// draws it, and callers without the client's config get the same answer.
 pub fn spawn_pty_size(
     state: &ClientState,
     session_id: SessionId,
@@ -135,6 +139,7 @@ fn add_new_leaf(layout: &mut ClientState, session_id: SessionId) {
             exit_code: None,
             env: Default::default(),
             user_options: Default::default(),
+            foreground_command: None,
         },
     );
     layout.nodes.insert(

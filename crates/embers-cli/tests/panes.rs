@@ -60,6 +60,84 @@ async fn buffer_user_options_round_trip_through_cli() {
     server.shutdown().await.expect("shutdown server");
 }
 
+/// Pane id and buffer id of every pane `list-panes` prints.
+fn listed_panes(server: &TestServer) -> Vec<(String, String)> {
+    let listed = run_cli(server, ["list-panes"]);
+    stdout(&listed)
+        .lines()
+        .map(|line| {
+            let mut columns = line.split('\t');
+            let pane = columns.next().expect("pane id column").to_owned();
+            let buffer = columns.next().expect("buffer id column").to_owned();
+            (pane, buffer)
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commands_run_inside_a_pane_default_to_that_pane() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let output_dir = tempdir().expect("tempdir");
+
+    // Pane `inner` is neither focused nor in the only session, so without the
+    // pane's identity a command run inside it has no way to target it.
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(&server, ["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    let (inner, inner_buffer) = listed_panes(&server).pop().expect("alpha has a pane");
+    let focused = stdout(&run_cli(&server, ["split-window", "--", "/bin/sh"]))
+        .trim()
+        .to_owned();
+    run_cli(&server, ["new-session", "beta"]);
+    run_cli(&server, ["new-window", "-t", "beta", "--", "/bin/sh"]);
+
+    // What Neovim's autocommand does: run `embers` from inside the pane, with
+    // no target, relying on the environment the pane's processes inherit.
+    let embers = embers_test_support::cargo_bin_path("embers");
+    let captured = output_dir.path().join("captured.txt");
+    let panes = output_dir.path().join("panes.txt");
+    let script = format!(
+        "'{embers}' buffer set-option is-vim 1 && echo pane-''marker && \
+         '{embers}' list-panes > '{panes}' && '{embers}' capture-pane > '{captured}'",
+        embers = embers.display(),
+        captured = captured.display(),
+        panes = panes.display(),
+    );
+    run_cli(&server, ["send-keys", "-t", &inner, "--enter", &script]);
+    wait_for_file_contains(&captured, "pane-marker").await;
+    // Window commands default to the pane's window.
+    let listed = fs::read_to_string(&panes).expect("read listed panes");
+    for pane in [&inner, &focused] {
+        assert!(
+            listed
+                .lines()
+                .any(|line| line.starts_with(&format!("{pane}\t"))),
+            "pane {pane} missing from {listed:?}"
+        );
+    }
+
+    let shown = run_cli(&server, ["buffer", "show-options", "-t", &inner]);
+    assert_eq!(stdout(&shown).trim(), "\"is-vim\"\t\"1\"");
+    let shown = run_cli(&server, ["buffer", "show-options", "-t", &focused]);
+    assert_eq!(stdout(&shown).trim(), "", "the focused pane is untouched");
+
+    // The identity is only used for the server the pane belongs to.
+    let elsewhere = cli_command(&server)
+        .env("EMBERS_BUFFER", &inner_buffer)
+        .env("EMBERS_SOCKET", output_dir.path().join("other.sock"))
+        .args(["buffer", "show-options"])
+        .output()
+        .expect("cli command runs");
+    assert!(!elsewhere.status.success());
+    assert!(
+        String::from_utf8_lossy(&elsewhere.stderr).contains("multiple sessions"),
+        "{}",
+        String::from_utf8_lossy(&elsewhere.stderr)
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pane_commands_round_trip_through_cli() {
     let _guard = acquire_test_lock().await.expect("acquire test lock");
@@ -116,6 +194,19 @@ async fn pane_commands_round_trip_through_cli() {
             .lines()
             .any(|line| line.starts_with(&format!("{other_pane_id}\t")) && line.contains("\t1\t"))
     );
+
+    // select-pane -l goes back to the pane focused before, and toggles.
+    let focused_pane = |server: &TestServer| {
+        stdout(&run_cli(server, ["list-panes"]))
+            .lines()
+            .map(|line| line.split('\t').collect::<Vec<_>>())
+            .find(|columns| columns.get(2) == Some(&"1"))
+            .and_then(|columns| columns[0].parse::<u64>().ok())
+    };
+    run_cli(&server, ["select-pane", "-l"]);
+    assert_eq!(focused_pane(&server), Some(new_pane_id));
+    run_cli(&server, ["select-pane", "-l"]);
+    assert_eq!(focused_pane(&server), Some(other_pane_id));
 
     run_cli(
         &server,
@@ -429,6 +520,25 @@ async fn buffer_show_and_history_open_helper_buffers() {
                     && response.error.message.contains("read-only")
         ),
         "helper buffers should reject input with a read-only conflict, got {send:?}"
+    );
+
+    // Closing the history view removes the helper buffer; nothing else can
+    // show it.
+    let helper_view = helper.attachment_node_id.expect("helper is shown");
+    run_cli(&server, ["kill-pane", "-t", &helper_view.to_string()]);
+    let gone = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: RequestId(5),
+            buffer_id: helper.id,
+        }))
+        .await
+        .expect("get helper returns a response");
+    assert!(
+        matches!(
+            gone,
+            ServerResponse::Error(ref response) if response.error.code == ErrorCode::NotFound
+        ),
+        "helper buffer should be removed with its view, got {gone:?}"
     );
 
     server.shutdown().await.expect("shutdown server");

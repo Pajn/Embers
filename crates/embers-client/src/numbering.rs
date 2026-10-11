@@ -10,8 +10,9 @@
 //! number that could mean two windows. Setting a base index makes every
 //! number mean exactly one window.
 
-/// Environment variable setting the window base index for the CLI and, unless
-/// its config sets one, the interactive client.
+/// Environment variable setting the window base index for the CLI, over the
+/// one the server has for the session, and for the interactive client unless
+/// its config sets one.
 pub const BASE_INDEX_ENV_VAR: &str = "EMBERS_BASE_INDEX";
 
 /// Largest accepted base index. tmux allows any non-negative number; this keeps

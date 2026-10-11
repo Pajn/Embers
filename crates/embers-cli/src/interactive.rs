@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attributes};
 use embers_client::{
-    ConfigManager, ConfiguredClient, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, MouseModifiers, MuxClient, PanePlacement, RenderGrid, SocketTransport,
-    spawn_pty_size,
+    ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
+    KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
+    detect_host_capabilities, spawn_pty_size,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
@@ -31,7 +33,26 @@ pub async fn run(
     target: Option<String>,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    let mut client = MuxClient::connect(&socket_path).await?;
+    let transport = SocketTransport::connect(&socket_path).await?;
+    let server_shutdown = transport.server_shutdown_flag();
+    let result = run_attached(MuxClient::new(transport), socket_path, target, config_path).await;
+    // The terminal is restored by now. Like tmux, a server stopped on purpose
+    // (kill-server) ends the client normally, whatever the connection's close
+    // did to the request in flight; a server that went away without saying so
+    // is still an error.
+    if server_shutdown.load(std::sync::atomic::Ordering::Acquire) {
+        println!("[server exited]");
+        return Ok(());
+    }
+    result
+}
+
+async fn run_attached(
+    mut client: MuxClient<SocketTransport>,
+    socket_path: PathBuf,
+    target: Option<String>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
@@ -49,11 +70,22 @@ pub async fn run(
     let watched_config_path = config.active_source().path.clone();
     let mut configured = ConfiguredClient::new(client, config);
     configured.set_socket_path(socket_path.clone());
+    configured.set_command_runner(std::sync::Arc::new(crate::PromptCommandRunner::new(
+        socket_path.clone(),
+    )));
     if let Some(session_id) = session_id {
         configured.emit_terminal_title(session_id);
     }
 
-    let mut terminal = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    let (mut terminal, host_replies) = TerminalGuard::enter(mouse_capture_enabled(&configured))?;
+    configured.set_host_capabilities(detect_host_capabilities(
+        &host_replies,
+        &HostEnvironment::from_process(),
+    ));
+    configured.set_pending_attach_queries(PendingAttachQueries::after(
+        &host_replies,
+        std::time::Instant::now() + LATE_HOST_REPLY_WINDOW,
+    ));
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let _input_thread = spawn_input_thread(input_tx.clone())?;
     let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
@@ -86,10 +118,28 @@ pub async fn run(
                     .render_session(active_session_id, viewport)
                     .await?;
                 let status = configured.status_line(active_session_id, &socket_path);
-                terminal.render(&grid, terminal_size, Some(&status))?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some(&status),
+                    configured.status_cursor(),
+                    configured.host_capabilities(),
+                )?;
+                terminal.write_after_frame(
+                    &configured.drain_frame_output(),
+                    &grid,
+                    terminal_size,
+                    configured.status_cursor(),
+                )?;
             } else {
                 let grid = RenderGrid::new(viewport.width, viewport.height);
-                terminal.render(&grid, terminal_size, Some("detached"))?;
+                terminal.render(
+                    &grid,
+                    terminal_size,
+                    Some("detached"),
+                    None,
+                    configured.host_capabilities(),
+                )?;
             }
             dirty = false;
         }
@@ -124,6 +174,15 @@ pub async fn run(
                             .handle_focus_event(active_session_id, viewport, focused)
                             .await?;
                         terminal.write_bytes(&drain_terminal_output(&mut configured))?;
+                        dirty = true;
+                    }
+                }
+                Ok(TerminalEvent::HostReply(bytes)) => {
+                    if let Some(active_session_id) = session_id {
+                        let viewport = content_viewport(terminal_size);
+                        configured
+                            .handle_host_reply(active_session_id, viewport, bytes)
+                            .await?;
                         dirty = true;
                     }
                 }
@@ -162,9 +221,7 @@ pub async fn run(
             // session rather than the old one — not just after the queue drains.
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
-            if let Some(active_session_id) = configured.active_session_id()
-                && Some(active_session_id) != session_id
-            {
+            if let Some(active_session_id) = moved_to_session(&configured, session_id) {
                 ensure_root_window(
                     configured.client_mut(),
                     active_session_id,
@@ -197,11 +254,23 @@ pub async fn run(
                 terminal.write_bytes(&drain_terminal_output(&mut configured))?;
                 dirty = true;
             }
+            // A display-message whose time is up leaves the status line.
+            if configured.expire_status_message() {
+                dirty = true;
+            }
             continue;
         }
         for event in &events {
             match switched_session_id(event, attached_client_id) {
-                SwitchedSession::Switched(next_session_id) => {
+                // A session destroyed since the switch is left to the
+                // ClientChanged that reports it.
+                SwitchedSession::Switched(next_session_id)
+                    if configured
+                        .client()
+                        .state()
+                        .sessions
+                        .contains_key(&next_session_id) =>
+                {
                     ensure_root_window(
                         configured.client_mut(),
                         next_session_id,
@@ -213,8 +282,23 @@ pub async fn run(
                 SwitchedSession::Detached => {
                     session_id = None;
                 }
-                SwitchedSession::Ignore => {}
+                SwitchedSession::Switched(_) | SwitchedSession::Ignore => {}
             }
+        }
+        // The session shown was destroyed (its last pane closed, or it was
+        // killed): detach-on-destroy either moved the client to another
+        // session, picked up here, or detaches it, which ends the client.
+        if configured.should_exit() {
+            return Ok(());
+        }
+        if let Some(active_session_id) = moved_to_session(&configured, session_id) {
+            ensure_root_window(
+                configured.client_mut(),
+                active_session_id,
+                Some(content_viewport(terminal_size)),
+            )
+            .await?;
+            session_id = Some(active_session_id);
         }
         // handle_event drains background notifications up front, but its own
         // awaits (and the session-switch handling above) can race a background
@@ -224,6 +308,24 @@ pub async fn run(
         terminal.write_bytes(&drain_terminal_output(&mut configured))?;
         dirty = true;
     }
+}
+
+/// The session the client moved to when it is not the one `shown`: an action
+/// switched sessions, or detach-on-destroy left a destroyed one. A session the
+/// client no longer knows, destroyed before the server said so, is not one to
+/// move to; the `ClientChanged` that follows its destruction settles it.
+fn moved_to_session(
+    configured: &ConfiguredClient<SocketTransport>,
+    shown: Option<SessionId>,
+) -> Option<SessionId> {
+    configured.active_session_id().filter(|session_id| {
+        Some(*session_id) != shown
+            && configured
+                .client()
+                .state()
+                .sessions
+                .contains_key(session_id)
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,6 +571,9 @@ enum TerminalEvent {
     Mouse(MouseEvent),
     Paste(Vec<u8>),
     Focus(bool),
+    /// A reply from the host terminal to a query, not typed input (see
+    /// `ConfiguredClient::handle_host_reply`).
+    HostReply(Vec<u8>),
     /// A recognized report that carries no input to act on (e.g. a kitty
     /// key-release when report-event-types is negotiated). Distinguished from an
     /// unrecognized sequence so it isn't forwarded to the program as raw bytes.
@@ -570,7 +675,9 @@ fn read_terminal_event(fd: libc::c_int) -> Result<Option<TerminalEvent>> {
     let event = match first {
         b'\r' | b'\n' => TerminalEvent::Key(KeyEvent::Enter),
         b'\t' => TerminalEvent::Key(KeyEvent::Tab),
-        0x7f | 0x08 => TerminalEvent::Key(KeyEvent::Backspace),
+        // DEL is Backspace and BS is Ctrl+H, as tmux reads them, so `<C-h>`
+        // bindings work without the kitty keyboard protocol.
+        0x7f => TerminalEvent::Key(KeyEvent::Backspace),
         0x1b => read_escape_event(fd)?,
         0x00 | 0x01..=0x1a | 0x1c..=0x1f => TerminalEvent::Key(KeyEvent::Ctrl(
             char::from(first | 0x40).to_ascii_lowercase(),
@@ -589,6 +696,7 @@ fn read_escape_event(fd: libc::c_int) -> Result<TerminalEvent> {
     match next {
         b'[' => read_csi_event(fd),
         b'O' => read_ss3_event(fd),
+        b'P' | b'_' | b']' => read_string_event(fd, next),
         byte if byte.is_ascii() => Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(byte)))),
         other => {
             let mut bytes = vec![0x1b, other];
@@ -625,7 +733,51 @@ fn read_csi_event(fd: libc::c_int) -> Result<TerminalEvent> {
     if bytes == b"\x1b[200~" {
         return Ok(TerminalEvent::Paste(read_bracketed_paste(fd)?));
     }
-    Ok(parse_csi_event(&bytes).unwrap_or(TerminalEvent::Key(KeyEvent::Bytes(bytes))))
+    Ok(parse_csi_event(&bytes).unwrap_or_else(|| {
+        if is_csi_report(&bytes) {
+            TerminalEvent::HostReply(bytes)
+        } else {
+            TerminalEvent::Key(KeyEvent::Bytes(bytes))
+        }
+    }))
+}
+
+/// Whether `bytes`, a CSI sequence that is not a key, mouse or focus event, is
+/// a report from the host terminal: one with a private-parameter marker
+/// (`CSI ?`, `CSI >`, `CSI =`), as DA1, DA2, kitty keyboard flags and DECRPM
+/// replies have, or a DECRPM reply (`... $ y`). Keys never take those forms.
+fn is_csi_report(bytes: &[u8]) -> bool {
+    matches!(bytes.get(2), Some(b'?' | b'>' | b'=')) || (bytes.len() > 4 && bytes.ends_with(b"$y"))
+}
+
+/// Longest DCS, APC or OSC reply read from the host terminal; the rest of a
+/// longer one arrives as ordinary input.
+const MAX_HOST_STRING_LEN: usize = 64 * 1024;
+
+/// Read a DCS (`ESC P`), APC (`ESC _`) or OSC (`ESC ]`) string. From the host
+/// terminal these are replies, to the client's own queries or to ones a
+/// program in a pane sent through passthrough such as a kitty graphics query,
+/// so they are read whole as a reply rather than as keys. The same two bytes
+/// alone are Alt+P, Alt+_ and Alt+], which nothing follows within the
+/// continuation timeout.
+fn read_string_event(fd: libc::c_int, introducer: u8) -> Result<TerminalEvent> {
+    let Some(first) = read_optional_byte(fd, KEY_SEQUENCE_CONTINUATION_TIMEOUT)? else {
+        return Ok(TerminalEvent::Key(KeyEvent::Alt(char::from(introducer))));
+    };
+    let mut bytes = vec![0x1b, introducer, first];
+    while bytes.len() < MAX_HOST_STRING_LEN && !ends_control_string(&bytes, introducer) {
+        let Some(next) = read_optional_byte(fd, KEY_SEQUENCE_TIMEOUT)? else {
+            break;
+        };
+        bytes.push(next);
+    }
+    Ok(TerminalEvent::HostReply(bytes))
+}
+
+/// Whether `bytes` ends with the string terminator `ESC \`, or BEL for OSC.
+fn ends_control_string(bytes: &[u8], introducer: u8) -> bool {
+    (bytes.len() >= 4 && bytes.ends_with(b"\x1b\\"))
+        || (introducer == b']' && bytes.ends_with(b"\x07"))
 }
 
 fn read_ss3_event(fd: libc::c_int) -> Result<TerminalEvent> {
@@ -985,8 +1137,44 @@ struct TerminalGuard {
     mouse_capture_enabled: bool,
 }
 
+/// How long attaching waits for the host terminal to answer [`HOST_QUERIES`].
+/// Terminals answer at once, or after one round trip over SSH; the wait only
+/// runs out for a terminal that does not answer DA1 at all.
+const HOST_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long after [`HOST_REPLY_TIMEOUT`] runs out a reply to [`HOST_QUERIES`]
+/// is still taken as one, and dropped, rather than handed to a pane. The
+/// replies can follow a slow link by a few seconds; a host that ignores a
+/// query never sends one, and after this a pane gets the same reply to a
+/// query it sent itself.
+const LATE_HOST_REPLY_WINDOW: Duration = Duration::from_secs(10);
+
+/// Read the host terminal's replies to [`HOST_QUERIES`], up to and including
+/// the DA1 reply that ends them, or until [`HOST_REPLY_TIMEOUT`]. This runs
+/// before the input thread starts, so nothing else reads the input meanwhile;
+/// it reads one byte at a time to leave whatever follows the DA1 reply to the
+/// input thread. Keys typed before the replies arrive are dropped.
+fn read_host_replies(input_fd: libc::c_int) -> Result<HostReplies> {
+    let deadline = std::time::Instant::now() + HOST_REPLY_TIMEOUT;
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_HOST_REPLY_BYTES && !ends_with_device_attributes(&bytes) {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match read_optional_byte(input_fd, remaining)? {
+            Some(byte) => bytes.push(byte),
+            None => break,
+        }
+    }
+    Ok(HostReplies::parse(&bytes))
+}
+
 impl TerminalGuard {
-    fn enter(mouse_capture_enabled: bool) -> Result<Self> {
+    /// Put the terminal in raw mode, switch to the alternate screen and ask
+    /// what the terminal supports (see [`HOST_QUERIES`]), returning its
+    /// replies.
+    fn enter(mouse_capture_enabled: bool) -> Result<(Self, HostReplies)> {
         let input_fd = io::stdin().as_raw_fd();
         let output_fd = io::stdout().as_raw_fd();
         if !is_tty(input_fd) || !is_tty(output_fd) {
@@ -1006,8 +1194,12 @@ impl TerminalGuard {
         set_terminal_mode(input_fd, &raw_mode)?;
 
         let mut stdout = io::stdout();
-        match write!(stdout, "{}", terminal_enter_sequence(mouse_capture_enabled))
-            .and_then(|()| stdout.flush())
+        match write!(
+            stdout,
+            "{}{HOST_QUERIES}",
+            terminal_enter_sequence(mouse_capture_enabled)
+        )
+        .and_then(|()| stdout.flush())
         {
             Ok(()) => {}
             Err(error) => {
@@ -1015,12 +1207,13 @@ impl TerminalGuard {
                 return Err(error.into());
             }
         }
-
-        Ok(Self {
+        let guard = Self {
             input_fd,
             original_mode,
             mouse_capture_enabled,
-        })
+        };
+        let replies = read_host_replies(input_fd)?;
+        Ok((guard, replies))
     }
 
     fn size(&self) -> Result<Size> {
@@ -1056,10 +1249,21 @@ impl TerminalGuard {
         Ok(())
     }
 
-    fn render(&self, grid: &RenderGrid, terminal_size: Size, status: Option<&str>) -> Result<()> {
+    /// Draw `grid` and the status line below it. With `status_cursor` (the
+    /// command prompt is open) the cursor goes to that column of the status
+    /// line instead of the grid's cursor. Only sequences `host` supports are
+    /// used.
+    fn render(
+        &self,
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status: Option<&str>,
+        status_cursor: Option<u16>,
+        host: HostCapabilities,
+    ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.ansi_lines() {
+        for line in grid.ansi_lines_for(host) {
             write!(stdout, "{line}\x1b[K\r\n")?;
         }
 
@@ -1069,19 +1273,62 @@ impl TerminalGuard {
         }
 
         write!(stdout, "\x1b[J")?;
-        if let Some(cursor) = grid.cursor() {
-            write!(
-                stdout,
-                "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-                cursor_shape_code(cursor.shape),
-                cursor.y.saturating_add(1),
-                cursor.x.saturating_add(1)
-            )?;
-        } else {
-            write!(stdout, "\x1b[?25l")?;
-        }
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
         stdout.flush()?;
         Ok(())
+    }
+
+    /// Write what must follow the frame `render` just drew (passthrough
+    /// sequences from panes, which move the cursor), then put the cursor back
+    /// where the frame left it.
+    fn write_after_frame(
+        &self,
+        bytes: &[u8],
+        grid: &RenderGrid,
+        terminal_size: Size,
+        status_cursor: Option<u16>,
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mut stdout = io::stdout();
+        stdout.write_all(bytes)?;
+        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+/// Place and show the cursor for a frame: in the status line while the command
+/// prompt is open (`status_cursor`), else at the grid's cursor, else hidden.
+fn write_cursor(
+    stdout: &mut impl Write,
+    grid: &RenderGrid,
+    terminal_size: Size,
+    status_cursor: Option<u16>,
+) -> io::Result<()> {
+    if let Some(column) = status_cursor
+        && terminal_size.height > grid.height()
+    {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(CursorShape::Beam),
+            terminal_size.height,
+            column
+                .min(terminal_size.width.saturating_sub(1))
+                .saturating_add(1)
+        )
+    } else if let Some(cursor) = grid.cursor() {
+        write!(
+            stdout,
+            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
+            cursor_shape_code(cursor.shape),
+            cursor.y.saturating_add(1),
+            cursor.x.saturating_add(1)
+        )
+    } else {
+        write!(stdout, "\x1b[?25l")
     }
 }
 
@@ -1463,6 +1710,61 @@ mod tests {
     }
 
     #[test]
+    fn host_string_replies_are_read_whole_as_replies() {
+        // Replies to a kitty graphics query, XTGETTCAP and an OSC colour query,
+        // as a host sends them back for a program in a pane.
+        let replies: [&[u8]; 3] = [
+            b"\x1b_Gi=31;OK\x1b\\",
+            b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\",
+            b"\x1b]11;rgb:0000/0000/0000\x07",
+        ];
+        with_pipe(&replies.concat(), |fd| {
+            for reply in replies {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::HostReply(reply.to_vec()))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn private_csi_reports_are_replies_not_keys() {
+        // DA1, DA2, the kitty keyboard flags and a DECRPM mode report.
+        let replies: [&[u8]; 4] = [
+            b"\x1b[?62;22c",
+            b"\x1b[>1;4000;29c",
+            b"\x1b[?1u",
+            b"\x1b[?2026;2$y",
+        ];
+        with_pipe(&replies.concat(), |fd| {
+            for reply in replies {
+                assert_eq!(
+                    read_terminal_event(fd).unwrap(),
+                    Some(TerminalEvent::HostReply(reply.to_vec()))
+                );
+            }
+        });
+        // An unknown key sequence is still a key.
+        with_pipe(b"\x1b[99z", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Bytes(b"\x1b[99z".to_vec())))
+            );
+        });
+    }
+
+    #[test]
+    fn alt_p_alone_stays_a_key() {
+        with_pipe(b"\x1bP", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Alt('P')))
+            );
+        });
+    }
+
+    #[test]
     fn parses_page_up_and_page_down_keys() {
         with_pipe(b"\x1b[1~\x1b[2~\x1b[3~\x1b[4~\x1b[5~\x1b[6~", |fd| {
             assert_eq!(
@@ -1514,6 +1816,22 @@ mod tests {
             assert_eq!(
                 read_terminal_event(fd).unwrap(),
                 Some(TerminalEvent::Key(KeyEvent::Ctrl('_')))
+            );
+        });
+    }
+
+    #[test]
+    fn decodes_backspace_and_ctrl_h_like_tmux() {
+        // DEL is Backspace; BS is Ctrl+H, so `<C-h>` bindings fire on hosts
+        // without the kitty keyboard protocol.
+        with_pipe(&[0x7f, 0x08], |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Backspace))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Ctrl('h')))
             );
         });
     }
