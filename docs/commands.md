@@ -201,7 +201,8 @@ A small part of tmux's format language is supported:
 | `#S` | `#{session_name}` | session name |
 | `#I` | `#{window_index}` | window number, counting from the base index |
 | `#W` | `#{window_name}` | window title |
-| `#D` | `#{pane_id}` | pane id, as `list-panes` prints it and `-t` takes it |
+| `#D` | `#{pane_id}` | pane id, as `%N` like tmux (the pane showing buffer `N`); `-t` takes it |
+| | `#{node_id}` | the pane's layout node, as `list-panes` prints it; `-t` takes it as a plain number |
 | `#T` | `#{pane_title}` | pane title |
 | | `#{pane_current_path}` | the pane's working directory |
 | | `#{pane_current_command}` | the program in the pane's foreground, or the one it started with when that is unknown |

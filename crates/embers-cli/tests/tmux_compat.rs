@@ -201,7 +201,8 @@ async fn panes_start_in_the_directory_given_with_c() {
     assert_eq!(address, "alpha:0.1");
     let (pane_id, buffer_id) = ids.split_once(' ').expect("ids");
     wait_for_text(&server, pane_id, &format!("dir:{}", real_dir(dir.path()))).await;
-    // `%N` names the same pane by its buffer.
+    // `#{pane_id}` is tmux's `%N`, and `%N` names the same pane back.
+    assert_eq!(pane_id, format!("%{buffer_id}"));
     assert_eq!(print(&server, &format!("%{buffer_id}"), "#D"), pane_id);
     // -v stacks the new pane below.
     let snapshot = {
@@ -660,7 +661,7 @@ fn focused_pane(server: &TestServer, session: &str) -> String {
             "-t",
             session,
             "-F",
-            "#{pane_active} #{pane_id}",
+            "#{pane_active} #{node_id}",
         ],
     ))
     .lines()
@@ -677,7 +678,7 @@ async fn select_pane_moves_to_the_pane_on_that_side() {
     );
     // left | right-top
     //      | right-bottom
-    let left = print(&server, "alpha:0.0", "#D");
+    let left = print(&server, "alpha:0.0", "#{node_id}");
     let top_right = out(&run_cli(
         &server,
         ["split-window", "-h", "-t", &left, "--", "/bin/sh"],

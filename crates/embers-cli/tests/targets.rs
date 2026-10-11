@@ -99,10 +99,10 @@ async fn targets_accept_tmux_forms() {
     // Panes by index within a window, `%buffer` and the plain pane id.
     let logs = panes(&server, "alpha:logs");
     assert_eq!(logs.len(), 2);
-    assert_eq!(print(&server, "alpha:logs.1", "#D"), logs[1].0);
-    assert_eq!(print(&server, "alpha:1.0", "#D"), logs[0].0);
+    assert_eq!(print(&server, "alpha:logs.1", "#{node_id}"), logs[1].0);
+    assert_eq!(print(&server, "alpha:1.0", "#{node_id}"), logs[0].0);
     assert_eq!(
-        print(&server, &format!("%{}", logs[1].1), "#S:#W #D"),
+        print(&server, &format!("%{}", logs[1].1), "#S:#W #{node_id}"),
         format!("alpha:logs {}", logs[1].0)
     );
     assert_eq!(print(&server, &logs[0].0, "#W"), "logs");
@@ -184,11 +184,11 @@ async fn relative_targets_start_from_the_callers_pane() {
         "one"
     );
     assert_eq!(
-        in_pane(&["display-message", "-p", "-t", ".1", "#D"]),
+        in_pane(&["display-message", "-p", "-t", ".1", "#{node_id}"]),
         two[1].0
     );
     assert_eq!(
-        in_pane(&["display-message", "-p", "-t", ":", "#D"]),
+        in_pane(&["display-message", "-p", "-t", ":", "#{node_id}"]),
         two[0].0
     );
     assert_eq!(

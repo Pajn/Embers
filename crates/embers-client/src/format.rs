@@ -145,7 +145,14 @@ impl FormatContext {
             "session_name" => self.session_name.clone(),
             "window_index" => self.window_index.to_string(),
             "window_name" => self.window_name.clone(),
+            // tmux's form, `%N`, which `-t` takes back: the pane showing
+            // buffer N.
             "pane_id" => self
+                .buffer_id
+                .map(|buffer_id| format!("%{buffer_id}"))
+                .unwrap_or_default(),
+            // The layout node the pane is, which plain-number targets take.
+            "node_id" => self
                 .pane_id
                 .map(|pane_id| pane_id.to_string())
                 .unwrap_or_default(),
@@ -305,7 +312,7 @@ mod tests {
     fn expands_short_and_long_variables() {
         assert_eq!(
             expand_format("[#S] #I:#W #D #T", &context()),
-            "[work] 2:editor 7 vim"
+            "[work] 2:editor %12 vim"
         );
         assert_eq!(
             expand_format(
