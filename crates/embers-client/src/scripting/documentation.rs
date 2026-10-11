@@ -35,6 +35,8 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
             "unbind",
             "define_action",
             "on",
+            "set_clipboard",
+            "set_base_index",
         ],
     },
     PageSpec {

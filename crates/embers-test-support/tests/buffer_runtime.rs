@@ -36,6 +36,8 @@ async fn create_buffer_with_env(
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
                 .collect(),
+            size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer request succeeds");
@@ -230,6 +232,43 @@ async fn detached_buffers_accept_input_and_keep_running_after_detach_requests() 
 
     send_input(&mut connection, buffer.id, "again\n").await;
     wait_for_capture_contains(&mut connection, buffer.id, "seen:again").await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_request_size_is_the_size_the_command_starts_at() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Create {
+            request_id: new_request_id(),
+            title: None,
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "stty size; exec cat".to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: Some(PtySize::new(97, 31)),
+            session_id: None,
+        }))
+        .await
+        .expect("create buffer request succeeds");
+    let buffer = match response {
+        ServerResponse::Buffer(buffer) => buffer.buffer,
+        other => panic!("expected buffer response, got {other:?}"),
+    };
+    assert_eq!(buffer.pty_size, PtySize::new(97, 31));
+    connection
+        .wait_for_capture_contains(buffer.id, "31 97", Duration::from_secs(3))
+        .await
+        .expect("command reports the requested size");
 
     server.shutdown().await.expect("shutdown server");
 }

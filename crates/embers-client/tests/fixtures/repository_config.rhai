@@ -87,8 +87,9 @@ fn is_nvim_buffer(ctx) {
         return false;
     }
 
-    // Prefer the user option set by the nvim autocmds (see below); it survives
-    // shells launched inside the pane the way tmux @pane-is-vim does. An explicit
+    // Prefer the user option set by the nvim autocmds (see
+    // docs/layout-controls.md); it survives shells launched inside the pane
+    // the way tmux @pane-is-vim does. An explicit
     // "0" means Vim reported it is no longer active, so trust it and stop. Only an
     // unset () value falls back to matching the direct child process name for panes
     // spawned straight into nvim.
@@ -137,6 +138,41 @@ fn smart_nav_right(ctx) {
         action.send_bytes_current([12])
     } else {
         action.focus_right()
+    }
+}
+
+// smart-splits.nvim: Alt-h/j/k/l resize the pane by 3 cells like tmux
+// `resize-pane -L/-D/-U/-R 3`, unless the pane runs Neovim, which gets the key
+// so smart-splits can resize its own windows (and hand off at the edges).
+fn smart_resize_left(ctx) {
+    if is_nvim_buffer(ctx) {
+        action.send_keys_current("<M-h>")
+    } else {
+        action.resize_left(3)
+    }
+}
+
+fn smart_resize_down(ctx) {
+    if is_nvim_buffer(ctx) {
+        action.send_keys_current("<M-j>")
+    } else {
+        action.resize_down(3)
+    }
+}
+
+fn smart_resize_up(ctx) {
+    if is_nvim_buffer(ctx) {
+        action.send_keys_current("<M-k>")
+    } else {
+        action.resize_up(3)
+    }
+}
+
+fn smart_resize_right(ctx) {
+    if is_nvim_buffer(ctx) {
+        action.send_keys_current("<M-l>")
+    } else {
+        action.resize_right(3)
     }
 }
 
@@ -250,8 +286,14 @@ fn format_tabs(ctx) {
             left.push(ui.segment("", #{ fg: inactive_bg }));
         }
 
-        if tab.has_urgent() {
+        if tab.has_bell() {
             left.push(ui.segment(" ! ", #{ fg: urgent_fg }));
+        }
+
+        // tmux has no default marker for synchronize-panes; flag it so typing
+        // into every pane is never a surprise.
+        if tab.synchronize_panes() {
+            left.push(ui.segment(" sync ", #{ fg: urgent_fg }));
         }
 
         left.push(ui.segment(" "));
@@ -303,6 +345,10 @@ define_action("smart-nav-left", smart_nav_left);
 define_action("smart-nav-down", smart_nav_down);
 define_action("smart-nav-up", smart_nav_up);
 define_action("smart-nav-right", smart_nav_right);
+define_action("smart-resize-left", smart_resize_left);
+define_action("smart-resize-down", smart_resize_down);
+define_action("smart-resize-up", smart_resize_up);
+define_action("smart-resize-right", smart_resize_right);
 define_action("split-below", split_below);
 define_action("split-right", split_right);
 define_action("new-shell-tab", new_shell_tab);
@@ -353,6 +399,12 @@ bind("copy", "<C-h>", "smart-nav-left");
 bind("copy", "<C-j>", "smart-nav-down");
 bind("copy", "<C-k>", "smart-nav-up");
 bind("copy", "<C-l>", "smart-nav-right");
+bind("normal", "<M-h>", "smart-resize-left");
+bind("normal", "<M-j>", "smart-resize-down");
+bind("normal", "<M-k>", "smart-resize-up");
+bind("normal", "<M-l>", "smart-resize-right");
+bind("normal", "<leader>z", action.toggle_zoom_current_node());
+bind("normal", "<leader>S", action.toggle_synchronize_panes());
 bind("normal", "<leader>c", "new-shell-tab");
 bind("normal", "<leader>s", "split-below");
 bind("normal", "<leader>v", "split-right");

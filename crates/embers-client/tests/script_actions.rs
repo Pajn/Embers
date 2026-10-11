@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use embers_client::copy_mode::{CopyMotion, JumpKind};
 use embers_client::{
     Action, BufferSpawnSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec,
     FloatingSize, FloatingSpec, KeyToken, NavigationDirection, NotifyLevel, PresentationModel,
@@ -9,6 +10,7 @@ use embers_client::{
 use embers_core::{BufferId, FloatingId, NodeId, Size, SplitDirection};
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+    SynchronizePanesMode,
 };
 
 use crate::support::{FOCUSED_BUFFER_ID, SESSION_ID, demo_state};
@@ -368,6 +370,49 @@ fn action_arrays_preserve_order_and_unit_is_noop() {
 }
 
 #[test]
+fn copy_mode_helpers_build_copy_mode_actions() {
+    let engine = load_engine(
+        r#"
+            fn copy_actions(ctx) {
+                [
+                    action.enter_copy_mode(),
+                    action.copy_next_word(),
+                    action.copy_halfpage_up(),
+                    action.copy_jump_to_backward(),
+                    action.copy_jump_reverse(),
+                    action.select_other_end(),
+                    action.enter_search_backward(),
+                    action.exit_copy_mode(),
+                ]
+            }
+            define_action("copy-actions", copy_actions);
+        "#,
+    );
+
+    assert_eq!(
+        engine
+            .run_named_action("copy-actions", demo_context())
+            .unwrap(),
+        vec![
+            Action::EnterCopyMode,
+            Action::CopyMotion {
+                motion: CopyMotion::NextWord,
+            },
+            Action::CopyMotion {
+                motion: CopyMotion::HalfPageUp,
+            },
+            Action::CopyJump {
+                kind: JumpKind::ToBackward,
+            },
+            Action::CopyJumpReverse,
+            Action::SelectOtherEnd,
+            Action::EnterSearchBackward,
+            Action::ExitCopyMode,
+        ]
+    );
+}
+
+#[test]
 fn invalid_action_shapes_fail_cleanly() {
     let engine = load_engine(
         r#"
@@ -674,6 +719,65 @@ fn session_switch_builders_map_to_actions() {
     assert_eq!(
         engine.run_named_action("prev", demo_context()).unwrap(),
         vec![Action::PrevSession]
+    );
+}
+
+#[test]
+fn layout_control_builders_map_to_actions() {
+    let engine = load_engine(
+        r#"
+            fn left(ctx) { action.resize_left(3) }
+            fn right(ctx) { action.resize_right(1) }
+            fn up(ctx) { action.resize_up(2) }
+            fn down(ctx) { action.resize_down(4) }
+            fn zoom(ctx) { action.toggle_zoom_current_node() }
+            fn sync_toggle(ctx) { action.toggle_synchronize_panes() }
+            fn sync_on(ctx) { action.set_synchronize_panes(true) }
+            fn sync_off(ctx) { action.set_synchronize_panes(false) }
+            fn bad_resize(ctx) { action.resize_left(0) }
+            define_action("left", left);
+            define_action("right", right);
+            define_action("up", up);
+            define_action("down", down);
+            define_action("zoom", zoom);
+            define_action("sync-toggle", sync_toggle);
+            define_action("sync-on", sync_on);
+            define_action("sync-off", sync_off);
+            define_action("bad-resize", bad_resize);
+        "#,
+    );
+
+    for (name, direction, cells) in [
+        ("left", NavigationDirection::Left, 3),
+        ("right", NavigationDirection::Right, 1),
+        ("up", NavigationDirection::Up, 2),
+        ("down", NavigationDirection::Down, 4),
+    ] {
+        assert_eq!(
+            engine.run_named_action(name, demo_context()).unwrap(),
+            vec![Action::ResizePane { direction, cells }]
+        );
+    }
+    assert_eq!(
+        engine.run_named_action("zoom", demo_context()).unwrap(),
+        vec![Action::ToggleZoomNode { node_id: None }]
+    );
+    for (name, mode) in [
+        ("sync-toggle", SynchronizePanesMode::Toggle),
+        ("sync-on", SynchronizePanesMode::On),
+        ("sync-off", SynchronizePanesMode::Off),
+    ] {
+        assert_eq!(
+            engine.run_named_action(name, demo_context()).unwrap(),
+            vec![Action::SetSynchronizePanes { mode }]
+        );
+    }
+    assert!(
+        engine
+            .run_named_action("bad-resize", demo_context())
+            .unwrap_err()
+            .to_string()
+            .contains("resize cells must be greater than zero")
     );
 }
 

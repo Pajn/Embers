@@ -81,6 +81,8 @@ async fn create_buffer_with_command(
             command,
             cwd: None,
             env: Default::default(),
+            size: None,
+            session_id: None,
         }))
         .await
         .expect("create buffer succeeds");
@@ -1247,8 +1249,10 @@ async fn rapid_terminal_output_renders_latest_visible_snapshot() {
     server.shutdown().await.expect("server shuts down");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn styled_pane_output_reaches_client_ansi_lines() {
+/// Run `script` under `/bin/sh` in a fresh pane, wait until `marker` shows in its
+/// visible snapshot, then render the session through a separate client the way
+/// the interactive client does. Returns the rendered ANSI and plain text.
+async fn render_pane_output(script: &str, marker: &str) -> (String, String) {
     let server = TestServer::start().await.expect("server starts");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -1257,35 +1261,30 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
     let session = create_session(&mut connection, "alpha").await;
     let buffer = create_buffer_with_command(
         &mut connection,
-        "colored",
-        vec![
-            "/bin/sh".to_owned(),
-            "-lc".to_owned(),
-            // Emit red text via SGR, then idle so the pane persists while we render.
-            "printf '\\033[31mRED-TEXT\\033[0m\\n'; sleep 2".to_owned(),
-        ],
+        "styled",
+        vec!["/bin/sh".to_owned(), "-lc".to_owned(), script.to_owned()],
     )
     .await;
     let _ = connection
         .request(&ClientMessage::Session(SessionRequest::AddRootTab {
             request_id: new_request_id(),
             session_id: session.session.id,
-            title: "colored".to_owned(),
+            title: "styled".to_owned(),
             buffer_id: Some(buffer.id),
             child_node_id: None,
         }))
         .await
-        .expect("add colored tab succeeds");
+        .expect("add styled tab succeeds");
 
     connection
-        .wait_for_capture_contains(buffer.id, "RED-TEXT", Duration::from_secs(3))
+        .wait_for_capture_contains(buffer.id, marker, Duration::from_secs(3))
         .await
-        .expect("colored output renders");
+        .expect("styled output renders");
     let _ = wait_for_visible_snapshot(
         &mut connection,
         buffer.id,
         Duration::from_secs(3),
-        |snapshot| lines_text(&snapshot.lines).contains("RED-TEXT"),
+        |snapshot| lines_text(&snapshot.lines).contains(marker),
     )
     .await;
 
@@ -1307,7 +1306,17 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
     )
     .expect("projection succeeds");
     let grid = Renderer.render(client.state(), &model);
-    let ansi = grid.ansi_lines().join("\n");
+    let rendered = (grid.ansi_lines().join("\n"), grid.render());
+
+    server.shutdown().await.expect("server shuts down");
+    rendered
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn styled_pane_output_reaches_client_ansi_lines() {
+    // Emit red text via SGR, then idle so the pane persists while we render.
+    let (ansi, plain) =
+        render_pane_output("printf '\\033[31mRED-TEXT\\033[0m\\n'; sleep 2", "RED-TEXT").await;
 
     // ANSI red maps to indexed color 1; the client re-emits `38;5;1m` so the
     // outer terminal's palette resolves it (semantic colors are not baked to RGB).
@@ -1315,9 +1324,143 @@ async fn styled_pane_output_reaches_client_ansi_lines() {
         ansi.contains("\x1b[38;5;1m"),
         "expected indexed red SGR in client output:\n{ansi:?}"
     );
-    assert!(grid.render().contains("RED-TEXT"));
+    assert!(plain.contains("RED-TEXT"));
+}
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undercurl_and_underline_color_reach_client_ansi_lines() {
+    // What Neovim emits for a diagnostic: a curly underline in true-color red.
+    let (ansi, plain) = render_pane_output(
+        "printf '\\033[4:3m\\033[58:2::255:0:0mDIAG\\033[0m\\n'; sleep 2",
+        "DIAG",
+    )
+    .await;
+
+    assert!(
+        ansi.contains("\x1b[4:3m\x1b[58:2::255:0:0mDIAG"),
+        "expected curly underline and its color in client output:\n{ansi:?}"
+    );
+    assert!(plain.contains("DIAG"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc8_hyperlink_reaches_client_ansi_lines() {
+    let (ansi, plain) = render_pane_output(
+        "printf '\\033]8;id=doc;https://example.com/doc\\033\\\\DOCLINK\\033]8;;\\033\\\\ after\\n'; sleep 2",
+        "DOCLINK",
+    )
+    .await;
+
+    assert!(
+        ansi.contains("\x1b]8;id=doc;https://example.com/doc\x1b\\DOCLINK\x1b]8;;\x1b\\ after"),
+        "expected an OSC 8 span around the link text in client output:\n{ansi:?}"
+    );
+    assert!(plain.contains("DOCLINK after"));
+}
+
+/// Attach a configured client to a session whose pane copies "hi" with OSC 52
+/// once it reads a line, trigger the copy, and return the client's host
+/// terminal output collected until the clipboard event was handled.
+async fn pane_osc52_output(config_source: &str) -> Vec<u8> {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    // Wait for a line first so the copy happens after the client is attached.
+    let buffer = create_buffer_with_command(
+        &mut connection,
+        "yank",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "read _; printf '\\033]52;c;%s\\a' $(printf hi | base64); sleep 5".to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "yank".to_owned(),
+            buffer_id: Some(buffer.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add yank tab succeeds");
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(config_dir.path().join("config.rhai"), config_source).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: buffer.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("trigger copy");
+
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "clipboard event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(100))
+            .await
+            .expect("process event");
+        output.extend(configured.drain_terminal_output().concat());
+        if matches!(event, Some(embers_protocol::ServerEvent::Clipboard(_))) {
+            break;
+        }
+    }
     server.shutdown().await.expect("server shuts down");
+    output
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc52_from_pane_reaches_client_terminal_output() {
+    let output = pane_osc52_output("").await;
+    assert!(
+        contains_subslice(&output, b"\x1b]52;c;aGk=\x07"),
+        "expected OSC 52 for \"hi\" in {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn osc52_from_pane_is_dropped_when_clipboard_is_off() {
+    let output = pane_osc52_output("set_clipboard(false);").await;
+    assert!(
+        !contains_subslice(&output, b"\x1b]52;"),
+        "expected no OSC 52 in {:?}",
+        String::from_utf8_lossy(&output)
+    );
 }
 
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
@@ -1776,6 +1919,510 @@ async fn session_switch_actions_move_between_sessions() {
         "expected a 'no previous session' notification, not an error switch, got {:?}",
         missing_notice[0]
     );
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+/// `(leaf, buffer)` pairs of `session_name`, ordered by leaf node id
+/// (creation order).
+async fn leaf_buffers(
+    connection: &mut TestConnection,
+    session_name: &str,
+) -> Vec<(NodeId, BufferId)> {
+    let snapshot = session_snapshot_by_name(connection, session_name).await;
+    let mut leaves = snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.buffer_view
+                .as_ref()
+                .map(|view| (node.id, view.buffer_id))
+        })
+        .collect::<Vec<_>>();
+    leaves.sort();
+    leaves
+}
+
+/// Ask the shell in `buffer_id` for its PTY size and wait for the `rows cols`
+/// answer, so the assertion covers the real PTY rather than server bookkeeping.
+async fn assert_stty_size(
+    connection: &mut TestConnection,
+    buffer_id: BufferId,
+    cols: u16,
+    rows: u16,
+) {
+    assert_eq!(
+        buffer_record(connection, buffer_id).await.pty_size,
+        embers_core::PtySize::new(cols, rows),
+        "server-side pty size of buffer {buffer_id}"
+    );
+    connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id,
+            bytes: b"stty size\n".to_vec(),
+        }))
+        .await
+        .expect("send stty succeeds");
+    connection
+        .wait_for_capture_contains(buffer_id, &format!("{rows} {cols}"), Duration::from_secs(3))
+        .await
+        .expect("shell reports the resized pty");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pane_pty_size_follows_the_drawn_pane_size() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let initial = Size {
+        width: 101,
+        height: 31,
+    };
+
+    // First attach: the root tab bar takes one row and the pane title another,
+    // so a 101x31 viewport leaves 101x29 for the shell.
+    configured
+        .sync_pty_sizes(alpha, initial)
+        .await
+        .expect("sync");
+    let leaves = leaf_buffers(&mut connection, "alpha").await;
+    assert_eq!(leaves.len(), 1);
+    assert_stty_size(&mut connection, leaves[0].1, 101, 29).await;
+
+    // A vertical split shares the width, minus one divider column.
+    run_cli(&server, &["split-window", "--", "/bin/sh"]);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after split");
+    configured
+        .sync_pty_sizes(alpha, initial)
+        .await
+        .expect("sync after split");
+    let leaves = leaf_buffers(&mut connection, "alpha").await;
+    assert_eq!(leaves.len(), 2);
+    assert_stty_size(&mut connection, leaves[0].1, 50, 29).await;
+    assert_stty_size(&mut connection, leaves[1].1, 50, 29).await;
+
+    // Resizing the outer terminal resizes every visible pane.
+    let resized = Size {
+        width: 121,
+        height: 41,
+    };
+    configured
+        .sync_pty_sizes(alpha, resized)
+        .await
+        .expect("sync after outer resize");
+    assert_stty_size(&mut connection, leaves[0].1, 60, 39).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+
+    // A zoomed pane fills the whole viewport (no tab bar); the hidden pane
+    // keeps its last size.
+    connection
+        .request(&ClientMessage::Node(NodeRequest::Zoom {
+            request_id: new_request_id(),
+            node_id: leaves[0].0,
+        }))
+        .await
+        .expect("zoom succeeds");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync after zoom");
+    configured
+        .sync_pty_sizes(alpha, resized)
+        .await
+        .expect("sync after zoom");
+    assert_stty_size(&mut connection, leaves[0].1, 121, 40).await;
+    assert_stty_size(&mut connection, leaves[1].1, 60, 39).await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+/// Shell command whose first output is the PTY size it started with.
+const REPORT_STARTUP_SIZE: &str = "stty size; exec /bin/sh";
+
+/// The newest buffer shown in `session_name`: the one a create command just
+/// spawned.
+async fn newest_buffer(connection: &mut TestConnection, session_name: &str) -> BufferId {
+    leaf_buffers(connection, session_name)
+        .await
+        .into_iter()
+        .map(|(_, buffer_id)| buffer_id)
+        .max()
+        .expect("session shows a buffer")
+}
+
+/// The first `rows cols` line `buffer_id` printed, as `(cols, rows)`.
+async fn first_reported_size(connection: &mut TestConnection, buffer_id: BufferId) -> (u16, u16) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let capture = connection
+            .capture_buffer(buffer_id)
+            .await
+            .expect("capture succeeds");
+        let size = capture.lines.iter().find_map(|line| {
+            let (rows, cols) = line.trim().split_once(' ')?;
+            Some((cols.parse().ok()?, rows.parse().ok()?))
+        });
+        if let Some(size) = size {
+            return size;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "buffer {buffer_id} never reported its size; last capture: {:?}",
+            capture.lines
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The PTY size `configured` draws `buffer_id` at in `session_id`.
+async fn drawn_size(
+    configured: &mut embers_client::ConfiguredClient<embers_client::SocketTransport>,
+    session_id: SessionId,
+    viewport: Size,
+    buffer_id: BufferId,
+) -> (u16, u16) {
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let presentation =
+        PresentationModel::project(configured.client().state(), session_id, viewport)
+            .expect("projection succeeds");
+    let size = presentation
+        .leaves
+        .iter()
+        .find(|leaf| leaf.buffer_id == buffer_id)
+        .and_then(|leaf| leaf.pty_size())
+        .unwrap_or_else(|| panic!("buffer {buffer_id} is not drawn"));
+    (size.cols, size.rows)
+}
+
+/// The startup size `buffer_id` reported must be the size it is drawn at,
+/// without the client having resized it.
+async fn assert_spawned_at_drawn_size(
+    connection: &mut TestConnection,
+    configured: &mut embers_client::ConfiguredClient<embers_client::SocketTransport>,
+    session_id: SessionId,
+    viewport: Size,
+    buffer_id: BufferId,
+    expected: (u16, u16),
+) {
+    let reported = first_reported_size(connection, buffer_id).await;
+    let drawn = drawn_size(configured, session_id, viewport, buffer_id).await;
+    assert_eq!(drawn, expected, "drawn size of buffer {buffer_id}");
+    assert_eq!(reported, drawn, "startup size of buffer {buffer_id}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_created_panes_start_at_their_drawn_size() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let (config, _tempdir) = session_switch_config();
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let viewport = Size {
+        width: 101,
+        height: 31,
+    };
+    // The attached client draws the session once; nothing below syncs again,
+    // so every size checked is the one the pane was spawned with.
+    configured
+        .sync_pty_sizes(alpha, viewport)
+        .await
+        .expect("sync");
+
+    // A horizontal split stacks the panes: 30 rows below the tab bar, minus
+    // one divider row, shared 14/15, each minus its title row.
+    run_cli(
+        &server,
+        &[
+            "split-window",
+            "--horizontal",
+            "--",
+            "/bin/sh",
+            "-c",
+            REPORT_STARTUP_SIZE,
+        ],
+    );
+    let buffer_id = newest_buffer(&mut connection, "alpha").await;
+    assert_spawned_at_drawn_size(
+        &mut connection,
+        &mut configured,
+        alpha,
+        viewport,
+        buffer_id,
+        (101, 14),
+    )
+    .await;
+
+    // A vertical split of that pane shares its width, minus one divider column.
+    run_cli(
+        &server,
+        &["split-window", "--", "/bin/sh", "-c", REPORT_STARTUP_SIZE],
+    );
+    let buffer_id = newest_buffer(&mut connection, "alpha").await;
+    assert_spawned_at_drawn_size(
+        &mut connection,
+        &mut configured,
+        alpha,
+        viewport,
+        buffer_id,
+        (50, 14),
+    )
+    .await;
+
+    // A new window gets the whole area below the tab bar.
+    run_cli(
+        &server,
+        &[
+            "new-window",
+            "-t",
+            "alpha",
+            "--",
+            "/bin/sh",
+            "-c",
+            REPORT_STARTUP_SIZE,
+        ],
+    );
+    let buffer_id = newest_buffer(&mut connection, "alpha").await;
+    assert_spawned_at_drawn_size(
+        &mut connection,
+        &mut configured,
+        alpha,
+        viewport,
+        buffer_id,
+        (101, 29),
+    )
+    .await;
+
+    // A popup loses its border and title row.
+    run_cli(
+        &server,
+        &[
+            "display-popup",
+            "-t",
+            "alpha",
+            "--width",
+            "40",
+            "--height",
+            "12",
+            "--",
+            "/bin/sh",
+            "-c",
+            REPORT_STARTUP_SIZE,
+        ],
+    );
+    let buffer_id = newest_buffer(&mut connection, "alpha").await;
+    assert_spawned_at_drawn_size(
+        &mut connection,
+        &mut configured,
+        alpha,
+        viewport,
+        buffer_id,
+        (38, 9),
+    )
+    .await;
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn action_created_panes_start_at_their_drawn_size() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let script = r#"
+            fn split_h(ctx) { action.split_with("horizontal", tree.buffer_spawn(REPORTER)) }
+            fn split_v(ctx) { action.split_with("vertical", tree.buffer_spawn(REPORTER)) }
+            fn new_tab(ctx) {
+                action.insert_tab_after_current("reporter", tree.buffer_spawn(REPORTER))
+            }
+            fn popup(ctx) {
+                action.open_floating(
+                    tree.buffer_spawn(REPORTER),
+                    #{ x: 2, y: 2, width: 30, height: 10 }
+                )
+            }
+            define_action("split-h", split_h);
+            define_action("split-v", split_v);
+            define_action("new-tab", new_tab);
+            define_action("popup", popup);
+            bind("normal", "1", "split-h");
+            bind("normal", "2", "split-v");
+            bind("normal", "3", "new-tab");
+            bind("normal", "4", "popup");
+        "#
+    .replace(
+        "REPORTER",
+        &format!(r#"["/bin/sh", "-c", "{REPORT_STARTUP_SIZE}"]"#),
+    );
+    std::fs::write(tempdir.path().join("config.rhai"), script).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let alpha = session_id_by_name(configured.client(), "alpha");
+    let viewport = Size {
+        width: 101,
+        height: 31,
+    };
+
+    for (key, expected) in [
+        ('1', (101, 14)),
+        ('2', (50, 14)),
+        ('3', (101, 29)),
+        ('4', (28, 7)),
+    ] {
+        configured
+            .handle_key(alpha, viewport, KeyEvent::Char(key))
+            .await
+            .expect("action runs");
+        assert!(
+            configured.notifications().is_empty(),
+            "{:?}",
+            configured.notifications()
+        );
+        let buffer_id = newest_buffer(&mut connection, "alpha").await;
+        assert_spawned_at_drawn_size(
+            &mut connection,
+            &mut configured,
+            alpha,
+            viewport,
+            buffer_id,
+            expected,
+        )
+        .await;
+    }
+
+    server.shutdown().await.expect("server shuts down");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn most_recently_active_client_owns_the_pane_pty_size() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let mut clients = Vec::new();
+    let mut tempdirs = Vec::new();
+    for _ in 0..2 {
+        let client = MuxClient::connect(server.socket_path())
+            .await
+            .expect("client connects");
+        let (config, tempdir) = session_switch_config();
+        let mut configured = ConfiguredClient::new(client, config);
+        configured
+            .client_mut()
+            .resync_all_sessions()
+            .await
+            .expect("resync");
+        clients.push(configured);
+        tempdirs.push(tempdir);
+    }
+    let alpha = session_id_by_name(clients[0].client(), "alpha");
+    let large = Size {
+        width: 101,
+        height: 31,
+    };
+    let small = Size {
+        width: 81,
+        height: 21,
+    };
+    let buffer_id = leaf_buffers(&mut connection, "alpha").await[0].1;
+
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
+
+    // A client attaching later takes over with its own size.
+    clients[1].sync_pty_sizes(alpha, small).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+
+    // Redrawing an idle client at an unchanged size does not fight back, even
+    // once it has seen the other client's size.
+    clients[0]
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    assert_stty_size(&mut connection, buffer_id, 81, 19).await;
+
+    // Typing in the first client makes it the active one again. Ctrl-U then
+    // clears the typed character so the shell reads a clean `stty size`.
+    clients[0]
+        .handle_key(alpha, large, KeyEvent::Char('z'))
+        .await
+        .expect("key passes through");
+    clients[0].sync_pty_sizes(alpha, large).await.expect("sync");
+    connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id,
+            bytes: b"\x15".to_vec(),
+        }))
+        .await
+        .expect("clear typed key");
+    assert_stty_size(&mut connection, buffer_id, 101, 29).await;
 
     server.shutdown().await.expect("server shuts down");
 }

@@ -216,6 +216,8 @@ async fn detached_buffers_can_be_listed_and_attached_via_cli() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
+            session_id: None,
         }))
         .await
         .expect("buffer create succeeds");
@@ -666,6 +668,8 @@ async fn node_commands_cover_zoom_swap_break_join_and_reorder() {
             command: vec!["/bin/sh".to_owned()],
             cwd: None,
             env: Default::default(),
+            size: None,
+            session_id: None,
         }))
         .await
         .expect("buffer create succeeds");

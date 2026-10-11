@@ -1,33 +1,43 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, MuxError, NodeId, Point, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, FloatGeometry, MuxError, NodeId, Point, PtySize,
+    Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRequest, BufferResponse,
     ClientMessage, FloatingRequest, InputRequest, NodeRequest, ServerEvent, ServerResponse,
+    SessionRequest,
 };
 
 use crate::RenderGrid;
 use crate::client::MuxClient;
 use crate::config::ConfigManager;
 use crate::controller::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::copy_mode::{
+    CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
+    apply_motion, jump, next_match_index, word_bounds,
+};
 use crate::input::{
-    FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE, SEARCH_MODE,
-    SELECT_MODE, resolve_key,
+    COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
+    SEARCH_MODE, SELECT_MODE, resolve_key,
 };
 use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
+use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, EventInfo, FloatingAnchor, FloatingGeometrySpec, FloatingSize,
-    NotifyLevel, TabBarContext, TreeSpec,
+    MouseSettings, NotifyLevel, TabBarContext, TreeSpec,
 };
+use crate::spawn_size::{PanePlacement, spawn_pty_size};
+use crate::split_resize::SplitResize;
 use crate::state::{
     HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
 };
@@ -35,11 +45,24 @@ use crate::transport::Transport;
 
 const WHEEL_SCROLL_LINES: u64 = 3;
 const MAX_EXPANDED_ACTIONS: usize = 256;
+/// Most events `process_ready_events_timeout` handles before the caller gets
+/// to draw, so a flood of output cannot hold off input and frames for long.
+const MAX_EVENT_BATCH: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SearchPrompt {
     node_id: NodeId,
     query: String,
+    /// `?` rather than `/`.
+    backward: bool,
+    /// Mode to return to once the prompt is committed or cancelled.
+    return_mode: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DividerDrag {
+    split_node_id: NodeId,
+    index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +95,16 @@ pub struct ConfiguredClient<T> {
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
+    pty_sizes: PtySizeSync,
+    /// The viewport last reported to the server, so it is only sent again
+    /// when it changes.
+    reported_viewport: Option<(SessionId, Size)>,
     search_prompt: Option<SearchPrompt>,
     hints_node: Option<NodeId>,
+    copy: CopyModeState,
+    /// The divider being dragged with the mouse, from the press on it until
+    /// the button is released.
+    divider_drag: Option<DividerDrag>,
     terminal_output: VecDeque<Vec<u8>>,
     socket_path: Option<PathBuf>,
     /// Notifications produced by background tasks (e.g. a failed `run_shell`
@@ -95,8 +126,12 @@ where
             active_session_id: None,
             previous_session_id: None,
             viewport: None,
+            pty_sizes: PtySizeSync::default(),
+            reported_viewport: None,
             search_prompt: None,
             hints_node: None,
+            copy: CopyModeState::default(),
+            divider_drag: None,
             terminal_output: VecDeque::new(),
             socket_path: None,
             background_notifications: Arc::new(Mutex::new(Vec::new())),
@@ -123,6 +158,17 @@ where
 
     pub fn notifications(&self) -> &[String] {
         &self.notifications
+    }
+
+    /// The window base index (tmux `base-index`): the config's
+    /// `set_base_index`, else `EMBERS_BASE_INDEX`, else `None` for numbering
+    /// from 0.
+    pub fn base_index(&self) -> Option<u32> {
+        self.config
+            .active_script()
+            .loaded_config()
+            .base_index
+            .or_else(crate::numbering::base_index_from_env)
     }
 
     /// The name of the active input mode (e.g. "normal", "hints").
@@ -176,7 +222,8 @@ where
             .map(|session| session.name.as_str())
             .unwrap_or("<missing>");
         if let Some(prompt) = &self.search_prompt {
-            return format!("[{session_name}] /{}", prompt.query);
+            let prefix = if prompt.backward { '?' } else { '/' };
+            return format!("[{session_name}] {prefix}{}", prompt.query);
         }
         match self.notifications.last() {
             Some(message) => format!("[{session_name}] {message}"),
@@ -191,6 +238,7 @@ where
         key: KeyEvent,
     ) -> Result<()> {
         self.drain_background_notifications();
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
 
@@ -212,15 +260,38 @@ where
                 .await;
         }
 
+        if self.in_copy_mode() {
+            // `f`/`F`/`t`/`T` take the next key as their target; any key that is
+            // not a character cancels the jump.
+            if let Some((kind, count)) = self.copy.pending_jump.take() {
+                if let KeyEvent::Char(target) = key {
+                    let leaf = self.focused_leaf(&presentation)?;
+                    self.copy.last_jump = Some((kind, target));
+                    return self
+                        .copy_jump(leaf.node_id, kind, target, count, false)
+                        .await;
+                }
+                return Ok(());
+            }
+            if let KeyEvent::Char(ch) = key
+                && self.accepts_count_digit(ch)
+            {
+                self.copy
+                    .push_count_digit(ch.to_digit(10).expect("checked digit"));
+                return Ok(());
+            }
+        }
+
         match key {
             KeyEvent::Bytes(bytes) => {
                 if self.current_fallback_policy() != FallbackPolicy::Passthrough {
                     return Ok(());
                 }
                 let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                self.send_bytes_to_buffer(buffer_id, session_id, bytes)
-                    .await?;
-                Ok(())
+                self.send_typed_input(&presentation, buffer_id, session_id, |_, _| {
+                    Ok(bytes.clone())
+                })
+                .await
             }
             other => {
                 let token = key_event_to_token(other)?;
@@ -231,45 +302,65 @@ where
                     token,
                 ) {
                     InputResolution::ExactMatch(binding) => {
+                        // A count typed before the binding applies to the first
+                        // motion it runs.
+                        self.copy.active_count = self.copy.pending_count.take();
                         if self.should_passthrough_binding_in_alternate_screen(
                             &presentation,
                             &binding.target,
                         ) {
+                            self.copy.active_count = None;
                             let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                            let mode = self.buffer_keyboard_mode(buffer_id);
                             return self
-                                .send_bytes_to_buffer(
+                                .send_typed_input(
+                                    &presentation,
                                     buffer_id,
                                     session_id,
-                                    sequence_to_bytes(&binding.sequence, mode)?,
+                                    |client, target| {
+                                        sequence_to_bytes(
+                                            &binding.sequence,
+                                            client.buffer_keyboard_mode(target),
+                                        )
+                                    },
                                 )
                                 .await;
                         }
-                        self.execute_actions(
-                            Some(session_id),
-                            Some(viewport),
-                            binding.target.clone(),
-                        )
-                        .await
+                        let result = self
+                            .execute_actions(
+                                Some(session_id),
+                                Some(viewport),
+                                binding.target.clone(),
+                            )
+                            .await;
+                        self.copy.active_count = None;
+                        result
                     }
                     InputResolution::PrefixMatch => Ok(()),
                     InputResolution::Unmatched {
                         sequence,
                         fallback_policy,
                         ..
-                    } => match fallback_policy {
-                        FallbackPolicy::Passthrough => {
-                            let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-                            let mode = self.buffer_keyboard_mode(buffer_id);
-                            self.send_bytes_to_buffer(
-                                buffer_id,
-                                session_id,
-                                sequence_to_bytes(&sequence, mode)?,
-                            )
-                            .await
+                    } => {
+                        self.copy.pending_count = None;
+                        match fallback_policy {
+                            FallbackPolicy::Passthrough => {
+                                let buffer_id = self.resolve_buffer_id(None, &presentation)?;
+                                self.send_typed_input(
+                                    &presentation,
+                                    buffer_id,
+                                    session_id,
+                                    |client, target| {
+                                        sequence_to_bytes(
+                                            &sequence,
+                                            client.buffer_keyboard_mode(target),
+                                        )
+                                    },
+                                )
+                                .await
+                            }
+                            FallbackPolicy::Ignore => Ok(()),
                         }
-                        FallbackPolicy::Ignore => Ok(()),
-                    },
+                    }
                 }
             }
         }
@@ -281,6 +372,7 @@ where
         viewport: Size,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         if self.input_state.current_mode() == SEARCH_MODE {
             return self.handle_search_paste(session_id, viewport, bytes).await;
@@ -291,22 +383,25 @@ where
 
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let buffer_id = self.resolve_buffer_id(None, &presentation)?;
-        let bytes = if self
-            .client
-            .state()
-            .snapshots
-            .get(&buffer_id)
-            .is_some_and(|snapshot| snapshot.bracketed_paste)
-        {
-            let mut wrapped = b"\x1b[200~".to_vec();
-            wrapped.extend(bytes);
-            wrapped.extend_from_slice(b"\x1b[201~");
-            wrapped
-        } else {
-            bytes
-        };
-        self.send_bytes_to_buffer(buffer_id, session_id, bytes)
-            .await
+        self.send_typed_input(&presentation, buffer_id, session_id, |client, target| {
+            Ok(
+                if client
+                    .client
+                    .state()
+                    .snapshots
+                    .get(&target)
+                    .is_some_and(|snapshot| snapshot.bracketed_paste)
+                {
+                    let mut wrapped = b"\x1b[200~".to_vec();
+                    wrapped.extend_from_slice(&bytes);
+                    wrapped.extend_from_slice(b"\x1b[201~");
+                    wrapped
+                } else {
+                    bytes.clone()
+                },
+            )
+        })
+        .await
     }
 
     pub async fn handle_mouse(
@@ -315,17 +410,36 @@ where
         viewport: Size,
         event: MouseEvent,
     ) -> Result<()> {
+        self.pty_sizes.note_user_activity();
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let point = Point {
             x: i32::from(event.column),
             y: i32::from(event.row),
         };
+        let settings = self.config.active_script().loaded_config().mouse;
+        if self
+            .handle_divider_drag(session_id, &presentation, point, event.kind, settings)
+            .await?
+        {
+            return Ok(());
+        }
+        // A drag selection stays with the pane it started in, wherever the
+        // pointer goes.
+        if self.copy.mouse.is_some()
+            && matches!(
+                event.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Release(_)
+            )
+        {
+            return self
+                .continue_mouse_selection(&presentation, point, event.kind)
+                .await;
+        }
         let Some(target_leaf) = self.mouse_target_leaf(&presentation, point).cloned() else {
             return Ok(());
         };
 
-        let settings = self.config.active_script().loaded_config().mouse;
         let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
         let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
         let point_in_content = point.y > target_leaf.rect.origin.y;
@@ -373,6 +487,12 @@ where
                         encode_mouse_event(&target_leaf, event)?,
                     )
                     .await?;
+                } else if settings.select
+                    && !mouse_reporting
+                    && point_in_content
+                    && event.kind == MouseEventKind::Press(MouseButton::Left)
+                {
+                    self.begin_mouse_selection(&target_leaf, point).await?;
                 }
                 Ok(())
             }
@@ -385,6 +505,9 @@ where
         viewport: Size,
         focused: bool,
     ) -> Result<()> {
+        if focused {
+            self.pty_sizes.note_user_activity();
+        }
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let buffer_id = self.resolve_buffer_id(None, &presentation)?;
@@ -428,6 +551,40 @@ where
         Ok(Some(event))
     }
 
+    /// Waits up to `timeout` for a server event, then handles it together with
+    /// every event that has already arrived behind it, and returns the handled
+    /// events in order.
+    ///
+    /// Handling one event per frame lets a busy pane's `RenderInvalidated`
+    /// events arrive faster than they are drawn, so a layout change queued
+    /// behind them, and the PTY resizes the next frame sends for it, would wait
+    /// for the whole backlog. Within a batch only the last `RenderInvalidated`
+    /// of each buffer is handled: it refreshes to the same latest snapshot the
+    /// earlier ones would have.
+    pub async fn process_ready_events_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<ServerEvent>> {
+        let Some(first) = tokio::time::timeout(timeout, self.client.next_event())
+            .await
+            .ok()
+            .transpose()?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut batch = vec![first];
+        while batch.len() < MAX_EVENT_BATCH
+            && let Some(event) = self.client.ready_event().await?
+        {
+            batch.push(event);
+        }
+        let batch = coalesce_render_invalidations(batch);
+        for event in &batch {
+            self.handle_event(event).await?;
+        }
+        Ok(batch)
+    }
+
     pub async fn next_event(&mut self) -> Result<ServerEvent> {
         self.client.next_event().await
     }
@@ -464,6 +621,13 @@ where
                 // now-stale active session instead of leaving it dangling.
                 None => self.clear_active_session(),
             }
+        }
+        // A program in a pane set the clipboard (OSC 52): pass it on to the
+        // host terminal unless the config turned that off.
+        if let ServerEvent::Clipboard(clipboard) = event
+            && self.config.active_script().loaded_config().clipboard
+        {
+            self.enqueue_osc52(clipboard.selection, &clipboard.text);
         }
         // Follow the active session's name in the host terminal title.
         if let ServerEvent::SessionRenamed(renamed) = event
@@ -528,7 +692,8 @@ where
         let mut recorded_formatter_error = false;
         for tabs in &presentation.tab_bars {
             let bar_context =
-                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width);
+                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
+                    .with_base_index(self.base_index());
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
@@ -781,6 +946,25 @@ where
                     self.spawn_run_shell(command, current_session_id);
                     Ok(())
                 }
+                Action::SetEnvironment {
+                    global,
+                    name,
+                    value,
+                } => match (global, current_session_id) {
+                    (false, None) => Err(MuxError::invalid_input(
+                        "set_environment needs a current session",
+                    )),
+                    (global, session_id) => self
+                        .client
+                        .request_message(ClientMessage::Session(SessionRequest::SetEnvironment {
+                            request_id: self.client.next_request_id(),
+                            session_id: session_id.filter(|_| !global),
+                            name,
+                            value,
+                        }))
+                        .await
+                        .map(|_| ()),
+                },
                 Action::EnterHints { action } => match (current_session_id, current_viewport) {
                     (Some(session_id), Some(viewport)) => {
                         let presentation = self.prepare_presentation(session_id, viewport).await?;
@@ -1052,6 +1236,21 @@ where
                     MuxError::invalid_input(error.to_string())
                 })?,
         );
+
+        // `enter_mode("copy")` and `leave_mode()` behave like
+        // `enter_copy_mode()` and `exit_copy_mode()` for the views involved.
+        let copy_modes = [COPY_MODE, SELECT_MODE];
+        if copy_modes.contains(&mode.as_str()) {
+            if let Some((session_id, viewport)) = session_id.zip(viewport)
+                && let Ok(presentation) =
+                    PresentationModel::project(self.client.state(), session_id, viewport)
+                && let Some(leaf) = presentation.focused_leaf()
+            {
+                self.ensure_copy_cursor(leaf.node_id);
+            }
+        } else if copy_modes.contains(&previous_mode.as_str()) && mode != SEARCH_MODE {
+            self.clear_copy_views().await?;
+        }
         Ok(actions)
     }
 
@@ -1105,31 +1304,78 @@ where
                 let leaf = self.focused_leaf(presentation)?;
                 self.follow_output_for_view(leaf.node_id).await
             }
-            Action::EnterSearchMode => {
-                self.enter_search_mode(session_id, viewport, presentation)
-                    .await
+            Action::EnterSearchMode => self.enter_search_mode(presentation, false).await,
+            Action::EnterSearchBackward => self.enter_search_mode(presentation, true).await,
+            Action::SearchNext => {
+                let count = self.copy.take_count();
+                self.navigate_search(presentation, true, count).await
             }
-            Action::SearchNext => self.navigate_search(presentation, true).await,
-            Action::SearchPrev => self.navigate_search(presentation, false).await,
+            Action::SearchPrev => {
+                let count = self.copy.take_count();
+                self.navigate_search(presentation, false, count).await
+            }
             Action::CommitSearch => self.commit_search_prompt(session_id, viewport).await,
             Action::CancelSearch => self.cancel_search_prompt(session_id, viewport).await,
-            Action::EnterSelect { kind } => {
-                self.enter_select_mode(session_id, viewport, presentation, kind)
+            Action::EnterCopyMode => {
+                let leaf = self.focused_leaf(presentation)?;
+                if self.ensure_copy_cursor(leaf.node_id) && !self.in_copy_mode() {
+                    self.input_state.set_mode(COPY_MODE);
+                }
+                Ok(())
+            }
+            Action::ExitCopyMode => self.exit_copy_mode().await,
+            Action::CopyMotion { motion } => {
+                let leaf = self.focused_leaf(presentation)?;
+                let count = self.copy.take_count();
+                self.copy_motion(leaf.node_id, motion, count).await
+            }
+            Action::CopyJump { kind } => {
+                let leaf = self.focused_leaf(presentation)?;
+                let count = self.copy.take_count();
+                if self.ensure_copy_cursor(leaf.node_id) {
+                    self.enter_copy_input_mode();
+                    self.copy.pending_jump = Some((kind, count));
+                }
+                Ok(())
+            }
+            Action::CopyJumpAgain | Action::CopyJumpReverse => {
+                let leaf = self.focused_leaf(presentation)?;
+                let count = self.copy.take_count();
+                let Some((kind, target)) = self.copy.last_jump else {
+                    return Ok(());
+                };
+                let kind = if action == Action::CopyJumpReverse {
+                    kind.reversed()
+                } else {
+                    kind
+                };
+                self.copy_jump(leaf.node_id, kind, target, count, true)
                     .await
             }
+            Action::EnterSelect { kind } => self.enter_select_mode(presentation, kind),
             Action::SelectMove { direction } => {
                 let leaf = self.focused_leaf(presentation)?;
-                self.move_selection(leaf.node_id, direction).await
+                let motion = match direction {
+                    NavigationDirection::Left => CopyMotion::Left,
+                    NavigationDirection::Right => CopyMotion::Right,
+                    NavigationDirection::Up => CopyMotion::Up,
+                    NavigationDirection::Down => CopyMotion::Down,
+                };
+                let count = self.copy.take_count();
+                self.copy_motion(leaf.node_id, motion, count).await
+            }
+            Action::SelectOtherEnd => {
+                let leaf = self.focused_leaf(presentation)?;
+                self.select_other_end(leaf.node_id).await
             }
             Action::CopySelection => {
                 let leaf = self.focused_leaf(presentation)?;
-                self.copy_selection(session_id, viewport, leaf.node_id)
-                    .await
+                self.copy_selection(leaf.node_id).await
             }
             Action::CancelSelection => {
                 let leaf = self.focused_leaf(presentation)?;
-                self.cancel_selection(session_id, viewport, leaf.node_id)
-                    .await
+                self.cancel_selection(leaf.node_id);
+                Ok(())
             }
             Action::SelectTab {
                 tabs_node_id,
@@ -1150,6 +1396,38 @@ where
                         request_id: self.client.next_request_id(),
                         tabs_node_id: tabs.node_id,
                         index,
+                    }))
+                    .await?;
+                self.client.resync_session(session_id).await
+            }
+            Action::SelectWindow { number } => {
+                let count = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .map_or(1, |root| {
+                        root.tabs.as_ref().map_or(1, |tabs| tabs.tabs.len())
+                    });
+                let Some(index) = crate::numbering::window_position(
+                    number,
+                    count,
+                    self.base_index().unwrap_or(0),
+                ) else {
+                    self.record_notification(format_notification(
+                        NotifyLevel::Warn,
+                        &format!("no window {number}"),
+                    ));
+                    return Ok(());
+                };
+                self.client
+                    .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
+                        request_id: self.client.next_request_id(),
+                        session_id,
+                        index: u32::try_from(index).map_err(|_| {
+                            MuxError::invalid_input("window index exceeds protocol limits")
+                        })?,
                     }))
                     .await?;
                 self.client.resync_session(session_id).await
@@ -1199,8 +1477,12 @@ where
                 let focused_leaf = presentation
                     .focused_leaf()
                     .ok_or_else(|| MuxError::invalid_input("no focused leaf to split"))?;
+                let placement = PanePlacement::Split {
+                    leaf_id: focused_leaf.node_id,
+                    direction,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, new_child)
+                    .resolve_tree_buffer(session_id, presentation, new_child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1221,8 +1503,14 @@ where
                 self.client.resync_all_sessions().await
             }
             Action::OpenFloating { spec } => {
+                let geometry = resolve_floating_geometry(spec.geometry, viewport);
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, spec.tree)
+                    .resolve_tree_buffer(
+                        session_id,
+                        presentation,
+                        spec.tree,
+                        PanePlacement::Floating { geometry },
+                    )
                     .await?;
                 let result = self
                     .client
@@ -1231,7 +1519,7 @@ where
                         session_id,
                         root_node_id: None,
                         buffer_id: Some(buffer.id()),
-                        geometry: resolve_floating_geometry(spec.geometry, viewport),
+                        geometry,
                         title: spec.title,
                         focus: spec.focus,
                         close_on_empty: spec.close_on_empty,
@@ -1267,16 +1555,43 @@ where
                     .await?;
                 self.client.resync_all_sessions().await
             }
-            Action::SendKeys { buffer_id, keys } => {
-                let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
+            Action::SendKeys {
+                buffer_id: Some(buffer_id),
+                keys,
+            } => {
                 let mode = self.buffer_keyboard_mode(buffer_id);
                 self.send_bytes_to_buffer(buffer_id, session_id, sequence_to_bytes(&keys, mode)?)
                     .await
             }
-            Action::SendBytes { buffer_id, bytes } => {
-                let buffer_id = self.resolve_buffer_id(buffer_id, presentation)?;
+            Action::SendKeys {
+                buffer_id: None,
+                keys,
+            } => {
+                let buffer_id = self.resolve_buffer_id(None, presentation)?;
+                self.send_typed_input(presentation, buffer_id, session_id, |client, target| {
+                    sequence_to_bytes(&keys, client.buffer_keyboard_mode(target))
+                })
+                .await
+            }
+            Action::SendBytes {
+                buffer_id: Some(buffer_id),
+                bytes,
+            } => {
                 self.send_bytes_to_buffer(buffer_id, session_id, bytes)
                     .await
+            }
+            Action::SendBytes {
+                buffer_id: None,
+                bytes,
+            } => {
+                let buffer_id = self.resolve_buffer_id(None, presentation)?;
+                self.send_typed_input(
+                    presentation,
+                    buffer_id,
+                    session_id,
+                    |_, _| Ok(bytes.clone()),
+                )
+                .await
             }
             Action::CloseFloating { floating_id } => {
                 let floating_id = floating_id
@@ -1308,8 +1623,11 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
+                let placement = PanePlacement::Tab {
+                    tabs_node_id: tabs.node_id,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child)
+                    .resolve_tree_buffer(session_id, presentation, child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1339,8 +1657,11 @@ where
                 child,
             } => {
                 let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
+                let placement = PanePlacement::Tab {
+                    tabs_node_id: tabs.node_id,
+                };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, child)
+                    .resolve_tree_buffer(session_id, presentation, child, placement)
                     .await?;
                 let result = self
                     .client
@@ -1368,8 +1689,9 @@ where
                 let node_id = node_id
                     .or_else(|| presentation.focused_leaf().map(|leaf| leaf.node_id))
                     .ok_or_else(|| MuxError::invalid_input("no focused node to replace"))?;
+                let placement = PanePlacement::Replace { leaf_id: node_id };
                 let buffer = self
-                    .resolve_tree_buffer(session_id, presentation, tree)
+                    .resolve_tree_buffer(session_id, presentation, tree, placement)
                     .await?;
                 let result = self
                     .client
@@ -1443,6 +1765,37 @@ where
                     }))
                     .await?;
                 self.client.resync_all_sessions().await
+            }
+            Action::ResizePane { direction, cells } => {
+                let leaf = self.focused_leaf(presentation)?;
+                match presentation.resize_leaf(self.client.state(), leaf.node_id, direction, cells)
+                {
+                    Some(resize) => self.resize_split(session_id, resize).await,
+                    None => Ok(()),
+                }
+            }
+            Action::SetSynchronizePanes { mode } => {
+                // Windows are the root tabs; a session whose root is a single
+                // untabbed window addresses it as index 0.
+                let index = self
+                    .client
+                    .state()
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .and_then(|root| root.tabs.as_ref())
+                    .map_or(0, |tabs| tabs.active);
+                self.client
+                    .request_message(ClientMessage::Session(
+                        SessionRequest::SetRootTabSynchronizePanes {
+                            request_id: self.client.next_request_id(),
+                            session_id,
+                            index,
+                            mode,
+                        },
+                    ))
+                    .await?;
+                self.client.resync_session(session_id).await
             }
             Action::SwapSiblingNodes {
                 first_node_id,
@@ -1541,12 +1894,24 @@ where
         }
     }
 
+    /// The buffer `tree` names, spawning it first when the tree asks for a
+    /// new one. A new buffer is started at the size it will be drawn at once
+    /// placed at `placement`.
     async fn resolve_tree_buffer(
         &self,
-        _session_id: SessionId,
+        session_id: SessionId,
         presentation: &PresentationModel,
         tree: TreeSpec,
+        placement: PanePlacement,
     ) -> Result<ResolvedTreeBuffer> {
+        let size = || {
+            spawn_pty_size(
+                self.client.state(),
+                session_id,
+                presentation.viewport,
+                placement,
+            )
+        };
         match tree {
             TreeSpec::BufferCurrent => presentation
                 .focused_buffer_id()
@@ -1554,16 +1919,20 @@ where
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
             TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
             TreeSpec::BufferSpawn(spec) => self
-                .create_buffer(spec)
+                .create_buffer(spec, size(), session_id)
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             TreeSpec::BufferEmpty => self
-                .create_buffer(crate::scripting::BufferSpawnSpec {
-                    title: Some("shell".to_owned()),
-                    command: default_shell_command(),
-                    cwd: None,
-                    env: Default::default(),
-                })
+                .create_buffer(
+                    crate::scripting::BufferSpawnSpec {
+                        title: Some("shell".to_owned()),
+                        command: default_shell_command(),
+                        cwd: None,
+                        env: Default::default(),
+                    },
+                    size(),
+                    session_id,
+                )
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             other => Err(MuxError::invalid_input(format!(
@@ -1572,7 +1941,12 @@ where
         }
     }
 
-    async fn create_buffer(&self, spec: crate::scripting::BufferSpawnSpec) -> Result<BufferId> {
+    async fn create_buffer(
+        &self,
+        spec: crate::scripting::BufferSpawnSpec,
+        size: Option<PtySize>,
+        session_id: SessionId,
+    ) -> Result<BufferId> {
         let response = self
             .client
             .request_message(ClientMessage::Buffer(BufferRequest::Create {
@@ -1581,6 +1955,8 @@ where
                 command: spec.command,
                 cwd: spec.cwd,
                 env: spec.env,
+                size,
+                session_id: Some(session_id),
             }))
             .await?;
 
@@ -1632,15 +2008,156 @@ where
         session_id: SessionId,
         bytes: Vec<u8>,
     ) -> Result<()> {
+        self.send_input(session_id, vec![(buffer_id, bytes)]).await
+    }
+
+    /// Send input typed into the focused pane's `buffer_id`, honouring
+    /// synchronize-panes (see `input_targets`). `encode` produces the bytes
+    /// for each target, so key encodings and bracketed paste follow what each
+    /// pane's program asked for.
+    async fn send_typed_input(
+        &mut self,
+        presentation: &PresentationModel,
+        buffer_id: BufferId,
+        session_id: SessionId,
+        encode: impl Fn(&Self, BufferId) -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        let sends = self
+            .input_targets(presentation, buffer_id)
+            .into_iter()
+            .map(|target| Ok((target, encode(self, target)?)))
+            .collect::<Result<Vec<_>>>()?;
+        self.send_input(session_id, sends).await
+    }
+
+    /// The buffers input for `buffer_id` goes to: `buffer_id` itself, then,
+    /// when it is the focused pane of a window with synchronize-panes on,
+    /// every other pane the window shows. Panes in hidden nested tabs or
+    /// hidden by zoom are not shown, so they are left out, as are popups:
+    /// input typed into a popup is never copied, and popup panes never
+    /// receive copies.
+    fn input_targets(
+        &self,
+        presentation: &PresentationModel,
+        buffer_id: BufferId,
+    ) -> Vec<BufferId> {
+        let mut targets = vec![buffer_id];
+        let synchronized = presentation
+            .focused_leaf()
+            .is_some_and(|leaf| leaf.buffer_id == buffer_id && leaf.floating_id.is_none())
+            && self.window_synchronized(presentation.session_id);
+        if synchronized {
+            for leaf in presentation
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.floating_id.is_none())
+            {
+                if !targets.contains(&leaf.buffer_id) {
+                    targets.push(leaf.buffer_id);
+                }
+            }
+        }
+        targets
+    }
+
+    /// Whether synchronize-panes is on for the session's active window.
+    fn window_synchronized(&self, session_id: SessionId) -> bool {
+        let state = self.client.state();
+        state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| state.nodes.get(&session.root_node_id))
+            .and_then(|root| root.tabs.as_ref())
+            .and_then(|tabs| tabs.tabs.get(usize::try_from(tabs.active).ok()?))
+            .is_some_and(|tab| tab.synchronize_panes)
+    }
+
+    /// Send each `(buffer, bytes)` pair, then refresh the buffers that took
+    /// input and the session. The first pair is the pane the input was aimed
+    /// at and its failure is returned; a synchronized copy that fails (for
+    /// example because that pane's program exited) is only logged.
+    async fn send_input(
+        &mut self,
+        session_id: SessionId,
+        sends: Vec<(BufferId, Vec<u8>)>,
+    ) -> Result<()> {
+        let mut sent = Vec::with_capacity(sends.len());
+        for (index, (buffer_id, bytes)) in sends.into_iter().enumerate() {
+            let result = self
+                .client
+                .request_message(ClientMessage::Input(InputRequest::Send {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    bytes,
+                }))
+                .await;
+            match result {
+                Ok(_) => sent.push(buffer_id),
+                Err(error) if index == 0 => return Err(error),
+                Err(error) => {
+                    warn!("failed to send synchronized input to buffer {buffer_id}: {error}");
+                }
+            }
+        }
+        for buffer_id in sent {
+            self.client.refresh_buffer_snapshot(buffer_id).await?;
+        }
+        self.client.resync_session(session_id).await
+    }
+
+    async fn resize_split(&mut self, session_id: SessionId, resize: SplitResize) -> Result<()> {
         self.client
-            .request_message(ClientMessage::Input(InputRequest::Send {
+            .request_message(ClientMessage::Node(NodeRequest::Resize {
                 request_id: self.client.next_request_id(),
-                buffer_id,
-                bytes,
+                node_id: resize.split_node_id,
+                sizes: resize.sizes,
             }))
             .await?;
-        self.client.refresh_buffer_snapshot(buffer_id).await?;
         self.client.resync_session(session_id).await
+    }
+
+    /// Claim mouse events that drag a split divider: a left press on a
+    /// divider starts a drag, left drags move the divider to the pointer
+    /// wherever it is, and the release ends it. Returns whether the event was
+    /// claimed; everything else, including drags that start inside a pane, is
+    /// left to the normal pane handling.
+    async fn handle_divider_drag(
+        &mut self,
+        session_id: SessionId,
+        presentation: &PresentationModel,
+        point: Point,
+        kind: MouseEventKind,
+        settings: MouseSettings,
+    ) -> Result<bool> {
+        match kind {
+            MouseEventKind::Press(button) => {
+                self.divider_drag = None;
+                if button != MouseButton::Left || !settings.drag_resize {
+                    return Ok(false);
+                }
+                let Some(divider) = presentation.divider_at(point) else {
+                    return Ok(false);
+                };
+                self.divider_drag = Some(DividerDrag {
+                    split_node_id: divider.split_node_id,
+                    index: divider.index,
+                });
+                Ok(true)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(drag) = self.divider_drag else {
+                    return Ok(false);
+                };
+                if let Some(resize) =
+                    presentation.drag_divider(drag.split_node_id, drag.index, point)
+                {
+                    self.resize_split(session_id, resize).await?;
+                }
+                Ok(true)
+            }
+            MouseEventKind::Release(_) => Ok(self.divider_drag.take().is_some()),
+            _ => Ok(false),
+        }
     }
 
     fn resolve_buffer_id(
@@ -1689,6 +2206,7 @@ where
                                             self.client.state(),
                                             tab.child_id,
                                         ),
+                                        synchronize_panes: tab.synchronize_panes,
                                     })
                                     .collect(),
                                 active: usize::try_from(tabs.active).unwrap_or(0),
@@ -1783,6 +2301,7 @@ where
             }
             ServerEvent::BufferDetached(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::RenderInvalidated(event) => self.session_id_for_buffer(event.buffer_id),
+            ServerEvent::Clipboard(event) => self.session_id_for_buffer(event.buffer_id),
             ServerEvent::SessionCreated(_)
             | ServerEvent::SessionClosed(_)
             | ServerEvent::SessionRenamed(_)
@@ -2000,6 +2519,10 @@ where
         if let Some(socket_path) = &self.socket_path {
             process.env("EMBERS_SOCKET", socket_path);
         }
+        // So `embers` commands the child runs number windows like this client.
+        if let Some(base_index) = self.base_index() {
+            process.env(crate::numbering::BASE_INDEX_ENV_VAR, base_index.to_string());
+        }
 
         // Identify the command by its executable only. The full argument list
         // may carry secrets (tokens, passwords) and these notifications are
@@ -2111,12 +2634,70 @@ where
         let Some(view_state) = self.client.state().view_state(leaf.node_id) else {
             return false;
         };
-        (view_state.alternate_screen && actions.iter().all(action_is_local_terminal_action))
+        // Copy mode itself never forwards: its bindings must keep working (and
+        // `q` must still leave) if focus moves onto a fullscreen app.
+        (!self.in_copy_mode()
+            && view_state.alternate_screen
+            && actions.iter().all(action_is_local_terminal_action))
             || (self.input_state.current_mode() == NORMAL_MODE
                 && view_state.follow_output
                 && view_state.search_state.is_none()
                 && view_state.selection_state.is_none()
                 && actions.iter().all(action_requires_local_context))
+    }
+
+    /// Resize the PTYs of the session's visible buffers to the content areas
+    /// `render_session` draws for them at `viewport`, sending a request only for
+    /// buffers whose size changed (see `PtySizeSync` for the multi-client
+    /// policy). The server answers with `RenderInvalidated`, which triggers the
+    /// redraw at the new size. A failed resize (e.g. the buffer exited
+    /// meanwhile) only leaves that PTY at its old size, so it is logged and
+    /// left for a later sync to retry rather than returned.
+    ///
+    /// The viewport itself is reported to the server too, so panes created
+    /// from the CLI can be spawned at the size this client will draw them.
+    pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
+        self.report_viewport(session_id, viewport).await;
+        let presentation = PresentationModel::project(self.client.state(), session_id, viewport)?;
+        for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
+            let result = self
+                .client
+                .request_message(ClientMessage::Input(InputRequest::Resize {
+                    request_id: self.client.next_request_id(),
+                    buffer_id,
+                    cols: size.cols,
+                    rows: size.rows,
+                }))
+                .await;
+            if let Err(error) = result {
+                warn!("failed to resize buffer {buffer_id}: {error}");
+                self.pty_sizes.resize_failed(buffer_id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn report_viewport(&mut self, session_id: SessionId, viewport: Size) {
+        if self.reported_viewport == Some((session_id, viewport))
+            || viewport.width == 0
+            || viewport.height == 0
+        {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Session(SessionRequest::SetViewport {
+                request_id: self.client.next_request_id(),
+                session_id,
+                viewport,
+            }))
+            .await;
+        match result {
+            Ok(_) => self.reported_viewport = Some((session_id, viewport)),
+            // Only the size of panes created later depends on it, so a
+            // failure is retried on the next sync rather than returned.
+            Err(error) => warn!("failed to report viewport of session {session_id}: {error}"),
+        }
     }
 
     async fn refresh_local_viewports(&mut self, presentation: &PresentationModel) -> Result<()> {
@@ -2174,13 +2755,33 @@ where
             .total_line_count
             .saturating_sub(u64::from(state.visible_line_count));
         let scroll_top_line = scroll_top_line.min(bottom);
-        if scroll_top_line == bottom {
+        // A view in copy mode stays frozen even when scrolled to the bottom.
+        let in_copy_mode = state.copy_cursor.is_some();
+        if scroll_top_line == bottom && !in_copy_mode {
             return self.follow_output_for_view(node_id).await;
         }
 
         self.fetch_view_slice(node_id, scroll_top_line).await?;
         if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
             state.follow_output = false;
+        }
+        // Like tmux, scrolling in copy mode drags the cursor along so it stays
+        // on screen.
+        if let Some((cursor, top, rows)) =
+            self.client.state().view_state(node_id).and_then(|state| {
+                state.copy_cursor.map(|cursor| {
+                    (
+                        cursor,
+                        state.scroll_top_line,
+                        u64::from(state.visible_line_count.max(1)),
+                    )
+                })
+            })
+        {
+            let line = cursor.line.clamp(top, top + rows - 1);
+            if line != cursor.line {
+                self.set_copy_point(node_id, SelectionPoint { line, ..cursor });
+            }
         }
         Ok(())
     }
@@ -2224,27 +2825,30 @@ where
         Ok(())
     }
 
+    /// Open the search prompt. The prompt starts empty, as in vim and tmux;
+    /// committing it empty clears the search.
     async fn enter_search_mode(
         &mut self,
-        _session_id: SessionId,
-        _viewport: Size,
         presentation: &PresentationModel,
+        backward: bool,
     ) -> Result<()> {
         let leaf = self.focused_leaf(presentation)?;
         if self.view_is_alternate_screen(leaf.node_id) {
             return Ok(());
         }
 
-        let query = self
-            .client
-            .state()
-            .view_state(leaf.node_id)
-            .and_then(|state| state.search_state.as_ref())
-            .map(|state| state.query.clone())
-            .unwrap_or_default();
+        // Searching from copy mode returns there, so the cursor can land on
+        // the match.
+        let return_mode = if self.in_copy_mode() {
+            self.input_state.current_mode().to_owned()
+        } else {
+            NORMAL_MODE.to_owned()
+        };
         self.search_prompt = Some(SearchPrompt {
             node_id: leaf.node_id,
-            query,
+            query: String::new(),
+            backward,
+            return_mode,
         });
         self.input_state.set_mode(SEARCH_MODE);
         Ok(())
@@ -2258,9 +2862,7 @@ where
         key: KeyEvent,
     ) -> Result<()> {
         if self.search_prompt.is_none() {
-            return self
-                .enter_search_mode(session_id, viewport, presentation)
-                .await;
+            return self.enter_search_mode(presentation, false).await;
         }
 
         match key {
@@ -2557,13 +3159,14 @@ where
         let Some(prompt) = self.search_prompt.take() else {
             return self.cancel_search_prompt(session_id, viewport).await;
         };
+        self.input_state.set_mode(prompt.return_mode.clone());
         let Some(buffer_id) = self
             .client
             .state()
             .view_state(prompt.node_id)
             .map(|state| state.buffer_id)
         else {
-            return self.cancel_search_prompt(session_id, viewport).await;
+            return Ok(());
         };
 
         let matches = if prompt.query.is_empty() {
@@ -2584,18 +3187,31 @@ where
                 });
             }
         }
+        self.copy.search_backward = prompt.backward;
 
-        if self
+        match self.initial_search_index(prompt.node_id, !prompt.backward) {
+            Some(index) => self.jump_to_search_index(prompt.node_id, index).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The match a newly committed search lands on: the next one in the search
+    /// direction from the copy-mode cursor (not counting a match under it), or
+    /// without a cursor the first match (forward) or the last (backward).
+    fn initial_search_index(&self, node_id: NodeId, forward: bool) -> Option<usize> {
+        let matches = &self
             .client
             .state()
-            .view_state(prompt.node_id)
-            .and_then(|state| state.search_state.as_ref())
-            .is_some_and(|state| !state.matches.is_empty())
-        {
-            self.jump_to_search_index(prompt.node_id, 0).await?;
+            .view_state(node_id)?
+            .search_state
+            .as_ref()?
+            .matches;
+        match self.copy_cursor_of(node_id) {
+            Some(cursor) => next_match_index(matches, cursor, forward),
+            None if matches.is_empty() => None,
+            None if forward => Some(0),
+            None => Some(matches.len() - 1),
         }
-        self.input_state.set_mode(NORMAL_MODE);
-        Ok(())
     }
 
     async fn cancel_search_prompt(
@@ -2603,20 +3219,29 @@ where
         _session_id: SessionId,
         _viewport: Size,
     ) -> Result<()> {
-        self.search_prompt = None;
-        self.input_state.set_mode(NORMAL_MODE);
+        let return_mode = self
+            .search_prompt
+            .take()
+            .map_or_else(|| NORMAL_MODE.to_owned(), |prompt| prompt.return_mode);
+        self.input_state.set_mode(return_mode);
         Ok(())
     }
 
+    /// `n` (`forward`) or `N`, `count` times. After a backward search the
+    /// directions swap, as in vim. In copy mode the next match is found from
+    /// the cursor; otherwise from the active match.
     async fn navigate_search(
         &mut self,
         presentation: &PresentationModel,
         forward: bool,
+        count: u32,
     ) -> Result<()> {
         let leaf = self.focused_leaf(presentation)?;
         if self.view_is_alternate_screen(leaf.node_id) {
             return Ok(());
         }
+        let forward = forward != self.copy.search_backward;
+        let mut cursor = self.copy_cursor_of(leaf.node_id);
         let Some(search_state) = self
             .client
             .state()
@@ -2625,18 +3250,37 @@ where
         else {
             return Ok(());
         };
-        if search_state.matches.is_empty() {
+        let matches = &search_state.matches;
+        if matches.is_empty() {
             return Ok(());
         }
-        let current = search_state.active_match_index.unwrap_or(0);
-        let next = if forward {
-            (current + 1) % search_state.matches.len()
-        } else if current == 0 {
-            search_state.matches.len() - 1
-        } else {
-            current - 1
-        };
-        self.jump_to_search_index(leaf.node_id, next).await
+        // Moving `count` matches wraps around, so a full lap is a no-op.
+        let steps = (count.max(1) as usize - 1) % matches.len() + 1;
+        let mut current = search_state.active_match_index;
+        for _ in 0..steps {
+            let next = match cursor {
+                Some(at) => next_match_index(matches, at, forward).unwrap_or(0),
+                None => {
+                    let current = current.unwrap_or(0);
+                    if forward {
+                        (current + 1) % matches.len()
+                    } else if current == 0 {
+                        matches.len() - 1
+                    } else {
+                        current - 1
+                    }
+                }
+            };
+            current = Some(next);
+            cursor = cursor.map(|_| SelectionPoint {
+                line: matches[next].line,
+                column: matches[next].start_column,
+            });
+        }
+        match current {
+            Some(index) => self.jump_to_search_index(leaf.node_id, index).await,
+            None => Ok(()),
+        }
     }
 
     async fn jump_to_search_index(&mut self, node_id: NodeId, index: usize) -> Result<()> {
@@ -2674,29 +3318,64 @@ where
             self.fetch_view_slice(node_id, new_top).await?;
         }
 
-        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+        let in_copy_mode = if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
             if let Some(search) = &mut state.search_state {
                 search.active_match_index = Some(index);
             }
             state.follow_output = false;
+            state.copy_cursor.is_some()
+        } else {
+            false
+        };
+        // In copy mode the cursor (and a selection's free end) moves onto the
+        // match, as in tmux.
+        if in_copy_mode {
+            self.set_copy_point(
+                node_id,
+                SelectionPoint {
+                    line: selected.line,
+                    column: selected.start_column,
+                },
+            );
         }
         Ok(())
     }
 
-    async fn enter_select_mode(
+    /// `v`/`V`/`C-v`: start a selection of `kind` at the copy-mode cursor,
+    /// entering copy mode first if needed. With a selection already active, the
+    /// same kind clears it and another kind switches to it, as in vim.
+    fn enter_select_mode(
         &mut self,
-        _session_id: SessionId,
-        _viewport: Size,
         presentation: &PresentationModel,
         kind: SelectionKind,
     ) -> Result<()> {
-        let leaf = self.focused_leaf(presentation)?;
-        if self.view_is_alternate_screen(leaf.node_id) {
+        let node_id = self.focused_leaf(presentation)?.node_id;
+        let active_kind = self
+            .client
+            .state()
+            .view_state(node_id)
+            .and_then(|state| state.selection_state.as_ref())
+            .map(|selection| selection.kind);
+        if let Some(active_kind) = active_kind {
+            if active_kind == kind {
+                self.cancel_selection(node_id);
+            } else if let Some(selection) = self
+                .client
+                .state_mut()
+                .view_state_mut(node_id)
+                .and_then(|state| state.selection_state.as_mut())
+            {
+                selection.kind = kind;
+            }
             return Ok(());
         }
 
-        let start = self.selection_origin(leaf.node_id);
-        if let Some(state) = self.client.state_mut().view_state_mut(leaf.node_id) {
+        if !self.ensure_copy_cursor(node_id) {
+            return Ok(());
+        }
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id)
+            && let Some(start) = state.copy_cursor
+        {
             state.selection_state = Some(SelectionState {
                 kind,
                 anchor: start,
@@ -2707,6 +3386,8 @@ where
         Ok(())
     }
 
+    /// Where copy mode puts its cursor on entry: the program's cursor when the
+    /// view is following output, else the top-left of the view.
     fn selection_origin(&self, node_id: NodeId) -> SelectionPoint {
         let Some(state) = self.client.state().view_state(node_id) else {
             return SelectionPoint::default();
@@ -2731,113 +3412,502 @@ where
             .unwrap_or(fallback)
     }
 
-    async fn move_selection(
+    fn in_copy_mode(&self) -> bool {
+        matches!(self.input_state.current_mode(), COPY_MODE | SELECT_MODE)
+    }
+
+    /// Switch input to copy mode, unless it is already in copy or select mode.
+    fn enter_copy_input_mode(&mut self) {
+        if !self.in_copy_mode() {
+            self.input_state.set_mode(COPY_MODE);
+        }
+    }
+
+    /// Whether a typed digit extends the count prefix rather than running a
+    /// binding. `0` only continues a count (on its own it is a motion), and a
+    /// digit the mode binds itself keeps its binding.
+    fn accepts_count_digit(&self, ch: char) -> bool {
+        let Some(digit) = ch.to_digit(10) else {
+            return false;
+        };
+        if !self.input_state.pending_sequence().is_empty() {
+            return false;
+        }
+        if self.copy.pending_count.is_some() {
+            return true;
+        }
+        digit != 0
+            && !self
+                .config
+                .active_script()
+                .loaded_config()
+                .bindings
+                .get(self.input_state.current_mode())
+                .is_some_and(|bindings| {
+                    bindings
+                        .iter()
+                        .any(|binding| binding.sequence.first() == Some(&KeyToken::Char(ch)))
+                })
+    }
+
+    /// The point copy-mode motions move: a selection's free end, else the copy
+    /// cursor.
+    fn copy_cursor_of(&self, node_id: NodeId) -> Option<SelectionPoint> {
+        let state = self.client.state().view_state(node_id)?;
+        state
+            .selection_state
+            .as_ref()
+            .map(|selection| selection.cursor)
+            .or(state.copy_cursor)
+    }
+
+    fn set_copy_point(&mut self, node_id: NodeId, point: SelectionPoint) {
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.copy_cursor = Some(point);
+            if let Some(selection) = &mut state.selection_state {
+                selection.cursor = point;
+            }
+        }
+    }
+
+    /// Put the view in copy mode if it is not already: freeze it and place the
+    /// cursor where the program's cursor is. Returns `false` for views copy mode
+    /// does not support (the alternate screen).
+    fn ensure_copy_cursor(&mut self, node_id: NodeId) -> bool {
+        let Some(state) = self.client.state().view_state(node_id) else {
+            return false;
+        };
+        if state.alternate_screen {
+            return false;
+        }
+        if state.copy_cursor.is_some() {
+            return true;
+        }
+        let origin = state
+            .selection_state
+            .as_ref()
+            .map(|selection| selection.cursor)
+            .unwrap_or_else(|| self.selection_origin(node_id));
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.copy_cursor = Some(origin);
+            state.follow_output = false;
+        }
+        true
+    }
+
+    fn copy_viewport(&self, node_id: NodeId) -> Option<CopyViewport> {
+        let state = self.client.state().view_state(node_id)?;
+        let cols = self
+            .client
+            .state()
+            .snapshots
+            .get(&state.buffer_id)
+            .map(|snapshot| snapshot.size.cols)
+            .filter(|cols| *cols > 0)
+            .unwrap_or(u16::MAX);
+        Some(CopyViewport {
+            top: state.scroll_top_line,
+            rows: u64::from(state.visible_line_count.max(1)),
+            total: state.total_line_count.max(1),
+            cols,
+        })
+    }
+
+    /// Capture the view's buffer text for motions, reusing the last capture
+    /// while the buffer's snapshot is unchanged.
+    async fn load_copy_text(&mut self, node_id: NodeId) -> Result<()> {
+        let Some(buffer_id) = self
+            .client
+            .state()
+            .view_state(node_id)
+            .map(|state| state.buffer_id)
+        else {
+            return Ok(());
+        };
+        let sequence = self
+            .client
+            .state()
+            .snapshots
+            .get(&buffer_id)
+            .map_or(0, |snapshot| snapshot.sequence);
+        if self
+            .copy
+            .text
+            .as_ref()
+            .is_some_and(|text| text.buffer_id == buffer_id && text.sequence == sequence)
+        {
+            return Ok(());
+        }
+        let snapshot = self.client.capture_buffer(buffer_id).await?;
+        self.copy.text = Some(CapturedText {
+            buffer_id,
+            sequence,
+            lines: snapshot.lines,
+        });
+        Ok(())
+    }
+
+    fn copy_lines(&self) -> &[String] {
+        self.copy
+            .text
+            .as_ref()
+            .map_or(&[], |text| text.lines.as_slice())
+    }
+
+    /// The text of one history line: from the rendered view when it is on
+    /// screen, else from the captured buffer.
+    async fn copy_line_text(&mut self, node_id: NodeId, line: u64) -> Result<String> {
+        if let Some(text) = self.client.state().view_state(node_id).and_then(|state| {
+            let row = usize::try_from(line.checked_sub(state.scroll_top_line)?).ok()?;
+            state.visible_lines.get(row).map(|line| line.text.clone())
+        }) {
+            return Ok(text);
+        }
+        self.load_copy_text(node_id).await?;
+        Ok(usize::try_from(line)
+            .ok()
+            .and_then(|line| self.copy_lines().get(line))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn copy_motion(&mut self, node_id: NodeId, motion: CopyMotion, count: u32) -> Result<()> {
+        if !self.ensure_copy_cursor(node_id) {
+            return Ok(());
+        }
+        self.enter_copy_input_mode();
+        if motion.needs_text() {
+            self.load_copy_text(node_id).await?;
+        }
+        let (Some(cursor), Some(viewport)) =
+            (self.copy_cursor_of(node_id), self.copy_viewport(node_id))
+        else {
+            return Ok(());
+        };
+        let repeat = if motion.repeats() { count.max(1) } else { 1 };
+        let lines = self.copy_lines();
+        let mut outcome = MotionOutcome {
+            cursor,
+            top: viewport.top,
+        };
+        for _ in 0..repeat {
+            let next = apply_motion(
+                motion,
+                outcome.cursor,
+                CopyViewport {
+                    top: outcome.top,
+                    ..viewport
+                },
+                lines,
+            );
+            if next == outcome {
+                break;
+            }
+            outcome = next;
+        }
+        self.apply_copy_outcome(node_id, viewport.top, outcome)
+            .await
+    }
+
+    /// Scroll to `outcome.top` if it moved and put the cursor at
+    /// `outcome.cursor`.
+    async fn apply_copy_outcome(
         &mut self,
         node_id: NodeId,
-        direction: NavigationDirection,
+        old_top: u64,
+        outcome: MotionOutcome,
     ) -> Result<()> {
-        let Some((mut selection, total_line_count, scroll_top_line, visible_line_count)) =
-            self.client.state().view_state(node_id).and_then(|state| {
-                state.selection_state.clone().map(|selection| {
-                    (
-                        selection,
-                        state.total_line_count,
-                        state.scroll_top_line,
-                        state.visible_line_count,
-                    )
-                })
+        if outcome.top != old_top {
+            self.fetch_view_slice(node_id, outcome.top).await?;
+        }
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.follow_output = false;
+        }
+        self.set_copy_point(node_id, outcome.cursor);
+        Ok(())
+    }
+
+    async fn copy_jump(
+        &mut self,
+        node_id: NodeId,
+        kind: JumpKind,
+        target: char,
+        count: u32,
+        repeat: bool,
+    ) -> Result<()> {
+        if !self.ensure_copy_cursor(node_id) {
+            return Ok(());
+        }
+        self.enter_copy_input_mode();
+        self.load_copy_text(node_id).await?;
+        let Some(cursor) = self.copy_cursor_of(node_id) else {
+            return Ok(());
+        };
+        let line = usize::try_from(cursor.line)
+            .ok()
+            .and_then(|line| self.copy_lines().get(line))
+            .map_or("", String::as_str);
+        let mut column = cursor.column;
+        let mut repeat = repeat;
+        for _ in 0..count.max(1) {
+            match jump(
+                kind,
+                target,
+                SelectionPoint { column, ..cursor },
+                line,
+                repeat,
+            ) {
+                Some(next) => column = next,
+                None => break,
+            }
+            // Later steps of a counted `t`/`T` must move past the previous stop.
+            repeat = true;
+        }
+        self.set_copy_point(node_id, SelectionPoint { column, ..cursor });
+        Ok(())
+    }
+
+    /// `o`: swap the selection's ends so motions move the other one.
+    async fn select_other_end(&mut self, node_id: NodeId) -> Result<()> {
+        let Some(cursor) = self
+            .client
+            .state_mut()
+            .view_state_mut(node_id)
+            .and_then(|state| state.selection_state.as_mut())
+            .map(|selection| {
+                std::mem::swap(&mut selection.anchor, &mut selection.cursor);
+                selection.cursor
             })
         else {
             return Ok(());
         };
+        let Some(viewport) = self.copy_viewport(node_id) else {
+            return Ok(());
+        };
+        let outcome = MotionOutcome {
+            cursor,
+            top: viewport.reveal(viewport.top, cursor.line),
+        };
+        self.apply_copy_outcome(node_id, viewport.top, outcome)
+            .await
+    }
 
-        match direction {
-            NavigationDirection::Left => {
-                selection.cursor.column = selection.cursor.column.saturating_sub(1);
-            }
-            NavigationDirection::Right => {
-                selection.cursor.column = selection.cursor.column.saturating_add(1);
-            }
-            NavigationDirection::Up => {
-                selection.cursor.line = selection.cursor.line.saturating_sub(1);
-            }
-            NavigationDirection::Down => {
-                selection.cursor.line = selection
-                    .cursor
-                    .line
-                    .saturating_add(1)
-                    .min(total_line_count.saturating_sub(1));
-            }
-        }
-
-        let visible_line_count = u64::from(visible_line_count.max(1));
-        let mut new_top = scroll_top_line;
-        if selection.cursor.line < new_top {
-            new_top = selection.cursor.line;
-        } else if selection.cursor.line >= new_top.saturating_add(visible_line_count) {
-            new_top = selection
-                .cursor
-                .line
-                .saturating_sub(visible_line_count.saturating_sub(1));
-        }
-        if new_top != scroll_top_line {
-            self.fetch_view_slice(node_id, new_top).await?;
-        }
-
-        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
-            state.follow_output = false;
-            state.selection_state = Some(selection);
+    /// Leave copy mode on every view that is in it and return to `normal` mode.
+    async fn exit_copy_mode(&mut self) -> Result<()> {
+        self.clear_copy_views().await?;
+        if self.in_copy_mode() {
+            self.input_state.set_mode(NORMAL_MODE);
         }
         Ok(())
     }
 
-    async fn copy_selection(
-        &mut self,
-        _session_id: SessionId,
-        _viewport: Size,
-        node_id: NodeId,
-    ) -> Result<()> {
-        let Some((buffer_id, selection_state)) =
+    /// Take every view out of copy mode: drop cursors, selections and search
+    /// highlights, and follow output again.
+    async fn clear_copy_views(&mut self) -> Result<()> {
+        let node_ids = self
+            .client
+            .state()
+            .view_state
+            .iter()
+            .filter(|(_, state)| state.copy_cursor.is_some() || state.selection_state.is_some())
+            .map(|(node_id, _)| *node_id)
+            .collect::<Vec<_>>();
+        for node_id in node_ids {
+            if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+                state.copy_cursor = None;
+                state.selection_state = None;
+                state.search_state = None;
+            }
+            self.follow_output_for_view(node_id).await?;
+        }
+        self.copy.clear_pending();
+        self.copy.mouse = None;
+        Ok(())
+    }
+
+    /// Copy the selection, if any, to the clipboard and leave copy mode (tmux
+    /// `copy-pipe-and-cancel`).
+    async fn copy_selection(&mut self, node_id: NodeId) -> Result<()> {
+        if let Some((buffer_id, selection_state)) =
             self.client.state().view_state(node_id).and_then(|state| {
                 state
                     .selection_state
                     .clone()
                     .map(|selection| (state.buffer_id, selection))
             })
+        {
+            let snapshot = self.client.capture_buffer(buffer_id).await?;
+            let copied = serialize_selection(&snapshot.lines, &selection_state);
+            self.enqueue_clipboard(copied);
+        }
+        self.exit_copy_mode().await
+    }
+
+    /// Clear the selection and stay in copy mode with the cursor where the
+    /// selection's free end was.
+    fn cancel_selection(&mut self, node_id: NodeId) {
+        let in_copy_mode = self
+            .client
+            .state_mut()
+            .view_state_mut(node_id)
+            .is_some_and(|state| {
+                if let Some(selection) = state.selection_state.take() {
+                    state.copy_cursor = Some(selection.cursor);
+                }
+                state.copy_cursor.is_some()
+            });
+        self.input_state
+            .set_mode(if in_copy_mode { COPY_MODE } else { NORMAL_MODE });
+    }
+
+    /// A left-button press in a pane that has not requested the mouse: a
+    /// double click copies the word under the pointer, a triple click the line,
+    /// and a single press may become a drag selection.
+    async fn begin_mouse_selection(&mut self, leaf: &LeafFrame, point: Point) -> Result<()> {
+        let Some(state) = self.client.state().view_state(leaf.node_id) else {
+            return Ok(());
+        };
+        if state.alternate_screen {
+            return Ok(());
+        }
+        let row = u64::try_from(point.y - leaf.rect.origin.y - 1).unwrap_or(0);
+        let at = SelectionPoint {
+            line: state.scroll_top_line.saturating_add(row),
+            column: u16::try_from(point.x - leaf.rect.origin.x).unwrap_or(0),
+        };
+        match self.copy.clicks.press(leaf.node_id, at, Instant::now()) {
+            2 => {
+                let text = self.copy_line_text(leaf.node_id, at.line).await?;
+                if let Some((start, end)) = word_bounds(&text, at.column) {
+                    let anchor = SelectionPoint {
+                        column: start,
+                        ..at
+                    };
+                    let cursor = SelectionPoint { column: end, ..at };
+                    self.select_and_copy(leaf.node_id, SelectionKind::Character, anchor, cursor)
+                        .await?;
+                }
+            }
+            3 => {
+                self.select_and_copy(leaf.node_id, SelectionKind::Line, at, at)
+                    .await?;
+            }
+            _ => {
+                self.copy.mouse = Some(MouseSelection {
+                    node_id: leaf.node_id,
+                    anchor: at,
+                    dragging: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn select_and_copy(
+        &mut self,
+        node_id: NodeId,
+        kind: SelectionKind,
+        anchor: SelectionPoint,
+        cursor: SelectionPoint,
+    ) -> Result<()> {
+        if !self.ensure_copy_cursor(node_id) {
+            return Ok(());
+        }
+        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
+            state.selection_state = Some(SelectionState {
+                kind,
+                anchor,
+                cursor,
+            });
+            state.copy_cursor = Some(cursor);
+        }
+        self.copy_selection(node_id).await
+    }
+
+    /// Drag and release events after a press that may start a selection. The
+    /// first drag enters copy mode with a character selection from the press
+    /// point; later drags extend it, scrolling a line at a time while the
+    /// pointer is above or below the pane. Release copies the selection and
+    /// leaves copy mode, as tmux's `MouseDragEnd1Pane` does by default.
+    async fn continue_mouse_selection(
+        &mut self,
+        presentation: &PresentationModel,
+        point: Point,
+        kind: MouseEventKind,
+    ) -> Result<()> {
+        let Some(mut drag) = self.copy.mouse.take() else {
+            return Ok(());
+        };
+        if let MouseEventKind::Release(_) = kind {
+            if drag.dragging {
+                return self.copy_selection(drag.node_id).await;
+            }
+            return Ok(());
+        }
+        let Some(leaf) = presentation
+            .leaves
+            .iter()
+            .find(|leaf| leaf.node_id == drag.node_id)
         else {
             return Ok(());
         };
-
-        let snapshot = self.client.capture_buffer(buffer_id).await?;
-        let copied = serialize_selection(&snapshot.lines, &selection_state);
-        self.enqueue_clipboard(copied);
-
-        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
-            state.selection_state = None;
+        let Some(viewport) = self.copy_viewport(drag.node_id) else {
+            return Ok(());
+        };
+        let rows = i64::try_from(viewport.rows).unwrap_or(i64::MAX);
+        let row = i64::from(point.y) - i64::from(leaf.rect.origin.y) - 1;
+        let top = if row < 0 {
+            viewport.top.saturating_sub(1)
+        } else if row >= rows {
+            viewport.reveal(viewport.top, viewport.top.saturating_add(viewport.rows))
+        } else {
+            viewport.top
+        };
+        let width = i64::from(leaf.rect.size.width.max(1));
+        let at = SelectionPoint {
+            line: top
+                .saturating_add(u64::try_from(row.clamp(0, rows - 1)).unwrap_or(0))
+                .min(viewport.total.saturating_sub(1)),
+            column: u16::try_from(
+                (i64::from(point.x) - i64::from(leaf.rect.origin.x)).clamp(0, width - 1),
+            )
+            .unwrap_or(0),
+        };
+        if !drag.dragging {
+            if !self.ensure_copy_cursor(drag.node_id) {
+                return Ok(());
+            }
+            if let Some(state) = self.client.state_mut().view_state_mut(drag.node_id) {
+                state.selection_state = Some(SelectionState {
+                    kind: SelectionKind::Character,
+                    anchor: drag.anchor,
+                    cursor: at,
+                });
+            }
+            self.input_state.set_mode(SELECT_MODE);
+            drag.dragging = true;
         }
-        self.input_state.set_mode(NORMAL_MODE);
-        Ok(())
-    }
-
-    async fn cancel_selection(
-        &mut self,
-        _session_id: SessionId,
-        _viewport: Size,
-        node_id: NodeId,
-    ) -> Result<()> {
-        if let Some(state) = self.client.state_mut().view_state_mut(node_id) {
-            state.selection_state = None;
-        }
-        self.input_state.set_mode(NORMAL_MODE);
-        Ok(())
+        self.copy.mouse = Some(drag);
+        self.apply_copy_outcome(
+            drag.node_id,
+            viewport.top,
+            MotionOutcome { cursor: at, top },
+        )
+        .await
     }
 
     fn enqueue_clipboard(&mut self, text: String) {
+        self.enqueue_osc52(ClipboardSelection::Clipboard, &text);
+    }
+
+    /// Queue an OSC 52 write that puts `text` on the host terminal's clipboard.
+    fn enqueue_osc52(&mut self, selection: ClipboardSelection, text: &str) {
         use base64::Engine as _;
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let parameter = selection.osc52_parameter();
         self.terminal_output
-            .push_back(format!("\x1b]52;c;{encoded}\x07").into_bytes());
+            .push_back(format!("\x1b]52;{parameter};{encoded}\x07").into_bytes());
     }
 
     async fn focus_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
@@ -2972,12 +4042,18 @@ fn action_is_local_terminal_action(action: &Action) -> bool {
         | Action::ScrollToBottom
         | Action::FollowOutput
         | Action::EnterSearchMode
+        | Action::EnterSearchBackward
         | Action::SearchNext
         | Action::SearchPrev
         | Action::CommitSearch
         | Action::CancelSearch
+        | Action::CopyMotion { .. }
+        | Action::CopyJump { .. }
+        | Action::CopyJumpAgain
+        | Action::CopyJumpReverse
         | Action::EnterSelect { .. }
         | Action::SelectMove { .. }
+        | Action::SelectOtherEnd
         | Action::CopySelection
         | Action::CancelSelection => true,
         _ => false,
@@ -2988,6 +4064,7 @@ fn action_requires_local_context(action: &Action) -> bool {
     match action {
         Action::Chain(actions) => actions.iter().all(action_requires_local_context),
         Action::EnterSearchMode
+        | Action::EnterSearchBackward
         | Action::SearchNext
         | Action::SearchPrev
         | Action::EnterSelect { .. } => true,
@@ -3425,6 +4502,22 @@ where
     }
 }
 
+/// Drops each `RenderInvalidated` that a later one for the same buffer in
+/// `events` supersedes, keeping the order of everything else.
+fn coalesce_render_invalidations(events: Vec<ServerEvent>) -> Vec<ServerEvent> {
+    let mut seen = BTreeSet::new();
+    let mut kept = events
+        .into_iter()
+        .rev()
+        .filter(|event| match event {
+            ServerEvent::RenderInvalidated(render) => seen.insert(render.buffer_id),
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    kept.reverse();
+    kept
+}
+
 fn event_name(event: &ServerEvent) -> &'static str {
     match event {
         ServerEvent::SessionCreated(_) => "session_created",
@@ -3438,6 +4531,7 @@ fn event_name(event: &ServerEvent) -> &'static str {
         ServerEvent::FocusChanged(_) => "focus_changed",
         ServerEvent::RenderInvalidated(_) => "render_invalidated",
         ServerEvent::ClientChanged(_) => "client_changed",
+        ServerEvent::Clipboard(_) => "clipboard",
     }
 }
 
@@ -3472,6 +4566,7 @@ fn event_info(
             info.floating_id = event.focused_floating_id;
         }
         ServerEvent::RenderInvalidated(event) => info.buffer_id = Some(event.buffer_id),
+        ServerEvent::Clipboard(event) => info.buffer_id = Some(event.buffer_id),
         ServerEvent::ClientChanged(event) => {
             info.session_id = event.client.current_session_id;
             info.previous_session_id = event.previous_session_id;
@@ -3827,6 +4922,8 @@ mod tests {
         configured.search_prompt = Some(SearchPrompt {
             node_id: NodeId(7),
             query: "stale".to_owned(),
+            backward: false,
+            return_mode: NORMAL_MODE.to_owned(),
         });
 
         fs::write(&config_path, "").expect("rewrite config without custom mode");

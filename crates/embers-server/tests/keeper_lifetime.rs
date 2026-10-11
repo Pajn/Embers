@@ -1,0 +1,333 @@
+//! Runtime keepers deliberately outlive the server so a restart can reattach,
+//! but must exit once nothing can ever reattach to them.
+
+use embers_core::{RequestId, init_test_tracing};
+use embers_protocol::{
+    BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ProtocolClient, ServerResponse,
+};
+use embers_server::{Server, ServerConfig};
+use tempfile::tempdir;
+use tokio::time::{Duration, Instant, sleep};
+
+async fn request_buffer(client: &mut ProtocolClient, request: BufferRequest) -> BufferResponse {
+    match client
+        .request(&ClientMessage::Buffer(request))
+        .await
+        .expect("buffer request succeeds")
+    {
+        ServerResponse::Buffer(response) => response,
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+}
+
+async fn wait_for_running_buffer(
+    client: &mut ProtocolClient,
+    request_id: RequestId,
+    buffer_id: embers_core::BufferId,
+) -> embers_protocol::BufferRecord {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let response = request_buffer(
+            client,
+            BufferRequest::Get {
+                request_id,
+                buffer_id,
+            },
+        )
+        .await;
+        if response.buffer.state == BufferRecordState::Running {
+            return response.buffer;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "buffer {buffer_id} did not reach Running before timeout"
+        );
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Returns whether `pid` names a live process. An exited keeper stays a zombie
+/// until its parent reaps it, so zombies count as gone.
+fn process_alive(pid: u32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    let stat = String::from_utf8_lossy(&output.stdout);
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+async fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            return true;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    !process_alive(pid)
+}
+
+#[tokio::test]
+async fn keepers_outlive_shutdown_but_exit_once_their_socket_is_removed() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let handle = Server::new(ServerConfig::new(socket_path.clone()))
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(201),
+            title: Some("orphan".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(202), buffer.id).await;
+    let shell_pid = running.pid.expect("running buffer reports its pid");
+    // The keeper runs out of process when the embers binary is available and
+    // in-process otherwise; only an out-of-process keeper has a pid of its own.
+    let keeper_pid = parent_pid(shell_pid).filter(|&pid| pid != std::process::id());
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    // Keepers deliberately survive a server shutdown so a restart can reattach.
+    assert!(
+        process_alive(shell_pid),
+        "shell should outlive server shutdown"
+    );
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            process_alive(keeper_pid),
+            "keeper should outlive server shutdown"
+        );
+    }
+
+    // Once the keeper socket is gone no server can reattach, so the keeper must
+    // stop its shell and exit rather than run unreachable forever.
+    drop(tempdir);
+    assert!(
+        wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
+        "shell {shell_pid} still running after its keeper socket was removed"
+    );
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after its socket was removed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let config = ServerConfig::new(socket_path.clone());
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(301),
+            title: Some("killed".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(302), buffer.id).await;
+    let shell_pid = running.pid.expect("running buffer reports its pid");
+    let keeper_pid = parent_pid(shell_pid).filter(|&pid| pid != std::process::id());
+
+    match client
+        .request(&ClientMessage::Buffer(BufferRequest::Kill {
+            request_id: RequestId(303),
+            buffer_id: buffer.id,
+            force: false,
+        }))
+        .await
+        .expect("kill request succeeds")
+    {
+        ServerResponse::Ok(_) => {}
+        other => panic!("expected ok response, got {other:?}"),
+    }
+    assert!(
+        wait_for_process_exit(shell_pid, Duration::from_secs(10)).await,
+        "shell {shell_pid} still running after kill"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let record = request_buffer(
+            &mut client,
+            BufferRequest::Get {
+                request_id: RequestId(304),
+                buffer_id: buffer.id,
+            },
+        )
+        .await
+        .buffer;
+        if record.state == BufferRecordState::Exited {
+            break;
+        }
+        assert!(Instant::now() < deadline, "buffer did not reach Exited");
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    // The child is gone and no server is attached, so there is nothing left to
+    // reattach to: the keeper exits even though its socket is still in place.
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after its buffer was killed"
+        );
+    }
+
+    // A restarted server keeps the record as exited.
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(305),
+            buffer_id: buffer.id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(restored.state, BufferRecordState::Exited);
+    handle.shutdown().await.expect("shutdown restarted server");
+}
+
+#[tokio::test]
+async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_the_exit() {
+    init_test_tracing();
+
+    let tempdir = tempdir().expect("tempdir");
+    let socket_path = tempdir.path().join("mux.sock");
+    let release = tempdir.path().join("release");
+    let config = ServerConfig::new(socket_path.clone());
+    let handle = Server::new(config.clone())
+        .start()
+        .await
+        .expect("start server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("connect client");
+
+    // The command exits with a known code once the test creates `release`, so
+    // it is still running at shutdown and exits only while no server is up.
+    let buffer = request_buffer(
+        &mut client,
+        BufferRequest::Create {
+            request_id: RequestId(401),
+            title: Some("finishes".to_owned()),
+            command: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                r#"while [ ! -e "$1" ]; do sleep 0.05; done; exit 3"#.to_owned(),
+                "sh".to_owned(),
+                release.to_str().expect("utf-8 temp path").to_owned(),
+            ],
+            cwd: None,
+            env: Default::default(),
+            size: None,
+            session_id: None,
+        },
+    )
+    .await
+    .buffer;
+    let running = wait_for_running_buffer(&mut client, RequestId(402), buffer.id).await;
+    let child_pid = running.pid.expect("running buffer reports its pid");
+    let keeper_pid = parent_pid(child_pid).filter(|&pid| pid != std::process::id());
+
+    drop(client);
+    handle.shutdown().await.expect("shutdown server");
+
+    std::fs::write(&release, b"").expect("release the command");
+    assert!(
+        wait_for_process_exit(child_pid, Duration::from_secs(10)).await,
+        "command {child_pid} still running after it was released"
+    );
+    // Restore runs a pane's shell command again, so withdraw the release: a
+    // resurrected command would now keep running instead of exiting 3.
+    std::fs::remove_file(&release).expect("withdraw the release");
+
+    // No server has saved the exit yet, so the keeper must stay reachable for
+    // the next one. Give it several socket-check intervals to (wrongly) leave.
+    sleep(Duration::from_millis(1500)).await;
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            process_alive(keeper_pid),
+            "keeper {keeper_pid} exited before any server saved its child exit"
+        );
+    }
+
+    // The restarted server reattaches and learns how the command ended rather
+    // than treating the pane as interrupted and starting a fresh shell in it.
+    let handle = Server::new(config).start().await.expect("restart server");
+    let mut client = ProtocolClient::connect(&socket_path)
+        .await
+        .expect("reconnect client");
+    let restored = request_buffer(
+        &mut client,
+        BufferRequest::Get {
+            request_id: RequestId(403),
+            buffer_id: buffer.id,
+        },
+    )
+    .await
+    .buffer;
+    assert_eq!(restored.state, BufferRecordState::Exited);
+    assert_eq!(restored.exit_code, Some(3));
+
+    // Now that a server has saved the exit, the keeper leaves once it is gone.
+    drop(client);
+    handle.shutdown().await.expect("shutdown restarted server");
+    if let Some(keeper_pid) = keeper_pid {
+        assert!(
+            wait_for_process_exit(keeper_pid, Duration::from_secs(10)).await,
+            "keeper {keeper_pid} still running after a server saved its child exit"
+        );
+    }
+}

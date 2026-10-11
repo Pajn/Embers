@@ -259,6 +259,8 @@ struct RegistrationState {
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
+    clipboard: Option<bool>,
+    base_index: Option<u32>,
 }
 
 impl RegistrationState {
@@ -362,6 +364,8 @@ impl RegistrationState {
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
+            clipboard: self.clipboard.unwrap_or(true),
+            base_index: self.base_index,
         })
     }
 }
@@ -552,6 +556,24 @@ impl MouseApi {
             .expect("registration lock")
             .mouse
             .wheel_forward = value;
+        Ok(())
+    }
+
+    fn set_drag_resize(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .drag_resize = value;
+        Ok(())
+    }
+
+    fn set_select(&self, position: Position, value: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .mouse
+            .select = value;
         Ok(())
     }
 }
@@ -754,6 +776,73 @@ mod registration_globals {
             )?);
         Ok(())
     }
+
+    /// Choose whether programs in panes may set the system clipboard.
+    ///
+    /// When on (the default), an OSC 52 clipboard write from a program in a
+    /// pane, such as a Neovim yank over SSH, is passed on to the terminal
+    /// running the Embers client, which puts it on the system clipboard. This
+    /// matches tmux's `set-clipboard on`. When off, those writes are dropped.
+    /// Programs can never read the clipboard through Embers: OSC 52 queries are
+    /// always ignored.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_clipboard(false);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:8
+    #[rhai_fn(return_raw, global, name = "set_clipboard")]
+    pub fn set_clipboard(ctx: NativeCallContext, enabled: bool) -> RhaiResultOf<()> {
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .clipboard = Some(enabled);
+        Ok(())
+    }
+
+    /// Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+    ///
+    /// Windows are a session's root tabs. Their numbers are what
+    /// `TabInfo.number()` gives tab bar formatters and what
+    /// `action.select_window` takes. Windows are always numbered without gaps:
+    /// closing one renumbers the windows after it, like tmux with
+    /// `renumber-windows on`.
+    ///
+    /// This setting covers the client and the commands it runs from the command
+    /// prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+    /// instead; set that variable where the server and your shells start to use
+    /// the same numbering everywhere. Without this call the client uses
+    /// `EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_base_index(1);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:9
+    #[rhai_fn(return_raw, global, name = "set_base_index")]
+    pub fn set_base_index(ctx: NativeCallContext, index: i64) -> RhaiResultOf<()> {
+        let index = u32::try_from(index)
+            .ok()
+            .filter(|index| *index <= crate::numbering::MAX_BASE_INDEX)
+            .ok_or_else(|| {
+                runtime_error(
+                    format!(
+                        "base index must be between 0 and {}",
+                        crate::numbering::MAX_BASE_INDEX
+                    ),
+                    ctx.call_position(),
+                )
+            })?;
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .base_index = Some(index);
+        Ok(())
+    }
 }
 
 #[export_module]
@@ -837,6 +926,33 @@ mod mouse_registration_api {
     ) -> RhaiResultOf<()> {
         mouse.set_wheel_forward(ctx.call_position(), value)
     }
+
+    /// Toggle resizing splits by dragging their dividers with the left button.
+    ///
+    /// Only drags that start on a divider are claimed; clicks and drags inside panes behave
+    /// as before. The built-in config turns this on.
+    ///
+    /// # rhai-autodocs:index:26
+    #[rhai_fn(return_raw, name = "set_drag_resize")]
+    pub fn set_drag_resize(
+        ctx: NativeCallContext,
+        mouse: MouseApi,
+        value: bool,
+    ) -> RhaiResultOf<()> {
+        mouse.set_drag_resize(ctx.call_position(), value)
+    }
+
+    /// Toggle mouse selection in panes that have not requested mouse reporting:
+    /// dragging enters copy mode with a selection and copies it on release,
+    /// a double click copies a word and a triple click copies a line (tmux's
+    /// defaults with `mouse on`). Panes running programs that requested the
+    /// mouse keep receiving these events instead.
+    ///
+    /// # rhai-autodocs:index:27
+    #[rhai_fn(return_raw, name = "set_select")]
+    pub fn set_select(ctx: NativeCallContext, mouse: MouseApi, value: bool) -> RhaiResultOf<()> {
+        mouse.set_select(ctx.call_position(), value)
+    }
 }
 
 #[export_module]
@@ -854,7 +970,7 @@ mod hints_registration_api {
     /// hints.set_patterns(["https?://\\S+", "[0-9a-f]{7,40}"]);
     /// ```
     ///
-    /// # rhai-autodocs:index:26
+    /// # rhai-autodocs:index:28
     #[rhai_fn(return_raw, name = "set_patterns")]
     pub fn set_patterns(
         ctx: NativeCallContext,

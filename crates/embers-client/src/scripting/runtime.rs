@@ -12,6 +12,7 @@ use rhai::{
     Array, Dynamic, Engine, EvalAltResult, ImmutableString, Map, NativeCallContext, Position, Scope,
 };
 
+use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::parse_key_sequence;
 use crate::presentation::NavigationDirection;
 
@@ -153,6 +154,10 @@ fn validate_live_actions(actions: &[Action]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn copy_motion(motion: CopyMotion) -> Action {
+    Action::CopyMotion { motion }
 }
 
 pub fn normalize_bar(result: Dynamic) -> Result<BarSpec, String> {
@@ -774,10 +779,25 @@ mod documented_ref_api {
         tab.title.clone()
     }
 
-    /// Return the zero-based tab index.
+    /// Return the zero-based tab index, as `action.select_tab` takes it.
     #[rhai_fn(name = "index")]
     pub fn tab_index(tab: &mut TabInfo) -> i64 {
         i64::try_from(tab.index).unwrap_or(i64::MAX)
+    }
+
+    /// Return the tab's window number: its index plus the base index set with
+    /// `set_base_index` (0 when unset), like tmux `#I`. Show this in tab bars so
+    /// the numbers match CLI targets such as `select-window -t work:2` and
+    /// `action.select_window`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = `${tab.number()}:${tab.title()}`;
+    /// ```
+    #[rhai_fn(name = "number")]
+    pub fn tab_number(tab: &mut TabInfo) -> i64 {
+        i64::try_from(tab.number).unwrap_or(i64::MAX)
     }
 
     /// Return whether the tab is active.
@@ -802,6 +822,19 @@ mod documented_ref_api {
     #[rhai_fn(name = "buffer_count")]
     pub fn tab_buffer_count(tab: &mut TabInfo) -> i64 {
         i64::try_from(tab.buffer_count).unwrap_or(i64::MAX)
+    }
+
+    /// Return whether `synchronize-panes` is on for the window this tab holds, so a formatter
+    /// can flag it. Always `false` for nested tabs.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let label = if tab.synchronize_panes() { tab.title() + " [sync]" } else { tab.title() };
+    /// ```
+    #[rhai_fn(name = "synchronize_panes")]
+    pub fn tab_synchronize_panes(tab: &mut TabInfo) -> bool {
+        tab.synchronize_panes
     }
 
     /// Return the formatter viewport width in cells.
@@ -934,13 +967,14 @@ mod documented_mux_api {
 #[export_module]
 mod documented_action_api {
     use super::{
-        Action, ActionApi, Array, Dynamic, ImmutableString, Map, NativeCallContext,
-        NavigationDirection, TreeSpec, parse_action_array, parse_buffer_history_placement,
-        parse_buffer_history_scope, parse_buffer_id, parse_bytes, parse_floating_id,
-        parse_floating_options, parse_floating_spec, parse_index, parse_key_sequence,
-        parse_node_break_destination, parse_node_id, parse_node_join_placement, parse_notify_level,
-        parse_split_direction, with_call_position,
+        Action, ActionApi, Array, CopyMotion, Dynamic, ImmutableString, JumpKind, Map,
+        NativeCallContext, NavigationDirection, TreeSpec, copy_motion, parse_action_array,
+        parse_buffer_history_placement, parse_buffer_history_scope, parse_buffer_id, parse_bytes,
+        parse_floating_id, parse_floating_options, parse_floating_spec, parse_index,
+        parse_key_sequence, parse_node_break_destination, parse_node_id, parse_node_join_placement,
+        parse_notify_level, parse_split_direction, resize_pane, with_call_position,
     };
+    use embers_protocol::SynchronizePanesMode;
 
     /// Build a no-op action.
     #[rhai_fn(name = "noop")]
@@ -1033,6 +1067,44 @@ mod documented_action_api {
         Action::RunShell {
             command: vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()],
         }
+    }
+
+    /// Set an environment variable for panes created later in the current
+    /// session (tmux `set-environment`). Pass `()` as the value to unset it.
+    /// Panes that already run keep their environment.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_environment("AWS_PROFILE", "staging")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_environment")]
+    pub fn set_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(false, name, value))
+    }
+
+    /// Set an environment variable for panes created later in every session
+    /// (tmux `set-environment -g`). Pass `()` as the value to unset it. A
+    /// session's own value wins over the global one.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.set_global_environment("EDITOR", "nvim")
+    /// ```
+    #[rhai_fn(return_raw, name = "set_global_environment")]
+    pub fn set_global_environment(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        name: &str,
+        value: Dynamic,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || super::environment_action(true, name, value))
     }
 
     /// Enter thumbs-style hint mode: label the matches in the visible pane and
@@ -1135,6 +1207,29 @@ mod documented_action_api {
             Ok(Action::SelectTab {
                 tabs_node_id: Some(parse_node_id(tabs_node_id)?),
                 index: parse_index(index, "tab index")?,
+            })
+        })
+    }
+
+    /// Select a window (a root tab of the current session) by its number, which
+    /// counts from the base index set with `set_base_index` (0 when unset), like
+    /// tmux `select-window -t :N`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>1", action.select_window(1));
+    /// ```
+    #[rhai_fn(return_raw, name = "select_window")]
+    pub fn select_window(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        number: i64,
+    ) -> RhaiResultOf<Action> {
+        with_call_position(ctx, || {
+            Ok(Action::SelectWindow {
+                number: u64::try_from(number)
+                    .map_err(|_| super::runtime_error("window number must be zero or greater"))?,
             })
         })
     }
@@ -1449,9 +1544,19 @@ mod documented_action_api {
         Action::UnzoomNode { session_id: None }
     }
 
+    /// Toggle zoom for the focused node (tmux `resize-pane -Z`).
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>z", action.toggle_zoom_current_node());
+    /// ```
+    #[rhai_fn(name = "toggle_zoom_current_node")]
+    pub fn toggle_zoom_current_node(_: &mut ActionApi) -> Action {
+        Action::ToggleZoomNode { node_id: None }
+    }
+
     /// Toggle zoom for the specified node id.
-    /// There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
-    /// focused node and `toggle_zoom_node` when you already know the target id.
     #[rhai_fn(return_raw, name = "toggle_zoom_node")]
     pub fn toggle_zoom_node(
         ctx: NativeCallContext,
@@ -1463,6 +1568,100 @@ mod documented_action_api {
                 node_id: Some(parse_node_id(node_id)?),
             })
         })
+    }
+
+    /// Move the focused pane's border `cells` cells left (tmux `resize-pane -L`).
+    ///
+    /// The nearest split with panes side by side is resized: the divider to the right of the
+    /// pane moves left, shrinking the pane, or, when the pane is the split's rightmost child,
+    /// the divider to its left moves left, growing it. Panes keep at least one column of
+    /// content, and the action does nothing when there is no such split or the divider cannot
+    /// move. While a pane is zoomed only splits inside the zoomed view can be resized.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<M-h>", action.resize_left(3));
+    /// ```
+    #[rhai_fn(return_raw, name = "resize_left")]
+    pub fn resize_left(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Left, cells)
+    }
+
+    /// Move the focused pane's border `cells` cells right (tmux `resize-pane -R`).
+    /// See `resize_left` for which divider moves.
+    #[rhai_fn(return_raw, name = "resize_right")]
+    pub fn resize_right(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Right, cells)
+    }
+
+    /// Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
+    /// See `resize_left` for which divider moves; panes keep their title row and at least
+    /// one row of content.
+    #[rhai_fn(return_raw, name = "resize_up")]
+    pub fn resize_up(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Up, cells)
+    }
+
+    /// Move the focused pane's border `cells` rows down (tmux `resize-pane -D`).
+    /// See `resize_left` for which divider moves.
+    #[rhai_fn(return_raw, name = "resize_down")]
+    pub fn resize_down(
+        ctx: NativeCallContext,
+        _: &mut ActionApi,
+        cells: i64,
+    ) -> RhaiResultOf<Action> {
+        resize_pane(ctx, NavigationDirection::Down, cells)
+    }
+
+    /// Toggle tmux-style `synchronize-panes` for the active window.
+    ///
+    /// While it is on, input typed into a pane of the window is also sent to every other pane
+    /// the window currently shows. Popups and other windows never take part. See
+    /// `set_synchronize_panes` for details.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// bind("normal", "<leader>S", action.toggle_synchronize_panes());
+    /// ```
+    #[rhai_fn(name = "toggle_synchronize_panes")]
+    pub fn toggle_synchronize_panes(_: &mut ActionApi) -> Action {
+        Action::SetSynchronizePanes {
+            mode: SynchronizePanesMode::Toggle,
+        }
+    }
+
+    /// Turn tmux-style `synchronize-panes` on or off for the active window.
+    ///
+    /// The setting belongs to the window (a root tab) and is shared by every client. While it
+    /// is on, keys, pastes and `send_keys_current`/`send_bytes_current` input aimed at the
+    /// focused pane go to every pane the window shows, each encoded for that pane. Panes in
+    /// hidden nested tabs or hidden by zoom, panes in other windows, and popups are left out,
+    /// and input typed into a focused popup is never copied. Mouse and focus events, input
+    /// sent to a specific buffer id, and `embers send-keys` are not synchronized. Tab bars can
+    /// show the state through `TabInfo.synchronize_panes()`.
+    #[rhai_fn(name = "set_synchronize_panes")]
+    pub fn set_synchronize_panes(_: &mut ActionApi, enabled: bool) -> Action {
+        Action::SetSynchronizePanes {
+            mode: if enabled {
+                SynchronizePanesMode::On
+            } else {
+                SynchronizePanesMode::Off
+            },
+        }
     }
 
     /// Swap the current node with a sibling.
@@ -1773,10 +1972,18 @@ mod documented_action_api {
         Action::FollowOutput
     }
 
-    /// Enter incremental search mode.
+    /// Enter incremental search mode, searching forward (`/`).
     #[rhai_fn(name = "enter_search_mode")]
     pub fn enter_search_mode(_: &mut ActionApi) -> Action {
         Action::EnterSearchMode
+    }
+
+    /// Enter incremental search mode, searching backward (`?`). After a backward
+    /// search `search_next` moves to earlier matches and `search_prev` to later
+    /// ones, as in vim.
+    #[rhai_fn(name = "enter_search_backward")]
+    pub fn enter_search_backward(_: &mut ActionApi) -> Action {
+        Action::EnterSearchBackward
     }
 
     /// Cancel the active search.
@@ -1804,7 +2011,204 @@ mod documented_action_api {
         Action::SearchPrev
     }
 
-    /// Enter character selection mode.
+    /// Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
+    /// following output and a cursor appears at the program's cursor; copy-mode
+    /// motions move it. Does nothing on the alternate screen.
+    #[rhai_fn(name = "enter_copy_mode")]
+    pub fn enter_copy_mode(_: &mut ActionApi) -> Action {
+        Action::EnterCopyMode
+    }
+
+    /// Leave copy mode: drop the cursor and any selection, follow output again,
+    /// and return to `normal` mode (tmux `cancel`).
+    #[rhai_fn(name = "exit_copy_mode")]
+    pub fn exit_copy_mode(_: &mut ActionApi) -> Action {
+        Action::ExitCopyMode
+    }
+
+    /// Move the copy-mode cursor left (`h`).
+    #[rhai_fn(name = "copy_cursor_left")]
+    pub fn copy_cursor_left(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Left)
+    }
+
+    /// Move the copy-mode cursor right (`l`).
+    #[rhai_fn(name = "copy_cursor_right")]
+    pub fn copy_cursor_right(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Right)
+    }
+
+    /// Move the copy-mode cursor up (`k`).
+    #[rhai_fn(name = "copy_cursor_up")]
+    pub fn copy_cursor_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Up)
+    }
+
+    /// Move the copy-mode cursor down (`j`).
+    #[rhai_fn(name = "copy_cursor_down")]
+    pub fn copy_cursor_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::Down)
+    }
+
+    /// Move to the start of the next word (`w`). Whitespace separates words, and
+    /// a run of ASCII punctuation other than `_` is a word of its own.
+    #[rhai_fn(name = "copy_next_word")]
+    pub fn copy_next_word(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextWord)
+    }
+
+    /// Move to the start of the previous word (`b`).
+    #[rhai_fn(name = "copy_previous_word")]
+    pub fn copy_previous_word(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PreviousWord)
+    }
+
+    /// Move to the end of the next word (`e`).
+    #[rhai_fn(name = "copy_next_word_end")]
+    pub fn copy_next_word_end(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextWordEnd)
+    }
+
+    /// Move to the start of the next whitespace-separated word (`W`).
+    #[rhai_fn(name = "copy_next_space")]
+    pub fn copy_next_space(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextSpace)
+    }
+
+    /// Move to the start of the previous whitespace-separated word (`B`).
+    #[rhai_fn(name = "copy_previous_space")]
+    pub fn copy_previous_space(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PreviousSpace)
+    }
+
+    /// Move to the end of the next whitespace-separated word (`E`).
+    #[rhai_fn(name = "copy_next_space_end")]
+    pub fn copy_next_space_end(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextSpaceEnd)
+    }
+
+    /// Move to the first column of the line (`0`).
+    #[rhai_fn(name = "copy_start_of_line")]
+    pub fn copy_start_of_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::StartOfLine)
+    }
+
+    /// Move to the first non-blank character of the line (`^`).
+    #[rhai_fn(name = "copy_back_to_indentation")]
+    pub fn copy_back_to_indentation(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::BackToIndentation)
+    }
+
+    /// Move to the last character of the line (`$`).
+    #[rhai_fn(name = "copy_end_of_line")]
+    pub fn copy_end_of_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::EndOfLine)
+    }
+
+    /// Move to the first line of history (`gg`).
+    #[rhai_fn(name = "copy_history_top")]
+    pub fn copy_history_top(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HistoryTop)
+    }
+
+    /// Move to the last line of the buffer (`G`).
+    #[rhai_fn(name = "copy_history_bottom")]
+    pub fn copy_history_bottom(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HistoryBottom)
+    }
+
+    /// Move to the top row of the view (`H`).
+    #[rhai_fn(name = "copy_top_line")]
+    pub fn copy_top_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::TopLine)
+    }
+
+    /// Move to the middle row of the view (`M`).
+    #[rhai_fn(name = "copy_middle_line")]
+    pub fn copy_middle_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::MiddleLine)
+    }
+
+    /// Move to the bottom row of the view (`L`).
+    #[rhai_fn(name = "copy_bottom_line")]
+    pub fn copy_bottom_line(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::BottomLine)
+    }
+
+    /// Scroll the view and move the cursor up half a page (`C-u`).
+    #[rhai_fn(name = "copy_halfpage_up")]
+    pub fn copy_halfpage_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HalfPageUp)
+    }
+
+    /// Scroll the view and move the cursor down half a page (`C-d`).
+    #[rhai_fn(name = "copy_halfpage_down")]
+    pub fn copy_halfpage_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::HalfPageDown)
+    }
+
+    /// Scroll the view and move the cursor up a page (`C-b`).
+    #[rhai_fn(name = "copy_page_up")]
+    pub fn copy_page_up(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PageUp)
+    }
+
+    /// Scroll the view and move the cursor down a page (`C-f`).
+    #[rhai_fn(name = "copy_page_down")]
+    pub fn copy_page_down(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PageDown)
+    }
+
+    /// Wait for a character and move onto its next occurrence on the line (`f`).
+    #[rhai_fn(name = "copy_jump_forward")]
+    pub fn copy_jump_forward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::Forward,
+        }
+    }
+
+    /// Wait for a character and move onto its previous occurrence on the line
+    /// (`F`).
+    #[rhai_fn(name = "copy_jump_backward")]
+    pub fn copy_jump_backward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::Backward,
+        }
+    }
+
+    /// Wait for a character and move just before its next occurrence on the
+    /// line (`t`).
+    #[rhai_fn(name = "copy_jump_to_forward")]
+    pub fn copy_jump_to_forward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::ToForward,
+        }
+    }
+
+    /// Wait for a character and move just after its previous occurrence on the
+    /// line (`T`).
+    #[rhai_fn(name = "copy_jump_to_backward")]
+    pub fn copy_jump_to_backward(_: &mut ActionApi) -> Action {
+        Action::CopyJump {
+            kind: JumpKind::ToBackward,
+        }
+    }
+
+    /// Repeat the last character jump (`;`).
+    #[rhai_fn(name = "copy_jump_again")]
+    pub fn copy_jump_again(_: &mut ActionApi) -> Action {
+        Action::CopyJumpAgain
+    }
+
+    /// Repeat the last character jump in the opposite direction (`,`).
+    #[rhai_fn(name = "copy_jump_reverse")]
+    pub fn copy_jump_reverse(_: &mut ActionApi) -> Action {
+        Action::CopyJumpReverse
+    }
+
+    /// Start a character selection at the copy-mode cursor, entering copy mode
+    /// first if needed. With a character selection already active this clears
+    /// it; with another kind active it switches to character selection.
     #[rhai_fn(name = "enter_select_char")]
     pub fn enter_select_char(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1812,7 +2216,8 @@ mod documented_action_api {
         }
     }
 
-    /// Enter line selection mode.
+    /// Start a line selection at the copy-mode cursor. Toggles like
+    /// `enter_select_char`.
     #[rhai_fn(name = "enter_select_line")]
     pub fn enter_select_line(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1820,7 +2225,8 @@ mod documented_action_api {
         }
     }
 
-    /// Enter block selection mode.
+    /// Start a block (rectangle) selection at the copy-mode cursor. Toggles
+    /// like `enter_select_char`.
     #[rhai_fn(name = "enter_select_block")]
     pub fn enter_select_block(_: &mut ActionApi) -> Action {
         Action::EnterSelect {
@@ -1828,7 +2234,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection left.
+    /// Move the copy-mode cursor left. Same as `copy_cursor_left`.
     #[rhai_fn(name = "select_move_left")]
     pub fn select_move_left(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -1836,7 +2242,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection right.
+    /// Move the copy-mode cursor right. Same as `copy_cursor_right`.
     #[rhai_fn(name = "select_move_right")]
     pub fn select_move_right(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -1844,7 +2250,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection up.
+    /// Move the copy-mode cursor up. Same as `copy_cursor_up`.
     #[rhai_fn(name = "select_move_up")]
     pub fn select_move_up(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -1852,7 +2258,7 @@ mod documented_action_api {
         }
     }
 
-    /// Move the active selection down.
+    /// Move the copy-mode cursor down. Same as `copy_cursor_down`.
     #[rhai_fn(name = "select_move_down")]
     pub fn select_move_down(_: &mut ActionApi) -> Action {
         Action::SelectMove {
@@ -1860,19 +2266,28 @@ mod documented_action_api {
         }
     }
 
-    /// Copy the current selection into the clipboard.
+    /// Swap the selection's ends, so motions move the other end (`o`).
+    #[rhai_fn(name = "select_other_end")]
+    pub fn select_other_end(_: &mut ActionApi) -> Action {
+        Action::SelectOtherEnd
+    }
+
+    /// Copy the current selection into the clipboard (OSC 52) and leave copy
+    /// mode. Without a selection it only leaves copy mode.
     #[rhai_fn(name = "yank_selection")]
     pub fn yank_selection(_: &mut ActionApi) -> Action {
         Action::CopySelection
     }
 
-    /// Copy the current selection into the clipboard.
+    /// Copy the current selection into the clipboard (OSC 52) and leave copy
+    /// mode. Same as `yank_selection`.
     #[rhai_fn(name = "copy_selection")]
     pub fn copy_selection(_: &mut ActionApi) -> Action {
         Action::CopySelection
     }
 
-    /// Cancel the current selection.
+    /// Clear the current selection and return to copy mode with the cursor
+    /// where the selection ended.
     #[rhai_fn(name = "cancel_selection")]
     pub fn cancel_selection(_: &mut ActionApi) -> Action {
         Action::CancelSelection
@@ -2606,6 +3021,28 @@ fn parse_amount(value: i64, label: &str) -> ScriptResult<u16> {
     u16::try_from(value).map_err(|_| runtime_error(format!("{label} is too large")))
 }
 
+fn environment_action(global: bool, name: &str, value: Dynamic) -> ScriptResult<Action> {
+    if name.is_empty() || name.contains('=') {
+        return Err(runtime_error(format!(
+            "invalid environment variable name '{name}'"
+        )));
+    }
+    let value = if value.is_unit() {
+        None
+    } else {
+        Some(
+            value
+                .into_string()
+                .map_err(|_| runtime_error("environment value must be a string or ()"))?,
+        )
+    };
+    Ok(Action::SetEnvironment {
+        global,
+        name: name.to_owned(),
+        value,
+    })
+}
+
 fn parse_index(value: i64, label: &str) -> ScriptResult<usize> {
     if value < 0 {
         return Err(runtime_error(format!("{label} must be zero or greater")));
@@ -2787,6 +3224,19 @@ fn which(name: &str) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+fn resize_pane(
+    ctx: NativeCallContext<'_>,
+    direction: NavigationDirection,
+    cells: i64,
+) -> RhaiResultOf<Action> {
+    with_call_position(ctx, || {
+        Ok(Action::ResizePane {
+            direction,
+            cells: parse_amount(cells, "resize cells")?,
+        })
+    })
 }
 
 fn with_call_position<T>(

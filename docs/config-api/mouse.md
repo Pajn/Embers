@@ -49,6 +49,59 @@ Toggle forwarding mouse clicks into the focused buffer.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_drag_resize </h2>
+
+```rust,ignore
+fn set_drag_resize(mouse: MouseApi, value: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_drag_resize" id="link-set_drag_resize-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_drag_resize', 'Description')">
+Description
+</button>
+</div>
+
+<div group="set_drag_resize" id="set_drag_resize-Description" class="tabcontent"  style="display: block;" >
+Toggle resizing splits by dragging their dividers with the left button.
+
+Only drags that start on a divider are claimed; clicks and drags inside panes behave
+as before. The built-in config turns this on.
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_select </h2>
+
+```rust,ignore
+fn set_select(mouse: MouseApi, value: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_select" id="link-set_select-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_select', 'Description')">
+Description
+</button>
+</div>
+
+<div group="set_select" id="set_select-Description" class="tabcontent"  style="display: block;" >
+Toggle mouse selection in panes that have not requested mouse reporting:
+dragging enters copy mode with a selection and copies it on release,
+a double click copies a word and a triple click copies a line (tmux's
+defaults with `mouse on`). Panes running programs that requested the
+mouse keep receiving these events instead.
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_wheel_forward </h2>
 
 ```rust,ignore

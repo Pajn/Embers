@@ -15,6 +15,11 @@ plan-facing entry point for the same behavior.
   the target buffer runtime.
 - Hidden or detached buffers do not receive arbitrary typed input unless a script or explicit
   command targets them directly.
+- With `synchronize-panes` on for the active window, typed input for the focused pane is also sent
+  to the window's other visible panes, encoded per pane; popups never take part (see
+  `docs/layout-controls.md`).
+- A left press on a split divider starts a divider drag that the client keeps until release;
+  presses inside panes are routed as before.
 
 ## Current boundaries
 
@@ -30,5 +35,9 @@ plan-facing entry point for the same behavior.
   - copy-mode passthrough suppression
   - scripted `send_keys` / `send_bytes`
   - reload clearing pending prefixes
+- `crates/embers-client/tests/copy_mode.rs`
+  - copy-mode motions, counts, jumps, selection and search direction
+  - copy-mode bindings from config
+  - mouse drag/double-click selection and forwarding to mouse-reporting programs
 
 For the full policy text, see `docs/input-routing-policy.md`.

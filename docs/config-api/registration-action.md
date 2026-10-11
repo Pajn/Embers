@@ -64,7 +64,8 @@ Description
 </div>
 
 <div group="cancel_selection" id="cancel_selection-Description" class="tabcontent"  style="display: block;" >
-Cancel the current selection.
+Clear the current selection and return to copy mode with the cursor
+where the selection ended.
 </div>
 
 </div>
@@ -226,6 +227,582 @@ mode with the committed result in place.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_back_to_indentation </h2>
+
+```rust,ignore
+fn copy_back_to_indentation(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_back_to_indentation" id="link-copy_back_to_indentation-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_back_to_indentation', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_back_to_indentation" id="copy_back_to_indentation-Description" class="tabcontent"  style="display: block;" >
+Move to the first non-blank character of the line (`^`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_bottom_line </h2>
+
+```rust,ignore
+fn copy_bottom_line(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_bottom_line" id="link-copy_bottom_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_bottom_line', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_bottom_line" id="copy_bottom_line-Description" class="tabcontent"  style="display: block;" >
+Move to the bottom row of the view (`L`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_cursor_down </h2>
+
+```rust,ignore
+fn copy_cursor_down(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_cursor_down" id="link-copy_cursor_down-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_cursor_down', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_cursor_down" id="copy_cursor_down-Description" class="tabcontent"  style="display: block;" >
+Move the copy-mode cursor down (`j`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_cursor_left </h2>
+
+```rust,ignore
+fn copy_cursor_left(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_cursor_left" id="link-copy_cursor_left-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_cursor_left', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_cursor_left" id="copy_cursor_left-Description" class="tabcontent"  style="display: block;" >
+Move the copy-mode cursor left (`h`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_cursor_right </h2>
+
+```rust,ignore
+fn copy_cursor_right(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_cursor_right" id="link-copy_cursor_right-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_cursor_right', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_cursor_right" id="copy_cursor_right-Description" class="tabcontent"  style="display: block;" >
+Move the copy-mode cursor right (`l`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_cursor_up </h2>
+
+```rust,ignore
+fn copy_cursor_up(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_cursor_up" id="link-copy_cursor_up-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_cursor_up', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_cursor_up" id="copy_cursor_up-Description" class="tabcontent"  style="display: block;" >
+Move the copy-mode cursor up (`k`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_end_of_line </h2>
+
+```rust,ignore
+fn copy_end_of_line(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_end_of_line" id="link-copy_end_of_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_end_of_line', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_end_of_line" id="copy_end_of_line-Description" class="tabcontent"  style="display: block;" >
+Move to the last character of the line (`$`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_halfpage_down </h2>
+
+```rust,ignore
+fn copy_halfpage_down(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_halfpage_down" id="link-copy_halfpage_down-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_halfpage_down', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_halfpage_down" id="copy_halfpage_down-Description" class="tabcontent"  style="display: block;" >
+Scroll the view and move the cursor down half a page (`C-d`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_halfpage_up </h2>
+
+```rust,ignore
+fn copy_halfpage_up(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_halfpage_up" id="link-copy_halfpage_up-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_halfpage_up', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_halfpage_up" id="copy_halfpage_up-Description" class="tabcontent"  style="display: block;" >
+Scroll the view and move the cursor up half a page (`C-u`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_history_bottom </h2>
+
+```rust,ignore
+fn copy_history_bottom(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_history_bottom" id="link-copy_history_bottom-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_history_bottom', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_history_bottom" id="copy_history_bottom-Description" class="tabcontent"  style="display: block;" >
+Move to the last line of the buffer (`G`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_history_top </h2>
+
+```rust,ignore
+fn copy_history_top(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_history_top" id="link-copy_history_top-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_history_top', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_history_top" id="copy_history_top-Description" class="tabcontent"  style="display: block;" >
+Move to the first line of history (`gg`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_again </h2>
+
+```rust,ignore
+fn copy_jump_again(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_again" id="link-copy_jump_again-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_again', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_again" id="copy_jump_again-Description" class="tabcontent"  style="display: block;" >
+Repeat the last character jump (`;`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_backward </h2>
+
+```rust,ignore
+fn copy_jump_backward(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_backward" id="link-copy_jump_backward-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_backward', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_backward" id="copy_jump_backward-Description" class="tabcontent"  style="display: block;" >
+Wait for a character and move onto its previous occurrence on the line
+(`F`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_forward </h2>
+
+```rust,ignore
+fn copy_jump_forward(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_forward" id="link-copy_jump_forward-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_forward', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_forward" id="copy_jump_forward-Description" class="tabcontent"  style="display: block;" >
+Wait for a character and move onto its next occurrence on the line (`f`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_reverse </h2>
+
+```rust,ignore
+fn copy_jump_reverse(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_reverse" id="link-copy_jump_reverse-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_reverse', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_reverse" id="copy_jump_reverse-Description" class="tabcontent"  style="display: block;" >
+Repeat the last character jump in the opposite direction (`,`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_to_backward </h2>
+
+```rust,ignore
+fn copy_jump_to_backward(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_to_backward" id="link-copy_jump_to_backward-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_to_backward', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_to_backward" id="copy_jump_to_backward-Description" class="tabcontent"  style="display: block;" >
+Wait for a character and move just after its previous occurrence on the
+line (`T`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_jump_to_forward </h2>
+
+```rust,ignore
+fn copy_jump_to_forward(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_jump_to_forward" id="link-copy_jump_to_forward-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_jump_to_forward', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_jump_to_forward" id="copy_jump_to_forward-Description" class="tabcontent"  style="display: block;" >
+Wait for a character and move just before its next occurrence on the
+line (`t`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_middle_line </h2>
+
+```rust,ignore
+fn copy_middle_line(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_middle_line" id="link-copy_middle_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_middle_line', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_middle_line" id="copy_middle_line-Description" class="tabcontent"  style="display: block;" >
+Move to the middle row of the view (`M`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_next_space </h2>
+
+```rust,ignore
+fn copy_next_space(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_next_space" id="link-copy_next_space-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_next_space', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_next_space" id="copy_next_space-Description" class="tabcontent"  style="display: block;" >
+Move to the start of the next whitespace-separated word (`W`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_next_space_end </h2>
+
+```rust,ignore
+fn copy_next_space_end(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_next_space_end" id="link-copy_next_space_end-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_next_space_end', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_next_space_end" id="copy_next_space_end-Description" class="tabcontent"  style="display: block;" >
+Move to the end of the next whitespace-separated word (`E`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_next_word </h2>
+
+```rust,ignore
+fn copy_next_word(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_next_word" id="link-copy_next_word-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_next_word', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_next_word" id="copy_next_word-Description" class="tabcontent"  style="display: block;" >
+Move to the start of the next word (`w`). Whitespace separates words, and
+a run of ASCII punctuation other than `_` is a word of its own.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_next_word_end </h2>
+
+```rust,ignore
+fn copy_next_word_end(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_next_word_end" id="link-copy_next_word_end-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_next_word_end', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_next_word_end" id="copy_next_word_end-Description" class="tabcontent"  style="display: block;" >
+Move to the end of the next word (`e`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_page_down </h2>
+
+```rust,ignore
+fn copy_page_down(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_page_down" id="link-copy_page_down-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_page_down', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_page_down" id="copy_page_down-Description" class="tabcontent"  style="display: block;" >
+Scroll the view and move the cursor down a page (`C-f`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_page_up </h2>
+
+```rust,ignore
+fn copy_page_up(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_page_up" id="link-copy_page_up-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_page_up', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_page_up" id="copy_page_up-Description" class="tabcontent"  style="display: block;" >
+Scroll the view and move the cursor up a page (`C-b`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_previous_space </h2>
+
+```rust,ignore
+fn copy_previous_space(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_previous_space" id="link-copy_previous_space-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_previous_space', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_previous_space" id="copy_previous_space-Description" class="tabcontent"  style="display: block;" >
+Move to the start of the previous whitespace-separated word (`B`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_previous_word </h2>
+
+```rust,ignore
+fn copy_previous_word(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_previous_word" id="link-copy_previous_word-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_previous_word', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_previous_word" id="copy_previous_word-Description" class="tabcontent"  style="display: block;" >
+Move to the start of the previous word (`b`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> copy_selection </h2>
 
 ```rust,ignore
@@ -241,7 +818,52 @@ Description
 </div>
 
 <div group="copy_selection" id="copy_selection-Description" class="tabcontent"  style="display: block;" >
-Copy the current selection into the clipboard.
+Copy the current selection into the clipboard (OSC 52) and leave copy
+mode. Same as `yank_selection`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_start_of_line </h2>
+
+```rust,ignore
+fn copy_start_of_line(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_start_of_line" id="link-copy_start_of_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_start_of_line', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_start_of_line" id="copy_start_of_line-Description" class="tabcontent"  style="display: block;" >
+Move to the first column of the line (`0`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_top_line </h2>
+
+```rust,ignore
+fn copy_top_line(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_top_line" id="link-copy_top_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_top_line', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_top_line" id="copy_top_line-Description" class="tabcontent"  style="display: block;" >
+Move to the top row of the view (`H`).
 </div>
 
 </div>
@@ -286,6 +908,30 @@ Description
 
 <div group="detach_buffer_id" id="detach_buffer_id-Description" class="tabcontent"  style="display: block;" >
 Detach a buffer by id.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> enter_copy_mode </h2>
+
+```rust,ignore
+fn enter_copy_mode(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="enter_copy_mode" id="link-enter_copy_mode-Description"  class="tablinks active"
+    onclick="openTab(event, 'enter_copy_mode', 'Description')">
+Description
+</button>
+</div>
+
+<div group="enter_copy_mode" id="enter_copy_mode-Description" class="tabcontent"  style="display: block;" >
+Enter copy mode on the focused pane (tmux `copy-mode`). The view stops
+following output and a cursor appears at the program's cursor; copy-mode
+motions move it. Does nothing on the alternate screen.
 </div>
 
 </div>
@@ -380,6 +1026,30 @@ Enter a specific input mode by name.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> enter_search_backward </h2>
+
+```rust,ignore
+fn enter_search_backward(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="enter_search_backward" id="link-enter_search_backward-Description"  class="tablinks active"
+    onclick="openTab(event, 'enter_search_backward', 'Description')">
+Description
+</button>
+</div>
+
+<div group="enter_search_backward" id="enter_search_backward-Description" class="tabcontent"  style="display: block;" >
+Enter incremental search mode, searching backward (`?`). After a backward
+search `search_next` moves to earlier matches and `search_prev` to later
+ones, as in vim.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> enter_search_mode </h2>
 
 ```rust,ignore
@@ -395,7 +1065,7 @@ Description
 </div>
 
 <div group="enter_search_mode" id="enter_search_mode-Description" class="tabcontent"  style="display: block;" >
-Enter incremental search mode.
+Enter incremental search mode, searching forward (`/`).
 </div>
 
 </div>
@@ -417,7 +1087,8 @@ Description
 </div>
 
 <div group="enter_select_block" id="enter_select_block-Description" class="tabcontent"  style="display: block;" >
-Enter block selection mode.
+Start a block (rectangle) selection at the copy-mode cursor. Toggles
+like `enter_select_char`.
 </div>
 
 </div>
@@ -439,7 +1110,9 @@ Description
 </div>
 
 <div group="enter_select_char" id="enter_select_char-Description" class="tabcontent"  style="display: block;" >
-Enter character selection mode.
+Start a character selection at the copy-mode cursor, entering copy mode
+first if needed. With a character selection already active this clears
+it; with another kind active it switches to character selection.
 </div>
 
 </div>
@@ -461,7 +1134,31 @@ Description
 </div>
 
 <div group="enter_select_line" id="enter_select_line-Description" class="tabcontent"  style="display: block;" >
-Enter line selection mode.
+Start a line selection at the copy-mode cursor. Toggles like
+`enter_select_char`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> exit_copy_mode </h2>
+
+```rust,ignore
+fn exit_copy_mode(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="exit_copy_mode" id="link-exit_copy_mode-Description"  class="tablinks active"
+    onclick="openTab(event, 'exit_copy_mode', 'Description')">
+Description
+</button>
+</div>
+
+<div group="exit_copy_mode" id="exit_copy_mode-Description" class="tabcontent"  style="display: block;" >
+Leave copy mode: drop the cursor and any selection, follow output again,
+and return to `normal` mode (tmux `cancel`).
 </div>
 
 </div>
@@ -1227,6 +1924,114 @@ Replace a specific node by id with a new tree.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_down </h2>
+
+```rust,ignore
+fn resize_down(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_down" id="link-resize_down-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_down', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_down" id="resize_down-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` rows down (tmux `resize-pane -D`).
+See `resize_left` for which divider moves.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_left </h2>
+
+```rust,ignore
+fn resize_left(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_left" id="link-resize_left-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_left', 'Description')">
+Description
+</button>
+<button group="resize_left" id="link-resize_left-Example"  class="tablinks"
+    onclick="openTab(event, 'resize_left', 'Example')">
+Example
+</button>
+</div>
+
+<div group="resize_left" id="resize_left-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` cells left (tmux `resize-pane -L`).
+
+The nearest split with panes side by side is resized: the divider to the right of the
+pane moves left, shrinking the pane, or, when the pane is the split's rightmost child,
+the divider to its left moves left, growing it. Panes keep at least one column of
+content, and the action does nothing when there is no such split or the divider cannot
+move. While a pane is zoomed only splits inside the zoomed view can be resized.
+</div>
+<div group="resize_left" id="resize_left-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<M-h>", action.resize_left(3));
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_right </h2>
+
+```rust,ignore
+fn resize_right(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_right" id="link-resize_right-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_right', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_right" id="resize_right-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` cells right (tmux `resize-pane -R`).
+See `resize_left` for which divider moves.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> resize_up </h2>
+
+```rust,ignore
+fn resize_up(_: ActionApi, cells: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="resize_up" id="link-resize_up-Description"  class="tablinks active"
+    onclick="openTab(event, 'resize_up', 'Description')">
+Description
+</button>
+</div>
+
+<div group="resize_up" id="resize_up-Description" class="tabcontent"  style="display: block;" >
+Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
+See `resize_left` for which divider moves; panes keep their title row and at least
+one row of content.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> reveal_buffer </h2>
 
 ```rust,ignore
@@ -1551,7 +2356,7 @@ Description
 </div>
 
 <div group="select_move_down" id="select_move_down-Description" class="tabcontent"  style="display: block;" >
-Move the active selection down.
+Move the copy-mode cursor down. Same as `copy_cursor_down`.
 </div>
 
 </div>
@@ -1573,7 +2378,7 @@ Description
 </div>
 
 <div group="select_move_left" id="select_move_left-Description" class="tabcontent"  style="display: block;" >
-Move the active selection left.
+Move the copy-mode cursor left. Same as `copy_cursor_left`.
 </div>
 
 </div>
@@ -1595,7 +2400,7 @@ Description
 </div>
 
 <div group="select_move_right" id="select_move_right-Description" class="tabcontent"  style="display: block;" >
-Move the active selection right.
+Move the copy-mode cursor right. Same as `copy_cursor_right`.
 </div>
 
 </div>
@@ -1617,7 +2422,29 @@ Description
 </div>
 
 <div group="select_move_up" id="select_move_up-Description" class="tabcontent"  style="display: block;" >
-Move the active selection up.
+Move the copy-mode cursor up. Same as `copy_cursor_up`.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> select_other_end </h2>
+
+```rust,ignore
+fn select_other_end(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="select_other_end" id="link-select_other_end-Description"  class="tablinks active"
+    onclick="openTab(event, 'select_other_end', 'Description')">
+Description
+</button>
+</div>
+
+<div group="select_other_end" id="select_other_end-Description" class="tabcontent"  style="display: block;" >
+Swap the selection's ends, so motions move the other end (`o`).
 </div>
 
 </div>
@@ -1640,6 +2467,40 @@ Description
 
 <div group="select_tab" id="select_tab-Description" class="tabcontent"  style="display: block;" >
 Select a tab by index in a specific tabs node.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> select_window </h2>
+
+```rust,ignore
+fn select_window(_: ActionApi, number: int) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="select_window" id="link-select_window-Description"  class="tablinks active"
+    onclick="openTab(event, 'select_window', 'Description')">
+Description
+</button>
+<button group="select_window" id="link-select_window-Example"  class="tablinks"
+    onclick="openTab(event, 'select_window', 'Example')">
+Example
+</button>
+</div>
+
+<div group="select_window" id="select_window-Description" class="tabcontent"  style="display: block;" >
+Select a window (a root tab of the current session) by its number, which
+counts from the base index set with `set_base_index` (0 when unset), like
+tmux `select-window -t :N`.
+</div>
+<div group="select_window" id="select_window-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>1", action.select_window(1));
+```
 </div>
 
 </div>
@@ -1730,6 +2591,104 @@ Description
 
 <div group="send_keys_current" id="send_keys_current-Description" class="tabcontent"  style="display: block;" >
 Send a key notation sequence to the focused buffer.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_environment </h2>
+
+```rust,ignore
+fn set_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_environment" id="link-set_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_environment', 'Description')">
+Description
+</button>
+<button group="set_environment" id="link-set_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_environment" id="set_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in the current
+session (tmux `set-environment`). Pass `()` as the value to unset it.
+Panes that already run keep their environment.
+</div>
+<div group="set_environment" id="set_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_environment("AWS_PROFILE", "staging")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_global_environment </h2>
+
+```rust,ignore
+fn set_global_environment(_: ActionApi, name: String, value: ?) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_global_environment" id="link-set_global_environment-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_global_environment', 'Description')">
+Description
+</button>
+<button group="set_global_environment" id="link-set_global_environment-Example"  class="tablinks"
+    onclick="openTab(event, 'set_global_environment', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_global_environment" id="set_global_environment-Description" class="tabcontent"  style="display: block;" >
+Set an environment variable for panes created later in every session
+(tmux `set-environment -g`). Pass `()` as the value to unset it. A
+session's own value wins over the global one.
+</div>
+<div group="set_global_environment" id="set_global_environment-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+action.set_global_environment("EDITOR", "nvim")
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_synchronize_panes </h2>
+
+```rust,ignore
+fn set_synchronize_panes(_: ActionApi, enabled: bool) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="set_synchronize_panes" id="link-set_synchronize_panes-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_synchronize_panes', 'Description')">
+Description
+</button>
+</div>
+
+<div group="set_synchronize_panes" id="set_synchronize_panes-Description" class="tabcontent"  style="display: block;" >
+Turn tmux-style `synchronize-panes` on or off for the active window.
+
+The setting belongs to the window (a root tab) and is shared by every client. While it
+is on, keys, pastes and `send_keys_current`/`send_bytes_current` input aimed at the
+focused pane go to every pane the window shows, each encoded for that pane. Panes in
+hidden nested tabs or hidden by zoom, panes in other windows, and popups are left out,
+and input typed into a focused popup is never copied. Mouse and focus events, input
+sent to a specific buffer id, and `embers send-keys` are not synchronized. Tab bars can
+show the state through `TabInfo.synchronize_panes()`.
 </div>
 
 </div>
@@ -1834,6 +2793,74 @@ Toggle a named input mode.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> toggle_synchronize_panes </h2>
+
+```rust,ignore
+fn toggle_synchronize_panes(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="toggle_synchronize_panes" id="link-toggle_synchronize_panes-Description"  class="tablinks active"
+    onclick="openTab(event, 'toggle_synchronize_panes', 'Description')">
+Description
+</button>
+<button group="toggle_synchronize_panes" id="link-toggle_synchronize_panes-Example"  class="tablinks"
+    onclick="openTab(event, 'toggle_synchronize_panes', 'Example')">
+Example
+</button>
+</div>
+
+<div group="toggle_synchronize_panes" id="toggle_synchronize_panes-Description" class="tabcontent"  style="display: block;" >
+Toggle tmux-style `synchronize-panes` for the active window.
+
+While it is on, input typed into a pane of the window is also sent to every other pane
+the window currently shows. Popups and other windows never take part. See
+`set_synchronize_panes` for details.
+</div>
+<div group="toggle_synchronize_panes" id="toggle_synchronize_panes-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>S", action.toggle_synchronize_panes());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> toggle_zoom_current_node </h2>
+
+```rust,ignore
+fn toggle_zoom_current_node(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="toggle_zoom_current_node" id="link-toggle_zoom_current_node-Description"  class="tablinks active"
+    onclick="openTab(event, 'toggle_zoom_current_node', 'Description')">
+Description
+</button>
+<button group="toggle_zoom_current_node" id="link-toggle_zoom_current_node-Example"  class="tablinks"
+    onclick="openTab(event, 'toggle_zoom_current_node', 'Example')">
+Example
+</button>
+</div>
+
+<div group="toggle_zoom_current_node" id="toggle_zoom_current_node-Description" class="tabcontent"  style="display: block;" >
+Toggle zoom for the focused node (tmux `resize-pane -Z`).
+</div>
+<div group="toggle_zoom_current_node" id="toggle_zoom_current_node-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+bind("normal", "<leader>z", action.toggle_zoom_current_node());
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> toggle_zoom_node </h2>
 
 ```rust,ignore
@@ -1850,8 +2877,6 @@ Description
 
 <div group="toggle_zoom_node" id="toggle_zoom_node-Description" class="tabcontent"  style="display: block;" >
 Toggle zoom for the specified node id.
-There is intentionally no `toggle_zoom_current_node`; use `zoom_current_node` for the
-focused node and `toggle_zoom_node` when you already know the target id.
 </div>
 
 </div>
@@ -1896,7 +2921,8 @@ Description
 </div>
 
 <div group="yank_selection" id="yank_selection-Description" class="tabcontent"  style="display: block;" >
-Copy the current selection into the clipboard.
+Copy the current selection into the clipboard (OSC 52) and leave copy
+mode. Without a selection it only leaves copy mode.
 </div>
 
 </div>

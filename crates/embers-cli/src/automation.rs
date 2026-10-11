@@ -285,6 +285,13 @@ fn event_value(event: &ServerEvent) -> Value {
             "client": client_value(&event.client),
             "previous_session_id": event.previous_session_id.map(u64::from),
         }),
+        // The clipboard text itself is left out of the event stream.
+        ServerEvent::Clipboard(event) => json!({
+            "type": "clipboard",
+            "buffer_id": u64::from(event.buffer_id),
+            "selection": event.selection.osc52_parameter().to_string(),
+            "bytes": event.text.len(),
+        }),
     }
 }
 

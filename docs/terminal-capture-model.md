@@ -81,7 +81,9 @@ While detached:
 - title and other backend metadata remain available
 - the most recent PTY size remains the size reported by capture APIs until another resize arrives
 
-Exited PTY buffers also remain capturable as long as the buffer record still exists. Writes,
+Exited PTY buffers also remain capturable as long as the buffer record still exists and the
+server that saw the exit keeps running; the keeper exits once no server is attached, so after a
+server restart an exited buffer keeps its record but no longer has a capture source. Writes,
 resizes, and kills must fail after exit, but capture reads continue to work. In practice callers
 should expect an error result rather than a silent no-op: writes and kills surface a conflict such
 as `buffer 12 has already exited`, while resize requests can fail with `buffer runtime has already

@@ -3,8 +3,10 @@ use std::collections::BTreeMap;
 use embers_core::{BufferId, FloatingId, NodeId, SessionId, SplitDirection};
 use embers_protocol::{
     BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
+    SynchronizePanesMode,
 };
 
+use crate::copy_mode::{CopyMotion, JumpKind};
 use crate::input::KeySequence;
 use crate::presentation::NavigationDirection;
 use crate::state::SelectionKind;
@@ -27,6 +29,11 @@ pub enum Action {
     SelectTab {
         tabs_node_id: Option<NodeId>,
         index: usize,
+    },
+    /// tmux `select-window -t :N`: select the root tab numbered `number`,
+    /// counting from the configured base index.
+    SelectWindow {
+        number: u64,
     },
     NextTab {
         tabs_node_id: Option<NodeId>,
@@ -98,6 +105,15 @@ pub enum Action {
     ToggleZoomNode {
         node_id: Option<NodeId>,
     },
+    /// tmux `resize-pane -L/-R/-U/-D <cells>` on the focused pane.
+    ResizePane {
+        direction: NavigationDirection,
+        cells: u16,
+    },
+    /// tmux `synchronize-panes` for the active window.
+    SetSynchronizePanes {
+        mode: SynchronizePanesMode,
+    },
     SwapSiblingNodes {
         first_node_id: Option<NodeId>,
         second_node_id: NodeId,
@@ -135,16 +151,29 @@ pub enum Action {
     ScrollToBottom,
     FollowOutput,
     EnterSearchMode,
+    EnterSearchBackward,
     SearchNext,
     SearchPrev,
     CommitSearch,
     CancelSearch,
+    EnterCopyMode,
+    ExitCopyMode,
+    CopyMotion {
+        motion: CopyMotion,
+    },
+    /// Wait for a character, then jump to it on the cursor line.
+    CopyJump {
+        kind: JumpKind,
+    },
+    CopyJumpAgain,
+    CopyJumpReverse,
     EnterSelect {
         kind: SelectionKind,
     },
     SelectMove {
         direction: NavigationDirection,
     },
+    SelectOtherEnd,
     CopySelection,
     CancelSelection,
     Notify {
@@ -162,6 +191,14 @@ pub enum Action {
     PrevSession,
     RunShell {
         command: Vec<String>,
+    },
+    /// tmux `set-environment [-g] [-u]`: set (or unset, when `value` is
+    /// `None`) a variable for panes created later in the current session, or
+    /// in every session when `global`.
+    SetEnvironment {
+        global: bool,
+        name: String,
+        value: Option<String>,
     },
     EnterHints {
         action: Option<String>,

@@ -1,8 +1,12 @@
 mod automation;
+mod environment;
 mod interactive;
+mod layout_controls;
 mod panes;
+mod persistence;
 mod ping;
 mod popups;
 mod sessions;
 mod support;
+mod window_numbering;
 mod windows;

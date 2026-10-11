@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use embers_core::{MuxError, Result};
@@ -69,15 +70,33 @@ impl Transport for SocketTransport {
         }
 
         let mut client = self.client.lock().await;
-        match client.recv().await.map_err(protocol_error_to_mux)? {
-            Some(ServerEnvelope::Event(event)) => Ok(event),
-            Some(ServerEnvelope::Response(response)) => Err(MuxError::protocol(format!(
-                "received response without pending request: {response:?}"
-            ))),
-            None => Err(MuxError::transport(
-                "connection closed while waiting for an event",
-            )),
+        expect_event(client.recv().await.map_err(protocol_error_to_mux)?)
+    }
+
+    async fn ready_event(&self) -> Result<Option<ServerEvent>> {
+        if let Some(event) = self.queued_events.lock().await.pop_front() {
+            return Ok(Some(event));
         }
+
+        let mut client = self.client.lock().await;
+        // `recv` is cancel-safe, so a zero timeout takes only what has already
+        // arrived and loses nothing.
+        match tokio::time::timeout(Duration::ZERO, client.recv()).await {
+            Ok(envelope) => expect_event(envelope.map_err(protocol_error_to_mux)?).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+fn expect_event(envelope: Option<ServerEnvelope>) -> Result<ServerEvent> {
+    match envelope {
+        Some(ServerEnvelope::Event(event)) => Ok(event),
+        Some(ServerEnvelope::Response(response)) => Err(MuxError::protocol(format!(
+            "received response without pending request: {response:?}"
+        ))),
+        None => Err(MuxError::transport(
+            "connection closed while waiting for an event",
+        )),
     }
 }
 

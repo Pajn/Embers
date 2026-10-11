@@ -114,6 +114,91 @@ Attach a callback to an emitted event such as `buffer_bell`.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_base_index </h2>
+
+```rust,ignore
+fn set_base_index(index: int)
+```
+
+<div>
+<div class="tab">
+<button group="set_base_index" id="link-set_base_index-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_base_index', 'Description')">
+Description
+</button>
+<button group="set_base_index" id="link-set_base_index-Example"  class="tablinks"
+    onclick="openTab(event, 'set_base_index', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_base_index" id="set_base_index-Description" class="tabcontent"  style="display: block;" >
+Number windows from `index` instead of 0, like tmux `set -g base-index 1`.
+
+Windows are a session's root tabs. Their numbers are what
+`TabInfo.number()` gives tab bar formatters and what
+`action.select_window` takes. Windows are always numbered without gaps:
+closing one renumbers the windows after it, like tmux with
+`renumber-windows on`.
+
+This setting covers the client and the commands it runs from the command
+prompt. The `embers` CLI reads `EMBERS_BASE_INDEX` (or `--base-index`)
+instead; set that variable where the server and your shells start to use
+the same numbering everywhere. Without this call the client uses
+`EMBERS_BASE_INDEX` when it is set, and numbers windows from 0 otherwise.
+</div>
+<div group="set_base_index" id="set_base_index-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_base_index(1);
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_clipboard </h2>
+
+```rust,ignore
+fn set_clipboard(enabled: bool)
+```
+
+<div>
+<div class="tab">
+<button group="set_clipboard" id="link-set_clipboard-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_clipboard', 'Description')">
+Description
+</button>
+<button group="set_clipboard" id="link-set_clipboard-Example"  class="tablinks"
+    onclick="openTab(event, 'set_clipboard', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_clipboard" id="set_clipboard-Description" class="tabcontent"  style="display: block;" >
+Choose whether programs in panes may set the system clipboard.
+
+When on (the default), an OSC 52 clipboard write from a program in a
+pane, such as a Neovim yank over SSH, is passed on to the terminal
+running the Embers client, which puts it on the system clipboard. This
+matches tmux's `set-clipboard on`. When off, those writes are dropped.
+Programs can never read the clipboard through Embers: OSC 52 queries are
+always ignored.
+</div>
+<div group="set_clipboard" id="set_clipboard-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_clipboard(false);
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_leader </h2>
 
 ```rust,ignore

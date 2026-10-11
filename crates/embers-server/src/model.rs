@@ -3,8 +3,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, SplitDirection,
-    Timestamp,
+    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
+    SplitDirection, Timestamp,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -16,6 +16,9 @@ pub struct Session {
     pub focused_leaf: Option<NodeId>,
     pub focused_floating: Option<FloatingId>,
     pub zoomed_node: Option<NodeId>,
+    /// The area an attached client last drew this session in. Panes created
+    /// without a client use it to start at their drawn size.
+    pub viewport: Option<Size>,
     pub created_at: Timestamp,
 }
 
@@ -73,6 +76,10 @@ pub struct Buffer {
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
     pub user_options: BTreeMap<String, String>,
+    /// Command line of the job last seen in the foreground of this buffer's
+    /// PTY when that was not the buffer's own process, for example a program
+    /// its shell runs. Saved so a restore can decide whether to run it again.
+    pub foreground_command: Option<Vec<String>>,
     runtime_socket_path: Option<PathBuf>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
@@ -99,6 +106,7 @@ impl Buffer {
             cwd,
             env,
             user_options: BTreeMap::new(),
+            foreground_command: None,
             runtime_socket_path: None,
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
@@ -130,6 +138,7 @@ impl fmt::Debug for Buffer {
             .field("cwd", &self.cwd)
             .field("env", &self.env)
             .field("user_options", &self.user_options)
+            .field("foreground_command", &self.foreground_command)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
@@ -334,6 +343,9 @@ pub struct TabsNode {
 pub struct TabEntry {
     pub title: String,
     pub child: NodeId,
+    /// tmux `synchronize-panes` for the window this tab holds. Only set on
+    /// root tabs; the client fans typed input out to the window's panes.
+    pub synchronize_panes: bool,
 }
 
 impl TabEntry {
@@ -341,6 +353,7 @@ impl TabEntry {
         Self {
             title: title.into(),
             child,
+            synchronize_panes: false,
         }
     }
 }

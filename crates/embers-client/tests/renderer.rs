@@ -3,10 +3,11 @@ use embers_client::{
     SelectionState,
 };
 use embers_core::{
-    CellAttrs, CursorPosition, CursorShape, CursorState, Size, SnapshotLine, StyledRun, TermColor,
+    CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
+    TermColor,
 };
 
-use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, SESSION_ID, demo_state};
+use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state};
 
 /// Build a single-run styled line covering the whole text.
 fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
@@ -17,7 +18,10 @@ fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
             fg,
             bg: TermColor::Default,
             attrs: CellAttrs(attrs),
+            underline_color: TermColor::Default,
+            link: 0,
         }],
+        links: Vec::new(),
     }
 }
 
@@ -113,6 +117,31 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
             "             |                          \n",
             "             |                          "
         )
+    );
+}
+
+#[test]
+fn default_tab_bar_marks_synchronized_windows() {
+    let mut state = demo_state();
+    let root = state.nodes.get_mut(&ROOT_TABS_ID).unwrap();
+    root.tabs.as_mut().unwrap().tabs[1].synchronize_panes = true;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+
+    let grid = Renderer.render(&state, &presentation);
+
+    assert!(
+        grid.render()
+            .starts_with("  shell  [!workspace (sync)]            \n"),
+        "{}",
+        grid.render()
     );
 }
 
@@ -286,6 +315,44 @@ fn renderer_draws_selection_overlay_and_hides_program_cursor_when_selecting() {
 }
 
 #[test]
+fn renderer_draws_the_copy_mode_cursor_instead_of_the_program_cursor() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("focused pane snapshot")
+        .cursor = Some(CursorState {
+        position: CursorPosition { row: 0, col: 0 },
+        shape: CursorShape::Beam,
+    });
+    let view = state.view_state_mut(FOCUSED_LEAF_ID).unwrap();
+    view.follow_output = false;
+    view.scroll_top_line = 0;
+    view.copy_cursor = Some(SelectionPoint { line: 1, column: 3 });
+
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .unwrap();
+    let leaf = presentation.focused_leaf().unwrap().clone();
+    let grid = Renderer.render(&state, &presentation);
+
+    assert_eq!(
+        grid.cursor(),
+        Some(embers_client::GridCursor {
+            x: leaf.rect.origin.x as u16 + 3,
+            y: leaf.rect.origin.y as u16 + 2,
+            shape: CursorShape::Block,
+        })
+    );
+}
+
+#[test]
 fn renders_indexed_foreground_run_in_pane() {
     let grid = render_focused_with_lines(vec![styled_line("red", TermColor::Indexed(1), 0)]);
     let ansi = grid.ansi_lines();
@@ -357,6 +424,126 @@ fn renders_styled_wide_char() {
         "{ansi:?}"
     );
     assert!(grid.lines().iter().any(|line| line.contains("界")));
+}
+
+#[test]
+fn renders_underline_styles_with_colon_subparameters() {
+    let styles = [
+        CellAttrs::UNDERLINE,
+        CellAttrs::DOUBLE_UNDERLINE,
+        CellAttrs::CURLY_UNDERLINE,
+        CellAttrs::DOTTED_UNDERLINE,
+        CellAttrs::DASHED_UNDERLINE,
+    ];
+    let line = SnapshotLine {
+        text: "abcde".to_owned(),
+        runs: styles
+            .iter()
+            .map(|&attrs| StyledRun {
+                len: 1,
+                attrs: CellAttrs(attrs),
+                ..StyledRun::default()
+            })
+            .collect(),
+        links: Vec::new(),
+    };
+    let ansi = render_focused_with_lines(vec![line])
+        .ansi_lines()
+        .join("\n");
+    // A single underline keeps the universally understood `4`; the other
+    // styles use the `4:n` sub-parameter form.
+    for expected in [
+        "\x1b[4ma",
+        "\x1b[4:2mb",
+        "\x1b[4:3mc",
+        "\x1b[4:4md",
+        "\x1b[4:5me",
+    ] {
+        assert!(ansi.contains(expected), "missing {expected:?} in {ansi:?}");
+    }
+}
+
+#[test]
+fn renders_underline_color() {
+    let mut rgb = styled_line("diag", TermColor::Default, CellAttrs::CURLY_UNDERLINE);
+    rgb.runs[0].underline_color = TermColor::Rgb {
+        r: 255,
+        g: 16,
+        b: 0,
+    };
+    let mut indexed = styled_line("warn", TermColor::Default, CellAttrs::UNDERLINE);
+    indexed.runs[0].underline_color = TermColor::Indexed(3);
+    let grid = render_focused_with_lines(vec![rgb, indexed]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b[58:2::255:16:0m"),
+        "expected rgb underline color in {ansi:?}"
+    );
+    assert!(
+        ansi.contains("\x1b[58:5:3m"),
+        "expected indexed underline color in {ansi:?}"
+    );
+}
+
+fn linked_line(text: &str, linked_len: u32, link: Hyperlink) -> SnapshotLine {
+    SnapshotLine {
+        text: text.to_owned(),
+        runs: vec![
+            StyledRun {
+                len: linked_len,
+                link: 1,
+                ..StyledRun::default()
+            },
+            StyledRun {
+                len: text.len() as u32 - linked_len,
+                ..StyledRun::default()
+            },
+        ],
+        links: vec![link],
+    }
+}
+
+#[test]
+fn renders_osc8_hyperlinks_and_closes_them() {
+    let grid = render_focused_with_lines(vec![linked_line(
+        "docs here",
+        4,
+        Hyperlink {
+            id: Some("d1".to_owned()),
+            uri: "https://example.com/docs".to_owned(),
+        },
+    )]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b]8;id=d1;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\ here"),
+        "expected an OSC 8 span around the linked text in {ansi:?}"
+    );
+    // Every opened link is closed on its own row.
+    for line in grid.ansi_lines() {
+        assert_eq!(
+            line.matches("\x1b]8;id=").count() + line.matches("\x1b]8;;http").count(),
+            line.matches("\x1b]8;;\x1b\\").count(),
+            "unbalanced OSC 8 in {line:?}"
+        );
+    }
+}
+
+#[test]
+fn osc8_emission_strips_control_characters() {
+    // A URI cannot smuggle a terminator or a new escape sequence to the host.
+    let grid = render_focused_with_lines(vec![linked_line(
+        "x",
+        1,
+        Hyperlink {
+            id: Some("a;b:c".to_owned()),
+            uri: "https://e.com/\x07\x1b]0;pwned\x1b\\".to_owned(),
+        },
+    )]);
+    let ansi = grid.ansi_lines().join("\n");
+    assert!(
+        ansi.contains("\x1b]8;id=abc;https://e.com/]0;pwned\\\x1b\\x"),
+        "expected sanitized OSC 8 in {ansi:?}"
+    );
 }
 
 #[test]
