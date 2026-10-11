@@ -663,6 +663,7 @@ async fn popup_close_preserves_underlying_buffer() {
         &server,
         &[
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--title",
@@ -2963,6 +2964,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
         &server,
         &[
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--width",
