@@ -2656,6 +2656,8 @@ Run a shell command line in the client's login context (tmux `run-shell`).
 
 The string is executed as `/bin/sh -lc "<command>"`. Output is discarded;
 the spawned tool can drive Embers via `$EMBERS_SOCKET` and the `embers` CLI.
+`$EMBERS_CLIENT` and `$EMBERS_BUFFER` name the client the binding was
+pressed in and its focused buffer.
 </div>
 <div group="run_shell" id="run_shell-Example" class="tabcontent"  style="display: none;" >
 
