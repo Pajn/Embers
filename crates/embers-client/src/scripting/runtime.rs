@@ -2936,6 +2936,16 @@ mod documented_ui_api {
     ///
     /// See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
     /// the full `options: Map` styling keys.
+    ///
+    /// Its `tab` key tags the segment with one of the bar's tabs, so a left click on it selects
+    /// that tab, like a click on a window in tmux's status line. Tag every segment a tab is
+    /// drawn with; untagged segments do nothing when clicked:
+    ///
+    /// ```rhai
+    /// for tab in ctx.tabs() {
+    ///     left.push(ui.segment(tab.title(), #{ bold: tab.is_active(), tab: tab }));
+    /// }
+    /// ```
     #[rhai_fn(name = "segment")]
     pub fn segment(_: &mut UiApi, text: &str) -> BarSegment {
         BarSegment {
@@ -2950,8 +2960,8 @@ mod documented_ui_api {
     /// See the main `segment(_: UiApi, text: String) -> BarSegment` doc for the shared behavior.
     ///
     /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-    /// `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override styling and
-    /// attach an optional interaction target.
+    /// `bold`, `italic`, `underline`, `dim`, `blink`, `tab`, and `target` keys to override
+    /// styling and attach an optional click target.
     ///
     /// `fg` is the foreground color and accepts a standard CSS color name, a hex code such as
     /// `#ff0000`, or an RGB/RGBA string such as `rgb(255,0,0)` or `rgba(255,0,0,0.5)`.
@@ -2960,14 +2970,20 @@ mod documented_ui_api {
     /// `dim` renders the text with reduced intensity for a muted appearance.
     /// `blink` enables blinking text for that segment, but many modern terminal emulators ignore
     /// or disable blink by default, so blinking text may not appear consistently.
-    /// `target` is an optional interaction target, usually either a string identifier such as
-    /// `"myTarget"` or a structured object such as `#{ type: "callback", id: "save" }`,
-    /// depending on the consumer API.
+    /// `tab` tags the segment with a tab, one of the [`TabInfo`] values of the bar's
+    /// `ctx.tabs()`: with the mouse on (`mouse.set_click_focus`), a left click on the segment
+    /// selects that tab, as `action.select_tab` does, like a click on a window in tmux's status
+    /// line. Tag every segment a tab is drawn with, such as its caps, number and name, so a
+    /// click anywhere on it selects it. Untagged segments do nothing when clicked. The default
+    /// tab bar needs no tags: a click on a tab's label selects it.
+    /// `target` is the lower-level form of `tab`, a map naming the tabs node and index:
+    /// `#{ kind: "tab", tabs_node_id: ctx.node_id(), index: tab.index() }`. A segment takes
+    /// `tab` or `target`, not both. The `"floating"` and `"buffer"` kinds are accepted but do
+    /// nothing when clicked.
     ///
     /// Examples:
     /// - `#{ fg: "#ff0000", bg: "rgba(0,0,0,0.5)", bold: true }`
-    /// - `#{ target: "myTarget" }`
-    /// - `#{ target: #{ type: "callback", id: "save" } }`
+    /// - `#{ fg: theme.color("base"), bg: theme.color("accent"), tab: tab }`
     ///
     /// Accessibility note: blinking text can be distracting and may trigger seizures for some
     /// users. Use `blink` sparingly, prefer non-animated emphasis such as `dim` or color/weight
@@ -3176,7 +3192,7 @@ fn parse_segment_options(mut options: Map) -> ScriptResult<(StyleSpec, Option<Ba
             dim: parse_bool_field(options.remove("dim"))?.unwrap_or(false),
             blink: parse_bool_field(options.remove("blink"))?.unwrap_or(false),
         },
-        parse_bar_target(options.remove("target"))?,
+        parse_segment_target(options.remove("tab"), options.remove("target"))?,
     );
     if !options.is_empty() {
         return Err(runtime_error(format!(
@@ -3191,6 +3207,31 @@ fn unexpected_option_keys(options: &Map) -> String {
     let mut keys = options.keys().map(ToString::to_string).collect::<Vec<_>>();
     keys.sort();
     keys.join(", ")
+}
+
+/// A segment's click target: the tab its `tab` option names, else its
+/// `target` option.
+fn parse_segment_target(
+    tab: Option<Dynamic>,
+    target: Option<Dynamic>,
+) -> ScriptResult<Option<BarTarget>> {
+    let Some(tab) = tab.filter(|tab| !tab.is_unit()) else {
+        return parse_bar_target(target);
+    };
+    if target.is_some_and(|target| !target.is_unit()) {
+        return Err(runtime_error(
+            "segment options 'tab' and 'target' cannot be used together",
+        ));
+    }
+    let Some(tab) = tab.try_cast::<TabInfo>() else {
+        return Err(runtime_error(
+            "segment option 'tab' expects a tab from the bar's ctx.tabs()",
+        ));
+    };
+    Ok(Some(BarTarget::Tab {
+        tabs_node_id: tab.tabs_node_id,
+        index: tab.index,
+    }))
 }
 
 fn parse_bar_target(value: Option<Dynamic>) -> ScriptResult<Option<BarTarget>> {
@@ -3661,12 +3702,13 @@ fn runtime_error_at(message: impl Into<String>, position: Position) -> Box<EvalA
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, Dynamic, Map, StyleSpec, parse_bar_target, parse_buffer_history_placement,
-        parse_buffer_history_scope, parse_buffer_spawn, parse_node_break_destination,
-        parse_node_join_placement, parse_notify_level, parse_segment_options,
-        parse_split_direction, register_documented_registration_runtime_api, registration_scope,
+        Action, BarTarget, Dynamic, Map, StyleSpec, TabInfo, parse_bar_target,
+        parse_buffer_history_placement, parse_buffer_history_scope, parse_buffer_spawn,
+        parse_node_break_destination, parse_node_join_placement, parse_notify_level,
+        parse_segment_options, parse_split_direction, register_documented_registration_runtime_api,
+        registration_scope,
     };
-    use embers_core::BufferId;
+    use embers_core::{BufferId, NodeId};
     use embers_protocol::{
         BufferHistoryPlacement, BufferHistoryScope, NodeBreakDestination, NodeJoinPlacement,
     };
@@ -3856,6 +3898,52 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Runtime error: unknown bar target option(s): bogus"
+        );
+    }
+
+    #[test]
+    fn parse_segment_options_tags_segments_with_a_tab() {
+        let tab = TabInfo {
+            tabs_node_id: NodeId(10),
+            index: 2,
+            number: 3,
+            title: "logs".to_owned(),
+            active: false,
+            has_activity: false,
+            has_bell: false,
+            buffer_count: 1,
+            synchronize_panes: false,
+            pane: None,
+        };
+        let mut options = Map::new();
+        options.insert("tab".into(), Dynamic::from(tab.clone()));
+        let (_, target) = parse_segment_options(options).expect("segment options parse");
+        assert_eq!(
+            target,
+            Some(BarTarget::Tab {
+                tabs_node_id: NodeId(10),
+                index: 2,
+            })
+        );
+
+        let mut options = Map::new();
+        options.insert("tab".into(), Dynamic::from(2_i64));
+        let error = parse_segment_options(options).expect_err("an index is not a tab");
+        assert_eq!(
+            error.to_string(),
+            "Runtime error: segment option 'tab' expects a tab from the bar's ctx.tabs()"
+        );
+
+        let mut target = Map::new();
+        target.insert("kind".into(), Dynamic::from("buffer"));
+        target.insert("buffer_id".into(), Dynamic::from(7_i64));
+        let mut options = Map::new();
+        options.insert("tab".into(), Dynamic::from(tab));
+        options.insert("target".into(), Dynamic::from(target));
+        let error = parse_segment_options(options).expect_err("tab and target conflict");
+        assert_eq!(
+            error.to_string(),
+            "Runtime error: segment options 'tab' and 'target' cannot be used together"
         );
     }
 

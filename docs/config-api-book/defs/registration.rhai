@@ -12,6 +12,16 @@ fn bar(_: UiApi, left: array, center: array, right: array) -> BarSpec;
 ///
 /// See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
 /// the full `options: Map` styling keys.
+///
+/// Its `tab` key tags the segment with one of the bar's tabs, so a left click on it selects
+/// that tab, like a click on a window in tmux's status line. Tag every segment a tab is
+/// drawn with; untagged segments do nothing when clicked:
+///
+/// ```rhai
+/// for tab in ctx.tabs() {
+///     left.push(ui.segment(tab.title(), #{ bold: tab.is_active(), tab: tab }));
+/// }
+/// ```
 fn segment(_: UiApi, text: string) -> BarSegment;
 
 /// Create a [`BarSegment`] from a [`UiApi`] receiver, text, and an `options: Map`.
@@ -19,8 +29,8 @@ fn segment(_: UiApi, text: string) -> BarSegment;
 /// See the main `segment(_: UiApi, text: String) -> BarSegment` doc for the shared behavior.
 ///
 /// `segment(_: UiApi, text: String, options: Map) -> BarSegment` supports `fg`, `bg`,
-/// `bold`, `italic`, `underline`, `dim`, `blink`, and `target` keys to override styling and
-/// attach an optional interaction target.
+/// `bold`, `italic`, `underline`, `dim`, `blink`, `tab`, and `target` keys to override
+/// styling and attach an optional click target.
 ///
 /// `fg` is the foreground color and accepts a standard CSS color name, a hex code such as
 /// `#ff0000`, or an RGB/RGBA string such as `rgb(255,0,0)` or `rgba(255,0,0,0.5)`.
@@ -29,14 +39,20 @@ fn segment(_: UiApi, text: string) -> BarSegment;
 /// `dim` renders the text with reduced intensity for a muted appearance.
 /// `blink` enables blinking text for that segment, but many modern terminal emulators ignore
 /// or disable blink by default, so blinking text may not appear consistently.
-/// `target` is an optional interaction target, usually either a string identifier such as
-/// `"myTarget"` or a structured object such as `#{ type: "callback", id: "save" }`,
-/// depending on the consumer API.
+/// `tab` tags the segment with a tab, one of the [`TabInfo`] values of the bar's
+/// `ctx.tabs()`: with the mouse on (`mouse.set_click_focus`), a left click on the segment
+/// selects that tab, as `action.select_tab` does, like a click on a window in tmux's status
+/// line. Tag every segment a tab is drawn with, such as its caps, number and name, so a
+/// click anywhere on it selects it. Untagged segments do nothing when clicked. The default
+/// tab bar needs no tags: a click on a tab's label selects it.
+/// `target` is the lower-level form of `tab`, a map naming the tabs node and index:
+/// `#{ kind: "tab", tabs_node_id: ctx.node_id(), index: tab.index() }`. A segment takes
+/// `tab` or `target`, not both. The `"floating"` and `"buffer"` kinds are accepted but do
+/// nothing when clicked.
 ///
 /// Examples:
 /// - `#{ fg: "#ff0000", bg: "rgba(0,0,0,0.5)", bold: true }`
-/// - `#{ target: "myTarget" }`
-/// - `#{ target: #{ type: "callback", id: "save" } }`
+/// - `#{ fg: theme.color("base"), bg: theme.color("accent"), tab: tab }`
 ///
 /// Accessibility note: blinking text can be distracting and may trigger seizures for some
 /// users. Use `blink` sparingly, prefer non-animated emphasis such as `dim` or color/weight
@@ -845,7 +861,9 @@ fn zoom_current_node(_: ActionApi) -> Action;
 /// # rhai-autodocs:index:28
 fn set_patterns(hints: HintsApi, patterns: array) -> ();
 
-/// Toggle focus-on-click behavior.
+/// Toggle focus-on-click behavior: a left click on a pane focuses it, and
+/// one on a tab in a tab bar selects it. A formatter's segments select the
+/// tab they are tagged with (`ui.segment`'s `tab` option).
 ///
 /// # rhai-autodocs:index:22
 fn set_click_focus(mouse: MouseApi, value: bool) -> ();

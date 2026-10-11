@@ -466,6 +466,7 @@ impl TabBarContext {
                 .iter()
                 .enumerate()
                 .map(|(index, tab)| TabInfo {
+                    tabs_node_id: frame.node_id,
                     index,
                     number: crate::numbering::window_number(index, None),
                     title: tab.title.clone(),
@@ -503,6 +504,8 @@ impl TabBarContext {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabInfo {
+    /// The tabs node the tab is in: the bar's `node_id`.
+    pub tabs_node_id: NodeId,
     pub index: usize,
     /// The tab's number as shown to users: `index` plus the configured base
     /// index. Window targets such as `embers select-window -t work:2` use it.

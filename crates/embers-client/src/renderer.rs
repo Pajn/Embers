@@ -8,7 +8,7 @@ use crate::grid::{
     BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle, replace_controls,
 };
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
-use crate::scripting::{BarSegment, BarSpec, PaneBorderColors};
+use crate::scripting::{BarSegment, BarSpec, BarTarget, PaneBorderColors};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 
 /// The most columns the session name takes in the default root tab bar.
@@ -130,20 +130,42 @@ impl Renderer {
             self.render_divider(grid, divider, focused);
         }
 
-        // The default root tab bar starts with the session name, like tmux's
-        // default status line.
-        let session_name = state
-            .sessions
-            .get(&model.session_id)
-            .map(|session| session.name.as_str());
         for tabs in model
             .tab_bars
             .iter()
             .filter(|tabs| tabs.floating_id == floating_id)
         {
-            let session_name = session_name.filter(|_| tabs.is_root);
-            self.render_tabs(grid, tabs, tab_bars.get(&tabs.node_id), session_name);
+            self.render_tabs(grid, tabs, tab_bars.get(&tabs.node_id), state, model);
         }
+    }
+
+    /// What a click at `point` selects in the tab bars
+    /// [`Self::render_with_tab_bars`] draws with the same `tab_bars`: the
+    /// target of the segment under it. The default bars target each tab's
+    /// label; a formatter's segments target what they were tagged with.
+    /// `None` off the tab bars, on untagged segments, and where a floating
+    /// window covers the bar.
+    pub fn tab_bar_target_at(
+        &self,
+        state: &ClientState,
+        model: &PresentationModel,
+        tab_bars: &BTreeMap<embers_core::NodeId, BarSpec>,
+        point: Point,
+    ) -> Option<BarTarget> {
+        let layer = model
+            .floating_at(point)
+            .map(|floating| floating.floating_id);
+        let tabs = model
+            .tab_bars
+            .iter()
+            .rev()
+            .filter(|tabs| tabs.floating_id == layer)
+            .find(|tabs| tabs.rect.contains(point))?;
+        let x = u16::try_from(point.x).ok()?;
+        layout_tabs(tabs, tab_bars.get(&tabs.node_id), state, model)
+            .into_iter()
+            .find(|cells| x >= cells.x && x < cells.x.saturating_add(display_width(&cells.text)))
+            .and_then(|cells| cells.target)
     }
 
     fn render_tabs(
@@ -151,95 +173,17 @@ impl Renderer {
         grid: &mut RenderGrid,
         tabs: &TabsFrame,
         custom: Option<&BarSpec>,
-        session_name: Option<&str>,
+        state: &ClientState,
+        model: &PresentationModel,
     ) {
         if tabs.rect.size.height == 0 || tabs.rect.size.width == 0 {
             return;
         }
-
-        let mut x = clamp_i32_to_u16(tabs.rect.origin.x);
+        let x = clamp_i32_to_u16(tabs.rect.origin.x);
         let y = clamp_i32_to_u16(tabs.rect.origin.y);
-        let end_x = x.saturating_add(tabs.rect.size.width);
         grid.put_str(x, y, &" ".repeat(usize::from(tabs.rect.size.width)));
-
-        if let Some(bar) = custom {
-            // Formatters build segments from titles programs set.
-            let sanitize = |segments: &[BarSegment]| -> Vec<BarSegment> {
-                segments
-                    .iter()
-                    .map(|segment| BarSegment {
-                        text: replace_controls(&segment.text).into_owned(),
-                        ..segment.clone()
-                    })
-                    .collect()
-            };
-            let bar = BarSpec {
-                left: sanitize(&bar.left),
-                center: sanitize(&bar.center),
-                right: sanitize(&bar.right),
-            };
-            let width = tabs.rect.size.width;
-            let left_width = bar
-                .left
-                .iter()
-                .map(|segment| display_width(&segment.text))
-                .sum::<u16>()
-                .min(width);
-            let right_width = bar
-                .right
-                .iter()
-                .map(|segment| display_width(&segment.text))
-                .sum::<u16>()
-                .min(width);
-            let left_end = x.saturating_add(left_width);
-            let right_start = end_x.saturating_sub(right_width);
-            render_bar_segments(grid, x, y, left_end, &bar.left);
-            render_bar_segments(grid, right_start, y, end_x, &bar.right);
-
-            let center_span = right_start.saturating_sub(left_end);
-            let center_width = bar
-                .center
-                .iter()
-                .map(|segment| display_width(&segment.text))
-                .sum::<u16>()
-                .min(center_span);
-            let center_x = left_end.saturating_add(center_span.saturating_sub(center_width) / 2);
-            render_bar_segments(
-                grid,
-                center_x,
-                y,
-                center_x.saturating_add(center_width),
-                &bar.center,
-            );
-            return;
-        }
-
-        if let Some(name) = session_name {
-            // At most tmux's default status-left-length.
-            let width = tabs.rect.size.width.min(SESSION_LABEL_WIDTH);
-            let label = truncate(&format!("[{name}] "), width);
-            grid.put_str(x, y, &label);
-            x = x.saturating_add(display_width(&label));
-        }
-
-        for tab in &tabs.tabs {
-            if x >= end_x {
-                break;
-            }
-
-            let available = end_x.saturating_sub(x);
-            if available == 0 {
-                break;
-            }
-
-            let label = format_tab_label(tab, available);
-            grid.put_str_styled(x, y, &label, tab_style(tab.active));
-            x = x.saturating_add(display_width(&label));
-
-            if x < end_x {
-                grid.put_char(x, y, ' ');
-                x += 1;
-            }
+        for cells in layout_tabs(tabs, custom, state, model) {
+            grid.put_str_styled(cells.x, y, &cells.text, cells.style);
         }
     }
 
@@ -680,6 +624,126 @@ fn ordered_points(left: SelectionPoint, right: SelectionPoint) -> (SelectionPoin
     }
 }
 
+/// A run of cells a tab bar draws, and what a click on it selects.
+struct BarCells {
+    x: u16,
+    text: String,
+    style: CellStyle,
+    target: Option<BarTarget>,
+}
+
+/// Lay out the cells of `tabs`'s bar: `custom`'s segments, or the default
+/// bar. Drawing and clicks both go through here, so a click selects what is
+/// drawn under it.
+fn layout_tabs(
+    tabs: &TabsFrame,
+    custom: Option<&BarSpec>,
+    state: &ClientState,
+    model: &PresentationModel,
+) -> Vec<BarCells> {
+    let mut cells = Vec::new();
+    if tabs.rect.size.height == 0 || tabs.rect.size.width == 0 {
+        return cells;
+    }
+
+    let mut x = clamp_i32_to_u16(tabs.rect.origin.x);
+    let end_x = x.saturating_add(tabs.rect.size.width);
+
+    if let Some(bar) = custom {
+        // Formatters build segments from titles programs set.
+        let sanitize = |segments: &[BarSegment]| -> Vec<BarSegment> {
+            segments
+                .iter()
+                .map(|segment| BarSegment {
+                    text: replace_controls(&segment.text).into_owned(),
+                    ..segment.clone()
+                })
+                .collect()
+        };
+        let bar = BarSpec {
+            left: sanitize(&bar.left),
+            center: sanitize(&bar.center),
+            right: sanitize(&bar.right),
+        };
+        let width = tabs.rect.size.width;
+        let left_width = bar
+            .left
+            .iter()
+            .map(|segment| display_width(&segment.text))
+            .sum::<u16>()
+            .min(width);
+        let right_width = bar
+            .right
+            .iter()
+            .map(|segment| display_width(&segment.text))
+            .sum::<u16>()
+            .min(width);
+        let left_end = x.saturating_add(left_width);
+        let right_start = end_x.saturating_sub(right_width);
+        layout_bar_segments(&mut cells, x, left_end, &bar.left);
+        layout_bar_segments(&mut cells, right_start, end_x, &bar.right);
+
+        let center_span = right_start.saturating_sub(left_end);
+        let center_width = bar
+            .center
+            .iter()
+            .map(|segment| display_width(&segment.text))
+            .sum::<u16>()
+            .min(center_span);
+        let center_x = left_end.saturating_add(center_span.saturating_sub(center_width) / 2);
+        layout_bar_segments(
+            &mut cells,
+            center_x,
+            center_x.saturating_add(center_width),
+            &bar.center,
+        );
+        return cells;
+    }
+
+    // The default root tab bar starts with the session name, like tmux's
+    // default status line.
+    let session_name = state
+        .sessions
+        .get(&model.session_id)
+        .map(|session| session.name.as_str())
+        .filter(|_| tabs.is_root);
+    if let Some(name) = session_name {
+        // At most tmux's default status-left-length.
+        let width = tabs.rect.size.width.min(SESSION_LABEL_WIDTH);
+        let label = truncate(&format!("[{name}] "), width);
+        let label_width = display_width(&label);
+        cells.push(BarCells {
+            x,
+            text: label,
+            style: CellStyle::default(),
+            target: None,
+        });
+        x = x.saturating_add(label_width);
+    }
+
+    for (index, tab) in tabs.tabs.iter().enumerate() {
+        let available = end_x.saturating_sub(x);
+        if available == 0 {
+            break;
+        }
+
+        let label = format_tab_label(tab, available);
+        let label_width = display_width(&label);
+        cells.push(BarCells {
+            x,
+            text: label,
+            style: tab_style(tab.active),
+            target: Some(BarTarget::Tab {
+                tabs_node_id: tabs.node_id,
+                index,
+            }),
+        });
+        // A blank column follows each label; the row is already cleared.
+        x = x.saturating_add(label_width).saturating_add(1);
+    }
+    cells
+}
+
 fn format_tab_label(tab: &crate::presentation::TabItem, width: u16) -> String {
     if width == 0 {
         return String::new();
@@ -704,24 +768,21 @@ fn activity_marker(activity: ActivityState) -> char {
     }
 }
 
-fn render_bar_segments(
-    grid: &mut RenderGrid,
-    mut x: u16,
-    y: u16,
-    end_x: u16,
-    segments: &[BarSegment],
-) {
+fn layout_bar_segments(cells: &mut Vec<BarCells>, mut x: u16, end_x: u16, segments: &[BarSegment]) {
     for segment in segments {
-        if x >= end_x {
-            break;
-        }
         let available = end_x.saturating_sub(x);
         if available == 0 {
             break;
         }
         let label = truncate(&segment.text, available);
-        grid.put_str_styled(x, y, &label, CellStyle::from(&segment.style));
-        x = x.saturating_add(display_width(&label));
+        let label_width = display_width(&label);
+        cells.push(BarCells {
+            x,
+            text: label,
+            style: CellStyle::from(&segment.style),
+            target: segment.target.clone(),
+        });
+        x = x.saturating_add(label_width);
     }
 }
 
