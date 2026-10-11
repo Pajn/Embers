@@ -271,8 +271,8 @@ The allowlist matches the program name of the command line and defaults to tmux-
 `vim`, `nvim`, `emacs`, `man`, `less`, `more`, `tail`, `top`, `htop`, `irssi`, `weechat`, `mutt`.
 The foreground job is the PTY's foreground process group, read by the keeper; it is only recorded
 while it differs from the buffer's own process, so a shell at its prompt has none. The keeper
-reads the group leader's command line again whenever the leader runs a different executable, so a
-job read between the shell's fork and the program's exec is corrected once the program starts.
+reads the group leader's command line on every status poll, so a job read between the shell's fork
+and the program's exec is corrected once the program starts, and so is a program that execs again.
 
 Like tmux-resurrect, restore brings back the layout and nothing outside it. An interrupted
 detached buffer has no place to come back to, and terminal contents are not restored, so a fresh
