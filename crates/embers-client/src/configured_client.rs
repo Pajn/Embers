@@ -1060,13 +1060,7 @@ where
             }
         }
 
-        let renderer = Renderer::new(
-            self.config
-                .active_script()
-                .loaded_config()
-                .theme
-                .pane_borders,
-        );
+        let renderer = Renderer::from_theme(&self.config.active_script().loaded_config().theme);
         let mut grid =
             renderer.render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
         self.flush_passthrough(&presentation);

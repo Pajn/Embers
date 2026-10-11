@@ -336,6 +336,63 @@ fn theme_sets_pane_border_colors() {
 }
 
 #[test]
+fn theme_sets_popup_border_lines_and_colors() {
+    use embers_client::{Color, PopupBorderLines, PopupBorders, TerminalColor};
+
+    let harness = ScriptHarness::load(
+        r##"
+            theme.set_popup_border_lines("double");
+            theme.set_popup_border_color("brightblack");
+            theme.set_popup_active_border_color("#ca9ee6");
+        "##,
+    )
+    .unwrap();
+    assert_eq!(
+        harness.engine().loaded_config().theme.popup_borders,
+        PopupBorders {
+            lines: PopupBorderLines::Double,
+            inactive: Some(TerminalColor::Indexed(8)),
+            active: Some(TerminalColor::Rgb(Color {
+                red: 0xca,
+                green: 0x9e,
+                blue: 0xe6,
+            })),
+        }
+    );
+
+    for (name, lines) in [
+        ("rounded", PopupBorderLines::Rounded),
+        ("single", PopupBorderLines::Single),
+        ("heavy", PopupBorderLines::Heavy),
+        ("ascii", PopupBorderLines::Ascii),
+        ("none", PopupBorderLines::None),
+    ] {
+        let source = format!(r#"theme.set_popup_border_lines("{name}");"#);
+        let harness = ScriptHarness::load(&source).unwrap();
+        assert_eq!(
+            harness.engine().loaded_config().theme.popup_borders.lines,
+            lines
+        );
+    }
+
+    // Rounded lines without colors by default.
+    let plain = ScriptHarness::load("").unwrap();
+    assert_eq!(
+        plain.engine().loaded_config().theme.popup_borders,
+        PopupBorders::default()
+    );
+    assert_eq!(PopupBorders::default().lines, PopupBorderLines::Rounded);
+
+    for bad in [
+        r#"theme.set_popup_border_lines("dotted");"#,
+        r#"theme.set_popup_border_color("mauve");"#,
+        r##"theme.set_popup_active_border_color("#12");"##,
+    ] {
+        assert!(ScriptHarness::load(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn status_keys_choose_the_prompt_key_table() {
     use embers_client::StatusKeys;
 

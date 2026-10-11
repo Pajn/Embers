@@ -63,6 +63,8 @@ pub struct ThemeSpec {
     pub palette: BTreeMap<String, RgbColor>,
     /// Colors of the dividers between panes.
     pub pane_borders: PaneBorderColors,
+    /// Lines and colors of popup (floating window) frames.
+    pub popup_borders: PopupBorders,
 }
 
 /// Colors of the dividers between panes, like tmux's `pane-border-style` and
@@ -72,6 +74,50 @@ pub struct ThemeSpec {
 pub struct PaneBorderColors {
     pub active: Option<TerminalColor>,
     pub inactive: Option<TerminalColor>,
+}
+
+/// How popup (floating window) frames are drawn, like tmux's
+/// `popup-border-lines`, `popup-border-style` and the focused popup's color.
+/// A focused frame takes `active`, an unfocused one `inactive`; without a
+/// color a focused frame is bold and an unfocused one dim.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PopupBorders {
+    pub lines: PopupBorderLines,
+    pub active: Option<TerminalColor>,
+    pub inactive: Option<TerminalColor>,
+}
+
+/// The characters a popup frame is drawn with. `None` leaves the frame
+/// cells blank: the popup keeps its one-cell margin and its title, so its
+/// panes are the same size whatever a client's config says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PopupBorderLines {
+    /// `╭─╮`
+    #[default]
+    Rounded,
+    /// `┌─┐`
+    Single,
+    /// `╔═╗`
+    Double,
+    /// `┏━┓`
+    Heavy,
+    /// `+-+`
+    Ascii,
+    None,
+}
+
+impl PopupBorderLines {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "rounded" => Some(Self::Rounded),
+            "single" => Some(Self::Single),
+            "double" => Some(Self::Double),
+            "heavy" => Some(Self::Heavy),
+            "ascii" => Some(Self::Ascii),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
 }
 
 /// The sixteen ANSI color names, as tmux spells them, with their palette

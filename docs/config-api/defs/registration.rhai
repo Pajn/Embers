@@ -913,6 +913,47 @@ fn set_pane_active_border_color(theme: ThemeApi, color: string) -> ();
 /// # rhai-autodocs:index:21
 fn set_pane_border_color(theme: ThemeApi, color: string) -> ();
 
+/// Color the frame and title of the focused popup. Takes the same colors
+/// as `set_pane_border_color`. Without it the frame is drawn bold in the
+/// terminal's default color.
+///
+/// # Example
+///
+/// ```rhai
+/// theme.set_popup_active_border_color("magenta");
+/// ```
+///
+/// # rhai-autodocs:index:21
+fn set_popup_active_border_color(theme: ThemeApi, color: string) -> ();
+
+/// Color the frames and titles of popups that do not have focus, like
+/// tmux's `popup-border-style fg=...`. Takes the same colors as
+/// `set_pane_border_color`. Without it they are drawn dim.
+///
+/// # Example
+///
+/// ```rhai
+/// theme.set_popup_border_color("brightblack");
+/// ```
+///
+/// # rhai-autodocs:index:21
+fn set_popup_border_color(theme: ThemeApi, color: string) -> ();
+
+/// Draw popup (floating window) frames with `"rounded"` (the default,
+/// `╭─╮`), `"single"` (`┌─┐`), `"double"` (`╔═╗`), `"heavy"` (`┏━┓`),
+/// `"ascii"` (`+-+`) or `"none"`, like tmux's `popup-border-lines`. With
+/// `"none"` the frame cells are left blank and the title stays on the top
+/// one: the popup's panes keep their size.
+///
+/// # Example
+///
+/// ```rhai
+/// theme.set_popup_border_lines("single");
+/// ```
+///
+/// # rhai-autodocs:index:21
+fn set_popup_border_lines(theme: ThemeApi, lines: string) -> ();
+
 /// Register the function used to format the tab bar.
 ///
 /// # rhai-autodocs:index:20

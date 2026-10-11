@@ -7,7 +7,9 @@ use embers_core::{
     TermColor,
 };
 
-use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state};
+use crate::support::{
+    FLOATING_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
+};
 
 /// Build a single-run styled line covering the whole text.
 fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
@@ -107,13 +109,13 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
             "left pane    |>  logs-long-title        \n",
             "line two     |logs visible              \n",
             "line three   |second row                \n",
-            "             |+-popup------------+      \n",
-            "             ||   popup-top      |      \n",
-            "             ||popup top         |      \n",
-            "             ||------------------|      \n",
-            "             ||   popup-bottom   |      \n",
-            "             ||popup bottom      |      \n",
-            "             |+------------------+      \n",
+            "             |╭─popup────────────╮      \n",
+            "             |│   popup-top      │      \n",
+            "             |│popup top         │      \n",
+            "             |│------------------│      \n",
+            "             |│   popup-bottom   │      \n",
+            "             |│popup bottom      │      \n",
+            "             |╰──────────────────╯      \n",
             "             |                          \n",
             "             |                          "
         )
@@ -141,6 +143,7 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
             active: Some(active),
             inactive: Some(inactive),
         },
+        ..Renderer::default()
     };
 
     let grid = renderer.render(&state, &presentation);
@@ -164,6 +167,125 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
         let style = plain.cell_style(13, row).unwrap();
         assert_eq!(style.fg, None, "row {row}");
         assert!(style.dim, "row {row}");
+    }
+}
+
+/// The demo popup's frame spans columns 14 to 33 and rows 5 to 11, with its
+/// title "popup" from column 16 on the top row.
+fn render_popup(focused: bool, renderer: Renderer) -> embers_client::RenderGrid {
+    let mut state = demo_state();
+    state.floating.get_mut(&FLOATING_ID).unwrap().focused = focused;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    renderer.render(&state, &presentation)
+}
+
+fn char_at(grid: &embers_client::RenderGrid, x: usize, y: usize) -> char {
+    grid.render()
+        .lines()
+        .nth(y)
+        .unwrap()
+        .chars()
+        .nth(x)
+        .unwrap()
+}
+
+#[test]
+fn popup_frames_draw_the_configured_border_lines() {
+    use embers_client::{PopupBorderLines, PopupBorders};
+
+    // Corners, then a horizontal and a vertical cell.
+    let cases = [
+        (PopupBorderLines::Rounded, "╭╮╰╯─│"),
+        (PopupBorderLines::Single, "┌┐└┘─│"),
+        (PopupBorderLines::Double, "╔╗╚╝═║"),
+        (PopupBorderLines::Heavy, "┏┓┗┛━┃"),
+        (PopupBorderLines::Ascii, "++++-|"),
+        (PopupBorderLines::None, "      "),
+    ];
+    for (lines, expected) in cases {
+        for focused in [true, false] {
+            let renderer = Renderer {
+                popup_borders: PopupBorders {
+                    lines,
+                    ..PopupBorders::default()
+                },
+                ..Renderer::default()
+            };
+            let grid = render_popup(focused, renderer);
+            let drawn: String = [(14, 5), (33, 5), (14, 11), (33, 11), (20, 11), (14, 8)]
+                .into_iter()
+                .map(|(x, y)| char_at(&grid, x, y))
+                .collect();
+            assert_eq!(drawn, expected, "{lines:?} focused={focused}");
+            // The title stays on the top border and the content inside it.
+            let rendered = grid.render();
+            let top = rendered.lines().nth(5).unwrap();
+            assert!(top.contains("popup"), "{lines:?}: {top}");
+            assert_eq!(char_at(&grid, 15, 7), 'p', "{lines:?}");
+        }
+    }
+}
+
+#[test]
+fn popup_frames_are_bold_when_focused_and_dim_when_not_without_reverse_video() {
+    let focused = render_popup(true, Renderer::default());
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = focused.cell_style(x, y).unwrap();
+        assert!(style.bold, "({x}, {y})");
+        assert!(!style.reverse, "({x}, {y})");
+        assert!(!style.dim, "({x}, {y})");
+        assert_eq!(style.fg, None, "({x}, {y})");
+    }
+
+    let unfocused = render_popup(false, Renderer::default());
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = unfocused.cell_style(x, y).unwrap();
+        assert!(style.dim, "({x}, {y})");
+        assert!(!style.bold, "({x}, {y})");
+        assert!(!style.reverse, "({x}, {y})");
+        assert_eq!(style.fg, None, "({x}, {y})");
+    }
+}
+
+#[test]
+fn popup_frames_take_theme_colors() {
+    use embers_client::{PopupBorders, TerminalColor};
+
+    let active = TerminalColor::Indexed(5);
+    let inactive = TerminalColor::Indexed(8);
+    let renderer = Renderer {
+        popup_borders: PopupBorders {
+            active: Some(active),
+            inactive: Some(inactive),
+            ..PopupBorders::default()
+        },
+        ..Renderer::default()
+    };
+
+    let focused = render_popup(true, renderer);
+    for (x, y) in [(14, 5), (20, 11), (14, 8)] {
+        let style = focused.cell_style(x, y).unwrap();
+        assert_eq!(style.fg, Some(active), "({x}, {y})");
+        assert!(!style.reverse && !style.dim, "({x}, {y})");
+    }
+    // The title takes the frame's color and stays bold.
+    let title = focused.cell_style(16, 5).unwrap();
+    assert_eq!(title.fg, Some(active));
+    assert!(title.bold);
+
+    let unfocused = render_popup(false, renderer);
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = unfocused.cell_style(x, y).unwrap();
+        assert_eq!(style.fg, Some(inactive), "({x}, {y})");
+        assert!(!style.reverse && !style.dim && !style.bold, "({x}, {y})");
     }
 }
 
