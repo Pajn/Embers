@@ -7,7 +7,7 @@ use embers_protocol::{
     NodeRecord, NodeRecordKind, SplitRecord, TabRecord, TabsRecord,
 };
 
-use crate::presentation::{PresentationModel, RootTabBar};
+use crate::presentation::{LayoutOptions, PaneTitles, PresentationModel, RootTabBar};
 use crate::state::ClientState;
 
 /// Where a pane about to be created will be placed, mirroring the server
@@ -46,31 +46,35 @@ pub enum PanePlacement {
 /// the client draws it. A client that hides it reports a viewport with its
 /// row added ([`PresentationModel::layout_viewport`]), so callers without the
 /// client's config, given that viewport, get the same answer as
-/// [`spawn_pty_size_with`] gives the client.
+/// [`spawn_pty_size_with`] gives the client. Title rows do change sizes, so
+/// `pane_titles` is the client's; callers without its config take what it
+/// reported ([`PaneTitles::reported`]).
 pub fn spawn_pty_size(
     state: &ClientState,
     session_id: SessionId,
     viewport: Size,
+    pane_titles: PaneTitles,
     placement: PanePlacement,
 ) -> Option<PtySize> {
     spawn_pty_size_with(
         state,
         session_id,
         viewport,
-        RootTabBar::default(),
+        LayoutOptions::new(RootTabBar::default(), pane_titles),
         placement,
     )
 }
 
-/// [`spawn_pty_size`] for a client that draws the root tab bar as `tab_bar`
+/// [`spawn_pty_size`] for a client that lays the session out as `options`
 /// says, in the viewport it draws the session in.
 pub fn spawn_pty_size_with(
     state: &ClientState,
     session_id: SessionId,
     viewport: Size,
-    tab_bar: RootTabBar,
+    options: impl Into<LayoutOptions>,
     placement: PanePlacement,
 ) -> Option<PtySize> {
+    let options = options.into();
     let mut layout = session_layout(state, session_id)?;
     add_new_leaf(&mut layout, session_id);
     let drawn_leaf = match placement {
@@ -97,7 +101,7 @@ pub fn spawn_pty_size_with(
         PanePlacement::Replace { leaf_id } => leaf_id,
     };
 
-    PresentationModel::project_with(&layout, session_id, viewport, tab_bar)
+    PresentationModel::project_with(&layout, session_id, viewport, options)
         .ok()?
         .leaves
         .iter()

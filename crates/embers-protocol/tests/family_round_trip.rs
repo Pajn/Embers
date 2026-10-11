@@ -63,6 +63,16 @@ fn client_message_families_round_trip() {
                 width: 120,
                 height: 40,
             },
+            pane_titles: true,
+        }),
+        ClientMessage::Session(SessionRequest::SetViewport {
+            request_id: RequestId(93),
+            session_id: SessionId(10),
+            viewport: Size {
+                width: 80,
+                height: 24,
+            },
+            pane_titles: false,
         }),
         ClientMessage::Session(SessionRequest::SetBaseIndex {
             request_id: RequestId(91),
@@ -469,6 +479,7 @@ fn sizes_must_be_non_zero_in_both_directions() {
             width: 0,
             height: 24,
         },
+        pane_titles: false,
     });
     encode_client_message(&set_viewport).expect_err("zero-width viewport is rejected");
 }
@@ -754,6 +765,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 height: 40,
             }),
             base_index: Some(1),
+            pane_titles: true,
         },
         nodes: vec![
             NodeRecord {

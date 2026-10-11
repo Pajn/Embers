@@ -9,7 +9,7 @@
 use embers_core::{NodeId, Point, SessionId, Size, SplitDirection};
 use embers_protocol::NodeRecordKind;
 
-use crate::presentation::{DividerFrame, NavigationDirection, PresentationModel};
+use crate::presentation::{DividerFrame, NavigationDirection, PaneTitles, PresentationModel};
 use crate::state::ClientState;
 
 /// New weights for one split, ready for `NodeRequest::Resize`.
@@ -149,31 +149,33 @@ fn move_divider(lengths: &[u16], mins: &[u16], index: usize, delta: i32) -> Opti
 
 /// Reconstruct the viewport a session was last drawn at from the PTY sizes
 /// the drawing client gave its visible panes: each pane's PTY is its drawn
-/// size minus the title row. Used where no viewport is known, such as the CLI.
-/// Returns `None` if the session or any visible pane is missing.
+/// size, minus its title row if the client reported title rows
+/// ([`PaneTitles::reported`]). Used where no viewport is known, such as the
+/// CLI. Returns `None` if the session or any visible pane is missing.
 pub fn drawn_viewport(state: &ClientState, session_id: SessionId) -> Option<Size> {
     let session = state.sessions.get(&session_id)?;
     let root = session
         .zoomed_node_id
         .filter(|node_id| state.nodes.contains_key(node_id))
         .unwrap_or(session.root_node_id);
-    drawn_extent(state, root)
+    let title_rows = u16::from(PaneTitles::reported(session).shown());
+    drawn_extent(state, root, title_rows)
 }
 
-fn drawn_extent(state: &ClientState, node_id: NodeId) -> Option<Size> {
+fn drawn_extent(state: &ClientState, node_id: NodeId, title_rows: u16) -> Option<Size> {
     let node = state.nodes.get(&node_id)?;
     match node.kind {
         NodeRecordKind::BufferView => {
             let buffer = state.buffers.get(&node.buffer_view.as_ref()?.buffer_id)?;
             Some(Size {
                 width: buffer.pty_size.cols,
-                height: buffer.pty_size.rows.saturating_add(1),
+                height: buffer.pty_size.rows.saturating_add(title_rows),
             })
         }
         NodeRecordKind::Tabs => {
             let tabs = node.tabs.as_ref()?;
             let active = tabs.tabs.get(usize::try_from(tabs.active).ok()?)?;
-            let child = drawn_extent(state, active.child_id)?;
+            let child = drawn_extent(state, active.child_id, title_rows)?;
             Some(Size {
                 width: child.width,
                 height: child.height.saturating_add(1),
@@ -184,7 +186,7 @@ fn drawn_extent(state: &ClientState, node_id: NodeId) -> Option<Size> {
             let children = split
                 .child_ids
                 .iter()
-                .map(|child_id| drawn_extent(state, *child_id))
+                .map(|child_id| drawn_extent(state, *child_id, title_rows))
                 .collect::<Option<Vec<_>>>()?;
             let dividers = u16::try_from(children.len().checked_sub(1)?).ok()?;
             let sum = |extent: fn(&Size) -> u16| {

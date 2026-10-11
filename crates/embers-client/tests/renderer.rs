@@ -1,13 +1,16 @@
 use embers_client::{
-    HostCapabilities, PresentationModel, Renderer, SearchMatch, SearchState, SelectionKind,
-    SelectionPoint, SelectionState,
+    HostCapabilities, PaneTitles, PresentationModel, Renderer, SearchMatch, SearchState,
+    SelectionKind, SelectionPoint, SelectionState,
 };
 use embers_core::{
     CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
     TermColor,
 };
 
-use crate::support::{FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state};
+use crate::support::{
+    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_BUFFER_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
+    root_buffer_state, root_split_state,
+};
 
 /// Build a single-run styled line covering the whole text.
 fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
@@ -64,13 +67,15 @@ fn renders_hint_labels_over_matches() {
         typed: String::new(),
         on_select: None,
     });
-    let presentation = PresentationModel::project(
+    // On the title row, the scroll indicator stays clear of the line.
+    let presentation = PresentationModel::project_with(
         &state,
         SESSION_ID,
         Size {
             width: 40,
             height: 14,
         },
+        PaneTitles::Top,
     )
     .expect("projection succeeds");
     let grid = Renderer::default().render(&state, &presentation);
@@ -103,10 +108,10 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
         grid.render(),
         concat!(
             "[demo]   shell  [!workspace]            \n",
-            " + editor    | !build  [ logs-long-tit~]\n",
-            "left pane    |>  logs-long-title        \n",
+            "left pane    | !build  [ logs-long-tit~]\n",
             "line two     |logs visible              \n",
             "line three   |second row                \n",
+            "             |third row                 \n",
             "             |+-popup------------+      \n",
             "             ||   popup-top      |      \n",
             "             ||popup top         |      \n",
@@ -299,9 +304,9 @@ fn renderer_emits_styles_and_tracks_cursor_position() {
     assert_eq!(
         grid.cursor(),
         Some(embers_client::GridCursor {
-            x: focused_leaf.rect.origin.x as u16 + 3,
-            // +1 for the tab/header row above the leaf and +1 for the cursor's row within it.
-            y: focused_leaf.rect.origin.y as u16 + 1 + 1,
+            x: focused_leaf.content_rect.origin.x as u16 + 3,
+            // +1 for the cursor's row within the pane's content.
+            y: focused_leaf.content_rect.origin.y as u16 + 1,
             shape: CursorShape::Beam,
         })
     );
@@ -451,8 +456,8 @@ fn renderer_draws_the_copy_mode_cursor_instead_of_the_program_cursor() {
     assert_eq!(
         grid.cursor(),
         Some(embers_client::GridCursor {
-            x: leaf.rect.origin.x as u16 + 3,
-            y: leaf.rect.origin.y as u16 + 2,
+            x: leaf.content_rect.origin.x as u16 + 3,
+            y: leaf.content_rect.origin.y as u16 + 1,
             shape: CursorShape::Block,
         })
     );
@@ -736,4 +741,112 @@ fn scrolled_styled_view_keeps_color() {
             .iter()
             .any(|line| line.contains("\x1b[38;2;10;20;30m"))
     );
+}
+
+fn render_with_pane_titles(
+    state: &embers_client::ClientState,
+    viewport: Size,
+    pane_titles: PaneTitles,
+) -> embers_client::RenderGrid {
+    let presentation =
+        PresentationModel::project_with(state, SESSION_ID, viewport, pane_titles).unwrap();
+    Renderer::default().render(state, &presentation)
+}
+
+#[test]
+fn panes_without_title_rows_show_content_from_their_first_row() {
+    let grid = render_with_pane_titles(
+        &root_split_state(),
+        Size {
+            width: 31,
+            height: 3,
+        },
+        PaneTitles::Off,
+    );
+
+    // No title row; the divider still separates the panes.
+    assert_eq!(
+        grid.render(),
+        concat!(
+            "left root pane |right root pane\n",
+            "               |               \n",
+            "               |               "
+        )
+    );
+}
+
+#[test]
+fn pane_title_rows_are_drawn_above_or_below_the_content() {
+    let state = root_split_state();
+    let viewport = Size {
+        width: 31,
+        height: 3,
+    };
+
+    let top = render_with_pane_titles(&state, viewport, PaneTitles::Top);
+    assert_eq!(
+        top.render(),
+        concat!(
+            "   root-left   |>+ root-right  \n",
+            "left root pane |right root pane\n",
+            "               |               "
+        )
+    );
+
+    let bottom = render_with_pane_titles(&state, viewport, PaneTitles::Bottom);
+    assert_eq!(
+        bottom.render(),
+        concat!(
+            "left root pane |right root pane\n",
+            "               |               \n",
+            "   root-left   |>+ root-right  "
+        )
+    );
+}
+
+#[test]
+fn overlays_and_cursor_follow_the_content_without_title_rows() {
+    let mut state = root_buffer_state();
+    let view = state.view_state_mut(ROOT_BUFFER_LEAF_ID).unwrap();
+    view.follow_output = false;
+    view.scroll_top_line = 12;
+    view.total_line_count = 60;
+    view.visible_lines = vec![
+        SnapshotLine::plain("needle here"),
+        SnapshotLine::plain("plain"),
+    ];
+    view.search_state = Some(SearchState {
+        query: "needle".to_owned(),
+        matches: vec![SearchMatch {
+            line: 12,
+            start_column: 0,
+            end_column: 6,
+        }],
+        active_match_index: Some(0),
+    });
+    view.copy_cursor = Some(SelectionPoint {
+        line: 13,
+        column: 2,
+    });
+    let viewport = Size {
+        width: 20,
+        height: 4,
+    };
+
+    let grid = render_with_pane_titles(&state, viewport, PaneTitles::Off);
+    let lines = grid.lines();
+    // The scroll indicator sits in the content's top-right corner, over it.
+    assert_eq!(lines[0], "needle here    13/60");
+    assert_eq!(lines[1].trim_end(), "plain");
+    assert!(grid.cell_style(0, 0).unwrap().reverse);
+    let cursor = grid.cursor().expect("copy-mode cursor");
+    assert_eq!((cursor.x, cursor.y), (2, 1));
+
+    let titled = render_with_pane_titles(&state, viewport, PaneTitles::Top);
+    let lines = titled.lines();
+    assert!(lines[0].ends_with("13/60"), "{lines:#?}");
+    assert_eq!(lines[1].trim_end(), "needle here");
+    assert!(titled.cell_style(0, 1).unwrap().reverse);
+    let cursor = titled.cursor().expect("copy-mode cursor");
+    assert_eq!((cursor.x, cursor.y), (2, 2));
 }

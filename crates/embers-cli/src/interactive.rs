@@ -8,8 +8,8 @@ use std::time::Duration;
 use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attributes};
 use embers_client::{
     ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
-    KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, RootTabBar, SocketTransport,
+    KeyCode, KeyEvent, LayoutOptions, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+    MouseModifiers, MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
     detect_host_capabilities, spawn_pty_size_with,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
@@ -64,12 +64,12 @@ async fn run_attached(
     let initial_viewport = terminal_size(io::stdout().as_raw_fd())
         .ok()
         .map(|size| configured.content_viewport(size));
-    let tab_bar = configured.root_tab_bar();
+    let layout = configured.layout_options();
     let initial_session_id = ensure_session_ready(
         configured.client_mut(),
         requested_target.as_deref(),
         initial_viewport,
-        tab_bar,
+        layout,
     )
     .await?;
     configured
@@ -387,14 +387,14 @@ async fn ensure_session_ready(
     client: &mut MuxClient<SocketTransport>,
     target: Option<&str>,
     viewport: Option<Size>,
-    tab_bar: RootTabBar,
+    layout: LayoutOptions,
 ) -> Result<SessionId> {
     client.resync_all_sessions().await?;
     let session_id = match select_session_id(client, target)? {
         Some(session_id) => session_id,
         None => create_session(client, target.unwrap_or(DEFAULT_SESSION_NAME)).await?,
     };
-    ensure_root_window(client, session_id, viewport, tab_bar).await?;
+    ensure_root_window(client, session_id, viewport, layout).await?;
     client.resync_session(session_id).await?;
     Ok(session_id)
 }
@@ -452,18 +452,18 @@ async fn ensure_shown_root_window(
     terminal: Size,
 ) -> Result<()> {
     let viewport = configured.content_viewport(terminal);
-    let tab_bar = configured.root_tab_bar();
-    ensure_root_window(configured.client_mut(), session_id, Some(viewport), tab_bar).await
+    let layout = configured.layout_options();
+    ensure_root_window(configured.client_mut(), session_id, Some(viewport), layout).await
 }
 
 /// Gives `session_id` a first window when it has none, spawned at the size it
-/// will be drawn at in `viewport`, with the root tab bar drawn as `tab_bar`
-/// says.
+/// will be drawn at in `viewport`, laid out as `layout` says (the root tab
+/// bar and pane title rows).
 async fn ensure_root_window(
     client: &mut MuxClient<SocketTransport>,
     session_id: SessionId,
     viewport: Option<Size>,
-    tab_bar: RootTabBar,
+    layout: LayoutOptions,
 ) -> Result<()> {
     client.resync_session(session_id).await?;
     if session_has_root_window(client, session_id)? {
@@ -477,7 +477,7 @@ async fn ensure_root_window(
             client.state(),
             session_id,
             viewport,
-            tab_bar,
+            layout,
             PanePlacement::RootTab,
         )
     });

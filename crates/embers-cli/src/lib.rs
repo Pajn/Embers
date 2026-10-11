@@ -18,8 +18,8 @@ use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use embers_client::{
     ClientState, CommandContext, CommandRunner, FormatContext, NavigationDirection, PanePlacement,
-    PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size, window_number,
-    window_position,
+    PaneTitles, PresentationModel, SplitResize, drawn_viewport, expand_format, spawn_pty_size,
+    window_number, window_position,
 };
 use embers_core::{
     BufferId, FloatGeometry, FloatingId, MuxError, NodeId, PtySize, Result, SessionId,
@@ -2901,7 +2901,8 @@ fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
 
 /// Plan tmux `resize-pane -L/-R/-U/-D` for `pane`. The CLI has no viewport,
 /// so the layout is projected at the size the session was last drawn at, which
-/// the attached client's pane PTY sizes record.
+/// the attached client's pane PTY sizes record, with the title rows it
+/// reported.
 fn plan_directional_resize(
     pane: &ResolvedPane,
     direction: NavigationDirection,
@@ -2913,7 +2914,12 @@ fn plan_directional_resize(
     let viewport = drawn_viewport(&state, session_id).ok_or_else(|| {
         MuxError::invalid_input("cannot determine the size the session is drawn at")
     })?;
-    let presentation = PresentationModel::project(&state, session_id, viewport)?;
+    let presentation = PresentationModel::project_with(
+        &state,
+        session_id,
+        viewport,
+        PaneTitles::reported(&pane.snapshot.session),
+    )?;
     Ok(presentation.resize_leaf(&state, pane.leaf_id, direction, cells))
 }
 
@@ -3299,13 +3305,21 @@ fn parse_floating_id(raw: &str) -> Result<FloatingId> {
 }
 
 /// The size a pane created at `placement` in `snapshot`'s session will be
-/// drawn at, from the viewport an attached client last reported for the
-/// session. `None` (the server default) when no client ever drew it.
+/// drawn at, from the viewport and title rows an attached client last
+/// reported for the session. `None` (the server default) when no client ever
+/// drew it.
 fn spawn_size(snapshot: &SessionSnapshot, placement: PanePlacement) -> Option<PtySize> {
     let viewport = snapshot.session.viewport?;
+    let pane_titles = PaneTitles::reported(&snapshot.session);
     let mut state = ClientState::default();
     state.apply_session_snapshot(snapshot.clone());
-    spawn_pty_size(&state, snapshot.session.id, viewport, placement)
+    spawn_pty_size(
+        &state,
+        snapshot.session.id,
+        viewport,
+        pane_titles,
+        placement,
+    )
 }
 
 fn buffer_command(command: Vec<String>) -> Vec<String> {

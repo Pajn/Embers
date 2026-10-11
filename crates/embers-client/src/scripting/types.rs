@@ -9,7 +9,7 @@ use crate::command_prompt::StatusKeys;
 use crate::grid::TerminalColor;
 use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
-use crate::presentation::{StatusLineMode, TabBarPosition};
+use crate::presentation::{PaneTitles, StatusLineMode, TabBarPosition};
 
 use super::model::Action;
 
@@ -253,6 +253,9 @@ pub struct LoadedConfig {
     pub mouse: MouseSettings,
     pub hints: HintsSettings,
     pub theme: ThemeSpec,
+    /// Where panes draw their title rows, if at all (`set_pane_titles`).
+    /// `Off` by default.
+    pub pane_titles: PaneTitles,
     /// Forward OSC 52 clipboard writes from programs in panes to the host
     /// terminal (`set_clipboard`). On by default.
     pub clipboard: bool,
@@ -307,6 +310,7 @@ impl fmt::Debug for LoadedConfig {
             .field("mouse", &self.mouse)
             .field("hints", &self.hints)
             .field("theme", &self.theme)
+            .field("pane_titles", &self.pane_titles)
             .field("clipboard", &self.clipboard)
             .field("base_index", &self.base_index)
             .field("passthrough", &self.passthrough)

@@ -19,6 +19,9 @@ pub struct Session {
     /// The area an attached client last drew this session in. Panes created
     /// without a client use it to start at their drawn size.
     pub viewport: Option<Size>,
+    /// Whether the client that last drew this session gave each pane a title
+    /// row, which pane sizes in `viewport` depend on.
+    pub pane_titles: bool,
     /// The window base index of the client that last showed this session
     /// (tmux `base-index`), so the CLI numbers windows as that client does.
     pub base_index: Option<u32>,

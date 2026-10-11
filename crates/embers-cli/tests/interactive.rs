@@ -1656,9 +1656,9 @@ async fn tmux_passthrough_from_a_pane_reaches_the_live_terminal_at_the_pane_curs
     let (row, col) = cursor_move_before(&output, index)
         .unwrap_or_else(|| panic!("no cursor move before the payload in {output:?}"));
     // The only pane fills the width, so column 5 of the pane is column 5 of
-    // the screen; its content starts below the tab bar and its title row.
+    // the screen; its content starts below the tab bar.
     assert_eq!(col, 5);
-    assert!(row > 3, "row {row} is not below the pane's title");
+    assert!(row > 3, "row {row} is not below the tab bar");
     assert!(
         !output.contains("tmux;"),
         "wrapper reached the host: {output:?}"
@@ -1916,8 +1916,8 @@ async fn a_message_over_the_tab_bar_comes_and_goes_without_resizing_panes() {
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
 
-    // 24 rows: the pane's title row and the tab bar, and no status row.
-    run_pane_command(&mut harness, "stty size", "22 80");
+    // 24 rows: the tab bar, and no status row or pane title row.
+    run_pane_command(&mut harness, "stty size", "23 80");
 
     // A program that reports every resize while the message comes and goes.
     // The quotes keep the echoed command line from matching its output.
@@ -1952,7 +1952,7 @@ async fn a_message_over_the_tab_bar_comes_and_goes_without_resizing_panes() {
     assert!(frame.contains("[main]"), "the tab bar is back: {frame:?}");
 
     harness.write_all("\x03").expect("stop the resize watcher");
-    let output = run_pane_command(&mut harness, "stty size", "22 80");
+    let output = run_pane_command(&mut harness, "stty size", "23 80");
     assert!(
         !format!("{shown}{after}{output}").contains("GOT-WINCH"),
         "a pane was resized"

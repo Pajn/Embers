@@ -352,6 +352,33 @@ fn status_keys_choose_the_prompt_key_table() {
 }
 
 #[test]
+fn pane_titles_are_off_unless_the_config_places_them() {
+    use embers_client::PaneTitles;
+
+    let pane_titles = |source: &str| {
+        ScriptHarness::load(source).map(|harness| harness.engine().loaded_config().pane_titles)
+    };
+    assert_eq!(pane_titles("").unwrap(), PaneTitles::Off);
+    assert_eq!(
+        pane_titles(r#"set_pane_titles("top");"#).unwrap(),
+        PaneTitles::Top
+    );
+    assert_eq!(
+        pane_titles(r#"set_pane_titles("bottom");"#).unwrap(),
+        PaneTitles::Bottom
+    );
+    assert_eq!(
+        pane_titles(r#"set_pane_titles("top"); set_pane_titles("off");"#).unwrap(),
+        PaneTitles::Off
+    );
+    let error = pane_titles(r#"set_pane_titles("on");"#).unwrap_err();
+    assert!(
+        error.to_string().contains(r#""off", "top" or "bottom""#),
+        "{error}"
+    );
+}
+
+#[test]
 fn harness_rejects_empty_notation_without_panicking() {
     let mut harness = ScriptHarness::load("").unwrap();
 

@@ -249,6 +249,8 @@ table SessionRequest {
   // SetBaseIndex: the number of the first window, when has_base_index.
   base_index:uint = 0 (id: 12);
   has_base_index:bool = false (id: 13);
+  // SetViewport: whether the client gives each pane a title row.
+  pane_titles:bool = false (id: 14);
 }
 
 table BufferRequest {
@@ -362,6 +364,7 @@ table SessionRecord {
   viewport_rows:ushort = 0 (id: 8);
   base_index:uint = 0 (id: 9);
   has_base_index:bool = false (id: 10);
+  pane_titles:bool = false (id: 11);
 }
 
 table BufferRecord {
