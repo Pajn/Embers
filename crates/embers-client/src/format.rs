@@ -12,6 +12,11 @@
 //! [`FormatContext::lookup`]. Callers that know more than the client state,
 //! such as the CLI with its layout projection, add variables in
 //! [`FormatContext::extra`].
+//!
+//! `#{@name}` is tmux's user option `@name`: the pane's buffer option `name`
+//! (`set-option -p @name`, `buffer set-option name`), or nothing when it is
+//! unset. Options live on panes only, so a window or session format reads its
+//! pane's.
 
 use std::collections::BTreeMap;
 
@@ -46,6 +51,8 @@ pub struct FormatContext {
     pub pane_height: u16,
     pub pane_dead: bool,
     pub pane_dead_status: Option<i32>,
+    /// The pane's buffer options, which `#{@name}` reads.
+    pub user_options: BTreeMap<String, String>,
     /// More variables by long name, checked after the built-in ones.
     pub extra: BTreeMap<String, String>,
 }
@@ -124,6 +131,9 @@ impl FormatContext {
             pane_height: buffer.map_or(0, |buffer| buffer.pty_size.rows),
             pane_dead: buffer.is_some_and(|buffer| buffer.state == BufferRecordState::Exited),
             pane_dead_status: buffer.and_then(|buffer| buffer.exit_code),
+            user_options: buffer
+                .map(|buffer| buffer.user_options.clone())
+                .unwrap_or_default(),
             extra: BTreeMap::new(),
             session_name: session.name.clone(),
             window_index: window_number(window_position, base_index),
@@ -141,6 +151,9 @@ impl FormatContext {
 
     /// The value of the variable `name` (long form), if it is one.
     pub fn lookup(&self, name: &str) -> Option<String> {
+        if let Some(option) = name.strip_prefix('@') {
+            return Some(self.user_options.get(option).cloned().unwrap_or_default());
+        }
         Some(match name {
             "session_name" => self.session_name.clone(),
             "window_index" => self.window_index.to_string(),
@@ -303,6 +316,10 @@ mod tests {
             buffer_id: Some(BufferId(12)),
             pane_index: Some(1),
             pane_active: true,
+            user_options: BTreeMap::from([(
+                "tria-open-socket".to_owned(),
+                "/tmp/t.sock".to_owned(),
+            )]),
             extra: BTreeMap::from([("pane_at_left".to_owned(), "1".to_owned())]),
             ..FormatContext::default()
         }
@@ -331,6 +348,14 @@ mod tests {
                 &context()
             ),
             "12 1 1 0 1"
+        );
+    }
+
+    #[test]
+    fn expands_user_options_by_name_without_the_at() {
+        assert_eq!(
+            expand_format("[#{@tria-open-socket}] [#{@unset}]", &context()),
+            "[/tmp/t.sock] []"
         );
     }
 

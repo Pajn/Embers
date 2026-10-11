@@ -219,6 +219,7 @@ A small part of tmux's format language is supported:
 | | `#{pane_width}`, `#{pane_height}` | the pane's size in cells |
 | | `#{pane_dead}`, `#{pane_dead_status}` | 1 when the pane's program has exited (kept by `remain-on-exit`), and its exit status |
 | | `#{pane_at_left}`, `#{pane_at_right}`, `#{pane_at_top}`, `#{pane_at_bottom}` | 1 when no pane is drawn on that side, as `select-pane -L/-R/-U/-D` sees it (CLI only) |
+| | `#{@name}` | the pane's option `@name` (see [Options](#options)), or nothing when it is not set |
 | `##` | | a literal `#` |
 
 An unknown `#{name}` expands to nothing. Conditionals, modifiers and styles
@@ -417,12 +418,13 @@ command is window 12, not pane 12.
 | `switch-client` | `-c`, `-t`, `-n`, `-p` | No `-l`: the server does not record each client's previous session. |
 | `detach-client` | `-c` | Picks the client like `switch-client`. |
 | `select-pane` | `-t`, `-L`, `-R`, `-U`, `-D`, `-l` | Directional moves do not wrap around at the edge. No `-T`: pane titles come from the program. |
+| `set-option`, `show-options` | `-p` only; `-t`, `-u`, `-o`, `-q`; `show-options -v` | See [Options](#options). |
 | `capture-pane` | `-t`, `-p`, `-S`, `-E`, `-J`, `-e` | See below. |
 | `list-sessions`, `list-windows`, `list-panes` | `-F`; `list-windows -a`, `list-panes -s`/`-a` | Without `-F`, Embers' tab-separated columns. |
 | `has-session`, `kill-session`, `kill-window`, `kill-pane`, `rename-session`, `rename-window`, `select-window`, `send-keys`, `resize-pane`, `display-message` | `-t` with any target | `send-keys` sends its words as text, joined by spaces (`--enter` presses Enter); tmux key names such as `C-c` are not translated. |
 
 `new`, `ls`, `neww`, `lsw`, `splitw`, `lsp`, `selectp`, `capturep`, `popup`,
-`switchc` and `detach` are accepted as short names. `-h` is not help for
+`switchc`, `detach`, `set` and `show` are accepted as short names. `-h` is not help for
 `split-window` and `display-popup`; use `--help`. The global `-v` (verbose)
 goes before the command, which leaves `-v` to `split-window`.
 
@@ -489,6 +491,34 @@ escape sequences. Captured lines carry no wrap flag, so `-J` joins a line to
 the next when it fills the pane's width; a line that exactly fills the width
 without wrapping is joined too. Bare `capture-pane` prints the whole history
 and screen, as it always has (tmux would store it in a paste buffer).
+
+#### Options
+
+Embers keeps options on panes only, as the options of the buffer a pane
+shows. `set-option -p` and `show-options -p` work on those, so tmux scripts
+that keep their state in pane user options run unchanged:
+
+```sh
+embers set-option -p -t %3 @tria-open-socket /tmp/tria.sock
+embers list-panes -a -F '#{pane_id} #{@tria-open-socket}'
+embers show-options -p -t %3              # @tria-open-socket /tmp/tria.sock
+embers show-options -pv -t %3 @tria-open-socket
+embers set-option -pu -t %3 @tria-open-socket
+```
+
+A user option `@name` is the buffer option `name`: the one `embers buffer
+set-option name` sets, the config reads with `buffer.user_option("name")`, and
+`#{@name}` expands to. So `set-option -p @is-vim 1` and `buffer set-option
+is-vim 1` set the same option. The only other option `set-option -p` takes is
+`remain-on-exit`; any other name is an invalid option, as an unknown one is in
+tmux. Options are saved with the workspace.
+
+Windows, sessions and the server have no options: `set-option` and
+`show-options` without `-p`, or with `-w`, `-s` or `-g`, fail. `#{@name}` reads
+the pane's option in every format; `list-windows -F` and `list-sessions -F`
+read it from the pane they expand for (the focused pane, else the window's
+first), where tmux would look up a window or session option.
+`set-option -a` (append) and `-F` are not supported.
 
 #### Choosing the client
 

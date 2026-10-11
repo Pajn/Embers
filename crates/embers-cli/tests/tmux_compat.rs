@@ -779,3 +779,174 @@ async fn capture_pane_prints_ranges_joined_lines_and_escapes() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+/// Run `args` and return its stderr, asserting that it failed.
+fn fails(server: &TestServer, args: &[&str]) -> String {
+    let output = cli_command(server).args(args).output().expect("cli runs");
+    assert!(
+        !output.status.success(),
+        "{args:?} succeeded: {}",
+        stdout(&output)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_options_expand_in_formats_and_set_with_set_option_p() {
+    let server = TestServer::start().await.expect("start server");
+    for session in ["main", "t1"] {
+        run_cli(
+            &server,
+            ["new-session", "-d", "-s", session, "--", "/bin/sh"],
+        );
+    }
+    let main_pane = print(&server, "=main:", "#{pane_id}");
+    let t1_pane = print(&server, "=t1:", "#{pane_id}");
+
+    // What tria does: mark a pane, then list every pane with the mark.
+    run_cli(
+        &server,
+        [
+            "set-option",
+            "-p",
+            "-t",
+            &t1_pane,
+            "@tria-open-socket",
+            "/tmp/tria.sock",
+        ],
+    );
+    let listed = out(&run_cli(
+        &server,
+        [
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id} [#{@tria-open-socket}]",
+        ],
+    ));
+    let mut lines = listed.lines().collect::<Vec<_>>();
+    lines.sort_unstable();
+    let mut expected = vec![
+        format!("{main_pane} []"),
+        format!("{t1_pane} [/tmp/tria.sock]"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(lines, expected);
+
+    // Every format context reads the pane's option.
+    assert_eq!(
+        print(&server, &t1_pane, "#{@tria-open-socket}"),
+        "/tmp/tria.sock"
+    );
+    assert_eq!(
+        out(&run_cli(
+            &server,
+            ["list-windows", "-t", "=t1", "-F", "#{@tria-open-socket}"]
+        )),
+        "/tmp/tria.sock"
+    );
+    assert_eq!(
+        out(&run_cli(
+            &server,
+            [
+                "list-sessions",
+                "-F",
+                "#{session_name}=#{@tria-open-socket}"
+            ]
+        )),
+        "main=\nt1=/tmp/tria.sock"
+    );
+    let created = out(&run_cli(
+        &server,
+        [
+            "new-window",
+            "-d",
+            "-t",
+            "=t1",
+            "-P",
+            "-F",
+            "[#{@tria-open-socket}]",
+            "--",
+            "/bin/sh",
+        ],
+    ));
+    assert_eq!(created, "[]");
+
+    // `@name` is the buffer option `name`, which `buffer set-option` sets
+    // and the config reads with `buffer.user_option("name")`.
+    run_cli(
+        &server,
+        ["buffer", "set-option", "-t", &main_pane, "is-vim", "1"],
+    );
+    assert_eq!(print(&server, &main_pane, "#{@is-vim}"), "1");
+    run_cli(
+        &server,
+        ["set-option", "-p", "-t", &main_pane, "@is-vim", "0"],
+    );
+    assert_eq!(
+        out(&run_cli(
+            &server,
+            ["buffer", "show-options", "-t", &main_pane]
+        )),
+        "\"is-vim\"\t\"0\""
+    );
+
+    // show-options -p prints like tmux, quoting values that need it.
+    run_cli(&server, ["set", "-p", "-t", &t1_pane, "@spaced", "a b"]);
+    run_cli(
+        &server,
+        ["set-option", "-p", "-t", &t1_pane, "remain-on-exit", "on"],
+    );
+    assert_eq!(
+        out(&run_cli(&server, ["show-options", "-p", "-t", &t1_pane])),
+        "@spaced \"a b\"\n@tria-open-socket /tmp/tria.sock\nremain-on-exit on"
+    );
+    assert_eq!(
+        out(&run_cli(
+            &server,
+            ["show", "-pv", "-t", &t1_pane, "@spaced"]
+        )),
+        "a b"
+    );
+    assert!(
+        fails(&server, &["show-options", "-p", "-t", &t1_pane, "@nope"])
+            .contains("invalid option: @nope")
+    );
+    assert_eq!(
+        out(&run_cli(
+            &server,
+            ["show-options", "-pq", "-t", &t1_pane, "@nope"]
+        )),
+        ""
+    );
+
+    // -u unsets; -o leaves a set option alone.
+    run_cli(&server, ["set-option", "-pu", "-t", &t1_pane, "@spaced"]);
+    assert_eq!(print(&server, &t1_pane, "[#{@spaced}]"), "[]");
+    assert!(
+        fails(
+            &server,
+            &[
+                "set-option",
+                "-po",
+                "-t",
+                &t1_pane,
+                "@tria-open-socket",
+                "x"
+            ]
+        )
+        .contains("already set: @tria-open-socket")
+    );
+    assert_eq!(
+        print(&server, &t1_pane, "#{@tria-open-socket}"),
+        "/tmp/tria.sock"
+    );
+
+    // Only pane options exist, and only user options and remain-on-exit.
+    assert!(fails(&server, &["set-option", "-p", "bogus", "1"]).contains("invalid option: bogus"));
+    assert!(fails(&server, &["set-option", "-p", "@empty"]).contains("empty value"));
+    assert!(fails(&server, &["set-option", "@foo", "1"]).contains("-p"));
+    assert!(fails(&server, &["set-option", "-w", "@foo", "1"]).contains("-p"));
+
+    server.shutdown().await.expect("shutdown server");
+}

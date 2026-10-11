@@ -3,6 +3,7 @@ mod capture;
 mod clients;
 mod formats;
 mod interactive;
+mod options;
 mod popup;
 mod sessions;
 mod target;
@@ -408,6 +409,54 @@ pub enum Command {
         up: bool,
         #[arg(short = 'D', group = "pane_direction")]
         down: bool,
+    },
+    /// Set pane `-t`'s option NAME to VALUE, like tmux `set-option -p`. Options
+    /// are the pane's buffer options (`buffer set-option`): `@name` is the
+    /// option `name`, and `remain-on-exit` is the only other one. `-u` unsets
+    /// it, `-o` fails if it is set, `-q` ignores an unknown option. Windows,
+    /// sessions and the server have no options, so `-p` is required.
+    #[command(name = "set-option", visible_alias = "set")]
+    SetOption {
+        #[arg(short = 'p')]
+        pane: bool,
+        #[arg(short = 'w', hide = true)]
+        window: bool,
+        #[arg(short = 's', hide = true)]
+        server: bool,
+        #[arg(short = 'g', hide = true)]
+        global: bool,
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(short = 'u')]
+        unset: bool,
+        #[arg(short = 'o')]
+        only_if_unset: bool,
+        #[arg(short = 'q')]
+        quiet: bool,
+        name: String,
+        #[arg(conflicts_with = "unset")]
+        value: Option<String>,
+    },
+    /// Print pane `-t`'s options, or option NAME, like tmux `show-options -p`:
+    /// `NAME VALUE` lines, or with `-v` the values alone. `-q` prints nothing
+    /// for an option that is not set.
+    #[command(name = "show-options", visible_alias = "show")]
+    ShowOptions {
+        #[arg(short = 'p')]
+        pane: bool,
+        #[arg(short = 'w', hide = true)]
+        window: bool,
+        #[arg(short = 's', hide = true)]
+        server: bool,
+        #[arg(short = 'g', hide = true)]
+        global: bool,
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        #[arg(short = 'v')]
+        value_only: bool,
+        #[arg(short = 'q')]
+        quiet: bool,
+        name: Option<String>,
     },
     /// Resize a pane like tmux: `-L/-R/-U/-D [N]` moves its border N cells
     /// (default 1), `-Z` toggles zoom, and `--sizes` sets the parent split's
@@ -1119,67 +1168,31 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                         )
                     })?)
                 };
-                let response = connection
-                    .request(ClientMessage::Buffer(BufferRequest::SetUserOption {
-                        request_id: new_request_id(),
-                        buffer_id,
-                        key,
-                        value,
-                    }))
+                connection
+                    .set_buffer_option(buffer_id, key, value, "buffer set-option")
                     .await?;
-                match response {
-                    ServerResponse::Buffer(response) => {
-                        ensure_matching_buffer_id(
-                            "buffer set-option",
-                            buffer_id,
-                            response.buffer.id,
-                        )?;
-                        Ok(String::new())
-                    }
-                    other => Err(MuxError::protocol(format!(
-                        "unexpected response to buffer set-option: {other:?}"
-                    ))),
-                }
+                Ok(String::new())
             }
             BufferCommand::ShowOptions { target } => {
                 let buffer_id = connection.resolve_buffer(target.as_deref()).await?;
-                let response = connection
-                    .request(ClientMessage::Buffer(BufferRequest::Get {
-                        request_id: new_request_id(),
-                        buffer_id,
-                    }))
-                    .await?;
-                match response {
-                    ServerResponse::Buffer(response) => {
-                        ensure_matching_buffer_id(
-                            "buffer show-options",
-                            buffer_id,
-                            response.buffer.id,
-                        )?;
-                        Ok(response
-                            .buffer
-                            .user_options
-                            .iter()
-                            .map(|(key, value)| {
-                                // JSON-encode both fields and tab-separate them
-                                // (like format_buffer_details) so a key or value
-                                // containing whitespace stays one parseable line
-                                // with an unambiguous field boundary.
-                                format!(
-                                    "{}\t{}",
-                                    serde_json::to_string(key)
-                                        .expect("user option keys serialize to JSON"),
-                                    serde_json::to_string(value)
-                                        .expect("user option values serialize to JSON"),
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"))
-                    }
-                    other => Err(MuxError::protocol(format!(
-                        "unexpected response to buffer show-options: {other:?}"
-                    ))),
-                }
+                Ok(connection
+                    .buffer_options(buffer_id, "buffer show-options")
+                    .await?
+                    .iter()
+                    .map(|(key, value)| {
+                        // JSON-encode both fields and tab-separate them (like
+                        // format_buffer_details) so a key or value containing
+                        // whitespace stays one parseable line with an
+                        // unambiguous field boundary.
+                        format!(
+                            "{}\t{}",
+                            serde_json::to_string(key).expect("user option keys serialize to JSON"),
+                            serde_json::to_string(value)
+                                .expect("user option values serialize to JSON"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
             }
         },
         Command::Node { command } => match command {
@@ -1627,6 +1640,60 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 }))
                 .await?;
             Ok(String::new())
+        }
+        Command::SetOption {
+            pane,
+            window,
+            server,
+            global,
+            target,
+            unset,
+            only_if_unset,
+            quiet,
+            name,
+            value,
+        } => {
+            connection
+                .set_option(options::SetOption {
+                    scope: options::Scope {
+                        pane,
+                        window,
+                        server,
+                        global,
+                    },
+                    target,
+                    name,
+                    value,
+                    unset,
+                    only_if_unset,
+                    quiet,
+                })
+                .await
+        }
+        Command::ShowOptions {
+            pane,
+            window,
+            server,
+            global,
+            target,
+            value_only,
+            quiet,
+            name,
+        } => {
+            connection
+                .show_options(options::ShowOptions {
+                    scope: options::Scope {
+                        pane,
+                        window,
+                        server,
+                        global,
+                    },
+                    target,
+                    name,
+                    value_only,
+                    quiet,
+                })
+                .await
         }
         Command::ResizePane {
             target,
