@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-032e18bd.js";
+            window.path_to_searchindex_js = "searchindex-3cc237bb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -253,6 +253,36 @@ Description
 
 <div group="node_id" id="node_id-Description" class="tabcontent" style="display: block;">
 Return the tabs node id currently being formatted.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> session_name </h2>
+
+<pre><code class="language-rust ignore">fn session_name(bar: TabBarContext) -&gt; String</code></pre>
+<div>
+<div class="tab">
+<button group="session_name" id="link-session_name-Description" class="tablinks active" onclick="openTab(event, &#39;session_name&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="session_name" id="link-session_name-Example" class="tablinks" onclick="openTab(event, &#39;session_name&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="session_name" id="session_name-Description" class="tabcontent" style="display: block;">
+Return the name of the session the bar belongs to, like tmux `#S`, for
+a status line such as `[main] 1 shell 2 nvim`.
+</div>
+
+<div group="session_name" id="session_name-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let left = [ui.segment(`[${ctx.session_name()}] `)];
+</code></pre>
 </div>
 
 </div>

@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
-    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, CursorPosition, CursorShape, FloatGeometry,
+    FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
@@ -29,19 +29,22 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
+use crate::grid::{CellStyle, GridCursor};
 use crate::host_terminal::{HostCapabilities, PendingAttachQueries};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
-use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel};
+use crate::presentation::{
+    LeafFrame, NavigationDirection, PresentationModel, RootTabBar, StatusLineMode,
+};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
     Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
     FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
 };
-use crate::spawn_size::{PanePlacement, spawn_pty_size};
+use crate::spawn_size::{PanePlacement, spawn_pty_size_with};
 use crate::split_resize::SplitResize;
 use crate::state::{
     HintsState, SearchMatch, SearchState, SelectionKind, SelectionPoint, SelectionState,
@@ -135,6 +138,8 @@ pub struct ConfiguredClient<T> {
     config: ConfigManager,
     input_state: InputState,
     notifications: Vec<String>,
+    /// Until when the latest notification shows over the tab bar.
+    notification_until: Option<Instant>,
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
@@ -192,6 +197,7 @@ where
             config,
             input_state: InputState::default(),
             notifications: Vec::new(),
+            notification_until: None,
             active_session_id: None,
             previous_session_id: None,
             viewport: None,
@@ -323,18 +329,24 @@ where
             .map(|message| message.text.as_str())
     }
 
-    /// Drop a `display-message` whose time is up. Returns `true` when one was
-    /// dropped, so the caller redraws the status line.
+    /// Drop a `display-message` or warning whose time is up. Returns `true`
+    /// when one was dropped, so the caller redraws the status line.
     pub fn expire_status_message(&mut self) -> bool {
+        let now = Instant::now();
+        let mut expired = false;
         if self
             .status_message
             .as_ref()
-            .is_some_and(|message| message.until <= Instant::now())
+            .is_some_and(|message| message.until <= now)
         {
             self.status_message = None;
-            return true;
+            expired = true;
         }
-        false
+        if self.notification_until.is_some_and(|until| until <= now) {
+            self.notification_until = None;
+            expired = true;
+        }
+        expired
     }
 
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
@@ -460,32 +472,75 @@ where
             .push_back(format!("\x1b]2;{title}\x07").into_bytes());
     }
 
+    /// The status line's text: what [`Self::status_text`] shows, else the
+    /// latest warning, else the session and how to quit.
     pub fn status_line(&self, session_id: SessionId, socket_path: &Path) -> String {
-        let session_name = self
-            .client
+        if let Some(text) = self.status_text(session_id) {
+            return text;
+        }
+        let session_name = self.session_name(session_id);
+        match self.notifications.last() {
+            Some(message) => format!("[{session_name}] {message}"),
+            None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
+        }
+    }
+
+    /// What the status line has to show right now: the command prompt, a
+    /// `confirm-before` question, the copy-mode search prompt, a
+    /// `display-message`, or a warning less than the display time old. `None`
+    /// when there is nothing, so the root tab bar shows instead.
+    pub fn status_text(&self, session_id: SessionId) -> Option<String> {
+        if let Some(prompt) = &self.command_prompt {
+            return Some(prompt.display());
+        }
+        if let Some(confirm) = &self.confirm {
+            return Some(confirm.prompt.clone());
+        }
+        let session_name = self.session_name(session_id);
+        if let Some(prompt) = &self.search_prompt {
+            let prefix = if prompt.backward { '?' } else { '/' };
+            return Some(format!("[{session_name}] {prefix}{}", prompt.query));
+        }
+        if let Some(message) = self.status_message() {
+            return Some(message.to_owned());
+        }
+        let now = Instant::now();
+        self.notifications
+            .last()
+            .filter(|_| self.notification_until.is_some_and(|until| until > now))
+            .map(|message| format!("[{session_name}] {message}"))
+    }
+
+    fn session_name(&self, session_id: SessionId) -> &str {
+        self.client
             .state()
             .sessions
             .get(&session_id)
             .map(|session| session.name.as_str())
-            .unwrap_or("<missing>");
-        if let Some(prompt) = &self.command_prompt {
-            return prompt.display();
-        }
-        if let Some(confirm) = &self.confirm {
-            return confirm.prompt.clone();
-        }
-        if let Some(prompt) = &self.search_prompt {
-            let prefix = if prompt.backward { '?' } else { '/' };
-            return format!("[{session_name}] {prefix}{}", prompt.query);
-        }
-        if let Some(message) = &self.status_message
-            && message.until > Instant::now()
-        {
-            return message.text.clone();
-        }
-        match self.notifications.last() {
-            Some(message) => format!("[{session_name}] {message}"),
-            None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
+            .unwrap_or("<missing>")
+    }
+
+    /// Draw [`Self::status_text`] over `presentation`'s status row of `grid`,
+    /// with the cursor at the command prompt's.
+    fn draw_status_overlay(
+        &self,
+        grid: &mut RenderGrid,
+        presentation: &PresentationModel,
+        session_id: SessionId,
+    ) {
+        let (Some(row), Some(text)) = (presentation.status_row(), self.status_text(session_id))
+        else {
+            return;
+        };
+        let style = CellStyle::default().with_reverse();
+        grid.put_str_styled(0, row, &" ".repeat(usize::from(grid.width())), style);
+        grid.put_str_styled(0, row, &crate::grid::replace_controls(&text), style);
+        if let Some(column) = self.status_cursor() {
+            grid.set_cursor(Some(GridCursor {
+                x: column.min(grid.width().saturating_sub(1)),
+                y: row,
+                shape: CursorShape::Beam,
+            }));
         }
     }
 
@@ -1041,10 +1096,15 @@ where
         let presentation = self.prepare_presentation(session_id, viewport).await?;
         let mut custom_bars = BTreeMap::<embers_core::NodeId, BarSpec>::new();
         let mut recorded_formatter_error = false;
-        for tabs in &presentation.tab_bars {
+        for tabs in presentation
+            .tab_bars
+            .iter()
+            .filter(|tabs| tabs.rect.size.height > 0)
+        {
             let bar_context =
                 TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
-                    .with_base_index(self.base_index());
+                    .with_base_index(self.base_index())
+                    .with_session_name(self.session_name(session_id));
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
@@ -1054,7 +1114,12 @@ where
                 Ok(None) => {}
                 Err(error) if !recorded_formatter_error => {
                     recorded_formatter_error = true;
-                    self.record_notification(error.to_string());
+                    // Every frame fails the same way; showing it once, for
+                    // the display time, lets the default bar show after.
+                    let message = error.to_string();
+                    if self.notifications.last() != Some(&message) {
+                        self.record_notification(message);
+                    }
                 }
                 Err(_) => {}
             }
@@ -1081,7 +1146,23 @@ where
             chooser.render(&mut grid, chooser_area(viewport), &rows);
             grid.set_cursor(None);
         }
+        if self.status_line_mode() == StatusLineMode::Overlay {
+            self.draw_status_overlay(&mut grid, &presentation, session_id);
+        }
         Ok(grid)
+    }
+
+    /// The part of a `terminal`-sized screen the session is drawn in. With
+    /// the status line drawn over the root tab bar (the default), all of it,
+    /// since the status line never takes a row from the panes; with a
+    /// separate status line, all but the last row, which the caller draws
+    /// [`Self::status_line`] in.
+    pub fn content_viewport(&self, terminal: Size) -> Size {
+        self.status_line_mode().content_viewport(terminal)
+    }
+
+    fn status_line_mode(&self) -> StatusLineMode {
+        self.config.active_script().loaded_config().status_line
     }
 
     pub fn reload_config(&mut self) -> Result<()> {
@@ -2389,10 +2470,11 @@ where
         placement: PanePlacement,
     ) -> Result<ResolvedTreeBuffer> {
         let size = || {
-            spawn_pty_size(
+            spawn_pty_size_with(
                 self.client.state(),
                 session_id,
                 presentation.viewport,
+                self.root_tab_bar(),
                 placement,
             )
         };
@@ -2742,14 +2824,23 @@ where
     }
 
     /// Project `session_id` the way this client draws it, with the root tab
-    /// bar where the config puts it.
+    /// bar where the config puts it, if it shows it.
     fn project(&self, session_id: SessionId, viewport: Size) -> Result<PresentationModel> {
         PresentationModel::project_with(
             self.client.state(),
             session_id,
             viewport,
-            self.config.active_script().loaded_config().tab_bar_position,
+            self.root_tab_bar(),
         )
+    }
+
+    /// How the config has the session's root tab bar drawn.
+    pub fn root_tab_bar(&self) -> RootTabBar {
+        let config = self.config.active_script().loaded_config();
+        RootTabBar {
+            position: config.tab_bar_position,
+            visible: config.tab_bar_visible,
+        }
     }
 
     async fn prepare_presentation(
@@ -3246,10 +3337,14 @@ where
     ///
     /// The viewport itself is reported to the server too, so panes created
     /// from the CLI can be spawned at the size this client will draw them.
+    /// The CLI does not know whether the root tab bar is hidden, so the
+    /// viewport reported is one in which it is shown and the panes keep
+    /// their sizes ([`PresentationModel::layout_viewport`]).
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
-        self.report_viewport(session_id, viewport).await;
-        self.report_base_index(session_id).await;
         let presentation = self.project(session_id, viewport)?;
+        self.report_viewport(session_id, presentation.layout_viewport())
+            .await;
+        self.report_base_index(session_id).await;
         for leaf in &presentation.leaves {
             if let Some(size) = leaf.pty_size() {
                 self.client
@@ -5039,6 +5134,7 @@ where
         let message = message.into();
         warn!("{message}");
         self.notifications.push(message);
+        self.notification_until = Some(Instant::now() + DEFAULT_DISPLAY_TIME);
         enforce_notification_cap(&mut self.notifications);
     }
 }

@@ -3,7 +3,7 @@ use std::path::Path;
 use embers_client::input::KeyParseError;
 use embers_client::{
     Action, InputResolution, KeyToken, PassthroughMode, PresentationModel, ScriptEngine,
-    ScriptHarness, TabBarContext,
+    ScriptHarness, StatusLineMode, TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::Size;
@@ -383,4 +383,82 @@ fn passthrough_is_off_unless_the_config_turns_it_on() {
         load(r#"set_allow_passthrough("all");"#),
         PassthroughMode::All
     );
+}
+
+#[test]
+fn the_root_tab_bar_can_be_hidden() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .map(|engine| engine.loaded_config().tab_bar_visible)
+    };
+
+    assert!(load("").unwrap());
+    assert!(!load("tabbar.set_visible(false);").unwrap());
+    assert!(load("tabbar.set_visible(true);").unwrap());
+    assert!(load(r#"tabbar.set_visible("no");"#).is_err());
+}
+
+#[test]
+fn the_status_line_can_keep_a_row_of_its_own() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .map(|engine| engine.loaded_config().status_line)
+    };
+
+    assert_eq!(load("").unwrap(), StatusLineMode::Overlay);
+    assert_eq!(
+        load(r#"set_status_line("separate");"#).unwrap(),
+        StatusLineMode::Separate
+    );
+    assert_eq!(
+        load(r#"set_status_line("overlay");"#).unwrap(),
+        StatusLineMode::Overlay
+    );
+    assert!(load(r#"set_status_line("off");"#).is_err());
+}
+
+#[test]
+fn tab_bar_formatters_read_the_session_name() {
+    let engine = ScriptEngine::load(&LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: None,
+        source: r#"
+            fn format_tabs(ctx) {
+                ui.bar([ui.segment(`[${ctx.session_name()}]`)], [], [])
+            }
+            tabbar.set_formatter(format_tabs);
+        "#
+        .to_owned(),
+        source_hash: 0,
+    })
+    .unwrap();
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+
+    let bar = engine
+        .format_tab_bar(
+            TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap(), "normal", 80)
+                .with_session_name("work"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(bar.left[0].text, "[work]");
 }

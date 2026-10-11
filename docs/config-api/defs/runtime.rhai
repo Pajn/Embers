@@ -1134,6 +1134,16 @@ fn session_id(floating: FloatingRef) -> int;
 /// Return the owning session id.
 fn session_id(node: NodeRef) -> int;
 
+/// Return the name of the session the bar belongs to, like tmux `#S`, for
+/// a status line such as `[main] 1 shell 2 nvim`.
+///
+/// # Example
+///
+/// ```rhai
+/// let left = [ui.segment(`[${ctx.session_name()}] `)];
+/// ```
+fn session_name(bar: TabBarContext) -> String;
+
 /// Return a text snapshot limited to the requested line count.
 fn snapshot_text(buffer: BufferRef, limit: int) -> String;
 

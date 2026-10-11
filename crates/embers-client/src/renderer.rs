@@ -11,6 +11,9 @@ use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationMo
 use crate::scripting::{BarSegment, BarSpec, PaneBorderColors};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 
+/// The most columns the session name takes in the default root tab bar.
+const SESSION_LABEL_WIDTH: u16 = 10;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Renderer {
     /// Divider colors from the theme.
@@ -127,16 +130,29 @@ impl Renderer {
             self.render_divider(grid, divider, focused);
         }
 
+        // The default root tab bar starts with the session name, like tmux's
+        // default status line.
+        let session_name = state
+            .sessions
+            .get(&model.session_id)
+            .map(|session| session.name.as_str());
         for tabs in model
             .tab_bars
             .iter()
             .filter(|tabs| tabs.floating_id == floating_id)
         {
-            self.render_tabs(grid, tabs, tab_bars.get(&tabs.node_id));
+            let session_name = session_name.filter(|_| tabs.is_root);
+            self.render_tabs(grid, tabs, tab_bars.get(&tabs.node_id), session_name);
         }
     }
 
-    fn render_tabs(&self, grid: &mut RenderGrid, tabs: &TabsFrame, custom: Option<&BarSpec>) {
+    fn render_tabs(
+        &self,
+        grid: &mut RenderGrid,
+        tabs: &TabsFrame,
+        custom: Option<&BarSpec>,
+        session_name: Option<&str>,
+    ) {
         if tabs.rect.size.height == 0 || tabs.rect.size.width == 0 {
             return;
         }
@@ -196,6 +212,14 @@ impl Renderer {
                 &bar.center,
             );
             return;
+        }
+
+        if let Some(name) = session_name {
+            // At most tmux's default status-left-length.
+            let width = tabs.rect.size.width.min(SESSION_LABEL_WIDTH);
+            let label = truncate(&format!("[{name}] "), width);
+            grid.put_str(x, y, &label);
+            x = x.saturating_add(display_width(&label));
         }
 
         for tab in &tabs.tabs {

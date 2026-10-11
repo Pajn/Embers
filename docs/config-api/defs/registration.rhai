@@ -921,9 +921,9 @@ fn set_formatter(tabbar: TabbarApi, callback: Fn) -> ();
 
 /// Put the session's tab bar, its list of windows, at the `"top"` (the
 /// default) or `"bottom"` of the screen, like tmux's `status-position`.
-/// At the bottom it sits just above the status line, where the command
-/// prompt and messages appear. Tab bars of nested tabs stay at the top of
-/// their own area.
+/// The command prompt and messages are drawn over it while they show, so
+/// they move with it. Tab bars of nested tabs stay at the top of their
+/// own area.
 ///
 /// # Example
 ///
@@ -933,6 +933,22 @@ fn set_formatter(tabbar: TabbarApi, callback: Fn) -> ();
 ///
 /// # rhai-autodocs:index:20
 fn set_position(tabbar: TabbarApi, value: string) -> ();
+
+/// Show (`true`, the default) or hide (`false`) the session's tab bar,
+/// like tmux's `status on` and `status off`. Hidden, it gives its row to
+/// the panes, and the command prompt and messages are drawn over the last
+/// row of the screen while they show. Only the session's own tab bar is
+/// hidden; tab bars of nested tabs, like `set_position`, are not
+/// affected.
+///
+/// # Example
+///
+/// ```rhai
+/// tabbar.set_visible(false);
+/// ```
+///
+/// # rhai-autodocs:index:20
+fn set_visible(tabbar: TabbarApi, visible: bool) -> ();
 
 fn bind(mode: string, notation: string, action: Action) -> ();
 
@@ -1106,6 +1122,26 @@ fn set_leader(notation: string) -> ();
 ///
 /// # rhai-autodocs:index:13
 fn set_status_keys(value: string) -> ();
+
+/// Choose where the status line goes: the command prompt, messages,
+/// `confirm` questions, the search prompt and warnings.
+///
+/// - `"overlay"` (the default): like tmux, it is drawn over the session's
+///   tab bar while there is something to show, and the tab bar comes
+///   back afterwards. With the tab bar hidden, it is drawn over the last
+///   row of the screen. The panes get every row but the tab bar's, and
+///   are not resized when a message comes and goes.
+/// - `"separate"`: the last row of the screen is kept for it and always
+///   shows the session name, so the panes have one row fewer.
+///
+/// # Example
+///
+/// ```rhai
+/// set_status_line("separate");
+/// ```
+///
+/// # rhai-autodocs:index:14
+fn set_status_line(value: string) -> ();
 
 /// Say what the terminal running the client supports, overriding what
 /// Embers detected when it attached.

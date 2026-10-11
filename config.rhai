@@ -286,10 +286,10 @@ for mode in ["copy", "select"] {
 // Theme and tab bar
 // ---------------------------------------------------------------------------
 // Catppuccin Frappe with rounded window tabs (the Powerline glyphs U+E0B6 and
-// U+E0B4, which need a Nerd Font). Each window is labelled from
-// the pane it shows: "nvim <dir>" for Neovim, "$ <dir>" for a shell, else the
-// pane title or program, cut to 24 characters. The right side shows the
-// focused pane's directory.
+// U+E0B4, which need a Nerd Font), after the session name. Each window is
+// labelled from the pane it shows: "nvim <dir>" for Neovim, "$ <dir>" for a
+// shell, else the pane title or program, cut to 24 characters. The right side
+// shows the focused pane's directory.
 theme.set_palette(#{
     base: "#303446",
     surface: "#51576d",
@@ -350,6 +350,15 @@ fn window_label(tab) {
 
 fn format_tabs(ctx) {
     let left = [];
+    if ctx.is_root() {
+        // status-left "#S"
+        left.push(ui.segment(` ${ctx.session_name()} `, #{
+            fg: theme.color("base"),
+            bg: theme.color("text"),
+            bold: true
+        }));
+        left.push(ui.segment(" "));
+    }
     for tab in ctx.tabs() {
         let bg = if tab.is_active() { theme.color("accent") } else { theme.color("surface") };
         let fg = if tab.is_active() { theme.color("base") } else { theme.color("text") };
@@ -378,3 +387,6 @@ fn format_tabs(ctx) {
 
 tabbar.set_formatter(format_tabs);
 tabbar.set_position("bottom");   // status-position bottom
+// The command prompt and messages are drawn over the tab bar while they show.
+// set_status_line("separate") gives them a row of their own instead, and
+// tabbar.set_visible(false) hides the bar (status off).

@@ -9,8 +9,8 @@ use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attrib
 use embers_client::{
     ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
     KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
-    detect_host_capabilities, spawn_pty_size,
+    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, RootTabBar, SocketTransport,
+    detect_host_capabilities, spawn_pty_size_with,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
@@ -48,7 +48,7 @@ pub async fn run(
 }
 
 async fn run_attached(
-    mut client: MuxClient<SocketTransport>,
+    client: MuxClient<SocketTransport>,
     socket_path: PathBuf,
     target: Option<String>,
     config_path: Option<PathBuf>,
@@ -56,19 +56,28 @@ async fn run_attached(
     let attached_client_id = client.current_client().await?.id;
     client.subscribe(None).await?;
     let requested_target = target;
+    let config = ConfigManager::from_process(config_path)
+        .map_err(|error| MuxError::invalid_input(error.to_string()))?;
+    let mut configured = ConfiguredClient::new(client, config);
     // The first window of a new session is created before the first frame, so
     // size it from the terminal directly.
     let initial_viewport = terminal_size(io::stdout().as_raw_fd())
         .ok()
-        .map(content_viewport);
-    let initial_session_id =
-        ensure_session_ready(&mut client, requested_target.as_deref(), initial_viewport).await?;
-    client.switch_current_session(initial_session_id).await?;
+        .map(|size| configured.content_viewport(size));
+    let tab_bar = configured.root_tab_bar();
+    let initial_session_id = ensure_session_ready(
+        configured.client_mut(),
+        requested_target.as_deref(),
+        initial_viewport,
+        tab_bar,
+    )
+    .await?;
+    configured
+        .client_mut()
+        .switch_current_session(initial_session_id)
+        .await?;
     let mut session_id = Some(initial_session_id);
-    let config = ConfigManager::from_process(config_path)
-        .map_err(|error| MuxError::invalid_input(error.to_string()))?;
-    let watched_config_path = config.active_source().path.clone();
-    let mut configured = ConfiguredClient::new(client, config);
+    let watched_config_path = configured.config().active_source().path.clone();
     configured.set_socket_path(socket_path.clone());
     configured.set_command_runner(std::sync::Arc::new(crate::PromptCommandRunner::new(
         socket_path.clone(),
@@ -96,7 +105,7 @@ async fn run_attached(
         if dirty {
             terminal.sync_mouse_capture(mouse_capture_enabled(&configured))?;
             terminal_size = terminal.size()?;
-            let viewport = content_viewport(terminal_size);
+            let viewport = configured.content_viewport(terminal_size);
             terminal.write_bytes(&drain_terminal_output(&mut configured))?;
             if let Some(active_session_id) = session_id
                 && !configured
@@ -132,7 +141,9 @@ async fn run_attached(
                     configured.status_cursor(),
                 )?;
             } else {
-                let grid = RenderGrid::new(viewport.width, viewport.height);
+                // Leave the last row to the status line, which says so.
+                let grid =
+                    RenderGrid::new(terminal_size.width, terminal_size.height.saturating_sub(1));
                 terminal.render(
                     &grid,
                     terminal_size,
@@ -149,7 +160,7 @@ async fn run_attached(
                 Ok(TerminalEvent::Key(key)) if is_quit_key(&key) => return Ok(()),
                 Ok(TerminalEvent::Key(key)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_key(active_session_id, viewport, key)
                             .await?;
@@ -159,7 +170,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Paste(bytes)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_paste(active_session_id, viewport, bytes)
                             .await?;
@@ -169,7 +180,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Focus(focused)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_focus_event(active_session_id, viewport, focused)
                             .await?;
@@ -179,7 +190,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::HostReply(bytes)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_host_reply(active_session_id, viewport, bytes)
                             .await?;
@@ -188,7 +199,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Mouse(mouse)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_mouse(active_session_id, viewport, mouse)
                             .await?;
@@ -222,12 +233,7 @@ async fn run_attached(
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
             if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-                ensure_root_window(
-                    configured.client_mut(),
-                    active_session_id,
-                    Some(content_viewport(terminal_size)),
-                )
-                .await?;
+                ensure_shown_root_window(&mut configured, active_session_id, terminal_size).await?;
                 session_id = Some(active_session_id);
                 dirty = true;
             }
@@ -271,12 +277,8 @@ async fn run_attached(
                         .sessions
                         .contains_key(&next_session_id) =>
                 {
-                    ensure_root_window(
-                        configured.client_mut(),
-                        next_session_id,
-                        Some(content_viewport(terminal_size)),
-                    )
-                    .await?;
+                    ensure_shown_root_window(&mut configured, next_session_id, terminal_size)
+                        .await?;
                     session_id = Some(next_session_id);
                 }
                 SwitchedSession::Detached => {
@@ -292,12 +294,7 @@ async fn run_attached(
             return Ok(());
         }
         if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-            ensure_root_window(
-                configured.client_mut(),
-                active_session_id,
-                Some(content_viewport(terminal_size)),
-            )
-            .await?;
+            ensure_shown_root_window(&mut configured, active_session_id, terminal_size).await?;
             session_id = Some(active_session_id);
         }
         // handle_event drains background notifications up front, but its own
@@ -390,13 +387,14 @@ async fn ensure_session_ready(
     client: &mut MuxClient<SocketTransport>,
     target: Option<&str>,
     viewport: Option<Size>,
+    tab_bar: RootTabBar,
 ) -> Result<SessionId> {
     client.resync_all_sessions().await?;
     let session_id = match select_session_id(client, target)? {
         Some(session_id) => session_id,
         None => create_session(client, target.unwrap_or(DEFAULT_SESSION_NAME)).await?,
     };
-    ensure_root_window(client, session_id, viewport).await?;
+    ensure_root_window(client, session_id, viewport, tab_bar).await?;
     client.resync_session(session_id).await?;
     Ok(session_id)
 }
@@ -446,12 +444,26 @@ async fn create_session(client: &mut MuxClient<SocketTransport>, name: &str) -> 
     }
 }
 
+/// [`ensure_root_window`] for a session `configured` is about to show on a
+/// `terminal`-sized screen.
+async fn ensure_shown_root_window(
+    configured: &mut ConfiguredClient<SocketTransport>,
+    session_id: SessionId,
+    terminal: Size,
+) -> Result<()> {
+    let viewport = configured.content_viewport(terminal);
+    let tab_bar = configured.root_tab_bar();
+    ensure_root_window(configured.client_mut(), session_id, Some(viewport), tab_bar).await
+}
+
 /// Gives `session_id` a first window when it has none, spawned at the size it
-/// will be drawn at in `viewport`.
+/// will be drawn at in `viewport`, with the root tab bar drawn as `tab_bar`
+/// says.
 async fn ensure_root_window(
     client: &mut MuxClient<SocketTransport>,
     session_id: SessionId,
     viewport: Option<Size>,
+    tab_bar: RootTabBar,
 ) -> Result<()> {
     client.resync_session(session_id).await?;
     if session_has_root_window(client, session_id)? {
@@ -461,7 +473,13 @@ async fn ensure_root_window(
     let command = default_shell_command();
     let title = default_title(&command, "shell");
     let size = viewport.and_then(|viewport| {
-        spawn_pty_size(client.state(), session_id, viewport, PanePlacement::RootTab)
+        spawn_pty_size_with(
+            client.state(),
+            session_id,
+            viewport,
+            tab_bar,
+            PanePlacement::RootTab,
+        )
     });
     let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client
@@ -544,17 +562,6 @@ fn default_title(command: &[String], fallback: &str) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn content_viewport(size: Size) -> Size {
-    if size.height > 1 {
-        Size {
-            width: size.width,
-            height: size.height - 1,
-        }
-    } else {
-        size
-    }
 }
 
 fn drain_terminal_output(configured: &mut ConfiguredClient<SocketTransport>) -> Vec<u8> {
@@ -1268,7 +1275,9 @@ impl TerminalGuard {
         Ok(())
     }
 
-    /// Draw `grid` and the status line below it. With `status_cursor` (the
+    /// Draw `grid`, and the status line below it when the grid leaves a row
+    /// free (otherwise the grid has status content drawn over its root tab
+    /// bar and its cursor at the prompt's). With `status_cursor` (the
     /// command prompt is open) the cursor goes to that column of the status
     /// line instead of the grid's cursor. Only sequences `host` supports are
     /// used.
@@ -1282,12 +1291,20 @@ impl TerminalGuard {
     ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.ansi_lines_for(host) {
-            write!(stdout, "{line}\x1b[K\r\n")?;
+        // Lines are separated, not ended, by newlines: one after a grid as
+        // tall as the terminal would scroll it.
+        for (index, line) in grid.ansi_lines_for(host).iter().enumerate() {
+            if index > 0 {
+                write!(stdout, "\r\n")?;
+            }
+            write!(stdout, "{line}\x1b[K")?;
         }
 
         if terminal_size.height > grid.height() {
             let status = fit_width(status.unwrap_or_default(), terminal_size.width);
+            if grid.height() > 0 {
+                write!(stdout, "\r\n")?;
+            }
             write!(stdout, "\x1b[7m{status}\x1b[0m\x1b[K")?;
         }
 

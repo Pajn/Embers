@@ -102,7 +102,7 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
     assert_eq!(
         grid.render(),
         concat!(
-            "  shell  [!workspace]                   \n",
+            "[demo]   shell  [!workspace]            \n",
             " + editor    | !build  [ logs-long-tit~]\n",
             "left pane    |>  logs-long-title        \n",
             "line two     |logs visible              \n",
@@ -245,7 +245,7 @@ fn default_tab_bar_marks_synchronized_windows() {
 
     assert!(
         grid.render()
-            .starts_with("  shell  [!workspace (sync)]            \n"),
+            .starts_with("[demo]   shell  [!workspace (sync)]     \n"),
         "{}",
         grid.render()
     );
@@ -258,7 +258,7 @@ fn truncates_titles_in_narrow_viewports() {
         &state,
         SESSION_ID,
         Size {
-            width: 18,
+            width: 25,
             height: 8,
         },
     )
@@ -267,7 +267,7 @@ fn truncates_titles_in_narrow_viewports() {
 
     let grid = renderer.render(&state, &presentation);
 
-    assert_eq!(grid.lines()[0], "  shell  [!works~]");
+    assert_eq!(grid.lines()[0], "[demo]   shell  [!works~]");
     assert!(grid.lines()[1].contains("!build"));
 }
 
