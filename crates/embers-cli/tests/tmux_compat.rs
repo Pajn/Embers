@@ -1276,6 +1276,31 @@ async fn select_pane_moves_from_a_pane_of_another_window() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_detached_new_window_keeps_a_lone_window_current() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "work", "--", "/bin/sh"],
+    );
+    let first = print(&server, "=work:0", "#{pane_id}");
+    // Killing the second window leaves the first as the session's root,
+    // outside any tabs.
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    run_cli(
+        &server,
+        ["--base-index", "0", "kill-window", "-t", "=work:1"],
+    );
+
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    assert_eq!(
+        print(&server, "=work:", "#{window_index} #{pane_id}"),
+        format!("0 {first}")
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_clients_takes_a_format() {
     let server = TestServer::start().await.expect("start server");
     run_cli(

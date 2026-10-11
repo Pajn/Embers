@@ -1368,9 +1368,11 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let cwd = connection
                 .spawn_cwd(cwd.as_deref(), Some(&snapshot))
                 .await?;
-            let previous_window = root_tabs(&snapshot)?
-                .filter(|(_, tabs)| !tabs.tabs.is_empty())
-                .map(|(_, tabs)| tabs.active);
+            // A root that is not tabs is the one window, and becomes tab 0.
+            let previous_window = match root_tabs(&snapshot)? {
+                Some((_, tabs)) => (!tabs.tabs.is_empty()).then_some(tabs.active),
+                None => Some(0),
+            };
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
                 .create_buffer(Some(window_title.clone()), command, cwd, size, session.id)
