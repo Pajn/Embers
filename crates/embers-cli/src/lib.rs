@@ -1368,11 +1368,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let cwd = connection
                 .spawn_cwd(cwd.as_deref(), Some(&snapshot))
                 .await?;
-            // A root that is not tabs is the one window, and becomes tab 0.
-            let previous_window = match root_tabs(&snapshot)? {
-                Some((_, tabs)) => (!tabs.tabs.is_empty()).then_some(tabs.active),
-                None => Some(0),
-            };
+            let previous_window = current_root_window(&snapshot)?;
+            let previous_focus = snapshot.session.focused_leaf_id;
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
                 .create_buffer(Some(window_title.clone()), command, cwd, size, session.id)
@@ -1402,15 +1399,15 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             .await?;
             let (index, title) = active_root_window(&snapshot)?;
             let number = window_number(index as usize, connection.base_index_for(&snapshot));
-            if detached && let Some(previous) = previous_window {
-                let response = connection
-                    .request(ClientMessage::Session(SessionRequest::SelectRootTab {
-                        request_id: new_request_id(),
-                        session_id: session.id,
-                        index: previous,
-                    }))
-                    .await?;
-                snapshot = expect_session_snapshot(response, "new-window")?;
+            if detached {
+                snapshot = restore_current(
+                    connection,
+                    snapshot,
+                    previous_window,
+                    previous_focus,
+                    "new-window",
+                )
+                .await?;
             }
             if print {
                 let pane = pane_showing(&snapshot, buffer.buffer.id);
@@ -1527,6 +1524,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             command,
         } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
+            let previous_window = current_root_window(&pane.snapshot)?;
             let previous_focus = pane.snapshot.session.focused_leaf_id;
             let command = buffer_command(command);
             let direction = if horizontal || stacked {
@@ -1581,8 +1579,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             if detached {
                 // The split focused the new pane, and with it the target's
                 // window. Make the target pane its window's active pane again,
-                // then give focus back to the pane that had it, so a split of
-                // a window that is not current leaves the current window alone.
+                // then give the window and focus back, so a split of a window
+                // that is not current leaves the current window alone.
                 let response = connection
                     .request(ClientMessage::Node(NodeRequest::SelectPane {
                         request_id: new_request_id(),
@@ -1591,16 +1589,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     }))
                     .await?;
                 snapshot = expect_session_snapshot(response, "split-window")?;
-                if let Some(previous) = previous_focus.filter(|leaf| *leaf != pane.leaf_id) {
-                    let response = connection
-                        .request(ClientMessage::Node(NodeRequest::Focus {
-                            request_id: new_request_id(),
-                            session_id: snapshot.session.id,
-                            node_id: previous,
-                        }))
-                        .await?;
-                    snapshot = expect_session_snapshot(response, "split-window")?;
-                }
+                snapshot = restore_current(
+                    connection,
+                    snapshot,
+                    previous_window,
+                    previous_focus,
+                    "split-window",
+                )
+                .await?;
             }
             if print {
                 let format = format.unwrap_or_else(|| DEFAULT_PANE_FORMAT.to_owned());
@@ -3529,6 +3525,49 @@ fn window_active_pane(
                 .filter(|leaf_id| leaves.contains(leaf_id))
         })
         .or_else(|| leaves.first().copied())
+}
+
+/// The index of the session's current window, `None` when it has none. A root
+/// that is not tabs is the one window, and becomes tab 0 when one is added.
+fn current_root_window(snapshot: &SessionSnapshot) -> Result<Option<u32>> {
+    Ok(match root_tabs(snapshot)? {
+        Some((_, tabs)) => (!tabs.tabs.is_empty()).then_some(tabs.active),
+        None => Some(0),
+    })
+}
+
+/// Make root window `window` current again and give focus back to `leaf`, for
+/// the `-d` of a command that made something else current. Focusing a pane of
+/// a popup does not select a root window, so the window is selected first.
+async fn restore_current(
+    connection: &mut CliConnection,
+    mut snapshot: SessionSnapshot,
+    window: Option<u32>,
+    leaf: Option<NodeId>,
+    context: &str,
+) -> Result<SessionSnapshot> {
+    let session_id = snapshot.session.id;
+    if let Some(index) = window {
+        let response = connection
+            .request(ClientMessage::Session(SessionRequest::SelectRootTab {
+                request_id: new_request_id(),
+                session_id,
+                index,
+            }))
+            .await?;
+        snapshot = expect_session_snapshot(response, context)?;
+    }
+    if let Some(leaf) = leaf.filter(|leaf| snapshot.session.focused_leaf_id != Some(*leaf)) {
+        let response = connection
+            .request(ClientMessage::Node(NodeRequest::Focus {
+                request_id: new_request_id(),
+                session_id,
+                node_id: leaf,
+            }))
+            .await?;
+        snapshot = expect_session_snapshot(response, context)?;
+    }
+    Ok(snapshot)
 }
 
 fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {

@@ -8,7 +8,9 @@ use std::process::Output;
 use std::time::{Duration, Instant};
 
 use embers_core::{FloatGeometry, Size, new_request_id};
-use embers_protocol::{ClientMessage, ClientRequest, ServerResponse, SessionRequest};
+use embers_protocol::{
+    ClientMessage, ClientRequest, ServerResponse, SessionRequest, SessionSnapshot,
+};
 use embers_test_support::{TestConnection, TestServer};
 use tempfile::tempdir;
 use tokio::time::sleep;
@@ -1295,6 +1297,64 @@ async fn a_detached_new_window_keeps_a_lone_window_current() {
     assert_eq!(
         print(&server, "=work:", "#{window_index} #{pane_id}"),
         format!("0 {first}")
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_creation_keeps_a_focused_popup_and_the_current_window() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "work", "--", "/bin/sh"],
+    );
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    run_cli(
+        &server,
+        ["display-popup", "--no-wait", "-t", "work", "--", "/bin/sh"],
+    );
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect");
+    let current = |snapshot: &SessionSnapshot| {
+        let root = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == snapshot.session.root_node_id)
+            .and_then(|node| node.tabs.as_ref())
+            .expect("root tabs");
+        (
+            root.active,
+            snapshot.session.focused_floating_id,
+            snapshot.session.focused_leaf_id,
+        )
+    };
+    let before = current(&session_snapshot_by_name(&mut connection, "work").await);
+    assert_eq!(before.0, 0);
+    assert!(before.1.is_some(), "the popup has focus");
+
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    assert_eq!(
+        current(&session_snapshot_by_name(&mut connection, "work").await),
+        before
+    );
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "split-window",
+            "-d",
+            "-t",
+            "=work:1",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(
+        current(&session_snapshot_by_name(&mut connection, "work").await),
+        before
     );
 
     server.shutdown().await.expect("shutdown server");
