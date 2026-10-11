@@ -1,5 +1,6 @@
 mod automation;
 mod interactive;
+mod target;
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -2308,43 +2309,9 @@ impl CliConnection {
         }
     }
 
+    /// The session `-t` names, or the current one; see [`target`].
     async fn resolve_session_record(&mut self, target: Option<&str>) -> Result<SessionRecord> {
-        let pane_session = match target {
-            None => self
-                .pane_location()
-                .await?
-                .and_then(BufferLocation::session_id),
-            Some(_) => None,
-        };
-        let sessions = self.list_sessions().await?;
-        if let Some(session_id) = pane_session {
-            return sessions
-                .into_iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| MuxError::not_found(format!("session {session_id} was not found")));
-        }
-        match target {
-            Some(target) => sessions
-                .into_iter()
-                .find(|session| session.name == target)
-                .ok_or_else(|| MuxError::not_found(format!("session '{target}' was not found"))),
-            None if self
-                .default_session
-                .is_some_and(|id| sessions.iter().any(|session| session.id == id)) =>
-            {
-                Ok(sessions
-                    .into_iter()
-                    .find(|session| Some(session.id) == self.default_session)
-                    .expect("checked default session"))
-            }
-            None => match sessions.as_slice() {
-                [session] => Ok(session.clone()),
-                [] => Err(MuxError::not_found("no sessions exist")),
-                _ => Err(MuxError::invalid_input(
-                    "session target is required when multiple sessions exist",
-                )),
-            },
-        }
+        self.target_session(target).await
     }
 
     async fn resolve_session_snapshot(&mut self, target: Option<&str>) -> Result<SessionSnapshot> {
@@ -2352,85 +2319,14 @@ impl CliConnection {
         self.session_snapshot(session.id).await
     }
 
+    /// The window `-t` names, or the current one; see [`target`].
     async fn resolve_window(&mut self, target: Option<&str>) -> Result<ResolvedWindow> {
-        if target.is_none()
-            && let Some(BufferLocationAttachment::Session {
-                session_id,
-                node_id,
-            }) = self
-                .pane_location()
-                .await?
-                .map(|location| location.attachment)
-        {
-            let snapshot = self.session_snapshot(session_id).await?;
-            let (index, child_id) = window_containing(&snapshot, node_id)?;
-            return Ok(ResolvedWindow {
-                snapshot,
-                index,
-                child_id,
-            });
-        }
-        let (session_target, selector) = split_scoped_target(target);
-        let snapshot = self
-            .resolve_session_snapshot(session_target.as_deref())
-            .await?;
-        let base_index = self.base_index_for(&snapshot);
-        let (index, child_id) = {
-            if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref(), base_index)?;
-                let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
-                    MuxError::not_found(format!(
-                        "window index {index} is not present in session {}",
-                        snapshot.session.id
-                    ))
-                })?;
-                (index, tab.child_id)
-            } else {
-                let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index = resolve_single_window_index(&title, selector.as_deref(), base_index)?;
-                (index, snapshot.session.root_node_id)
-            }
-        };
-        Ok(ResolvedWindow {
-            snapshot,
-            index,
-            child_id,
-        })
+        self.target_window(target).await
     }
 
+    /// The pane `-t` names, or the current one; see [`target`].
     async fn resolve_pane(&mut self, target: Option<&str>) -> Result<ResolvedPane> {
-        match target {
-            Some(target) => {
-                let (session_target, selector) = split_scoped_required(target, "pane target")?;
-                let pane_id = parse_node_id(&selector)?;
-                let snapshot = if let Some(session_target) = session_target {
-                    self.resolve_session_snapshot(Some(&session_target)).await?
-                } else {
-                    self.find_session_containing_pane(pane_id).await?
-                };
-                resolved_pane(snapshot, pane_id)
-            }
-            None => {
-                if let Some(location) = self.pane_location().await? {
-                    let (Some(session_id), Some(pane_id)) =
-                        (location.session_id(), location.node_id())
-                    else {
-                        return Err(MuxError::not_found(format!(
-                            "buffer {} of this pane ({BUFFER_ENV_VAR}) is not shown in a session",
-                            location.buffer_id
-                        )));
-                    };
-                    let snapshot = self.session_snapshot(session_id).await?;
-                    return resolved_pane(snapshot, pane_id);
-                }
-                let snapshot = self.resolve_session_snapshot(None).await?;
-                let pane_id = snapshot
-                    .session
-                    .focused_leaf_id
-                    .ok_or_else(|| MuxError::not_found("session has no focused pane"))?;
-                resolved_pane(snapshot, pane_id)
-            }
-        }
+        self.target_pane(target).await
     }
 
     async fn resolve_popup(&mut self, target: Option<&str>) -> Result<FloatingRecord> {
@@ -3284,12 +3180,6 @@ fn split_scoped_required(target: &str, label: &str) -> Result<(Option<String>, S
     let selector =
         selector.ok_or_else(|| MuxError::invalid_input(format!("{label} is required")))?;
     Ok((session, selector))
-}
-
-fn parse_node_id(raw: &str) -> Result<NodeId> {
-    raw.parse::<u64>()
-        .map(NodeId)
-        .map_err(|_| MuxError::invalid_input(format!("pane target '{raw}' is not a valid pane id")))
 }
 
 fn parse_floating_id(raw: &str) -> Result<FloatingId> {
