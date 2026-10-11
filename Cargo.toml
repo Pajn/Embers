@@ -2,6 +2,7 @@
 members = [
   "crates/embers-core",
   "crates/embers-protocol",
+  "crates/embers-protocol-gen",
   "crates/embers-server",
   "crates/embers-client",
   "crates/embers-cli",

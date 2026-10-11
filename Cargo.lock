@@ -633,6 +633,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "embers-protocol-gen"
+version = "0.2.0"
+
+[[package]]
 name = "embers-server"
 version = "0.2.0"
 dependencies = [

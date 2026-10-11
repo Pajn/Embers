@@ -28,16 +28,22 @@ The project is still early, but the shape is already close to a tmux-like workfl
 ## Requirements
 
 - Rust `1.92` or newer
-- `flatc` from FlatBuffers `25.12.19`
+- `flatc` from FlatBuffers `25.12.19` when changing the protocol schema
 - `mdbook` when regenerating the config API docs
+
+Building needs only Cargo: the Rust code generated from the protocol schema
+(`crates/embers-protocol/schema/embers.fbs`) is checked in. After changing the schema, regenerate it
+with `flatc` on `PATH` and commit the result:
+
+```sh
+cargo gen-protocol
+```
 
 If you use Nix, the included flake provides the pinned development tools:
 
 ```sh
 nix develop
 ```
-
-Without Nix, make sure `flatc` is available on `PATH` before building.
 
 ## Quick Start
 

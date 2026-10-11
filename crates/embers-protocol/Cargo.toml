@@ -1,6 +1,5 @@
 [package]
 name = "embers-protocol"
-build = "build.rs"
 autotests = false
 description = "FlatBuffers protocol, framing, and client transport primitives for Embers."
 edition.workspace = true
