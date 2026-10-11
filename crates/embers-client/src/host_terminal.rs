@@ -7,9 +7,12 @@
 //! queries in order, so the DA1 reply marks the end of the replies; terminals
 //! that do not know the first two queries just skip them. The answers, or the
 //! environment when there are none, decide the [`HostCapabilities`], and the
-//! config can override each one (`set_terminal_features`).
+//! config can override each one (`set_terminal_features`). Replies that come
+//! after attaching stopped waiting are recognised while their query is still
+//! [pending](PendingAttachQueries).
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 /// Sequences the renderer only emits when the host terminal supports them.
 /// Without them it degrades: plain underlines, no underline color, no OSC 8
@@ -108,6 +111,8 @@ pub struct HostReplies {
     pub version: Option<String>,
     /// Terminfo capabilities XTGETTCAP reported as present.
     pub termcaps: BTreeSet<String>,
+    /// Terminfo capabilities XTGETTCAP answered for, present or not.
+    pub answered_termcaps: BTreeSet<String>,
     /// Whether the DA1 reply arrived, so every other reply had too.
     pub device_attributes: bool,
 }
@@ -156,14 +161,27 @@ impl HostReplies {
         if let Some(version) = body.strip_prefix(b">|") {
             self.version = Some(String::from_utf8_lossy(version).into_owned());
         } else if let Some(found) = body.strip_prefix(b"1+r") {
-            for entry in found.split(|&byte| byte == b';') {
-                let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
-                if let Some(name) = hex_decode(name).and_then(|name| String::from_utf8(name).ok()) {
-                    self.termcaps.insert(name);
-                }
+            for name in termcap_reply_names(found).into_iter().flatten() {
+                self.answered_termcaps.insert(name.clone());
+                self.termcaps.insert(name);
             }
+        } else if let Some(missing) = body.strip_prefix(b"0+r") {
+            self.answered_termcaps
+                .extend(termcap_reply_names(missing).into_iter().flatten());
         }
     }
+}
+
+/// The capability names in the entries of an XTGETTCAP reply
+/// (`<hex name>[=<hex value>];...`), or `None` when one is not valid hex.
+fn termcap_reply_names(entries: &[u8]) -> Option<Vec<String>> {
+    entries
+        .split(|&byte| byte == b';')
+        .map(|entry| {
+            let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
+            hex_decode(name).and_then(|name| String::from_utf8(name).ok())
+        })
+        .collect()
 }
 
 /// Whether `bytes` ends with a DA1 reply (`CSI ? ... c`), the last reply to
@@ -180,47 +198,98 @@ pub fn ends_with_device_attributes(bytes: &[u8]) -> bool {
         .all(|byte| byte.is_ascii_digit() || *byte == b';')
 }
 
-/// The terminfo capabilities [`HOST_QUERIES`] asks XTGETTCAP about, hex encoded
-/// as in the query and its reply.
-const QUERIED_TERMCAPS: [&[u8]; 2] = [b"536d756c78", b"536574756c63"];
+/// The terminfo capabilities [`HOST_QUERIES`] asks XTGETTCAP about.
+const QUERIED_TERMCAPS: [&str; 2] = ["Smulx", "Setulc"];
 
-/// Whether `reply`, one control sequence from the host terminal, answers one
-/// of the client's own queries rather than a pane's: XTVERSION, XTGETTCAP for
-/// the capabilities [`HOST_QUERIES`] asks about, DA1, or the kitty keyboard
-/// flags (the client owns the host's keyboard mode). These can arrive after
-/// attaching stopped waiting for them, and are dropped instead of being
-/// handed to a pane.
-pub fn is_attach_query_reply(reply: &[u8]) -> bool {
-    if let Some(body) = reply
-        .strip_prefix(b"\x1bP")
-        .and_then(|body| body.strip_suffix(b"\x1b\\"))
-    {
-        if body.starts_with(b">|") {
+/// The [`HOST_QUERIES`] the host has not answered yet, so that their replies
+/// are told apart from identical ones to queries a pane sent through
+/// passthrough. A reply that answers an outstanding query is the client's and
+/// marks it answered; any other reply is a pane's. A query stays outstanding
+/// until its reply arrives or a deadline passes, so a host that never answers
+/// one does not keep a pane from getting the same reply later.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingAttachQueries {
+    /// XTVERSION.
+    version: bool,
+    /// The XTGETTCAP capabilities not answered for yet.
+    termcaps: BTreeSet<String>,
+    /// DA1.
+    device_attributes: bool,
+    /// When whatever is still outstanding stops being expected.
+    until: Option<Instant>,
+}
+
+impl PendingAttachQueries {
+    /// What is outstanding once attaching stopped waiting, having read
+    /// `replies`: nothing when the DA1 reply came, since it is answered last;
+    /// otherwise every query whose reply has not come, until `until`.
+    pub fn after(replies: &HostReplies, until: Instant) -> Self {
+        if replies.device_attributes {
+            return Self::default();
+        }
+        Self {
+            version: replies.version.is_none(),
+            termcaps: QUERIED_TERMCAPS
+                .iter()
+                .filter(|name| !replies.answered_termcaps.contains(**name))
+                .map(|name| (*name).to_owned())
+                .collect(),
+            device_attributes: true,
+            until: Some(until),
+        }
+    }
+
+    /// Whether no reply is expected any more.
+    pub fn is_empty(&self) -> bool {
+        !self.version && self.termcaps.is_empty() && !self.device_attributes
+    }
+
+    /// Whether `reply`, one control sequence from the host terminal, answers
+    /// an outstanding query at `now`, which it then marks answered. A DA1
+    /// reply answers every query, as the host answers them in order.
+    pub fn take_reply(&mut self, reply: &[u8], now: Instant) -> bool {
+        if self.until.is_some_and(|until| now >= until) {
+            *self = Self::default();
+        }
+        if self.is_empty() {
+            return false;
+        }
+        if let Some(body) = reply
+            .strip_prefix(b"\x1bP")
+            .and_then(|body| body.strip_suffix(b"\x1b\\"))
+        {
+            if body.starts_with(b">|") {
+                return std::mem::take(&mut self.version);
+            }
+            let Some(names) = body
+                .strip_prefix(b"1+r")
+                .or_else(|| body.strip_prefix(b"0+r"))
+                .and_then(termcap_reply_names)
+            else {
+                return false;
+            };
+            if !names.iter().all(|name| self.termcaps.contains(name)) {
+                return false;
+            }
+            for name in &names {
+                self.termcaps.remove(name);
+            }
             return true;
         }
-        let Some(entries) = body
-            .strip_prefix(b"1+r")
-            .or_else(|| body.strip_prefix(b"0+r"))
-        else {
-            return false;
-        };
-        return entries.split(|&byte| byte == b';').all(|entry| {
-            let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
-            QUERIED_TERMCAPS
-                .iter()
-                .any(|queried| name.eq_ignore_ascii_case(queried))
-        });
+        let is_device_attributes = reply
+            .strip_prefix(b"\x1b[?")
+            .and_then(|body| body.strip_suffix(b"c"))
+            .is_some_and(|params| {
+                params
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || *byte == b';')
+            });
+        if is_device_attributes && self.device_attributes {
+            *self = Self::default();
+            return true;
+        }
+        false
     }
-    let Some(body) = reply.strip_prefix(b"\x1b[?") else {
-        return false;
-    };
-    let Some((&final_byte, params)) = body.split_last() else {
-        return false;
-    };
-    matches!(final_byte, b'c' | b'u')
-        && params
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || *byte == b';')
 }
 
 /// The parts of the client's environment that name the host terminal.
@@ -328,6 +397,8 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn env(term: &str, term_program: Option<&str>) -> HostEnvironment {
@@ -346,6 +417,10 @@ mod tests {
         let replies = HostReplies::parse(bytes);
         assert_eq!(replies.version.as_deref(), Some("ghostty 1.1.3"));
         assert_eq!(replies.termcaps, BTreeSet::from(["Smulx".to_owned()]));
+        assert_eq!(
+            replies.answered_termcaps,
+            BTreeSet::from(["Setulc".to_owned(), "Smulx".to_owned()])
+        );
         assert!(replies.device_attributes);
         assert!(ends_with_device_attributes(bytes));
     }
@@ -436,38 +511,71 @@ mod tests {
         assert!(ends_with_device_attributes(b"junk\x1b[?6c"));
     }
 
+    const VERSION_REPLY: &[u8] = b"\x1bP>|ghostty 1.1.3\x1b\\";
+    const SMULX_REPLY: &[u8] = b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\";
+    const SETULC_REPLY: &[u8] = b"\x1bP0+r536574756c63\x1b\\";
+    const DA1_REPLY: &[u8] = b"\x1b[?62;22c";
+
     #[test]
-    fn recognises_replies_to_the_attach_queries_only() {
-        for reply in [
-            &b"\x1bP>|ghostty 1.1.3\x1b\\"[..],
-            b"\x1bP1+r536d756c78=5c455b343a25703125646d\x1b\\",
-            b"\x1bP1+r536d756c78=00;536574756c63=00\x1b\\",
-            b"\x1bP0+r536574756c63\x1b\\",
-            b"\x1b[?62;22c",
-            b"\x1b[?c",
-            b"\x1b[?15u",
-        ] {
-            assert!(
-                is_attach_query_reply(reply),
-                "{:?}",
-                String::from_utf8_lossy(reply)
-            );
+    fn nothing_is_pending_once_the_device_attributes_reply_came() {
+        let now = Instant::now();
+        let replies = HostReplies::parse(b"\x1bP>|ghostty 1.1.3\x1b\\\x1b[?62;22c");
+        let mut pending = PendingAttachQueries::after(&replies, now + Duration::from_secs(10));
+        assert!(pending.is_empty());
+        for reply in [VERSION_REPLY, SMULX_REPLY, SETULC_REPLY, DA1_REPLY] {
+            assert!(!pending.take_reply(reply, now));
         }
+    }
+
+    #[test]
+    fn each_late_reply_answers_its_pending_query_once() {
+        let now = Instant::now();
+        // Attach read the version reply, then stopped waiting.
+        let mut pending = PendingAttachQueries::after(
+            &HostReplies::parse(VERSION_REPLY),
+            now + Duration::from_secs(10),
+        );
+        assert!(!pending.take_reply(VERSION_REPLY, now));
+
+        assert!(pending.take_reply(SMULX_REPLY, now));
+        assert!(!pending.take_reply(SMULX_REPLY, now));
+        // A capability Embers did not ask about, alone or alongside one it did.
+        assert!(!pending.take_reply(b"\x1bP1+r524742=383a383a38\x1b\\", now));
+        assert!(!pending.take_reply(b"\x1bP0+r536574756c63;524742\x1b\\", now));
+        // Not replies to the attach queries at all: a kitty graphics reply,
+        // an OSC colour reply, kitty keyboard flags, a cursor position report.
         for other in [
-            // A kitty graphics reply and an OSC colour reply: for a pane.
             &b"\x1b_Gi=31;OK\x1b\\"[..],
             b"\x1b]11;rgb:0000/0000/0000\x1b\\",
-            // XTGETTCAP for a capability Embers did not ask about.
-            b"\x1bP1+r524742=383a383a38\x1b\\",
-            // A key report and a cursor position report.
-            b"\x1b[97;5u",
+            b"\x1b[?1u",
             b"\x1b[3;5R",
         ] {
-            assert!(
-                !is_attach_query_reply(other),
-                "{:?}",
-                String::from_utf8_lossy(other)
-            );
+            assert!(!pending.take_reply(other, now));
         }
+        assert!(pending.take_reply(SETULC_REPLY, now));
+        assert!(pending.take_reply(DA1_REPLY, now));
+        assert!(pending.is_empty());
+        assert!(!pending.take_reply(DA1_REPLY, now));
+    }
+
+    #[test]
+    fn device_attributes_answer_every_query_before_them() {
+        let now = Instant::now();
+        let mut pending =
+            PendingAttachQueries::after(&HostReplies::default(), now + Duration::from_secs(10));
+        // A host that does not know XTVERSION or XTGETTCAP answers DA1 only.
+        assert!(pending.take_reply(b"\x1b[?c", now));
+        assert!(!pending.take_reply(VERSION_REPLY, now));
+        assert!(!pending.take_reply(SMULX_REPLY, now));
+    }
+
+    #[test]
+    fn pending_queries_lapse_at_their_deadline() {
+        let now = Instant::now();
+        let until = now + Duration::from_secs(10);
+        let mut pending = PendingAttachQueries::after(&HostReplies::default(), until);
+        assert!(pending.take_reply(VERSION_REPLY, until - Duration::from_millis(1)));
+        assert!(!pending.take_reply(DA1_REPLY, until));
+        assert!(pending.is_empty());
     }
 }

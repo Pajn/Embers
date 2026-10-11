@@ -3,15 +3,20 @@
 
 use std::fs;
 
+use std::time::{Duration, Instant};
+
 use embers_client::{
-    ClientState, ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent,
-    MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel,
-    ScriptedTransport,
+    ClientState, ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport,
+    HostReplies, KeyEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers, MuxClient,
+    PendingAttachQueries, PresentationModel, ScriptedTransport,
 };
-use embers_core::{BufferId, ErrorCode, RequestId, Size, WireError};
+use embers_core::{
+    BufferId, CursorPosition, ErrorCode, PassthroughWrite, RequestId, Size, WireError,
+};
 use embers_protocol::{
-    ClientMessage, ErrorResponse, InputRequest, NodeRequest, OkResponse, ServerResponse,
-    SessionRequest, SessionSnapshot, SessionSnapshotResponse, SynchronizePanesMode,
+    ClientMessage, ErrorResponse, InputRequest, NodeRequest, OkResponse, PassthroughEvent,
+    ServerEvent, ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
+    SynchronizePanesMode,
 };
 use tempfile::tempdir;
 
@@ -24,6 +29,8 @@ const VIEWPORT: Size = Size {
     width: 80,
     height: 20,
 };
+/// The buffer of the left pane, on screen beside the focused one.
+const LEFT_BUFFER_ID: BufferId = BufferId(2);
 
 fn manager_from_source(source: &str) -> (ConfigManager, tempfile::TempDir) {
     let tempdir = tempdir().unwrap();
@@ -581,22 +588,82 @@ async fn host_replies_skip_the_command_prompt_and_bindings() {
     );
 }
 
+/// Late replies to [`HOST_QUERIES`], in the order the host sends them.
+const ATTACH_REPLIES: [&[u8]; 4] = [
+    // XTVERSION
+    b"\x1bP>|kitty(0.35.2)\x1b\\",
+    // XTGETTCAP for Smulx and Setulc, found and not found
+    b"\x1bP1+r536d756c78=1b5b343a25703125646d\x1b\\",
+    b"\x1bP0+r536574756c63\x1b\\",
+    // DA1
+    b"\x1b[?62;22c",
+];
+
+/// The queries [`ATTACH_REPLIES`] answer, as a pane sends them through
+/// passthrough.
+const PANE_QUERIES: &[u8] = b"\x1b[>0q\x1bP+q536d756c78\x1b\\\x1bP+q536574756c63\x1b\\\x1b[c";
+
+/// A client whose attach stopped waiting before the host answered anything.
+fn attach_timed_out(configured: &mut ConfiguredClient<FakeTransport>) {
+    configured.set_pending_attach_queries(PendingAttachQueries::after(
+        &HostReplies::default(),
+        Instant::now() + Duration::from_secs(60),
+    ));
+}
+
+/// Have the left pane send `query` to the host through passthrough, as the
+/// next frame writes it.
+async fn pass_through_from_left_pane(
+    configured: &mut ConfiguredClient<FakeTransport>,
+    transport: &FakeTransport,
+    query: &[u8],
+) {
+    configured
+        .render_session(SESSION_ID, VIEWPORT)
+        .await
+        .unwrap();
+    transport.push_event(ServerEvent::Passthrough(PassthroughEvent {
+        buffer_id: LEFT_BUFFER_ID,
+        writes: vec![PassthroughWrite {
+            bytes: query.to_vec(),
+            cursor: CursorPosition::default(),
+        }],
+    }));
+    configured.process_next_event().await.unwrap();
+    configured
+        .render_session(SESSION_ID, VIEWPORT)
+        .await
+        .unwrap();
+    let output = configured.drain_frame_output();
+    assert!(
+        output.windows(query.len()).any(|window| window == query),
+        "the query did not reach the host: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+async fn deliver_replies(
+    configured: &mut ConfiguredClient<FakeTransport>,
+    transport: &FakeTransport,
+    state: &ClientState,
+    replies: &[&[u8]],
+) {
+    for reply in replies {
+        push_input_responses(transport, state, &[LEFT_BUFFER_ID]);
+        configured
+            .handle_host_reply(SESSION_ID, VIEWPORT, reply.to_vec())
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
-async fn replies_to_the_attach_queries_are_swallowed_whenever_they_arrive() {
+async fn late_replies_to_the_attach_queries_are_dropped() {
     let transport = FakeTransport::default();
     let (mut configured, _tempdir) = configured(transport.clone(), demo_state(), "");
+    attach_timed_out(&mut configured);
 
-    for reply in [
-        // XTVERSION
-        &b"\x1bP>|kitty(0.35.2)\x1b\\"[..],
-        // XTGETTCAP for Smulx and Setulc, found and not found
-        b"\x1bP1+r536d756c78=1b5b343a25703125646d\x1b\\",
-        b"\x1bP0+r536574756c63\x1b\\",
-        // DA1
-        b"\x1b[?62;22c",
-        // kitty keyboard flags
-        b"\x1b[?1u",
-    ] {
+    for reply in ATTACH_REPLIES {
         configured
             .handle_host_reply(SESSION_ID, VIEWPORT, reply.to_vec())
             .await
@@ -607,5 +674,65 @@ async fn replies_to_the_attach_queries_are_swallowed_whenever_they_arrive() {
         transport.requests().is_empty(),
         "attach-query replies reached the server: {:?}",
         transport.requests()
+    );
+}
+
+#[tokio::test]
+async fn replies_to_a_panes_passthrough_queries_reach_it() {
+    let state = demo_state();
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        state.clone(),
+        r#"set_allow_passthrough("on");"#,
+    );
+    // Attach got every reply, so nothing of its own is outstanding.
+    configured.set_pending_attach_queries(PendingAttachQueries::after(
+        &HostReplies::parse(&ATTACH_REPLIES.concat()),
+        Instant::now() + Duration::from_secs(60),
+    ));
+
+    pass_through_from_left_pane(&mut configured, &transport, PANE_QUERIES).await;
+    deliver_replies(&mut configured, &transport, &state, &ATTACH_REPLIES).await;
+
+    assert_eq!(
+        sent_input(&transport),
+        ATTACH_REPLIES
+            .iter()
+            .map(|reply| (LEFT_BUFFER_ID, reply.to_vec()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn an_answered_attach_query_leaves_the_next_identical_reply_to_the_pane() {
+    let state = demo_state();
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        state.clone(),
+        r#"set_allow_passthrough("on");"#,
+    );
+    attach_timed_out(&mut configured);
+
+    // The late replies answer the attach queries and are dropped.
+    for reply in ATTACH_REPLIES {
+        configured
+            .handle_host_reply(SESSION_ID, VIEWPORT, reply.to_vec())
+            .await
+            .unwrap();
+    }
+    assert!(sent_input(&transport).is_empty());
+
+    // The same replies again answer the pane's queries.
+    pass_through_from_left_pane(&mut configured, &transport, PANE_QUERIES).await;
+    deliver_replies(&mut configured, &transport, &state, &ATTACH_REPLIES).await;
+
+    assert_eq!(
+        sent_input(&transport),
+        ATTACH_REPLIES
+            .iter()
+            .map(|reply| (LEFT_BUFFER_ID, reply.to_vec()))
+            .collect::<Vec<_>>()
     );
 }

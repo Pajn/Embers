@@ -249,9 +249,12 @@ set_allow_passthrough("on");
   `CSI >`, `CSI =`) as replies, not keys. A reply goes whole to the pane whose
   passthrough sequence last reached the host, since only panes send queries
   through passthrough; when no pane has, or that pane is gone, it goes to the
-  focused pane. A reply is never copied to other panes by synchronize-panes,
-  typed into the command prompt or a picker's filter, or matched against key
-  bindings.
+  focused pane. That includes replies that look like those to the client's
+  own queries, such as DA1 or XTVERSION; only a late reply to one of those
+  queries while it is still unanswered is dropped (see [the host
+  terminal](#the-host-terminal)). A reply is never copied to other panes by
+  synchronize-panes, typed into the command prompt or a picker's filter, or
+  matched against key bindings.
 
 Images are not part of the pane's contents in Embers: they are not kept in
 snapshots or scrollback, and Embers does not move or redraw them. What a host
@@ -344,9 +347,11 @@ replies before it draws anything:
   not know the first two queries ignore them.
 
 If no DA1 reply arrives within a second the client goes on without one. Keys
-typed while it waits are dropped. Replies to these queries that arrive later,
-and kitty keyboard protocol flag reports, are recognised and dropped whenever
-they come, rather than handed to a pane as [replies](#passthrough). Then:
+typed while it waits are dropped. A reply to one of these queries that arrives
+later, within ten more seconds, is recognised and dropped rather than handed to
+a pane as a [reply](#passthrough). Each query takes one reply: once it has
+been answered, or the ten seconds are up, an identical reply answers a query a
+pane sent through passthrough and goes to that pane. Then:
 
 - A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
   styles or underline colors.

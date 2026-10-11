@@ -29,7 +29,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
-use crate::host_terminal::{HostCapabilities, is_attach_query_reply};
+use crate::host_terminal::{HostCapabilities, PendingAttachQueries};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
@@ -165,6 +165,8 @@ pub struct ConfiguredClient<T> {
     /// The buffer whose passthrough write last reached the host terminal: the
     /// pane a host reply to a query sent through passthrough is meant for.
     last_passthrough_buffer: Option<BufferId>,
+    /// The client's attach queries whose late replies are still expected.
+    pending_attach_queries: PendingAttachQueries,
     /// Host terminal output that must follow the frame `render_session` last
     /// returned (see [`ConfiguredClient::drain_frame_output`]).
     frame_output: Vec<u8>,
@@ -210,6 +212,7 @@ where
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
             last_passthrough_buffer: None,
+            pending_attach_queries: PendingAttachQueries::default(),
             frame_output: Vec::new(),
             detected_host: HostCapabilities::default(),
             socket_path: None,
@@ -812,12 +815,20 @@ where
             .await
     }
 
+    /// Record the attach queries the host had not answered when attaching
+    /// stopped waiting, so their late replies are dropped (see
+    /// [`ConfiguredClient::handle_host_reply`]).
+    pub fn set_pending_attach_queries(&mut self, pending: PendingAttachQueries) {
+        self.pending_attach_queries = pending;
+    }
+
     /// Deliver `bytes`, a reply from the host terminal (a DCS, APC or OSC
     /// string, or a CSI report), to the pane it is meant for. A reply is not
     /// typed input: it is never copied to synchronized panes, inserted into
     /// the command prompt or chooser filter, or matched against bindings.
-    /// Replies to the client's own attach queries are dropped whenever they
-    /// arrive (see [`is_attach_query_reply`]).
+    /// A reply to one of the client's own attach queries that is still
+    /// pending is dropped, and the query marked answered (see
+    /// [`PendingAttachQueries`]); an identical reply after that is a pane's.
     ///
     /// The host only answers what it was sent, and the only queries that do
     /// not come from the client come from panes through passthrough, so a
@@ -829,7 +840,10 @@ where
         viewport: Size,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        if is_attach_query_reply(&bytes) {
+        if self
+            .pending_attach_queries
+            .take_reply(&bytes, Instant::now())
+        {
             debug!("dropped a reply to the attach queries");
             return Ok(());
         }

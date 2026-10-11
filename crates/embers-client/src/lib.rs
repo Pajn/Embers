@@ -37,8 +37,8 @@ pub use grid::{
     BorderStyle, CellStyle, Color, GridCursor, RenderGrid, TerminalColor, UnderlineStyle,
 };
 pub use host_terminal::{
-    HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies, TerminalFeatures,
-    detect_host_capabilities, is_attach_query_reply,
+    HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies, PendingAttachQueries,
+    TerminalFeatures, detect_host_capabilities,
 };
 pub use input::{
     BindingMatch, BindingSpec, COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState,
