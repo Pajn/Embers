@@ -30,7 +30,7 @@ use embers_protocol::{
 use crate::{
     CliConnection, ResolvedPane, ResolvedWindow, expect_buffer_location, protocol_tab,
     resolve_single_window_index, resolve_window_index, resolved_pane, root_tabs, visible_leaf_ids,
-    window_containing, window_title,
+    window_active_pane, window_containing, window_title,
 };
 use embers_core::new_request_id;
 
@@ -405,8 +405,7 @@ impl CliConnection {
     }
 
     /// Pane `spec` of `window`. The current pane is the one the command runs
-    /// in when it is in the window, else the session's focused pane when it
-    /// is, else the window's first pane.
+    /// in when it is in the window, else the window's active pane.
     async fn pane_in(&mut self, window: ResolvedWindow, spec: &PaneSpec) -> Result<ResolvedPane> {
         let leaves = visible_leaf_ids(&window.snapshot, window.child_id)?;
         let pane_id = match spec {
@@ -421,12 +420,7 @@ impl CliConnection {
                     .and_then(|location| location.node_id());
                 caller
                     .filter(|pane_id| leaves.contains(pane_id))
-                    .or(window
-                        .snapshot
-                        .session
-                        .focused_leaf_id
-                        .filter(|pane_id| leaves.contains(pane_id)))
-                    .or_else(|| leaves.first().copied())
+                    .or_else(|| window_active_pane(&window.snapshot, window.child_id, &leaves))
                     .ok_or_else(|| MuxError::not_found("window has no panes"))?
             }
         };

@@ -773,6 +773,7 @@ fn sample_snapshot() -> SessionSnapshot {
                     sizes: vec![70, 50],
                 }),
                 tabs: None,
+                focus_leaf_id: Some(NodeId(21)),
             },
             NodeRecord {
                 id: NodeId(21),
@@ -788,6 +789,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: Some(NodeId(21)),
             },
             NodeRecord {
                 id: NodeId(22),
@@ -811,6 +813,7 @@ fn sample_snapshot() -> SessionSnapshot {
                         },
                     ],
                 }),
+                focus_leaf_id: Some(NodeId(24)),
             },
             NodeRecord {
                 id: NodeId(23),
@@ -826,6 +829,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
             NodeRecord {
                 id: NodeId(24),
@@ -841,6 +845,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: Some(NodeId(24)),
             },
         ],
         buffers: vec![

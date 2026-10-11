@@ -6870,6 +6870,7 @@ impl<'a> NodeRecord<'a> {
   pub const VT_BUFFER_VIEW: ::flatbuffers::VOffsetT = 12;
   pub const VT_SPLIT: ::flatbuffers::VOffsetT = 14;
   pub const VT_TABS: ::flatbuffers::VOffsetT = 16;
+  pub const VT_FOCUS_LEAF_ID: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6881,6 +6882,7 @@ impl<'a> NodeRecord<'a> {
     args: &'args NodeRecordArgs<'args>
   ) -> ::flatbuffers::WIPOffset<NodeRecord<'bldr>> {
     let mut builder = NodeRecordBuilder::new(_fbb);
+    builder.add_focus_leaf_id(args.focus_leaf_id);
     builder.add_parent_id(args.parent_id);
     builder.add_session_id(args.session_id);
     builder.add_id(args.id);
@@ -6941,6 +6943,13 @@ impl<'a> NodeRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<TabsRecord>>(NodeRecord::VT_TABS, None)}
   }
+  #[inline]
+  pub fn focus_leaf_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(NodeRecord::VT_FOCUS_LEAF_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for NodeRecord<'_> {
@@ -6956,6 +6965,7 @@ impl ::flatbuffers::Verifiable for NodeRecord<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<BufferViewRecord>>("buffer_view", Self::VT_BUFFER_VIEW, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<SplitRecord>>("split", Self::VT_SPLIT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<TabsRecord>>("tabs", Self::VT_TABS, false)?
+     .visit_field::<u64>("focus_leaf_id", Self::VT_FOCUS_LEAF_ID, false)?
      .finish();
     Ok(())
   }
@@ -6968,6 +6978,7 @@ pub struct NodeRecordArgs<'a> {
     pub buffer_view: Option<::flatbuffers::WIPOffset<BufferViewRecord<'a>>>,
     pub split: Option<::flatbuffers::WIPOffset<SplitRecord<'a>>>,
     pub tabs: Option<::flatbuffers::WIPOffset<TabsRecord<'a>>>,
+    pub focus_leaf_id: u64,
 }
 impl<'a> Default for NodeRecordArgs<'a> {
   #[inline]
@@ -6980,6 +6991,7 @@ impl<'a> Default for NodeRecordArgs<'a> {
       buffer_view: None,
       split: None,
       tabs: None,
+      focus_leaf_id: 0,
     }
   }
 }
@@ -7018,6 +7030,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> NodeRecordBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<TabsRecord>>(NodeRecord::VT_TABS, tabs);
   }
   #[inline]
+  pub fn add_focus_leaf_id(&mut self, focus_leaf_id: u64) {
+    self.fbb_.push_slot::<u64>(NodeRecord::VT_FOCUS_LEAF_ID, focus_leaf_id, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> NodeRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     NodeRecordBuilder {
@@ -7042,6 +7058,7 @@ impl ::core::fmt::Debug for NodeRecord<'_> {
       ds.field("buffer_view", &self.buffer_view());
       ds.field("split", &self.split());
       ds.field("tabs", &self.tabs());
+      ds.field("focus_leaf_id", &self.focus_leaf_id());
       ds.finish()
   }
 }

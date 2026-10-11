@@ -1040,6 +1040,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused) in [
@@ -1062,6 +1063,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1134,6 +1136,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused) in [
@@ -1156,6 +1159,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1236,6 +1240,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1325,6 +1330,7 @@ mod zoom_tests {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         state.nodes.insert(
@@ -1341,6 +1347,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused, zoomed) in [
@@ -1363,6 +1370,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1480,6 +1488,7 @@ mod zoom_tests {
                         synchronize_panes: false,
                     }],
                 }),
+                focus_leaf_id: None,
             },
         );
         state.nodes.insert(
@@ -1498,6 +1507,7 @@ mod zoom_tests {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         state.buffers.insert(

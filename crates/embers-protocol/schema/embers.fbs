@@ -441,6 +441,8 @@ table NodeRecord {
   buffer_view:BufferViewRecord;
   split:SplitRecord;
   tabs:TabsRecord;
+  // The pane that focusing this node lands on; 0 when it has none.
+  focus_leaf_id:ulong = 0;
 }
 
 table FloatingRecord {

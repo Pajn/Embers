@@ -1157,6 +1157,60 @@ async fn select_pane_and_select_window_elsewhere_do_not_move_the_client() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_target_means_the_pane_select_pane_made_active() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "work", "--", "/bin/sh"],
+    );
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "split-window",
+            "-d",
+            "-t",
+            "=work:1",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let second = print(&server, "=work:1.1", "#{pane_id}");
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-window", "-t", "=work:0"],
+    );
+
+    // Window 0 stays current, but window 1 now means its second pane.
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-pane", "-t", "=work:1.1"],
+    );
+    assert_eq!(print(&server, "=work:", "#{window_index}"), "0");
+    assert_eq!(
+        print(&server, "=work:1", "#{pane_index} #{pane_id}"),
+        format!("1 {second}")
+    );
+    let windows = out(&run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "list-windows",
+            "-t",
+            "=work",
+            "-F",
+            "#{window_index} #{pane_id}",
+        ],
+    ));
+    assert_eq!(windows.lines().nth(1), Some(format!("1 {second}").as_str()));
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_clients_takes_a_format() {
     let server = TestServer::start().await.expect("start server");
     run_cli(

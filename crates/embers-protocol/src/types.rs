@@ -892,6 +892,9 @@ pub struct NodeRecord {
     pub buffer_view: Option<BufferViewRecord>,
     pub split: Option<SplitRecord>,
     pub tabs: Option<TabsRecord>,
+    /// The pane that focusing this node lands on: the node itself for a
+    /// pane, else the pane it last focused or its first visible one.
+    pub focus_leaf_id: Option<NodeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

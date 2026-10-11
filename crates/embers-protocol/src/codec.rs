@@ -1748,6 +1748,7 @@ fn validate_node_record(record: &NodeRecord) -> Result<(), ProtocolError> {
     validate_required_node_id(record.id, "node_record.id")?;
     validate_required_session_id(record.session_id, "node_record.session_id")?;
     validate_optional_node_id(record.parent_id, "node_record.parent_id")?;
+    validate_optional_node_id(record.focus_leaf_id, "node_record.focus_leaf_id")?;
     if let Some(buffer_view) = &record.buffer_view {
         validate_required_buffer_id(buffer_view.buffer_id, "node_record.buffer_view.buffer_id")?;
     }
@@ -3864,6 +3865,7 @@ fn encode_node_record<'a>(
             buffer_view,
             split,
             tabs,
+            focus_leaf_id: record.focus_leaf_id.map(|id| id.into()).unwrap_or(0),
         },
     )
 }
@@ -5357,6 +5359,11 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
         buffer_view,
         split,
         tabs,
+        focus_leaf_id: if record.focus_leaf_id() == 0 {
+            None
+        } else {
+            Some(NodeId(record.focus_leaf_id()))
+        },
     })
 }
 

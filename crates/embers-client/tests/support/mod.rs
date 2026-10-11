@@ -114,6 +114,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                         },
                     ],
                 }),
+                focus_leaf_id: None,
             },
             buffer_view_node(HIDDEN_ROOT_LEAF_ID, Some(ROOT_TABS_ID), BufferId(1)),
             NodeRecord {
@@ -128,6 +129,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                     sizes: vec![1, 2],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
             buffer_view_node(LEFT_LEAF_ID, Some(ROOT_SPLIT_ID), BufferId(2)),
             NodeRecord {
@@ -152,6 +154,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                         },
                     ],
                 }),
+                focus_leaf_id: None,
             },
             buffer_view_node(HIDDEN_NESTED_LEAF_ID, Some(NESTED_TABS_ID), BufferId(3)),
             buffer_view_node(FOCUSED_LEAF_ID, Some(NESTED_TABS_ID), FOCUSED_BUFFER_ID),
@@ -167,6 +170,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
             buffer_view_node(FLOATING_TOP_LEAF_ID, Some(FLOATING_SPLIT_ID), BufferId(5)),
             buffer_view_node(
@@ -261,6 +265,7 @@ fn root_split_snapshot() -> SessionSnapshot {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
             buffer_view_node(
                 ROOT_SPLIT_LEFT_LEAF_ID,
@@ -306,6 +311,7 @@ fn buffer_view_node(id: NodeId, parent_id: Option<NodeId>, buffer_id: BufferId) 
         }),
         split: None,
         tabs: None,
+        focus_leaf_id: None,
     }
 }
 

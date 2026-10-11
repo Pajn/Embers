@@ -3482,20 +3482,36 @@ fn window_children(snapshot: &SessionSnapshot) -> Result<Vec<NodeId>> {
     })
 }
 
-/// Each window's active pane, as tmux window formats see it: the focused
-/// pane in the window that has it, else the window's first pane.
+/// Each window's active pane, as tmux window formats see it.
 fn window_panes(snapshot: &SessionSnapshot) -> Result<Vec<Option<NodeId>>> {
     window_children(snapshot)?
         .into_iter()
         .map(|child_id| {
             let leaves = visible_leaf_ids(snapshot, child_id)?;
-            Ok(snapshot
-                .session
-                .focused_leaf_id
-                .filter(|leaf_id| leaves.contains(leaf_id))
-                .or_else(|| leaves.first().copied()))
+            Ok(window_active_pane(snapshot, child_id, &leaves))
         })
         .collect()
+}
+
+/// The active pane of the window `child_id`, whose visible panes are
+/// `leaves`: the session's focused pane when it is in the window, else the
+/// pane the window would focus when selected, else its first pane.
+fn window_active_pane(
+    snapshot: &SessionSnapshot,
+    child_id: NodeId,
+    leaves: &[NodeId],
+) -> Option<NodeId> {
+    snapshot
+        .session
+        .focused_leaf_id
+        .filter(|leaf_id| leaves.contains(leaf_id))
+        .or_else(|| {
+            node_record(snapshot, child_id)
+                .ok()
+                .and_then(|node| node.focus_leaf_id)
+                .filter(|leaf_id| leaves.contains(leaf_id))
+        })
+        .or_else(|| leaves.first().copied())
 }
 
 fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
@@ -3695,11 +3711,7 @@ fn resolve_single_window_index(
 
 fn window_title(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<String> {
     let visible_leaf_ids = visible_leaf_ids(snapshot, node_id)?;
-    let leaf_id = snapshot
-        .session
-        .focused_leaf_id
-        .filter(|leaf_id| visible_leaf_ids.contains(leaf_id))
-        .or_else(|| visible_leaf_ids.first().copied())
+    let leaf_id = window_active_pane(snapshot, node_id, &visible_leaf_ids)
         .ok_or_else(|| MuxError::not_found(format!("window {node_id} has no visible panes")))?;
     let leaf = node_record(snapshot, leaf_id)?;
     let buffer_id = leaf

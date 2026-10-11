@@ -2361,7 +2361,9 @@ impl ServerState {
         self.resolve_focus_candidate(floating.root_node)
     }
 
-    fn resolve_focus_candidate(&self, node_id: NodeId) -> Result<Option<NodeId>> {
+    /// The pane focusing `node_id` lands on: the node itself for a pane,
+    /// else the pane it last focused, if still visible, or its first one.
+    pub fn resolve_focus_candidate(&self, node_id: NodeId) -> Result<Option<NodeId>> {
         match self.node(node_id)? {
             Node::BufferView(_) => Ok(Some(node_id)),
             Node::Split(split) => {
