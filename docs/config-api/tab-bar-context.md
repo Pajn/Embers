@@ -91,6 +91,39 @@ Return the tabs node id currently being formatted.
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> session_name </h2>
+
+```rust,ignore
+fn session_name(bar: TabBarContext) -> String
+```
+
+<div>
+<div class="tab">
+<button group="session_name" id="link-session_name-Description"  class="tablinks active"
+    onclick="openTab(event, 'session_name', 'Description')">
+Description
+</button>
+<button group="session_name" id="link-session_name-Example"  class="tablinks"
+    onclick="openTab(event, 'session_name', 'Example')">
+Example
+</button>
+</div>
+
+<div group="session_name" id="session_name-Description" class="tabcontent"  style="display: block;" >
+Return the name of the session the bar belongs to, like tmux `#S`, for
+a status line such as `[main] 1 shell 2 nvim`.
+</div>
+<div group="session_name" id="session_name-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+let left = [ui.segment(`[${ctx.session_name()}] `)];
+```
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> tabs </h2>
 
 ```rust,ignore

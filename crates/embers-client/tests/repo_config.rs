@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use embers_client::{
     Action, BufferSpawnSpec, ChooserScope, ClientState, Context, FloatingAnchor,
     FloatingGeometrySpec, FloatingSize, KeyToken, NavigationDirection, PaneBorderColors,
-    PresentationModel, ScriptEngine, StatusKeys, TabBarContext, TabBarPosition, TerminalColor,
-    TreeSpec,
+    PresentationModel, ScriptEngine, StatusKeys, StatusLineMode, TabBarContext, TabBarPosition,
+    TerminalColor, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
     input::parse_key_sequence,
 };
@@ -27,8 +27,10 @@ fn example_config_loads_with_a_c_a_leader_and_settings() {
     assert!(loaded.has_tab_bar_formatter());
     // status-keys vi
     assert_eq!(loaded.status_keys, StatusKeys::Vi);
-    // status-position bottom
+    // status-position bottom, with messages over the bar
     assert_eq!(loaded.tab_bar_position, TabBarPosition::Bottom);
+    assert!(loaded.tab_bar_visible);
+    assert_eq!(loaded.status_line, StatusLineMode::Overlay);
     // pane-active-border-style fg=magenta, pane-border-style fg=brightblack
     assert_eq!(
         loaded.theme.pane_borders,
@@ -388,6 +390,8 @@ fn example_config_labels_windows_from_their_panes() {
     editor.cwd = Some("/srv/app".to_owned());
 
     let (left, right) = tab_bar_text(&engine, &state);
+    // The session name comes first, like tmux `#S`.
+    assert!(left.starts_with(" demo  "), "{left:?}");
     assert!(left.contains("1 $ src/embers"), "{left:?}");
     assert!(left.contains("2 nvim srv/app"), "{left:?}");
     assert_eq!(right, " /srv/app ");
@@ -442,7 +446,8 @@ fn tab_bar_text(engine: &ScriptEngine, state: &ClientState) -> (String, String) 
     let bar = engine
         .format_tab_bar(
             TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap(), "normal", 80)
-                .with_base_index(Some(1)),
+                .with_base_index(Some(1))
+                .with_session_name("demo"),
         )
         .unwrap()
         .expect("formatter produces a bar");

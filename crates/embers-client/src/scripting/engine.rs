@@ -21,7 +21,7 @@ use super::runtime::{
 };
 use crate::command_prompt::StatusKeys;
 use crate::host_terminal::TerminalFeatures;
-use crate::presentation::TabBarPosition;
+use crate::presentation::{StatusLineMode, TabBarPosition};
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
@@ -262,6 +262,7 @@ struct RegistrationState {
     event_handlers: BTreeMap<String, Vec<ScriptFunctionRef>>,
     tab_bar_formatter: Option<ScriptFunctionRef>,
     tab_bar_position: TabBarPosition,
+    tab_bar_visible: Option<bool>,
     mouse: MouseSettings,
     hints: HintsSettings,
     theme: ThemeSpec,
@@ -271,6 +272,7 @@ struct RegistrationState {
     terminal_features: TerminalFeatures,
     detach_on_destroy: DetachOnDestroy,
     status_keys: StatusKeys,
+    status_line: StatusLineMode,
 }
 
 impl RegistrationState {
@@ -372,6 +374,7 @@ impl RegistrationState {
             event_handlers: self.event_handlers,
             tab_bar_formatter: self.tab_bar_formatter,
             tab_bar_position: self.tab_bar_position,
+            tab_bar_visible: self.tab_bar_visible.unwrap_or(true),
             mouse: self.mouse,
             hints: self.hints,
             theme: self.theme,
@@ -381,6 +384,7 @@ impl RegistrationState {
             terminal_features: self.terminal_features,
             detach_on_destroy: self.detach_on_destroy,
             status_keys: self.status_keys,
+            status_line: self.status_line,
         })
     }
 }
@@ -508,6 +512,14 @@ impl TabbarApi {
             .lock()
             .expect("registration lock")
             .tab_bar_position = tab_bar;
+        Ok(())
+    }
+
+    fn set_visible(&self, position: Position, visible: bool) -> ScriptResult<()> {
+        clone_active_registration(position)?
+            .lock()
+            .expect("registration lock")
+            .tab_bar_visible = Some(visible);
         Ok(())
     }
 }
@@ -1066,6 +1078,39 @@ mod registration_globals {
             .status_keys = keys;
         Ok(())
     }
+
+    /// Choose where the status line goes: the command prompt, messages,
+    /// `confirm` questions, the search prompt and warnings.
+    ///
+    /// - `"overlay"` (the default): like tmux, it is drawn over the session's
+    ///   tab bar while there is something to show, and the tab bar comes
+    ///   back afterwards. With the tab bar hidden, it is drawn over the last
+    ///   row of the screen. The panes get every row but the tab bar's, and
+    ///   are not resized when a message comes and goes.
+    /// - `"separate"`: the last row of the screen is kept for it and always
+    ///   shows the session name, so the panes have one row fewer.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_status_line("separate");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:14
+    #[rhai_fn(return_raw, global, name = "set_status_line")]
+    pub fn set_status_line(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(mode) = StatusLineMode::parse(value) else {
+            return Err(runtime_error(
+                format!("set_status_line expects \"overlay\" or \"separate\", got {value:?}"),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .status_line = mode;
+        Ok(())
+    }
 }
 
 #[export_module]
@@ -1086,9 +1131,9 @@ mod tabbar_registration_api {
 
     /// Put the session's tab bar, its list of windows, at the `"top"` (the
     /// default) or `"bottom"` of the screen, like tmux's `status-position`.
-    /// At the bottom it sits just above the status line, where the command
-    /// prompt and messages appear. Tab bars of nested tabs stay at the top of
-    /// their own area.
+    /// The command prompt and messages are drawn over it while they show, so
+    /// they move with it. Tab bars of nested tabs stay at the top of their
+    /// own area.
     ///
     /// # Example
     ///
@@ -1104,6 +1149,29 @@ mod tabbar_registration_api {
         value: &str,
     ) -> RhaiResultOf<()> {
         tabbar.set_position(ctx.call_position(), value)
+    }
+
+    /// Show (`true`, the default) or hide (`false`) the session's tab bar,
+    /// like tmux's `status on` and `status off`. Hidden, it gives its row to
+    /// the panes, and the command prompt and messages are drawn over the last
+    /// row of the screen while they show. Only the session's own tab bar is
+    /// hidden; tab bars of nested tabs, like `set_position`, are not
+    /// affected.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// tabbar.set_visible(false);
+    /// ```
+    ///
+    /// # rhai-autodocs:index:20
+    #[rhai_fn(return_raw, name = "set_visible")]
+    pub fn set_visible(
+        ctx: NativeCallContext,
+        tabbar: TabbarApi,
+        visible: bool,
+    ) -> RhaiResultOf<()> {
+        tabbar.set_visible(ctx.call_position(), visible)
     }
 }
 
