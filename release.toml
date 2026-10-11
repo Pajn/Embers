@@ -1,0 +1,10 @@
+# `cargo release <level>` bumps the shared workspace version, commits, tags
+# `v<version>` and pushes. Pushing the tag runs .github/workflows/release.yml,
+# which publishes the crates to crates.io through trusted publishing.
+allow-branch = ["main"]
+shared-version = true
+consolidate-commits = true
+pre-release-commit-message = "v{{version}}"
+tag-name = "v{{version}}"
+tag-message = "v{{version}}"
+publish = false
