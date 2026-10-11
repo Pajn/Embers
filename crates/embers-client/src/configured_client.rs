@@ -3213,13 +3213,20 @@ where
     }
 
     /// The working directory of the focused buffer in the given session, if known.
-    fn focused_buffer_cwd(&self, session_id: Option<SessionId>) -> Option<PathBuf> {
+    /// The buffer shown in the focused pane of `session_id`, or of the active
+    /// session when `None`.
+    fn focused_buffer_id(&self, session_id: Option<SessionId>) -> Option<BufferId> {
         let session_id = session_id.or(self.active_session_id)?;
         let state = self.client.state();
         let session = state.sessions.get(&session_id)?;
         let node = state.nodes.get(&session.focused_leaf_id?)?;
-        let buffer_id = node.buffer_view.as_ref()?.buffer_id;
-        state
+        Some(node.buffer_view.as_ref()?.buffer_id)
+    }
+
+    fn focused_buffer_cwd(&self, session_id: Option<SessionId>) -> Option<PathBuf> {
+        let buffer_id = self.focused_buffer_id(session_id)?;
+        self.client
+            .state()
             .buffers
             .get(&buffer_id)?
             .cwd
@@ -3231,8 +3238,11 @@ where
     ///
     /// Output is discarded (unlike tmux, which shows it in a pane — capture into
     /// a popup with `buffer_spawn` instead). `$EMBERS_SOCKET` is injected so the
-    /// child can drive Embers via the CLI. The client never awaits the child; a
-    /// background waiter surfaces a warning on non-zero exit.
+    /// child can drive Embers via the CLI, and `$EMBERS_CLIENT` and
+    /// `$EMBERS_BUFFER` name this client and its focused buffer, so the child
+    /// can act on the session the binding was pressed in rather than on its own
+    /// unattached connection. The client never awaits the child; a background
+    /// waiter surfaces a warning on non-zero exit.
     fn spawn_run_shell(&mut self, command: Vec<String>, session_id: Option<SessionId>) {
         let Some((program, args)) = command.split_first() else {
             return;
@@ -3249,6 +3259,16 @@ where
         if let Some(socket_path) = &self.socket_path {
             process.env("EMBERS_SOCKET", socket_path);
         }
+        // Set or clear both: a client started inside an Embers pane inherits
+        // that pane's values, which must not leak to the child as its own.
+        match self.client.cached_client_id() {
+            Some(client_id) => process.env("EMBERS_CLIENT", client_id.to_string()),
+            None => process.env_remove("EMBERS_CLIENT"),
+        };
+        match self.focused_buffer_id(session_id) {
+            Some(buffer_id) => process.env("EMBERS_BUFFER", buffer_id.0.to_string()),
+            None => process.env_remove("EMBERS_BUFFER"),
+        };
         // So `embers` commands the child runs number windows like this client.
         if let Some(base_index) = self.base_index() {
             process.env(crate::numbering::BASE_INDEX_ENV_VAR, base_index.to_string());
