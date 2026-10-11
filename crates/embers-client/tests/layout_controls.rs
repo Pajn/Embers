@@ -795,3 +795,44 @@ async fn host_graphics_are_declared_with_passthrough_on_a_graphics_host() {
     configured.sync_host_graphics().await;
     assert_eq!(host_graphics_requests(&transport), vec![true, false]);
 }
+
+#[tokio::test]
+async fn host_graphics_are_declared_again_after_a_failed_request() {
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        demo_state(),
+        r#"set_allow_passthrough("on");"#,
+    );
+    configured.set_host_capabilities(HostCapabilities::ALL);
+
+    // No response: the request did not reach the server, so the next frame
+    // tries again.
+    configured.sync_host_graphics().await;
+    transport.push_response(ServerResponse::Ok(OkResponse {
+        request_id: RequestId(0),
+    }));
+    configured.sync_host_graphics().await;
+    configured.sync_host_graphics().await;
+    assert_eq!(host_graphics_requests(&transport), vec![true, true]);
+}
+
+#[tokio::test]
+async fn host_graphics_are_not_declared_again_to_a_server_that_rejects_them() {
+    let transport = FakeTransport::default();
+    let (mut configured, _tempdir) = configured(
+        transport.clone(),
+        demo_state(),
+        r#"set_allow_passthrough("on");"#,
+    );
+    configured.set_host_capabilities(HostCapabilities::ALL);
+
+    // A server that predates the request answers that it does not know it.
+    transport.push_response(ServerResponse::Error(ErrorResponse {
+        request_id: Some(RequestId(0)),
+        error: WireError::new(ErrorCode::ProtocolViolation, "unknown client op"),
+    }));
+    configured.sync_host_graphics().await;
+    configured.sync_host_graphics().await;
+    assert_eq!(host_graphics_requests(&transport), vec![true]);
+}

@@ -414,12 +414,19 @@ where
                 enabled,
             }))
             .await;
-        // Not retried: a server that predates the request rejects it on
-        // every frame, and only the order of query replies depends on it.
-        if let Err(error) = result {
-            warn!("failed to tell the server about host graphics: {error}");
+        match result {
+            Ok(_) => self.reported_host_graphics = Some(enabled),
+            Err(error) => {
+                warn!("failed to tell the server about host graphics: {error}");
+                // A server that answered with an error, as one that predates
+                // the request does, would reject it on every frame; only the
+                // order of query replies depends on it. Otherwise a later
+                // frame tries again.
+                if matches!(error, MuxError::Wire(_)) {
+                    self.reported_host_graphics = Some(enabled);
+                }
+            }
         }
-        self.reported_host_graphics = Some(enabled);
     }
 
     /// Which panes may write to the host terminal through passthrough: the
