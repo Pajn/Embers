@@ -1525,6 +1525,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             command,
         } => {
             let pane = connection.resolve_pane(target.as_deref()).await?;
+            let previous_focus = pane.snapshot.session.focused_leaf_id;
             let command = buffer_command(command);
             let direction = if horizontal || stacked {
                 SplitDirection::Horizontal
@@ -1576,14 +1577,28 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 MuxError::protocol("split-window response does not show the new pane")
             })?;
             if detached {
+                // The split focused the new pane, and with it the target's
+                // window. Make the target pane its window's active pane again,
+                // then give focus back to the pane that had it, so a split of
+                // a window that is not current leaves the current window alone.
                 let response = connection
-                    .request(ClientMessage::Node(NodeRequest::Focus {
+                    .request(ClientMessage::Node(NodeRequest::SelectPane {
                         request_id: new_request_id(),
                         session_id: snapshot.session.id,
                         node_id: pane.leaf_id,
                     }))
                     .await?;
                 snapshot = expect_session_snapshot(response, "split-window")?;
+                if let Some(previous) = previous_focus.filter(|leaf| *leaf != pane.leaf_id) {
+                    let response = connection
+                        .request(ClientMessage::Node(NodeRequest::Focus {
+                            request_id: new_request_id(),
+                            session_id: snapshot.session.id,
+                            node_id: previous,
+                        }))
+                        .await?;
+                    snapshot = expect_session_snapshot(response, "split-window")?;
+                }
             }
             if print {
                 let format = format.unwrap_or_else(|| DEFAULT_PANE_FORMAT.to_owned());
