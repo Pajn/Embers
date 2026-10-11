@@ -2270,6 +2270,92 @@ fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_shell_names_the_launching_client_and_focused_buffer() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let env_out = out_dir.path().join("env.txt");
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(
+        config_dir.path().join("config.rhai"),
+        format!(
+            r#"
+                fn write_env(ctx) {{ action.run_shell("printf '%s %s' \"$EMBERS_CLIENT\" \"$EMBERS_BUFFER\" > '{out}'") }}
+                define_action("write-env", write_env);
+                bind("normal", "w", "write-env");
+            "#,
+            out = env_out.display()
+        ),
+    )
+    .expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(server.socket_path().to_path_buf());
+    let client_id = configured
+        .client()
+        .current_client()
+        .await
+        .expect("client record")
+        .id;
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let (alpha, focused_buffer) = {
+        let state = configured.client().state();
+        let session = state
+            .sessions
+            .values()
+            .find(|session| session.name == "alpha")
+            .expect("alpha session");
+        let leaf = session.focused_leaf_id.expect("focused leaf");
+        let buffer = state.nodes[&leaf]
+            .buffer_view
+            .as_ref()
+            .expect("buffer view")
+            .buffer_id;
+        (session.id, buffer)
+    };
+
+    configured
+        .handle_key(
+            alpha,
+            Size {
+                width: 80,
+                height: 24,
+            },
+            KeyEvent::Char('w'),
+        )
+        .await
+        .expect("run-shell dispatch returns immediately");
+    let expected = format!("{client_id} {}", focused_buffer.0);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let contents = std::fs::read_to_string(&env_out).unwrap_or_default();
+        if contents == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "run-shell wrote {contents:?}, expected {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_shell_spawns_with_socket_env_and_reports_failures() {
     use embers_client::{ConfiguredClient, KeyEvent};
 

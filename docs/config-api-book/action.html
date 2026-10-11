@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-cc1d5b97.js";
+            window.path_to_searchindex_js = "searchindex-27118b6c.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -2681,7 +2681,9 @@ Example
 <div group="run_shell" id="run_shell-Description" class="tabcontent" style="display: block;">
 Run a shell command line in the client's login context (tmux `run-shell`).
 <p>The string is executed as <code>/bin/sh -lc "&lt;command&gt;"</code>. Output is discarded;
-the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.</p>
+the spawned tool can drive Embers via <code>$EMBERS_SOCKET</code> and the <code>embers</code> CLI.
+<code>$EMBERS_CLIENT</code> and <code>$EMBERS_BUFFER</code> name the client the binding was
+pressed in and its focused buffer.</p>
 </div>
 
 <div group="run_shell" id="run_shell-Example" class="tabcontent" style="display: none;">
