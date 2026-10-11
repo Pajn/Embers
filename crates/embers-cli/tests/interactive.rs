@@ -1484,9 +1484,29 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
 
-    // A bell in the window the client shows does not flag it, as in tmux. A
-    // capture syncs the buffer's status, so the bell has been seen once the
-    // output after it is.
+    // Output streaming in the window the client shows does not flag it, as
+    // in tmux.
+    send_buffer_input(
+        &mut connection,
+        shown_buffer_id,
+        b"for i in 1 2 3 4 5; do echo shown-$i; sleep 0.1; done; echo shown-done\r",
+    )
+    .await;
+    connection
+        .wait_for_capture_contains(shown_buffer_id, "shown-done", IO_TIMEOUT)
+        .await
+        .expect("shown buffer output appears");
+    let output = harness
+        .read_until_contains("shown-done", IO_TIMEOUT)
+        .expect("attached client shows the output");
+    assert!(!output.contains("+shell"), "{output:?}");
+    assert_eq!(
+        buffer_activity(&mut connection, shown_buffer_id).await,
+        ActivityState::Idle
+    );
+
+    // Nor does a bell there. A capture syncs the buffer's status, so the bell
+    // has been seen once the output after it is.
     send_buffer_input(
         &mut connection,
         shown_buffer_id,
@@ -1497,10 +1517,22 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
         .wait_for_capture_contains(shown_buffer_id, "shown-bell", IO_TIMEOUT)
         .await
         .expect("shown buffer output appears");
-    assert_ne!(
+    assert_eq!(
         buffer_activity(&mut connection, shown_buffer_id).await,
-        ActivityState::Bell
+        ActivityState::Idle
     );
+
+    // Output in a background window flags it.
+    send_buffer_input(&mut connection, hidden_buffer_id, b"echo hidden-output\r").await;
+    connection
+        .wait_for_capture_contains(hidden_buffer_id, "hidden-output", IO_TIMEOUT)
+        .await
+        .expect("hidden buffer output accumulates");
+    wait_for_buffer_activity(&mut connection, hidden_buffer_id, ActivityState::Activity).await;
+    let output = harness
+        .read_until_contains("+bg", IO_TIMEOUT)
+        .expect("hidden output updates tab marker in attached client");
+    assert!(!output.contains("+shell"), "{output:?}");
 
     send_buffer_input(
         &mut connection,
@@ -1523,9 +1555,9 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
     harness
         .read_until_contains("hidden-bell", IO_TIMEOUT)
         .expect("revealed hidden buffer shows accumulated output");
-    assert_ne!(
+    assert_eq!(
         buffer_activity(&mut connection, hidden_buffer_id).await,
-        ActivityState::Bell
+        ActivityState::Idle
     );
 
     harness.write_all("\x11").expect("quit attached client");

@@ -1275,9 +1275,9 @@ impl Runtime {
             } => {
                 let target_id = client_id.map(|id| id.get()).unwrap_or(connection_id);
                 match self.set_client_session(target_id, Some(session_id)).await {
-                    Ok((client, event)) => (
+                    Ok((client, events)) => (
                         ServerResponse::Client(ClientResponse { request_id, client }),
-                        vec![event],
+                        events,
                         None,
                     ),
                     Err(error) => (
@@ -3631,8 +3631,8 @@ impl Runtime {
             .collect();
         let (render_invalidated, pipe_event, workspace_changed) = {
             let mut state = self.state.lock().await;
-            // Like tmux, a bell flags only a window no client is looking at:
-            // in the window a client shows it is ordinary output.
+            // Like tmux, output and bells flag only a window no client is
+            // looking at: the window a client shows is not flagged.
             let shown = state
                 .session_showing_buffer(buffer_id)
                 .is_some_and(|session_id| shown_sessions.contains(&session_id));
@@ -3659,15 +3659,8 @@ impl Runtime {
                 }
                 if sequence_advanced {
                     buffer.last_snapshot_seq = update.sequence;
-                    let activity = match update.activity {
-                        embers_core::ActivityState::Bell if shown => {
-                            embers_core::ActivityState::Activity
-                        }
-                        activity => activity,
-                    };
-                    let next_activity = max_activity(buffer.activity, activity);
-                    if next_activity != buffer.activity {
-                        buffer.activity = next_activity;
+                    if !shown {
+                        buffer.activity = max_activity(buffer.activity, update.activity);
                     }
                     if let Some(title) = update.title {
                         let next_title = title.unwrap_or_default();
@@ -4277,9 +4270,9 @@ impl Runtime {
         &self,
         client_id: u64,
         session_id: Option<embers_core::SessionId>,
-    ) -> Result<(ClientRecord, ServerEvent)> {
-        let previous_session_id = {
-            let state = self.state.lock().await;
+    ) -> Result<(ClientRecord, Vec<ServerEvent>)> {
+        let (previous_session_id, acknowledged) = {
+            let mut state = self.state.lock().await;
             if let Some(session_id) = session_id
                 && !state.sessions.contains_key(&session_id)
             {
@@ -4293,17 +4286,30 @@ impl Runtime {
                 .ok_or_else(|| MuxError::not_found(format!("client {client_id} was not found")))?;
             let previous = client.current_session_id;
             client.current_session_id = session_id;
-            previous
+            // A client now looks at the session's current window, so its
+            // flags are acknowledged, as tmux clears them on attach. The
+            // client has switched already, so a failure here does not undo it.
+            let acknowledged = session_id.is_some_and(|session_id| {
+                state
+                    .acknowledge_shown_activity(session_id)
+                    .unwrap_or(false)
+            });
+            (previous, acknowledged)
         };
         let record = self
             .client_record(client_id)
             .await
             .ok_or_else(|| MuxError::not_found(format!("client {client_id} was not found")))?;
-        let event = ServerEvent::ClientChanged(ClientChangedEvent {
+        let mut events = vec![ServerEvent::ClientChanged(ClientChangedEvent {
             client: record.clone(),
             previous_session_id,
-        });
-        Ok((record, event))
+        })];
+        // Other clients and automation refetch the session to see the cleared
+        // flags.
+        if acknowledged && let Some(session_id) = session_id {
+            events.push(ServerEvent::NodeChanged(NodeChangedEvent { session_id }));
+        }
+        Ok((record, events))
     }
 
     fn clear_client_session(
@@ -5451,11 +5457,11 @@ mod tests {
             },
         );
 
-        // A bell in the window the client shows is output, not a flag; one
-        // in a background window flags that window.
+        // A bell in the window the client shows does not flag it; one in a
+        // background window flags that window.
         ring(shown, 2).await;
         ring(hidden, 1).await;
-        assert_eq!(activity(shown).await, ActivityState::Activity);
+        assert_eq!(activity(shown).await, ActivityState::Idle);
         assert_eq!(activity(hidden).await, ActivityState::Bell);
 
         // Until the window is visited.
@@ -5469,7 +5475,7 @@ mod tests {
     }
 
     #[test]
-    fn visiting_a_window_clears_the_bells_of_all_its_panes() {
+    fn visiting_a_window_clears_the_flags_of_all_its_panes() {
         let mut state = ServerState::new();
         let session = state.create_session("alpha");
         let first = create_leaf(&mut state, session, "first");
@@ -5492,18 +5498,142 @@ mod tests {
             other => panic!("expected buffer view, got {other:?}"),
         };
         let left_buffer = buffer_of(left);
-        for buffer_id in [left_buffer, right_buffer] {
-            state
-                .set_buffer_activity(buffer_id, ActivityState::Bell)
-                .expect("ring");
-        }
+        state
+            .set_buffer_activity(left_buffer, ActivityState::Bell)
+            .expect("ring");
+        state
+            .set_buffer_activity(right_buffer, ActivityState::Activity)
+            .expect("output");
 
-        // Focusing one pane of the window acknowledges the bell in the other
-        // pane too: tmux clears the window's flag, not a pane's.
+        // Focusing one pane of the window acknowledges the flag of the other
+        // pane too: tmux clears the window's flags, not a pane's.
         state.focus_leaf(session, left).expect("visit the window");
         let activity = |buffer_id| state.buffer(buffer_id).expect("buffer").activity;
         assert_eq!(activity(left_buffer), ActivityState::Idle);
-        assert_eq!(activity(right_buffer), ActivityState::Activity);
+        assert_eq!(activity(right_buffer), ActivityState::Idle);
+    }
+
+    #[tokio::test]
+    async fn output_flags_activity_only_in_windows_no_client_is_looking_at() {
+        let mut state = ServerState::new();
+        let session = state.create_session("alpha");
+        let shown_leaf = create_leaf(&mut state, session, "shown");
+        let hidden_leaf = create_leaf(&mut state, session, "hidden");
+        state
+            .add_root_tab(session, "one", shown_leaf)
+            .expect("attach shown leaf");
+        state
+            .add_root_tab(session, "two", hidden_leaf)
+            .expect("attach hidden leaf");
+        state
+            .focus_leaf(session, shown_leaf)
+            .expect("show the first window");
+        let popup = state.create_buffer("popup", vec!["/bin/sh".to_owned()], None);
+        let floating_id = state
+            .create_floating_from_buffer_with_options(
+                session,
+                popup,
+                FloatGeometry::new(0, 0, 20, 5),
+                None,
+                false,
+                true,
+            )
+            .expect("open a popup");
+        let buffer_of = |state: &ServerState, leaf| match state.node(leaf).expect("leaf exists") {
+            crate::Node::BufferView(view) => view.buffer_id,
+            other => panic!("expected buffer view, got {other:?}"),
+        };
+        let shown = buffer_of(&state, shown_leaf);
+        let hidden = buffer_of(&state, hidden_leaf);
+        let root = state.session(session).expect("session").root_node;
+        let runtime = Runtime::new(
+            state,
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let runtime = &runtime;
+        let output = |buffer_id, sequence| {
+            runtime.record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence,
+                    activity: ActivityState::Activity,
+                    title: None,
+                    pipe: None,
+                    cwd: None,
+                    foreground_command: None,
+                    bell_sequence: 0,
+                },
+            )
+        };
+        let activity = |buffer_id| async move {
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists")
+                .activity
+        };
+
+        // No client shows the session: like tmux, output flags even the
+        // current window.
+        output(shown, 1).await;
+        assert_eq!(activity(shown).await, ActivityState::Activity);
+
+        // A client attaching acknowledges the window it shows, as tmux clears
+        // the current window's flags on attach.
+        runtime.clients.lock().await.insert(
+            1,
+            super::ClientConnection {
+                current_session_id: None,
+                shutdown: None,
+                stopped: None,
+            },
+        );
+        runtime
+            .set_client_session(1, Some(session))
+            .await
+            .expect("attach the client");
+        assert_eq!(activity(shown).await, ActivityState::Idle);
+
+        // Output in the window or popup the client shows does not flag them;
+        // output in a background window flags that window.
+        output(shown, 2).await;
+        output(popup, 1).await;
+        output(hidden, 1).await;
+        assert_eq!(activity(shown).await, ActivityState::Idle);
+        assert_eq!(activity(popup).await, ActivityState::Idle);
+        assert_eq!(activity(hidden).await, ActivityState::Activity);
+
+        // A hidden popup is not looked at.
+        runtime
+            .state
+            .lock()
+            .await
+            .floating
+            .get_mut(&floating_id)
+            .expect("popup exists")
+            .visible = false;
+        output(popup, 2).await;
+        assert_eq!(activity(popup).await, ActivityState::Activity);
+
+        // Visiting the window clears its flag, and the window left behind is
+        // flagged by its next output.
+        runtime
+            .state
+            .lock()
+            .await
+            .switch_tab(root, 1)
+            .expect("visit the second window");
+        assert_eq!(activity(hidden).await, ActivityState::Idle);
+        output(hidden, 2).await;
+        output(shown, 3).await;
+        assert_eq!(activity(hidden).await, ActivityState::Idle);
+        assert_eq!(activity(shown).await, ActivityState::Activity);
     }
 
     #[tokio::test]
