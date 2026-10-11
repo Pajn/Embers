@@ -1690,7 +1690,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let pane_id = match direction {
                 None => pane.leaf_id,
                 Some(direction) => {
-                    let (_, presentation) = formats::project(&pane.snapshot)?;
+                    let (_, presentation) = formats::project(&pane.snapshot, pane.leaf_id)?;
                     match presentation.focus_target_from(pane.leaf_id, direction) {
                         Some(pane_id) => pane_id,
                         // Nothing on that side: like the client's focus

@@ -39,11 +39,34 @@ pub(crate) fn session_viewport(snapshot: &SessionSnapshot) -> Size {
 }
 
 /// `snapshot`'s session laid out the way a client draws it at
-/// [`session_viewport`].
-pub(crate) fn project(snapshot: &SessionSnapshot) -> Result<(ClientState, PresentationModel)> {
+/// [`session_viewport`], with the window and tabs holding `pane_id` shown, so
+/// a pane of a window that is not current is laid out too.
+pub(crate) fn project(
+    snapshot: &SessionSnapshot,
+    pane_id: NodeId,
+) -> Result<(ClientState, PresentationModel)> {
     let viewport = session_viewport(snapshot);
+    let mut shown = snapshot.clone();
+    let mut child_id = pane_id;
+    while let Some(parent_id) = shown
+        .nodes
+        .iter()
+        .find(|node| node.id == child_id)
+        .and_then(|node| node.parent_id)
+    {
+        if let Some(tabs) = shown
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == parent_id)
+            .and_then(|node| node.tabs.as_mut())
+            && let Some(index) = tabs.tabs.iter().position(|tab| tab.child_id == child_id)
+        {
+            tabs.active = u32::try_from(index).expect("tab index fits into protocol width");
+        }
+        child_id = parent_id;
+    }
     let mut state = ClientState::default();
-    state.apply_session_snapshot(snapshot.clone());
+    state.apply_session_snapshot(shown);
     let presentation = PresentationModel::project(&state, snapshot.session.id, viewport)?;
     Ok((state, presentation))
 }
@@ -88,7 +111,7 @@ impl CliConnection {
         if template.contains("pane_at_")
             && let Some(pane_id) = context.pane_id
         {
-            let (_, presentation) = project(snapshot)?;
+            let (_, presentation) = project(snapshot, pane_id)?;
             for (name, direction) in [
                 ("pane_at_left", NavigationDirection::Left),
                 ("pane_at_right", NavigationDirection::Right),

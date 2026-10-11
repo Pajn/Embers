@@ -1239,6 +1239,43 @@ async fn a_window_target_means_the_pane_select_pane_made_active() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn select_pane_moves_from_a_pane_of_another_window() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "work", "--", "/bin/sh"],
+    );
+    run_cli(&server, ["new-window", "-d", "-t", "work", "--", "/bin/sh"]);
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "split-window",
+            "-d",
+            "-h",
+            "-t",
+            "=work:1",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(
+        print(&server, "=work:1.0", "#{pane_at_left}#{pane_at_right}"),
+        "10"
+    );
+
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-pane", "-R", "-t", "=work:1.0"],
+    );
+    assert_eq!(print(&server, "=work:1", "#{pane_index}"), "1");
+    assert_eq!(print(&server, "=work:", "#{window_index}"), "0");
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_clients_takes_a_format() {
     let server = TestServer::start().await.expect("start server");
     run_cli(
