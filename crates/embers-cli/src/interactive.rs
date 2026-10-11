@@ -854,7 +854,12 @@ fn parse_csi_event(bytes: &[u8]) -> Option<TerminalEvent> {
             // Recognized but carries no input (e.g. a key release): consume it so
             // it never reaches the raw-byte fallback in `read_csi_event`.
             Some(ExtendedKey::Consumed) => Some(TerminalEvent::Ignored),
-            None => parse_sgr_mouse(bytes).map(TerminalEvent::Mouse),
+            // A mouse report Embers has no event for (horizontal wheel, motion
+            // without a button, extra buttons) is still a mouse report, never
+            // keys: consume it rather than type it into the pane.
+            None => parse_sgr_mouse(bytes)
+                .map(TerminalEvent::Mouse)
+                .or_else(|| is_sgr_mouse_report(bytes).then_some(TerminalEvent::Ignored)),
         },
     }
 }
@@ -986,6 +991,20 @@ fn parse_extended_key(bytes: &[u8]) -> Option<ExtendedKey> {
     // unrepresentable modifier mask falls back to raw bytes.
     let mods = decode_kitty_mods(modifier_value)?;
     Some(ExtendedKey::Event(KeyEvent::Key { code, mods }))
+}
+
+/// Whether `bytes` has the shape of an SGR mouse report, `CSI < b ; x ; y M`
+/// or `m`, whatever its button code.
+fn is_sgr_mouse_report(bytes: &[u8]) -> bool {
+    bytes
+        .strip_prefix(b"\x1b[<")
+        .and_then(|body| body.strip_suffix(b"M").or_else(|| body.strip_suffix(b"m")))
+        .is_some_and(|params| {
+            params.split(|&byte| byte == b';').count() == 3
+                && params
+                    .iter()
+                    .all(|&byte| byte.is_ascii_digit() || byte == b';')
+        })
 }
 
 fn parse_sgr_mouse(bytes: &[u8]) -> Option<MouseEvent> {
@@ -1869,6 +1888,24 @@ mod tests {
                 Some(TerminalEvent::Focus(false))
             );
         });
+    }
+
+    #[test]
+    fn unused_sgr_mouse_reports_are_dropped_not_typed() {
+        // Trackpads send horizontal wheel events (buttons 66/67), and some
+        // terminals report motion with no button held (35). Embers has no use
+        // for them; they must not reach the pane as typed text.
+        with_pipe(
+            b"\x1b[<66;30;20M\x1b[<67;30;20M\x1b[<35;31;20M\x1b[<71;30;20M",
+            |fd| {
+                for _ in 0..4 {
+                    assert_eq!(
+                        read_terminal_event(fd).unwrap(),
+                        Some(TerminalEvent::Ignored)
+                    );
+                }
+            },
+        );
     }
 
     #[test]
