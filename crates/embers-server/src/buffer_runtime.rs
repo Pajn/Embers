@@ -199,7 +199,8 @@ enum KeeperRequest {
     StopPipeAfterExit,
     Kill,
     /// Stop the child (SIGHUP, then SIGKILL) and exit, for kill-server. An
-    /// older keeper rejects it; the server then falls back to `Kill`.
+    /// older keeper rejects it; the server then falls back to `Kill` followed
+    /// by `ExitRecorded`.
     Shutdown,
     /// Fetch the latest OSC 52 clipboard write. Only sent once a status reply
     /// reports a `clipboard_sequence`, which keepers without clipboard
@@ -919,9 +920,16 @@ impl KeeperConnection {
                 "unexpected runtime keeper shutdown response: {other_kind}",
                 other_kind = keeper_response_kind(&other)
             ))),
-            // A keeper that predates `Shutdown` rejects it; ending its child is
-            // enough, since it exits once its child has and no server is left.
-            Err(_) => self.kill(),
+            // A keeper that predates `Shutdown` rejects it. End its child, then
+            // release it: a keeper that knows `ExitRecorded` only exits once a
+            // server has acknowledged the exit, and after kill-server none
+            // will. One older still rejects `ExitRecorded` too, harmlessly; it
+            // exits once its child has and no server is left.
+            Err(_) => {
+                self.kill()?;
+                let _ = self.exit_recorded();
+                Ok(())
+            }
         }
     }
 
@@ -3158,6 +3166,45 @@ mod tests {
         done.recv_timeout(Duration::from_secs(10))
             .expect("keeper should retire once its exit was acknowledged and the server left");
         assert!(!socket_path.exists(), "a retired keeper removes its socket");
+    }
+
+    /// Serve `stream` like a keeper that knows `ExitRecorded` but predates
+    /// `Shutdown`: any other request is answered with an error, as an unknown
+    /// variant would be. Returns the requests it received, by name.
+    fn serve_keeper_without_shutdown(mut stream: UnixStream) -> Vec<String> {
+        let mut received = Vec::new();
+        while let Ok(Some(request)) = read_message::<serde_json::Value>(&mut stream) {
+            let name = match &request {
+                serde_json::Value::String(name) => name.clone(),
+                other => other.to_string(),
+            };
+            let response = match name.as_str() {
+                "Kill" | "ExitRecorded" => super::KeeperResponse::Ok,
+                _ => super::KeeperResponse::Error {
+                    message: format!("unknown variant `{name}`"),
+                },
+            };
+            received.push(name);
+            if super::write_message(&mut stream, &response).is_err() {
+                break;
+            }
+        }
+        received
+    }
+
+    #[test]
+    fn shutdown_of_a_keeper_without_shutdown_kills_and_releases_it() {
+        let (server, keeper) = UnixStream::pair().expect("socket pair");
+        let keeper = thread::spawn(move || serve_keeper_without_shutdown(keeper));
+        let mut connection = KeeperConnection { stream: server };
+        connection.shutdown().expect("fallback shutdown succeeds");
+        drop(connection);
+        // Killing the child alone would leave such a keeper waiting for a
+        // server to record the exit, which after kill-server never comes.
+        assert_eq!(
+            keeper.join().expect("fake keeper"),
+            ["Shutdown", "Kill", "ExitRecorded"]
+        );
     }
 
     #[test]
