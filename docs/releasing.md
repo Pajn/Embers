@@ -23,7 +23,8 @@ commits, tags and pushes; publishing to crates.io happens in CI once the tag is 
 The release workflow publishes with
 [trusted publishing](https://crates.io/docs/trusted-publishing): the `publish-crates` job runs in
 the `crates.io` GitHub environment and exchanges its OIDC token for a short-lived crates.io token
-through `rust-lang/crates-io-auth-action`. No crates.io API token is stored in the repository.
+through `rust-lang/crates-io-auth-action`, pinned to a commit. No crates.io API token is stored in
+the repository.
 
 Each published crate (`embers-core`, `embers-protocol`, `embers-server`, `embers-test-support`,
 `embers-client`, `embers-cli`) needs a trusted publisher configured once in its settings on
