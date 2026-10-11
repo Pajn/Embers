@@ -3,6 +3,8 @@ pub mod codec;
 pub mod framing;
 pub mod types;
 
+/// Code generated from `schema/embers.fbs`. Regenerate it with `cargo gen-protocol` rather than
+/// editing it by hand; `include!` keeps it out of rustfmt's reach.
 pub mod generated {
     #![allow(
         clippy::all,
@@ -12,7 +14,7 @@ pub mod generated {
         non_upper_case_globals,
         unused_imports
     )]
-    include!(concat!(env!("OUT_DIR"), "/embers_generated.rs"));
+    include!("generated/embers_generated.rs");
 }
 
 pub use client::ProtocolClient;

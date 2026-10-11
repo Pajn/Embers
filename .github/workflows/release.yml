@@ -5,20 +5,12 @@ on:
     tags:
       - "v[0-9]*"
 
-env:
-  FLATBUFFERS_VERSION: 25.12.19
-  FLATBUFFERS_SHA256: 9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039
-
 jobs:
   validate:
     name: Validate release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/install-flatc
-        with:
-          version: ${{ env.FLATBUFFERS_VERSION }}
-          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -55,10 +47,6 @@ jobs:
     environment: crates.io
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/install-flatc
-        with:
-          version: ${{ env.FLATBUFFERS_VERSION }}
-          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Publish crates in dependency order
@@ -141,15 +129,6 @@ jobs:
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-      - name: Install flatc on Linux
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/install-flatc
-        with:
-          version: ${{ env.FLATBUFFERS_VERSION }}
-          sha256: ${{ env.FLATBUFFERS_SHA256 }}
-      - name: Install flatc on macOS
-        if: runner.os == 'macOS'
-        run: brew install flatbuffers
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
