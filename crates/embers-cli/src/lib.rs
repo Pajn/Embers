@@ -256,10 +256,12 @@ pub enum Command {
         #[arg(short = 'c', long = "client", value_name = "CLIENT")]
         client: Option<u64>,
     },
-    /// Show session `-t` on a client, like tmux. Without `-c` the client is
-    /// the command prompt's, else `EMBERS_CLIENT`, else the one showing the
-    /// session of the pane the command runs in, else the only attached one.
-    /// `-n`/`-p` move to the next/previous session by name.
+    /// Show session `-t` on a client, like tmux. A window or pane target
+    /// (`%3`, `work:2`, `work:2.1`) also makes that window current and focuses
+    /// the pane. Without `-c` the client is the command prompt's, else
+    /// `EMBERS_CLIENT`, else the one showing the session of the pane the
+    /// command runs in, else the only attached one. `-n`/`-p` move to the
+    /// next/previous session by name.
     #[command(name = "switch-client", visible_alias = "switchc")]
     SwitchClient {
         #[arg(conflicts_with = "client")]
@@ -979,15 +981,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             previous,
         } => {
             let client_id = connection.target_client(client_id.or(client)).await?;
-            let session = match target {
-                Some(target) => connection.resolve_session_record(Some(&target)).await?,
-                None => connection.neighbour_session(client_id, !previous).await?,
+            let (session_id, node_id) = match target {
+                Some(target) => connection.switch_target(&target).await?,
+                None => (
+                    connection.neighbour_session(client_id, !previous).await?.id,
+                    None,
+                ),
             };
             match connection
                 .request(ClientMessage::Client(ClientRequest::Switch {
                     request_id: new_request_id(),
                     client_id: Some(client_id),
-                    session_id: session.id,
+                    session_id,
+                    node_id,
                 }))
                 .await?
             {

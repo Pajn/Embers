@@ -337,6 +337,7 @@ async fn attached_client(server: &TestServer, session: &str) -> (TestConnection,
             request_id: new_request_id(),
             client_id: None,
             session_id,
+            node_id: None,
         }))
         .await
         .expect("switch");
@@ -947,6 +948,132 @@ async fn user_options_expand_in_formats_and_set_with_set_option_p() {
     assert!(fails(&server, &["set-option", "-p", "@empty"]).contains("empty value"));
     assert!(fails(&server, &["set-option", "@foo", "1"]).contains("-p"));
     assert!(fails(&server, &["set-option", "-w", "@foo", "1"]).contains("-p"));
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switch_client_to_a_pane_shows_its_window_and_pane() {
+    let server = TestServer::start().await.expect("start server");
+    let output_dir = tempdir().expect("tempdir");
+    for session in ["main", "t1"] {
+        run_cli(
+            &server,
+            ["new-session", "-d", "-s", session, "--", "/bin/sh"],
+        );
+    }
+    // t1: window 0, and window 1 split in two, with window 0 current.
+    run_cli(&server, ["new-window", "-d", "-t", "=t1", "--", "/bin/sh"]);
+    let target = out(&run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "split-window",
+            "-d",
+            "-t",
+            "=t1:1",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "--",
+            "/bin/sh",
+        ],
+    ));
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-window", "-t", "=t1:0"],
+    );
+    assert_eq!(print(&server, "=t1:", "#{window_index}"), "0");
+    assert_eq!(
+        print(&server, &target, "#{window_index}.#{pane_index}"),
+        "1.1"
+    );
+
+    let (_main_client, main_client) = attached_client(&server, "main").await;
+
+    // From main's pane, as tria does.
+    let embers = embers_test_support::cargo_bin_path("embers");
+    let done = output_dir.path().join("done");
+    let script = format!(
+        "'{embers}' switch-client -t '{target}' && touch '{done}'",
+        embers = embers.display(),
+        done = done.display(),
+    );
+    run_cli(&server, ["send-keys", "-t", "=main:", "--enter", &script]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done.exists() {
+        assert!(Instant::now() < deadline, "switch-client did not finish");
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(shown_session(&server, main_client), "t1");
+    assert_eq!(
+        print(&server, "=t1:", "#{window_index}.#{pane_index} #{pane_id}"),
+        format!("1.1 {target}")
+    );
+
+    // A window target shows that window with the pane it last focused.
+    let client = main_client.to_string();
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "switch-client",
+            "-c",
+            &client,
+            "-t",
+            "=main:0",
+        ],
+    );
+    assert_eq!(shown_session(&server, main_client), "main");
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "switch-client",
+            "-c",
+            &client,
+            "-t",
+            "t1:0",
+        ],
+    );
+    assert_eq!(shown_session(&server, main_client), "t1");
+    assert_eq!(print(&server, "=t1:", "#{window_index}"), "0");
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "switch-client",
+            "-c",
+            &client,
+            "-t",
+            "t1:1",
+        ],
+    );
+    assert_eq!(
+        print(&server, "=t1:", "#{window_index}.#{pane_index} #{pane_id}"),
+        format!("1.1 {target}")
+    );
+    // `sess:win.pane` too.
+    run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "switch-client",
+            "-c",
+            &client,
+            "-t",
+            "=t1:1.0",
+        ],
+    );
+    assert_eq!(
+        print(&server, "=t1:", "#{window_index}.#{pane_index}"),
+        "1.0"
+    );
 
     server.shutdown().await.expect("shutdown server");
 }

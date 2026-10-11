@@ -415,7 +415,7 @@ command is window 12, not pane 12.
 | `new-window` | `-t`, `-n`, `-c`, `-d`, `-P`, `-F`, `-- command` | `-t` names the session; the window is always added last. Without `-P` it prints the window's number and title. |
 | `split-window` | `-t`, `-h`, `-v`, `-c`, `-d`, `-P`, `-F`, `-- command` | Without `-h` or `-v` the new pane goes to the right (tmux: below). Without `-P` it prints the new pane's id. No `-l`, `-p`, `-b` or `-f`. |
 | `display-popup` | `-t`, `-w`, `-h`, `-x`, `-y`, `-E`, `-EE`, `-d`, `-T`, `-P`, `-F`, `-- command` | See below. |
-| `switch-client` | `-c`, `-t`, `-n`, `-p` | No `-l`: the server does not record each client's previous session. |
+| `switch-client` | `-c`, `-t`, `-n`, `-p` | No `-l`: the server does not record each client's previous session. See below. |
 | `detach-client` | `-c` | Picks the client like `switch-client`. |
 | `select-pane` | `-t`, `-L`, `-R`, `-U`, `-D`, `-l` | Directional moves do not wrap around at the edge. No `-T`: pane titles come from the program. See below. |
 | `set-option`, `show-options` | `-p` only; `-t`, `-u`, `-o`, `-q`; `show-options -v` | See [Options](#options). |
@@ -492,7 +492,15 @@ the next when it fills the pane's width; a line that exactly fills the width
 without wrapping is joined too. Bare `capture-pane` prints the whole history
 and screen, as it always has (tmux would store it in a paste buffer).
 
-#### select-pane and select-window
+#### switch-client, select-pane and select-window
+
+As in tmux, `switch-client -t` with a window or pane shows that window with
+that pane focused: `switch-client -t %3` moves the client to the session of
+the pane showing buffer 3, makes its window current and focuses it. A target
+with `:`, `.` or `%` is read as a pane, so `work:2` shows window 2 with the
+pane it last focused; a plain word is a session, shown as it was. The server
+changes the window and focus before it switches the client, so the client
+never shows the session's old window.
 
 `select-pane -t` and `select-window -t` never move a client. `select-pane -t`
 with a pane in a window that is not its session's current one makes it the

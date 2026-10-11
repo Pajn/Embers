@@ -95,6 +95,7 @@ async fn display_message_reaches_clients_showing_the_session() {
             request_id: new_request_id(),
             client_id: None,
             session_id,
+            node_id: None,
         }))
         .await
         .expect("switch");

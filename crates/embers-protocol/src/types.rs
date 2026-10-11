@@ -666,10 +666,14 @@ pub enum ClientRequest {
         request_id: RequestId,
         client_id: Option<NonZeroU64>,
     },
+    /// Show `session_id` on the client. With `node_id`, a window (the node
+    /// a root tab shows) or pane of that session, first make it current
+    /// and focused, as tmux `switch-client -t` does for a window or pane.
     Switch {
         request_id: RequestId,
         client_id: Option<NonZeroU64>,
         session_id: SessionId,
+        node_id: Option<NodeId>,
     },
     /// tmux `display-message`: show `message` in the status line of
     /// `client_id`, or of every client whose current session is `session_id`,

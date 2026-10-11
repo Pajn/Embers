@@ -274,6 +274,38 @@ impl CliConnection {
         self.session_by_spec(&SessionSpec::Id(session_id)).await
     }
 
+    /// What `switch-client -t` shows: the session `target` names, and the
+    /// window or pane it names, if any. As in tmux, a target with `:`, `.`
+    /// or `%` is read as a pane (`work:2` is window 2 and its active pane),
+    /// anything else as a session; `@N` names a window either way.
+    pub(crate) async fn switch_target(&mut self, raw: &str) -> Result<(SessionId, Option<NodeId>)> {
+        let kind = if raw.contains([':', '.', '%']) {
+            TargetKind::Pane
+        } else {
+            TargetKind::Session
+        };
+        match Target::parse(raw, kind)? {
+            Target::Path {
+                window: WindowSpec::Current,
+                pane: PaneSpec::Current,
+                ..
+            } => Ok((self.target_session(Some(raw)).await?.id, None)),
+            Target::Buffer(_)
+            | Target::Node(_)
+            | Target::Path {
+                pane: PaneSpec::Index(_) | PaneSpec::Buffer(_),
+                ..
+            } => {
+                let pane = self.target_pane(Some(raw)).await?;
+                Ok((pane.snapshot.session.id, Some(pane.leaf_id)))
+            }
+            Target::WindowId(_) | Target::Path { .. } | Target::Word { .. } => {
+                let window = self.target_window(Some(raw)).await?;
+                Ok((window.snapshot.session.id, Some(window.child_id)))
+            }
+        }
+    }
+
     /// The window `target` names, or the current window.
     pub(crate) async fn target_window(&mut self, target: Option<&str>) -> Result<ResolvedWindow> {
         let target = match target {

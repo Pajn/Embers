@@ -447,8 +447,16 @@ fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
         ClientRequest::List { .. } | ClientRequest::Get { .. } | ClientRequest::Detach { .. } => {
             Ok(())
         }
-        ClientRequest::Switch { session_id, .. } => {
-            validate_required_session_id(*session_id, "client_request.session_id")
+        ClientRequest::Switch {
+            session_id,
+            node_id,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "client_request.session_id")?;
+            if let Some(node_id) = node_id {
+                validate_required_node_id(*node_id, "client_request.node_id")?;
+            }
+            Ok(())
         }
         ClientRequest::DisplayMessage {
             client_id,
@@ -989,6 +997,10 @@ fn encode_client_request<'a>(
         } => (Some(builder.create_string(message)), *duration_ms),
         _ => (None, 0),
     };
+    let node_id = match req {
+        ClientRequest::Switch { node_id, .. } => node_id.map_or(0, u64::from),
+        _ => 0,
+    };
 
     let client_req = fb::ClientRequest::create(
         builder,
@@ -998,6 +1010,7 @@ fn encode_client_request<'a>(
             session_id,
             message,
             duration_ms,
+            node_id,
         },
     );
 
@@ -4604,6 +4617,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                             req.session_id(),
                             "client_request.session_id",
                         )?,
+                        node_id: (req.node_id() != 0).then(|| NodeId(req.node_id())),
                     }
                 }
                 fb::ClientOp::DisplayMessage => {
@@ -5850,6 +5864,7 @@ mod tests {
             request_id: RequestId(11),
             client_id: Some(NonZeroU64::new(42).expect("non-zero client id")),
             session_id: SessionId(99),
+            node_id: Some(NodeId(7)),
         });
 
         let encoded = encode_client_message(&original).expect("encode should succeed");
@@ -6675,6 +6690,7 @@ mod tests {
             request_id: RequestId(1),
             client_id: None,
             session_id: SessionId(0),
+            node_id: None,
         }))
         .expect_err("zero switch session id should be rejected");
 

@@ -1943,6 +1943,17 @@ impl ServerState {
         Ok(())
     }
 
+    /// Show `node_id`, a pane or window of the session, like tmux
+    /// `switch-client -t` with a pane or window: focus the pane, or the pane
+    /// the window focuses when selected, which makes its window current.
+    pub fn show_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
+        self.ensure_node_belongs_to(node_id, session_id)?;
+        let leaf_id = self.resolve_focus_candidate(node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {node_id} has no focusable leaf"))
+        })?;
+        self.focus_leaf(session_id, leaf_id)
+    }
+
     /// The pane focused before the current one in the focused pane's window,
     /// like tmux's last pane: the newest pane in the session's focus history
     /// that still exists and is in that window. `None` when the focus is in

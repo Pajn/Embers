@@ -4861,6 +4861,7 @@ impl<'a> ClientRequest<'a> {
   pub const VT_SESSION_ID: ::flatbuffers::VOffsetT = 8;
   pub const VT_MESSAGE: ::flatbuffers::VOffsetT = 10;
   pub const VT_DURATION_MS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_NODE_ID: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4872,6 +4873,7 @@ impl<'a> ClientRequest<'a> {
     args: &'args ClientRequestArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ClientRequest<'bldr>> {
     let mut builder = ClientRequestBuilder::new(_fbb);
+    builder.add_node_id(args.node_id);
     builder.add_session_id(args.session_id);
     builder.add_client_id(args.client_id);
     builder.add_duration_ms(args.duration_ms);
@@ -4916,6 +4918,13 @@ impl<'a> ClientRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(ClientRequest::VT_DURATION_MS, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn node_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ClientRequest::VT_NODE_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ClientRequest<'_> {
@@ -4929,6 +4938,7 @@ impl ::flatbuffers::Verifiable for ClientRequest<'_> {
      .visit_field::<u64>("session_id", Self::VT_SESSION_ID, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("message", Self::VT_MESSAGE, false)?
      .visit_field::<u32>("duration_ms", Self::VT_DURATION_MS, false)?
+     .visit_field::<u64>("node_id", Self::VT_NODE_ID, false)?
      .finish();
     Ok(())
   }
@@ -4939,6 +4949,7 @@ pub struct ClientRequestArgs<'a> {
     pub session_id: u64,
     pub message: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub duration_ms: u32,
+    pub node_id: u64,
 }
 impl<'a> Default for ClientRequestArgs<'a> {
   #[inline]
@@ -4949,6 +4960,7 @@ impl<'a> Default for ClientRequestArgs<'a> {
       session_id: 0,
       message: None,
       duration_ms: 0,
+      node_id: 0,
     }
   }
 }
@@ -4979,6 +4991,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ClientRequestBuilder<'a, 'b, 
     self.fbb_.push_slot::<u32>(ClientRequest::VT_DURATION_MS, duration_ms, 0);
   }
   #[inline]
+  pub fn add_node_id(&mut self, node_id: u64) {
+    self.fbb_.push_slot::<u64>(ClientRequest::VT_NODE_ID, node_id, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ClientRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ClientRequestBuilder {
@@ -5001,6 +5017,7 @@ impl ::core::fmt::Debug for ClientRequest<'_> {
       ds.field("session_id", &self.session_id());
       ds.field("message", &self.message());
       ds.field("duration_ms", &self.duration_ms());
+      ds.field("node_id", &self.node_id());
       ds.finish()
   }
 }

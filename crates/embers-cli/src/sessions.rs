@@ -153,6 +153,7 @@ impl CliConnection {
                 request_id: new_request_id(),
                 client_id: Some(client_id),
                 session_id: snapshot.session.id,
+                node_id: None,
             }))
             .await?;
             return Ok(());
