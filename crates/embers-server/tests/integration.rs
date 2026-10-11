@@ -3,6 +3,7 @@ mod buffer_move;
 mod client_sessions;
 mod exited_buffers;
 mod floating_windows;
+mod graphics_replies;
 mod keeper_lifetime;
 mod keeper_spawn;
 mod model_state;

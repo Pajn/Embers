@@ -447,6 +447,9 @@ struct Subscription {
 
 struct ClientConnection {
     current_session_id: Option<embers_core::SessionId>,
+    /// Whether the client forwards kitty graphics queries to a host terminal
+    /// that answers them (`ClientRequest::SetHostGraphics`).
+    host_graphics: bool,
     shutdown: Option<oneshot::Sender<()>>,
     stopped: Option<oneshot::Receiver<()>>,
 }
@@ -494,6 +497,9 @@ struct Runtime {
     last_saved_workspace: Mutex<Option<PersistedWorkspace>>,
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
+    /// Whether any client forwards kitty graphics queries to a host terminal
+    /// that answers them, as every keeper was last told.
+    host_graphics: AtomicBool,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
     shutdown: ShutdownSignal,
@@ -595,6 +601,7 @@ impl Runtime {
             last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
+            host_graphics: AtomicBool::new(false),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
             shutdown: ShutdownSignal::new(),
@@ -703,6 +710,12 @@ impl Runtime {
             .lock()
             .await
             .insert(buffer_id, runtime.clone());
+        // A keeper starts out holding no replies; tell this one if it should.
+        if self.host_graphics.load(Ordering::Acquire)
+            && let Err(error) = runtime.set_host_graphics(true).await
+        {
+            debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
+        }
         let exited = self
             .state
             .lock()
@@ -1038,6 +1051,7 @@ impl Runtime {
             connection_id,
             ClientConnection {
                 current_session_id: None,
+                host_graphics: false,
                 shutdown: Some(shutdown),
                 stopped: Some(stopped),
             },
@@ -1267,6 +1281,20 @@ impl Runtime {
                     Err(error) => mux_error_response(Some(request_id), error),
                 };
                 (response, Vec::new(), None)
+            }
+            ClientRequest::SetHostGraphics {
+                request_id,
+                enabled,
+            } => {
+                if let Some(client) = self.clients.lock().await.get_mut(&connection_id) {
+                    client.host_graphics = enabled;
+                }
+                self.sync_host_graphics().await;
+                (
+                    ServerResponse::Ok(OkResponse { request_id }),
+                    Vec::new(),
+                    None,
+                )
             }
             ClientRequest::Switch {
                 request_id,
@@ -4308,6 +4336,39 @@ impl Runtime {
             .lock()
             .await
             .retain(|_, subscription| subscription.connection_id != connection_id);
+        self.sync_host_graphics().await;
+    }
+
+    /// Tell every keeper whether any client now forwards kitty graphics
+    /// queries to a host terminal that answers them, when that changed. While
+    /// one does, a keeper holds a pane's replies to the queries that follow a
+    /// graphics query until the host's answer arrives (see
+    /// `crate::reply_hold`); otherwise it answers at once, as before. It is not
+    /// worked out per pane: a pane no such client shows waits out the hold's
+    /// timeout instead.
+    async fn sync_host_graphics(&self) {
+        let enabled = self
+            .clients
+            .lock()
+            .await
+            .values()
+            .any(|client| client.host_graphics);
+        if self.host_graphics.swap(enabled, Ordering::AcqRel) == enabled {
+            return;
+        }
+        let runtimes: Vec<_> = self
+            .buffer_runtimes
+            .lock()
+            .await
+            .iter()
+            .map(|(buffer_id, runtime)| (*buffer_id, runtime.clone()))
+            .collect();
+        for (buffer_id, runtime) in runtimes {
+            // A keeper that predates this rejects it, and never holds replies.
+            if let Err(error) = runtime.set_host_graphics(enabled).await {
+                debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
+            }
+        }
     }
 }
 
@@ -5291,6 +5352,7 @@ mod tests {
                 connection_id,
                 super::ClientConnection {
                     current_session_id: session,
+                    host_graphics: false,
                     shutdown: None,
                     stopped: None,
                 },

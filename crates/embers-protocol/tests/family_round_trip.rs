@@ -155,6 +155,14 @@ fn client_message_families_round_trip() {
             message: String::new(),
             duration_ms: 0,
         }),
+        ClientMessage::Client(ClientRequest::SetHostGraphics {
+            request_id: RequestId(99),
+            enabled: true,
+        }),
+        ClientMessage::Client(ClientRequest::SetHostGraphics {
+            request_id: RequestId(100),
+            enabled: false,
+        }),
         ClientMessage::Buffer(BufferRequest::List {
             request_id: RequestId(11),
             session_id: Some(SessionId(10)),

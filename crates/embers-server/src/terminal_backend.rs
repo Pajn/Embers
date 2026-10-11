@@ -81,6 +81,10 @@ pub trait TerminalBackend: Send {
     /// Combining the drains keeps the read hot path to one lock acquisition
     /// against the client-thread readers of the same state.
     fn take_events(&mut self) -> BackendEvents;
+    /// Drain only the pending terminal replies, leaving activity and clipboard
+    /// for [`TerminalBackend::take_events`]. The keeper uses it to tell the
+    /// replies to queries before a kitty graphics query from those after it.
+    fn take_replies(&mut self) -> Vec<u8>;
     fn take_damage(&mut self) -> BackendDamage;
     /// Answer a terminal query the emulator itself does not handle. The reply is
     /// queued with the emulator's own replies (drained by
@@ -144,6 +148,20 @@ impl RawByteRouter {
         bytes: &[u8],
     ) -> Vec<PassthroughWrite> {
         let mut writes = Vec::new();
+        self.route_output_with(backend, bytes, |_, write| writes.push(write));
+        writes
+    }
+
+    /// [`RawByteRouter::route_output`], handing each sequence for the host to
+    /// `on_write` as soon as it is taken out, together with the backend as it
+    /// is at that point: everything before the sequence has been ingested and
+    /// nothing after it.
+    pub fn route_output_with(
+        &mut self,
+        backend: &mut dyn TerminalBackend,
+        bytes: &[u8],
+        mut on_write: impl FnMut(&mut dyn TerminalBackend, PassthroughWrite),
+    ) {
         let mut forward = Vec::with_capacity(bytes.len());
         for &byte in bytes {
             if let Some(payload) = self.passthrough.step(byte, &mut forward) {
@@ -151,14 +169,17 @@ impl RawByteRouter {
                 // the cursor is where the program left it.
                 self.ingest(backend, &forward);
                 forward.clear();
-                writes.push(PassthroughWrite {
-                    bytes: payload,
-                    cursor: backend.cursor_position(),
-                });
+                let cursor = backend.cursor_position();
+                on_write(
+                    backend,
+                    PassthroughWrite {
+                        bytes: payload,
+                        cursor,
+                    },
+                );
             }
         }
         self.ingest(backend, &forward);
-        writes
     }
 
     fn ingest(&mut self, backend: &mut dyn TerminalBackend, bytes: &[u8]) {
@@ -1226,6 +1247,16 @@ impl TerminalBackend for AlacrittyTerminalBackend {
         }
     }
 
+    fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(
+            &mut self
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pty_write,
+        )
+    }
+
     fn answer_query(&mut self, query: &TerminalQuery) {
         let mut events = self
             .events
@@ -1517,6 +1548,10 @@ mod tests {
                 replies: Vec::new(),
                 clipboard: None,
             }
+        }
+
+        fn take_replies(&mut self) -> Vec<u8> {
+            Vec::new()
         }
 
         fn answer_query(&mut self, query: &TerminalQuery) {
@@ -2162,6 +2197,27 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn route_output_with_shows_the_backend_at_each_write() {
+        let mut router = RawByteRouter::default();
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut seen = Vec::new();
+
+        router.route_output_with(
+            &mut backend,
+            b"\x1b[5n\x1b_Gi=31,a=q;AAAA\x1b\\\x1b[c",
+            |backend, write| seen.push((backend.take_replies(), write.bytes)),
+        );
+
+        // The status report was answered before the graphics query, DA1
+        // after it.
+        assert_eq!(
+            seen,
+            vec![(b"\x1b[0n".to_vec(), b"\x1b_Gi=31,a=q;AAAA\x1b\\".to_vec())]
+        );
+        assert!(backend.take_events().replies.starts_with(b"\x1b[?"));
     }
 
     /// `payload` wrapped for tmux passthrough, with every ESC doubled.

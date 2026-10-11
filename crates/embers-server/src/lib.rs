@@ -6,6 +6,7 @@ mod config;
 mod environment;
 mod persist;
 mod protocol;
+mod reply_hold;
 mod restore;
 mod runtime_dir;
 mod server;

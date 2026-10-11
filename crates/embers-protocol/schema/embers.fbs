@@ -148,6 +148,7 @@ enum ClientOp : ubyte {
   Detach = 2,
   Switch = 3,
   DisplayMessage = 4,
+  SetHostGraphics = 5,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -343,6 +344,9 @@ table ClientRequest {
   // DisplayMessage: the text to show and for how long (0 = client default).
   message:string;
   duration_ms:uint = 0;
+  // SetHostGraphics: whether the client forwards kitty graphics queries to a
+  // host terminal that answers them.
+  enabled:bool = false;
 }
 
 table PingResponse {

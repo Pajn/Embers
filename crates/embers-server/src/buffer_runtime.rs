@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,7 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
+use crate::reply_hold::ReplyHold;
 use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
 
 /// How long spawning a buffer waits for its runtime keeper to report that it
@@ -211,6 +212,14 @@ enum KeeperRequest {
     /// a `passthrough_sequence`.
     Passthrough {
         after: u64,
+    },
+    /// Whether some client forwards kitty graphics queries to a host terminal
+    /// that answers them, so the keeper should hold the replies that follow a
+    /// graphics query until the answer arrives (see `crate::reply_hold`). Off
+    /// until a server says otherwise, and again once the server disconnects.
+    /// An older keeper rejects it and never holds replies.
+    SetHostGraphics {
+        enabled: bool,
     },
     /// The server has saved a workspace that no longer needs this keeper: the
     /// buffer is recorded as exited, or its record no longer refers to the
@@ -413,6 +422,9 @@ impl KeeperScrollbackSlice {
 
 struct KeeperRuntime {
     surface: Mutex<KeeperSurface>,
+    /// Signalled, with the surface lock, when the surface's reply hold starts
+    /// waiting, so the hold thread wakes up for its deadline.
+    reply_hold_changed: Condvar,
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// All PTY-master writes are submitted here and serialized by the writer
     /// thread that owns the underlying writer (see `keeper_writer_loop`). Keeping
@@ -442,6 +454,8 @@ struct KeeperSurface {
     /// Passthrough writes the router took out of the output, kept under the
     /// surface lock the read loop already holds.
     passthrough: PassthroughQueue,
+    /// Replies held behind forwarded kitty graphics queries.
+    reply_hold: ReplyHold,
 }
 
 struct KeeperPipe {
@@ -662,6 +676,21 @@ impl BufferRuntimeHandle {
                 .lock()
                 .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
             connection.resize(size)
+        })
+        .await
+        .map_err(|error| MuxError::internal(error.to_string()))?
+    }
+
+    /// Tell the keeper whether some client forwards kitty graphics queries to
+    /// a host terminal that answers them (see `KeeperRequest::SetHostGraphics`).
+    pub async fn set_host_graphics(&self, enabled: bool) -> Result<()> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = inner
+                .connection
+                .lock()
+                .map_err(|_| MuxError::internal("buffer runtime connection lock poisoned"))?;
+            connection.set_host_graphics(enabled)
         })
         .await
         .map_err(|error| MuxError::internal(error.to_string()))?
@@ -933,6 +962,16 @@ impl KeeperConnection {
         }
     }
 
+    fn set_host_graphics(&mut self, enabled: bool) -> Result<()> {
+        match self.request(KeeperRequest::SetHostGraphics { enabled })? {
+            KeeperResponse::Ok => Ok(()),
+            other => Err(MuxError::protocol(format!(
+                "unexpected runtime keeper host-graphics response: {other_kind}",
+                other_kind = keeper_response_kind(&other)
+            ))),
+        }
+    }
+
     fn exit_recorded(&mut self) -> Result<()> {
         match self.request(KeeperRequest::ExitRecorded)? {
             KeeperResponse::Ok => Ok(()),
@@ -991,18 +1030,36 @@ impl KeeperSurface {
             backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
             size,
             passthrough: PassthroughQueue::default(),
+            reply_hold: ReplyHold::default(),
         }
     }
 
-    /// Ingest PTY output and return the resulting activity, any terminal replies
-    /// the emulator generated (device-attribute / cursor-position / mode
+    /// Ingest PTY output and return the resulting activity, the terminal
+    /// replies to write now (device-attribute / cursor-position / mode
     /// queries), and any clipboard write. The caller writes the replies back to
     /// the PTY master. Passthrough sequences are queued for the server.
-    fn route_output(&mut self, bytes: &[u8]) -> BackendEvents {
-        for write in self.router.route_output(self.backend.as_mut(), bytes) {
-            self.passthrough.push(write);
-        }
-        self.backend.take_events()
+    ///
+    /// Replies to queries that follow a forwarded kitty graphics query are held
+    /// back by the reply hold rather than returned (see `crate::reply_hold`).
+    fn route_output(&mut self, bytes: &[u8], now: Instant) -> BackendEvents {
+        let Self {
+            router,
+            backend,
+            passthrough,
+            reply_hold,
+            ..
+        } = self;
+        let mut replies = Vec::new();
+        router.route_output_with(backend.as_mut(), bytes, |backend, write| {
+            // Replies to what came before the write are not held behind it.
+            replies.extend(reply_hold.replies(backend.take_replies()));
+            reply_hold.forwarded(&write.bytes, now);
+            passthrough.push(write);
+        });
+        let mut events = backend.take_events();
+        replies.extend(reply_hold.replies(std::mem::take(&mut events.replies)));
+        events.replies = replies;
+        events
     }
 
     fn resize(&mut self, size: PtySize) {
@@ -1369,6 +1426,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
 
     let runtime = Arc::new(KeeperRuntime {
         surface: Mutex::new(KeeperSurface::new(cli.size)),
+        reply_hold_changed: Condvar::new(),
         master: Mutex::new(pair.master),
         write_tx,
         killer: Mutex::new(killer),
@@ -1386,6 +1444,11 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     let _reader = thread::Builder::new()
         .name(format!("keeper-reader-{}", cli.socket_path.display()))
         .spawn(move || keeper_read_loop(reader_runtime, reader))
+        .map_err(|error| MuxError::internal(error.to_string()))?;
+    let hold_runtime = runtime.clone();
+    let _reply_hold = thread::Builder::new()
+        .name(format!("keeper-reply-hold-{}", cli.socket_path.display()))
+        .spawn(move || keeper_reply_hold_loop(hold_runtime))
         .map_err(|error| MuxError::internal(error.to_string()))?;
     let wait_runtime = runtime.clone();
     let wait_join = thread::Builder::new()
@@ -1429,7 +1492,10 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         // of the PTY slave has closed it, which a surviving grandchild may
         // never do.
         let (mut stream, _) = listener.accept()?;
-        if handle_keeper_client(runtime.clone(), &mut stream)? {
+        let shutdown = handle_keeper_client(runtime.clone(), &mut stream)?;
+        // Without a server no client forwards graphics queries any more.
+        runtime.set_host_graphics(false);
+        if shutdown {
             // The server asked this keeper to shut down (kill-server).
             debug!(
                 socket_path = %cli.socket_path.display(),
@@ -1541,6 +1607,10 @@ fn handle_keeper_request(
             ),
             false,
         )),
+        KeeperRequest::SetHostGraphics { enabled } => {
+            runtime.set_host_graphics(enabled);
+            Ok((KeeperResponse::Ok, false))
+        }
         KeeperRequest::ExitRecorded => {
             runtime.exit_recorded.store(true, Ordering::Release);
             Ok((KeeperResponse::Ok, false))
@@ -1651,13 +1721,47 @@ impl KeeperRuntime {
 
     fn write(&self, bytes: Vec<u8>) -> Result<()> {
         self.ensure_running()?;
+        // Input that answers the pane's pending kitty graphics queries lets the
+        // replies held behind them go, right after it.
+        let released = self
+            .surface
+            .lock()
+            .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?
+            .reply_hold
+            .input(&bytes);
         // Hand off to the writer thread. This is a bounded send: it blocks only
         // when the queue is full (backpressure from a child that is not reading
         // its input) and never holds the writer, so it cannot stall other writers
         // or the read loop. A send error means the writer thread is gone.
         self.write_tx
             .send(bytes)
-            .map_err(|_| MuxError::internal("runtime keeper writer channel closed"))
+            .map_err(|_| MuxError::internal("runtime keeper writer channel closed"))?;
+        self.write_replies(released);
+        Ok(())
+    }
+
+    /// Record whether some client forwards kitty graphics queries to a host
+    /// terminal that answers them. Turning it off lets held replies go.
+    fn set_host_graphics(&self, enabled: bool) {
+        let released = self
+            .surface
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .reply_hold
+            .set_enabled(enabled);
+        self.write_replies(released);
+    }
+
+    /// Hand terminal replies to the writer thread without blocking, as the read
+    /// loop does: if the queue is full (the writer is stuck on a child that is
+    /// not reading its input) they are dropped.
+    fn write_replies(&self, replies: Vec<u8>) {
+        if replies.is_empty() {
+            return;
+        }
+        if let Err(TrySendError::Full(_)) = self.write_tx.try_send(replies) {
+            debug!("terminal query reply queue full; dropping reply");
+        }
     }
 
     fn resize(&self, size: PtySize) -> Result<()> {
@@ -1802,7 +1906,10 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     activity,
                     replies,
                     clipboard,
-                } = surface.route_output(bytes);
+                } = surface.route_output(bytes, Instant::now());
+                if surface.reply_hold.deadline().is_some() {
+                    runtime.reply_hold_changed.notify_one();
+                }
                 if let Ok(mut pipe) = runtime.pipe.lock()
                     && let Some(pipe) = pipe.as_mut()
                 {
@@ -1843,6 +1950,32 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
+    }
+}
+
+/// Let replies held behind kitty graphics queries go once their deadline
+/// passes without an answer from the host terminal. Sleeps until the read loop
+/// signals that the hold started waiting, then until its deadline.
+fn keeper_reply_hold_loop(runtime: Arc<KeeperRuntime>) {
+    let Ok(mut surface) = runtime.surface.lock() else {
+        return;
+    };
+    loop {
+        let now = Instant::now();
+        let released = surface.reply_hold.expire(now);
+        runtime.write_replies(released);
+        let waited = match surface.reply_hold.deadline() {
+            Some(deadline) => runtime
+                .reply_hold_changed
+                .wait_timeout(surface, deadline.saturating_duration_since(now))
+                .ok()
+                .map(|(surface, _)| surface),
+            None => runtime.reply_hold_changed.wait(surface).ok(),
+        };
+        let Some(next) = waited else {
+            return;
+        };
+        surface = next;
     }
 }
 
@@ -2689,10 +2822,95 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// What ratatui-image's `Picker::from_query_stdio` writes in one burst: a
+    /// kitty graphics query, DA1, the cell size query and a status report,
+    /// whose reply it reads up to.
+    const GRAPHICS_DETECTION: &[u8] =
+        b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c\x1b[16t\x1b[5n";
+
+    /// The emulator's replies to [`GRAPHICS_DETECTION`] in a pane of 9 by 18
+    /// pixel cells.
+    const DETECTION_REPLIES: &[u8] = b"\x1b[?6c\x1b[6;18;9t\x1b[0n";
+
+    fn detecting_surface(host_graphics: bool) -> super::KeeperSurface {
+        let mut surface = super::KeeperSurface::new(embers_core::PtySize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 720,
+            pixel_height: 432,
+        });
+        assert!(surface.reply_hold.set_enabled(host_graphics).is_empty());
+        surface
+    }
+
+    #[test]
+    fn detection_replies_wait_for_the_hosts_graphics_answer() {
+        let mut surface = detecting_surface(true);
+        // A reply to a query before the graphics query is not held.
+        let events = surface.route_output(b"\x1b[5n", Instant::now());
+        assert_eq!(events.replies, b"\x1b[0n");
+
+        let events = surface.route_output(GRAPHICS_DETECTION, Instant::now());
+        assert!(events.replies.is_empty(), "{:?}", events.replies);
+        let forwarded = surface.passthrough.take_after(0);
+        assert_eq!(
+            forwarded
+                .iter()
+                .map(|write| &write.bytes[..])
+                .collect::<Vec<_>>(),
+            vec![&b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"[..]]
+        );
+
+        // The host's answer reaches the pane as input; the replies follow it.
+        assert_eq!(
+            surface.reply_hold.input(b"\x1b_Gi=31;OK\x1b\\"),
+            DETECTION_REPLIES
+        );
+        assert_eq!(
+            surface.route_output(b"\x1b[5n", Instant::now()).replies,
+            b"\x1b[0n"
+        );
+    }
+
+    #[test]
+    fn detection_replies_go_out_when_the_host_stays_silent() {
+        let mut surface = detecting_surface(true);
+        let sent = Instant::now();
+        assert!(
+            surface
+                .route_output(GRAPHICS_DETECTION, sent)
+                .replies
+                .is_empty()
+        );
+
+        let deadline = surface.reply_hold.deadline().expect("replies are held");
+        assert_eq!(deadline, sent + crate::reply_hold::REPLY_HOLD_TIMEOUT);
+        assert!(
+            surface
+                .reply_hold
+                .expire(deadline - Duration::from_millis(1))
+                .is_empty()
+        );
+        assert_eq!(surface.reply_hold.expire(deadline), DETECTION_REPLIES);
+    }
+
+    #[test]
+    fn detection_replies_are_immediate_without_host_graphics() {
+        let mut surface = detecting_surface(false);
+        let events = surface.route_output(GRAPHICS_DETECTION, Instant::now());
+        // No graphics answer, then the emulator's: the program sees no kitty
+        // graphics support, at once.
+        assert_eq!(events.replies, DETECTION_REPLIES);
+        assert_eq!(surface.reply_hold.deadline(), None);
+    }
+
     #[test]
     fn scrollback_slice_carries_hyperlinks_through_keeper_json() {
         let mut surface = super::KeeperSurface::new(embers_core::PtySize::new(20, 2));
-        let _ = surface.route_output(b"\x1b]8;id=x;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+        let _ = surface.route_output(
+            b"\x1b]8;id=x;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+            Instant::now(),
+        );
 
         let slice = surface.capture_scrollback_slice(0, 1);
         let json = serde_json::to_string(&slice).expect("serialize slice");

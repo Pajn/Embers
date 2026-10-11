@@ -1073,15 +1073,16 @@ impl ::flatbuffers::SimpleToVerifyInSlice for InputOp {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CLIENT_OP: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_CLIENT_OP: u8 = 4;
+pub const ENUM_MAX_CLIENT_OP: u8 = 5;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_CLIENT_OP: [ClientOp; 5] = [
+pub const ENUM_VALUES_CLIENT_OP: [ClientOp; 6] = [
   ClientOp::List,
   ClientOp::Get,
   ClientOp::Detach,
   ClientOp::Switch,
   ClientOp::DisplayMessage,
+  ClientOp::SetHostGraphics,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -1094,15 +1095,17 @@ impl ClientOp {
   pub const Detach: Self = Self(2);
   pub const Switch: Self = Self(3);
   pub const DisplayMessage: Self = Self(4);
+  pub const SetHostGraphics: Self = Self(5);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 4;
+  pub const ENUM_MAX: u8 = 5;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::List,
     Self::Get,
     Self::Detach,
     Self::Switch,
     Self::DisplayMessage,
+    Self::SetHostGraphics,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -1112,6 +1115,7 @@ impl ClientOp {
       Self::Detach => Some("Detach"),
       Self::Switch => Some("Switch"),
       Self::DisplayMessage => Some("DisplayMessage"),
+      Self::SetHostGraphics => Some("SetHostGraphics"),
       _ => None,
     }
   }
@@ -4925,6 +4929,7 @@ impl<'a> ClientRequest<'a> {
   pub const VT_SESSION_ID: ::flatbuffers::VOffsetT = 8;
   pub const VT_MESSAGE: ::flatbuffers::VOffsetT = 10;
   pub const VT_DURATION_MS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_ENABLED: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4940,6 +4945,7 @@ impl<'a> ClientRequest<'a> {
     builder.add_client_id(args.client_id);
     builder.add_duration_ms(args.duration_ms);
     if let Some(x) = args.message { builder.add_message(x); }
+    builder.add_enabled(args.enabled);
     builder.add_op(args.op);
     builder.finish()
   }
@@ -4980,6 +4986,13 @@ impl<'a> ClientRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(ClientRequest::VT_DURATION_MS, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn enabled(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(ClientRequest::VT_ENABLED, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ClientRequest<'_> {
@@ -4993,6 +5006,7 @@ impl ::flatbuffers::Verifiable for ClientRequest<'_> {
      .visit_field::<u64>("session_id", Self::VT_SESSION_ID, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("message", Self::VT_MESSAGE, false)?
      .visit_field::<u32>("duration_ms", Self::VT_DURATION_MS, false)?
+     .visit_field::<bool>("enabled", Self::VT_ENABLED, false)?
      .finish();
     Ok(())
   }
@@ -5003,6 +5017,7 @@ pub struct ClientRequestArgs<'a> {
     pub session_id: u64,
     pub message: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub duration_ms: u32,
+    pub enabled: bool,
 }
 impl<'a> Default for ClientRequestArgs<'a> {
   #[inline]
@@ -5013,6 +5028,7 @@ impl<'a> Default for ClientRequestArgs<'a> {
       session_id: 0,
       message: None,
       duration_ms: 0,
+      enabled: false,
     }
   }
 }
@@ -5043,6 +5059,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ClientRequestBuilder<'a, 'b, 
     self.fbb_.push_slot::<u32>(ClientRequest::VT_DURATION_MS, duration_ms, 0);
   }
   #[inline]
+  pub fn add_enabled(&mut self, enabled: bool) {
+    self.fbb_.push_slot::<bool>(ClientRequest::VT_ENABLED, enabled, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ClientRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ClientRequestBuilder {
@@ -5065,6 +5085,7 @@ impl ::core::fmt::Debug for ClientRequest<'_> {
       ds.field("session_id", &self.session_id());
       ds.field("message", &self.message());
       ds.field("duration_ms", &self.duration_ms());
+      ds.field("enabled", &self.enabled());
       ds.finish()
   }
 }

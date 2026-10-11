@@ -439,9 +439,10 @@ fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
 
 fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
     match req {
-        ClientRequest::List { .. } | ClientRequest::Get { .. } | ClientRequest::Detach { .. } => {
-            Ok(())
-        }
+        ClientRequest::List { .. }
+        | ClientRequest::Get { .. }
+        | ClientRequest::Detach { .. }
+        | ClientRequest::SetHostGraphics { .. } => Ok(()),
         ClientRequest::Switch { session_id, .. } => {
             validate_required_session_id(*session_id, "client_request.session_id")
         }
@@ -975,7 +976,9 @@ fn encode_client_request<'a>(
             client_id.map(|id| id.get()).unwrap_or(0),
             session_id.map_or(0, u64::from),
         ),
+        ClientRequest::SetHostGraphics { .. } => (fb::ClientOp::SetHostGraphics, 0, 0),
     };
+    let enabled = matches!(req, ClientRequest::SetHostGraphics { enabled: true, .. });
     let (message, duration_ms) = match req {
         ClientRequest::DisplayMessage {
             message,
@@ -993,6 +996,7 @@ fn encode_client_request<'a>(
             session_id,
             message,
             duration_ms,
+            enabled,
         },
     );
 
@@ -4610,6 +4614,10 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         duration_ms: req.duration_ms(),
                     }
                 }
+                fb::ClientOp::SetHostGraphics => ClientRequest::SetHostGraphics {
+                    request_id,
+                    enabled: req.enabled(),
+                },
                 _ => return Err(ProtocolError::InvalidMessage("unknown client op")),
             };
             Ok(ClientMessage::Client(request))
