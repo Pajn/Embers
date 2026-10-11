@@ -4225,6 +4225,7 @@ impl<'a> FloatingRequest<'a> {
   pub const VT_HEIGHT: ::flatbuffers::VOffsetT = 22;
   pub const VT_FOCUS: ::flatbuffers::VOffsetT = 24;
   pub const VT_CLOSE_ON_EMPTY: ::flatbuffers::VOffsetT = 26;
+  pub const VT_BORDER: ::flatbuffers::VOffsetT = 28;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4245,6 +4246,7 @@ impl<'a> FloatingRequest<'a> {
     builder.add_width(args.width);
     builder.add_y(args.y);
     builder.add_x(args.x);
+    builder.add_border(args.border);
     builder.add_close_on_empty(args.close_on_empty);
     builder.add_focus(args.focus);
     builder.add_op(args.op);
@@ -4336,6 +4338,13 @@ impl<'a> FloatingRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(FloatingRequest::VT_CLOSE_ON_EMPTY, Some(true)).unwrap()}
   }
+  #[inline]
+  pub fn border(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(FloatingRequest::VT_BORDER, Some(true)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for FloatingRequest<'_> {
@@ -4356,6 +4365,7 @@ impl ::flatbuffers::Verifiable for FloatingRequest<'_> {
      .visit_field::<u16>("height", Self::VT_HEIGHT, false)?
      .visit_field::<bool>("focus", Self::VT_FOCUS, false)?
      .visit_field::<bool>("close_on_empty", Self::VT_CLOSE_ON_EMPTY, false)?
+     .visit_field::<bool>("border", Self::VT_BORDER, false)?
      .finish();
     Ok(())
   }
@@ -4373,6 +4383,7 @@ pub struct FloatingRequestArgs<'a> {
     pub height: u16,
     pub focus: bool,
     pub close_on_empty: bool,
+    pub border: bool,
 }
 impl<'a> Default for FloatingRequestArgs<'a> {
   #[inline]
@@ -4390,6 +4401,7 @@ impl<'a> Default for FloatingRequestArgs<'a> {
       height: 0,
       focus: true,
       close_on_empty: true,
+      border: true,
     }
   }
 }
@@ -4448,6 +4460,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FloatingRequestBuilder<'a, 'b
     self.fbb_.push_slot::<bool>(FloatingRequest::VT_CLOSE_ON_EMPTY, close_on_empty, true);
   }
   #[inline]
+  pub fn add_border(&mut self, border: bool) {
+    self.fbb_.push_slot::<bool>(FloatingRequest::VT_BORDER, border, true);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> FloatingRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     FloatingRequestBuilder {
@@ -4477,6 +4493,7 @@ impl ::core::fmt::Debug for FloatingRequest<'_> {
       ds.field("height", &self.height());
       ds.field("focus", &self.focus());
       ds.field("close_on_empty", &self.close_on_empty());
+      ds.field("border", &self.border());
       ds.finish()
   }
 }
@@ -7051,6 +7068,7 @@ impl<'a> FloatingRecord<'a> {
   pub const VT_FOCUSED: ::flatbuffers::VOffsetT = 20;
   pub const VT_VISIBLE: ::flatbuffers::VOffsetT = 22;
   pub const VT_CLOSE_ON_EMPTY: ::flatbuffers::VOffsetT = 24;
+  pub const VT_BORDER: ::flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -7070,6 +7088,7 @@ impl<'a> FloatingRecord<'a> {
     builder.add_width(args.width);
     builder.add_y(args.y);
     builder.add_x(args.x);
+    builder.add_border(args.border);
     builder.add_close_on_empty(args.close_on_empty);
     builder.add_visible(args.visible);
     builder.add_focused(args.focused);
@@ -7154,6 +7173,13 @@ impl<'a> FloatingRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(FloatingRecord::VT_CLOSE_ON_EMPTY, Some(true)).unwrap()}
   }
+  #[inline]
+  pub fn border(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(FloatingRecord::VT_BORDER, Some(true)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for FloatingRecord<'_> {
@@ -7173,6 +7199,7 @@ impl ::flatbuffers::Verifiable for FloatingRecord<'_> {
      .visit_field::<bool>("focused", Self::VT_FOCUSED, false)?
      .visit_field::<bool>("visible", Self::VT_VISIBLE, false)?
      .visit_field::<bool>("close_on_empty", Self::VT_CLOSE_ON_EMPTY, false)?
+     .visit_field::<bool>("border", Self::VT_BORDER, false)?
      .finish();
     Ok(())
   }
@@ -7189,6 +7216,7 @@ pub struct FloatingRecordArgs<'a> {
     pub focused: bool,
     pub visible: bool,
     pub close_on_empty: bool,
+    pub border: bool,
 }
 impl<'a> Default for FloatingRecordArgs<'a> {
   #[inline]
@@ -7205,6 +7233,7 @@ impl<'a> Default for FloatingRecordArgs<'a> {
       focused: false,
       visible: true,
       close_on_empty: true,
+      border: true,
     }
   }
 }
@@ -7259,6 +7288,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> FloatingRecordBuilder<'a, 'b,
     self.fbb_.push_slot::<bool>(FloatingRecord::VT_CLOSE_ON_EMPTY, close_on_empty, true);
   }
   #[inline]
+  pub fn add_border(&mut self, border: bool) {
+    self.fbb_.push_slot::<bool>(FloatingRecord::VT_BORDER, border, true);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> FloatingRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     FloatingRecordBuilder {
@@ -7287,6 +7320,7 @@ impl ::core::fmt::Debug for FloatingRecord<'_> {
       ds.field("focused", &self.focused());
       ds.field("visible", &self.visible());
       ds.field("close_on_empty", &self.close_on_empty());
+      ds.field("border", &self.border());
       ds.finish()
   }
 }

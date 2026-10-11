@@ -254,6 +254,7 @@ fn example_config_popups_cover_ninety_percent_in_the_pane_directory() {
                     title: Some(title.to_owned()),
                     focus: true,
                     close_on_empty: true,
+                    border: true,
                 },
             }],
             "{name}"

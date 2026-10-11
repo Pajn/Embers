@@ -223,7 +223,14 @@ pub struct PersistedFloatingWindow {
     pub focused: bool,
     pub visible: bool,
     pub close_on_empty: bool,
+    /// Workspaces saved before borderless popups have framed ones.
+    #[serde(default = "framed")]
+    pub border: bool,
     pub last_focused_leaf: Option<u64>,
+}
+
+fn framed() -> bool {
+    true
 }
 
 pub fn load_workspace(path: &Path) -> Result<Option<ServerState>> {
@@ -603,6 +610,7 @@ pub fn persisted_floating(window: &FloatingWindow) -> PersistedFloatingWindow {
         focused: window.focused,
         visible: window.visible,
         close_on_empty: window.close_on_empty,
+        border: window.border,
         last_focused_leaf: window.last_focused_leaf.map(|id| id.0),
     }
 }
@@ -617,6 +625,7 @@ pub fn restored_floating(window: PersistedFloatingWindow) -> FloatingWindow {
         focused: window.focused,
         visible: window.visible,
         close_on_empty: window.close_on_empty,
+        border: window.border,
         last_focused_leaf: window.last_focused_leaf.map(NodeId),
     }
 }
@@ -763,6 +772,31 @@ mod tests {
     use super::*;
 
     use tempfile::tempdir;
+
+    #[test]
+    fn popups_keep_their_border_and_older_workspaces_have_framed_ones() {
+        let older = serde_json::json!({
+            "id": 1,
+            "session_id": 1,
+            "root_node": 2,
+            "title": null,
+            "geometry": { "x": 0, "y": 0, "width": 20, "height": 6 },
+            "focused": true,
+            "visible": true,
+            "close_on_empty": true,
+            "last_focused_leaf": null
+        });
+        let window: PersistedFloatingWindow =
+            serde_json::from_value(older).expect("older popup loads");
+        assert!(window.border);
+
+        let mut borderless = restored_floating(window);
+        borderless.border = false;
+        let saved = serde_json::to_value(persisted_floating(&borderless)).expect("popup saves");
+        let reloaded: PersistedFloatingWindow =
+            serde_json::from_value(saved).expect("popup reloads");
+        assert!(!restored_floating(reloaded).border);
+    }
 
     #[test]
     fn save_workspace_writes_current_format_version() {

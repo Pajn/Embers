@@ -312,6 +312,9 @@ table FloatingRequest {
   height:ushort = 0 (id: 9);
   focus:bool = true (id: 10);
   close_on_empty:bool = true (id: 11);
+  // Draw a frame with the title around the popup. Without one its content
+  // fills the whole popup.
+  border:bool = true (id: 12);
 }
 
 table InputRequest {
@@ -452,6 +455,7 @@ table FloatingRecord {
   focused:bool = false;
   visible:bool = true;
   close_on_empty:bool = true;
+  border:bool = true;
 }
 
 table SessionSnapshot {

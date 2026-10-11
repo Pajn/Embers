@@ -2025,7 +2025,10 @@ where
                         session_id,
                         presentation,
                         spec.tree,
-                        PanePlacement::Floating { geometry },
+                        PanePlacement::Floating {
+                            geometry,
+                            border: spec.border,
+                        },
                     )
                     .await?;
                 let result = self
@@ -2039,6 +2042,7 @@ where
                         title: spec.title,
                         focus: spec.focus,
                         close_on_empty: spec.close_on_empty,
+                        border: spec.border,
                     }))
                     .await;
                 rollback_created_buffer_on_error(
@@ -2205,6 +2209,7 @@ where
                 title,
                 focus,
                 close_on_empty,
+                border,
             } => {
                 self.client
                     .request_message(ClientMessage::Floating(FloatingRequest::Create {
@@ -2216,6 +2221,7 @@ where
                         title,
                         focus,
                         close_on_empty,
+                        border,
                     }))
                     .await?;
                 self.client.resync_all_sessions().await

@@ -460,6 +460,9 @@ impl Renderer {
         for row in 0..floating.rect.size.height {
             grid.put_str(x, y + row, &blank_line);
         }
+        if !floating.border {
+            return;
+        }
 
         let border = match self.popup_borders.lines {
             PopupBorderLines::Rounded => BorderStyle::ROUNDED,

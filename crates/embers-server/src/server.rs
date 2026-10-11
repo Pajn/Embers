@@ -2602,6 +2602,7 @@ impl Runtime {
                 title,
                 focus,
                 close_on_empty,
+                border,
             } => match match (root_node_id, buffer_id) {
                 (Some(root_node_id), None) => state.create_floating_window_with_options(
                     session_id,
@@ -2625,7 +2626,11 @@ impl Runtime {
                 (None, None) => Err(MuxError::invalid_input(
                     "create-floating requires either root_node_id or buffer_id",
                 )),
-            } {
+            }
+            .and_then(|floating_id| {
+                state.set_floating_border(floating_id, border)?;
+                Ok(floating_id)
+            }) {
                 Ok(floating_id) => match state.floating_window(floating_id) {
                     Ok(floating) => {
                         let mut events = vec![ServerEvent::FloatingChanged(FloatingChangedEvent {

@@ -131,9 +131,23 @@ fn popup_loses_its_border_and_title_row() {
             VIEWPORT,
             PanePlacement::Floating {
                 geometry: FloatGeometry::new(2, 2, 30, 10),
+                border: true,
             },
         ),
         Some(PtySize::new(28, 7))
+    );
+    // Without a border the pane fills the popup but for its title row.
+    assert_eq!(
+        spawn_pty_size(
+            &root_buffer_state(),
+            SESSION_ID,
+            VIEWPORT,
+            PanePlacement::Floating {
+                geometry: FloatGeometry::new(2, 2, 30, 10),
+                border: false,
+            },
+        ),
+        Some(PtySize::new(30, 9))
     );
     // A popup reaching past the viewport is clipped to it.
     assert_eq!(
@@ -143,6 +157,7 @@ fn popup_loses_its_border_and_title_row() {
             VIEWPORT,
             PanePlacement::Floating {
                 geometry: FloatGeometry::new(30, 2, 30, 10),
+                border: true,
             },
         ),
         Some(PtySize::new(9, 7))

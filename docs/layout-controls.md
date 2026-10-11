@@ -95,6 +95,11 @@ row, and a popup's panes are the same size in every client, whatever each
 client's config says. Colors take the same values as the divider colors and
 also color the title.
 
+A popup can also be opened without a frame, like tmux's `display-popup -B`:
+`embers display-popup -B -- cmd`, or `border: false` in the options of
+`action.open_floating`. It has no frame and no title, and its panes fill the
+whole popup.
+
 ## Synchronize panes
 
 While `synchronize-panes` is on for a window (a root tab), input typed into

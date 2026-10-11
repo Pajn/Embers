@@ -334,6 +334,9 @@ pub enum Command {
         width: u16,
         #[arg(long, default_value_t = 12)]
         height: u16,
+        /// Draw no frame or title: the command fills the whole popup.
+        #[arg(short = 'B', long = "no-border")]
+        no_border: bool,
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -1341,14 +1344,16 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             y,
             width,
             height,
+            no_border,
             command,
         } => {
             let session = connection.resolve_session_record(target.as_deref()).await?;
             let command = buffer_command(command);
             let popup_title = title.unwrap_or_else(|| default_title(&command, "popup"));
             let geometry = FloatGeometry::new(x, y, width, height);
+            let border = !no_border;
             let snapshot = connection.session_snapshot(session.id).await?;
-            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
+            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry, border });
             let buffer = connection
                 .create_buffer(Some(popup_title.clone()), command, None, size, session.id)
                 .await?;
@@ -1362,6 +1367,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     title: Some(popup_title),
                     focus: true,
                     close_on_empty: true,
+                    border,
                 }))
                 .await;
             let response = rollback_created_buffer_on_error(

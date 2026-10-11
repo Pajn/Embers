@@ -802,6 +802,7 @@ async fn move_and_detach_workflows_preserve_running_buffers() {
             title: Some("moved".to_owned()),
             focus: true,
             close_on_empty: true,
+            border: true,
         }))
         .await
         .expect("create floating from detached buffer succeeds")

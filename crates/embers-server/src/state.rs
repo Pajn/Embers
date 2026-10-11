@@ -876,6 +876,15 @@ impl ServerState {
         self.create_floating_window_with_options(session_id, root_node, geometry, title, true, true)
     }
 
+    /// Frame the popup with its title, or let its content fill it.
+    pub fn set_floating_border(&mut self, floating_id: FloatingId, border: bool) -> Result<()> {
+        self.floating
+            .get_mut(&floating_id)
+            .ok_or_else(|| MuxError::not_found(format!("unknown floating window {floating_id}")))?
+            .border = border;
+        Ok(())
+    }
+
     pub fn default_floating_geometry(&self, session_id: SessionId) -> Result<FloatGeometry> {
         let session = self.session(session_id)?;
         let anchor_leaf = session
@@ -952,6 +961,7 @@ impl ServerState {
                 focused: false,
                 visible: true,
                 close_on_empty,
+                border: true,
                 last_focused_leaf: None,
             },
         );

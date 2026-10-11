@@ -122,6 +122,8 @@ pub struct FloatingFrame {
     pub content_rect: Rect,
     pub title: Option<String>,
     pub focused: bool,
+    /// Framed with its title; without a frame `content_rect` is `rect`.
+    pub border: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1167,6 +1169,7 @@ mod zoom_tests {
                 focused: true,
                 visible: false,
                 close_on_empty: true,
+                border: true,
             },
         );
 
@@ -1318,6 +1321,7 @@ mod zoom_tests {
                 focused: true,
                 visible: true,
                 close_on_empty: true,
+                border: true,
             },
         );
 
@@ -1452,13 +1456,18 @@ fn project_floating_window(
         return Ok(());
     }
 
-    let content_rect = inset_border(rect);
+    let content_rect = if window.border {
+        inset_border(rect)
+    } else {
+        rect
+    };
     projector.projection.floating.push(FloatingFrame {
         floating_id: window.id,
         rect,
         content_rect,
         title: window.title.clone(),
         focused: window.focused,
+        border: window.border,
     });
     projector.project_node(node_id, content_rect, Some(window.id), false, Vec::new())
 }

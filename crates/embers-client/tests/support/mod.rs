@@ -207,6 +207,7 @@ fn demo_snapshot(focused_floating: Option<(FloatingId, NodeId)>) -> SessionSnaps
             focused: focused_floating_id == Some(FLOATING_ID),
             visible: true,
             close_on_empty: true,
+            border: true,
         }],
     }
 }

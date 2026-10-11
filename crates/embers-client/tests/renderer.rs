@@ -8,7 +8,8 @@ use embers_core::{
 };
 
 use crate::support::{
-    FLOATING_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
+    FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_TABS_ID,
+    SESSION_ID, demo_state,
 };
 
 /// Build a single-run styled line covering the whole text.
@@ -287,6 +288,50 @@ fn popup_frames_take_theme_colors() {
         assert_eq!(style.fg, Some(inactive), "({x}, {y})");
         assert!(!style.reverse && !style.dim && !style.bold, "({x}, {y})");
     }
+}
+
+#[test]
+fn borderless_popups_draw_no_frame_and_their_content_fills_them() {
+    use embers_core::PtySize;
+
+    let mut state = demo_state();
+    state.floating.get_mut(&FLOATING_ID).unwrap().border = false;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+
+    // The content gets the whole popup, columns 14 to 33 and rows 5 to 11.
+    let floating = &presentation.floating[0];
+    assert!(!floating.border);
+    assert_eq!(floating.content_rect, floating.rect);
+    let top = presentation
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == FLOATING_TOP_LEAF_ID)
+        .unwrap();
+    assert_eq!((top.rect.origin.x, top.rect.origin.y), (14, 5));
+    assert_eq!(top.rect.size.width, 20);
+    // Its PTY is as wide as the popup, below the pane's title row.
+    assert_eq!(
+        top.pty_size(),
+        Some(PtySize::new(20, top.rect.size.height - 1))
+    );
+
+    let grid = Renderer::default().render(&state, &presentation);
+    let rendered = grid.render();
+    let lines: Vec<&str> = rendered.lines().collect();
+    // No frame and no popup title: the panes start in the popup's corner.
+    let top_row: String = lines[5].chars().skip(14).take(20).collect();
+    assert_eq!(top_row, "   popup-top        ");
+    assert!(!rendered.contains("popup─") && !rendered.contains('╭'));
+    assert_eq!(char_at(&grid, 14, 6), 'p');
+    assert_eq!(char_at(&grid, 14, 11), ' ');
 }
 
 #[test]
