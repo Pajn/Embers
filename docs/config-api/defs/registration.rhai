@@ -1122,6 +1122,26 @@ fn set_leader(notation: string) -> ();
 /// # rhai-autodocs:index:13
 fn set_status_keys(value: string) -> ();
 
+/// Choose where the status line goes: the command prompt, messages,
+/// `confirm` questions, the search prompt and warnings.
+///
+/// - `"overlay"` (the default): like tmux, it is drawn over the session's
+///   tab bar while there is something to show, and the tab bar comes
+///   back afterwards. With the tab bar hidden, it is drawn over the last
+///   row of the screen. The panes get every row but the tab bar's, and
+///   are not resized when a message comes and goes.
+/// - `"separate"`: the last row of the screen is kept for it and always
+///   shows the session name, so the panes have one row fewer.
+///
+/// # Example
+///
+/// ```rhai
+/// set_status_line("separate");
+/// ```
+///
+/// # rhai-autodocs:index:14
+fn set_status_line(value: string) -> ();
+
 /// Say what the terminal running the client supports, overriding what
 /// Embers detected when it attached.
 ///

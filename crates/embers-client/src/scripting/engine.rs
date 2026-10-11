@@ -21,7 +21,7 @@ use super::runtime::{
 };
 use crate::command_prompt::StatusKeys;
 use crate::host_terminal::TerminalFeatures;
-use crate::presentation::TabBarPosition;
+use crate::presentation::{StatusLineMode, TabBarPosition};
 
 use super::types::{
     DetachOnDestroy, HintsSettings, LoadedConfig, ModeHooks, MouseSettings, PassthroughMode,
@@ -272,6 +272,7 @@ struct RegistrationState {
     terminal_features: TerminalFeatures,
     detach_on_destroy: DetachOnDestroy,
     status_keys: StatusKeys,
+    status_line: StatusLineMode,
 }
 
 impl RegistrationState {
@@ -383,6 +384,7 @@ impl RegistrationState {
             terminal_features: self.terminal_features,
             detach_on_destroy: self.detach_on_destroy,
             status_keys: self.status_keys,
+            status_line: self.status_line,
         })
     }
 }
@@ -1074,6 +1076,39 @@ mod registration_globals {
             .lock()
             .expect("registration lock")
             .status_keys = keys;
+        Ok(())
+    }
+
+    /// Choose where the status line goes: the command prompt, messages,
+    /// `confirm` questions, the search prompt and warnings.
+    ///
+    /// - `"overlay"` (the default): like tmux, it is drawn over the session's
+    ///   tab bar while there is something to show, and the tab bar comes
+    ///   back afterwards. With the tab bar hidden, it is drawn over the last
+    ///   row of the screen. The panes get every row but the tab bar's, and
+    ///   are not resized when a message comes and goes.
+    /// - `"separate"`: the last row of the screen is kept for it and always
+    ///   shows the session name, so the panes have one row fewer.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// set_status_line("separate");
+    /// ```
+    ///
+    /// # rhai-autodocs:index:14
+    #[rhai_fn(return_raw, global, name = "set_status_line")]
+    pub fn set_status_line(ctx: NativeCallContext, value: &str) -> RhaiResultOf<()> {
+        let Some(mode) = StatusLineMode::parse(value) else {
+            return Err(runtime_error(
+                format!("set_status_line expects \"overlay\" or \"separate\", got {value:?}"),
+                ctx.call_position(),
+            ));
+        };
+        clone_active_registration(ctx.call_position())?
+            .lock()
+            .expect("registration lock")
+            .status_line = mode;
         Ok(())
     }
 }

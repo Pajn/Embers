@@ -203,6 +203,12 @@ tabbar.set_position("bottom");   // status-position bottom
 tabbar.set_visible(false);       // status off
 ```
 
+`set_status_line("separate")` brings back the earlier layout, where the last
+row of the screen is kept for the status line and shows the session name and
+the latest warning when there is nothing else to show. The panes then have one
+row fewer, two with the tab bar shown. `set_status_line("overlay")` is the
+default.
+
 Panes created from the CLI are sized from the viewport the client reports to
 the server. With the bar hidden the client reports one row more than the
 screen it draws on, the row the bar would take, since the CLI does not know

@@ -35,7 +35,9 @@ use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
-use crate::presentation::{LeafFrame, NavigationDirection, PresentationModel, RootTabBar};
+use crate::presentation::{
+    LeafFrame, NavigationDirection, PresentationModel, RootTabBar, StatusLineMode,
+};
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
@@ -1143,15 +1145,23 @@ where
             chooser.render(&mut grid, chooser_area(viewport), &rows);
             grid.set_cursor(None);
         }
-        self.draw_status_overlay(&mut grid, &presentation, session_id);
+        if self.status_line_mode() == StatusLineMode::Overlay {
+            self.draw_status_overlay(&mut grid, &presentation, session_id);
+        }
         Ok(grid)
     }
 
-    /// The part of a `terminal`-sized screen the session is drawn in: all of
-    /// it. Status content is drawn over the root tab bar while it shows, so
-    /// it never takes a row from the panes.
+    /// The part of a `terminal`-sized screen the session is drawn in. With
+    /// the status line drawn over the root tab bar (the default), all of it,
+    /// since the status line never takes a row from the panes; with a
+    /// separate status line, all but the last row, which the caller draws
+    /// [`Self::status_line`] in.
     pub fn content_viewport(&self, terminal: Size) -> Size {
-        terminal
+        self.status_line_mode().content_viewport(terminal)
+    }
+
+    fn status_line_mode(&self) -> StatusLineMode {
+        self.config.active_script().loaded_config().status_line
     }
 
     pub fn reload_config(&mut self) -> Result<()> {

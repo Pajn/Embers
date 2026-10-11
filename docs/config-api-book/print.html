@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-89738992.js";
+            window.path_to_searchindex_js = "searchindex-1ca83f5d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -588,6 +588,45 @@ Esc in normal mode cancels the prompt; Enter runs it in either mode.</li>
 
 <div group="set_status_keys" id="set_status_keys-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_status_keys("vi");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_status_line </h2>
+
+<pre><code class="language-rust ignore">fn set_status_line(value: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_status_line" id="link-set_status_line-Description" class="tablinks active" onclick="openTab(event, &#39;set_status_line&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_status_line" id="link-set_status_line-Example" class="tablinks" onclick="openTab(event, &#39;set_status_line&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_status_line" id="set_status_line-Description" class="tabcontent" style="display: block;">
+Choose where the status line goes: the command prompt, messages,
+`confirm` questions, the search prompt and warnings.
+<ul>
+<li><code>"overlay"</code> (the default): like tmux, it is drawn over the session’s
+tab bar while there is something to show, and the tab bar comes
+back afterwards. With the tab bar hidden, it is drawn over the last
+row of the screen. The panes get every row but the tab bar’s, and
+are not resized when a message comes and goes.</li>
+<li><code>"separate"</code>: the last row of the screen is kept for it and always
+shows the session name, so the panes have one row fewer.</li>
+</ul>
+</div>
+
+<div group="set_status_line" id="set_status_line-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_status_line("separate");
 </code></pre>
 </div>
 

@@ -9,7 +9,7 @@ use crate::command_prompt::StatusKeys;
 use crate::grid::TerminalColor;
 use crate::host_terminal::TerminalFeatures;
 use crate::input::{BindingSpec, KeySequence, ModeSpec};
-use crate::presentation::TabBarPosition;
+use crate::presentation::{StatusLineMode, TabBarPosition};
 
 use super::model::Action;
 
@@ -268,6 +268,8 @@ pub struct LoadedConfig {
     pub detach_on_destroy: DetachOnDestroy,
     /// The keys prompts are edited with (`set_status_keys`).
     pub status_keys: StatusKeys,
+    /// Where the status line goes (`set_status_line`).
+    pub status_line: StatusLineMode,
 }
 
 impl LoadedConfig {
@@ -310,6 +312,7 @@ impl fmt::Debug for LoadedConfig {
             .field("passthrough", &self.passthrough)
             .field("terminal_features", &self.terminal_features)
             .field("status_keys", &self.status_keys)
+            .field("status_line", &self.status_line)
             .finish()
     }
 }

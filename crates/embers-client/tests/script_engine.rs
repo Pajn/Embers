@@ -3,7 +3,7 @@ use std::path::Path;
 use embers_client::input::KeyParseError;
 use embers_client::{
     Action, InputResolution, KeyToken, PassthroughMode, PresentationModel, ScriptEngine,
-    ScriptHarness, TabBarContext,
+    ScriptHarness, StatusLineMode, TabBarContext,
     config::{ConfigOrigin, LoadedConfigSource},
 };
 use embers_core::Size;
@@ -401,4 +401,28 @@ fn the_root_tab_bar_can_be_hidden() {
     assert!(!load("tabbar.set_visible(false);").unwrap());
     assert!(load("tabbar.set_visible(true);").unwrap());
     assert!(load(r#"tabbar.set_visible("no");"#).is_err());
+}
+
+#[test]
+fn the_status_line_can_keep_a_row_of_its_own() {
+    let load = |source: &str| {
+        ScriptEngine::load(&LoadedConfigSource {
+            origin: ConfigOrigin::BuiltIn,
+            path: None,
+            source: source.to_owned(),
+            source_hash: 0,
+        })
+        .map(|engine| engine.loaded_config().status_line)
+    };
+
+    assert_eq!(load("").unwrap(), StatusLineMode::Overlay);
+    assert_eq!(
+        load(r#"set_status_line("separate");"#).unwrap(),
+        StatusLineMode::Separate
+    );
+    assert_eq!(
+        load(r#"set_status_line("overlay");"#).unwrap(),
+        StatusLineMode::Overlay
+    );
+    assert!(load(r#"set_status_line("off");"#).is_err());
 }

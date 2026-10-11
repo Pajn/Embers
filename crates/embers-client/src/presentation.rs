@@ -62,6 +62,40 @@ impl From<TabBarPosition> for RootTabBar {
     }
 }
 
+/// Where the status line (the command prompt, messages, warnings) goes
+/// (`set_status_line`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatusLineMode {
+    /// Drawn over the root tab bar while there is something to show, like
+    /// tmux; the panes get every other row.
+    #[default]
+    Overlay,
+    /// A row of its own at the bottom of the screen, always shown.
+    Separate,
+}
+
+impl StatusLineMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "overlay" => Some(Self::Overlay),
+            "separate" => Some(Self::Separate),
+            _ => None,
+        }
+    }
+
+    /// The part of a `terminal`-sized screen the session is drawn in: all of
+    /// it, or all but the last row for a separate status line.
+    pub fn content_viewport(self, terminal: Size) -> Size {
+        match self {
+            Self::Separate if terminal.height > 1 => Size {
+                width: terminal.width,
+                height: terminal.height - 1,
+            },
+            _ => terminal,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabItem {
     pub title: String,

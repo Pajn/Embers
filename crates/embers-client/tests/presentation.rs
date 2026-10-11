@@ -1,4 +1,4 @@
-use embers_client::{PresentationModel, RootTabBar, TabBarPosition};
+use embers_client::{PresentationModel, RootTabBar, StatusLineMode, TabBarPosition};
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, NodeId, PtySize, SessionId, Size, SplitDirection,
 };
@@ -129,7 +129,7 @@ fn status_content_takes_the_last_row_without_a_root_tab_bar() {
 #[test]
 fn screen_layouts_give_the_window_every_row_the_bars_do_not_take() {
     let state = demo_state();
-    let viewport = Size {
+    let terminal = Size {
         width: 40,
         height: 14,
     };
@@ -140,52 +140,58 @@ fn screen_layouts_give_the_window_every_row_the_bars_do_not_take() {
             .map(|leaf| (leaf.node_id, leaf.pty_size()))
             .collect::<Vec<_>>()
     };
-    for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
-        for visible in [true, false] {
-            let layout = format!("{position:?} visible={visible}");
-            let model = PresentationModel::project_with(
-                &state,
-                SESSION_ID,
-                viewport,
-                RootTabBar { position, visible },
-            )
-            .unwrap();
-            let window_top = i32::from(visible && position == TabBarPosition::Top);
-            let window_rows = viewport.height - u16::from(visible);
-            let tiled = model
-                .leaves
-                .iter()
-                .filter(|leaf| leaf.floating_id.is_none())
-                .collect::<Vec<_>>();
-            let top = tiled.iter().map(|leaf| leaf.rect.origin.y).min().unwrap();
-            let bottom = tiled
-                .iter()
-                .map(|leaf| leaf.rect.origin.y + i32::from(leaf.rect.size.height))
-                .max()
+    for status_line in [StatusLineMode::Overlay, StatusLineMode::Separate] {
+        for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
+            for visible in [true, false] {
+                let layout = format!("{status_line:?} {position:?} visible={visible}");
+                let viewport = status_line.content_viewport(terminal);
+                let separate_rows = u16::from(status_line == StatusLineMode::Separate);
+                assert_eq!(viewport.height, terminal.height - separate_rows, "{layout}");
+
+                let model = PresentationModel::project_with(
+                    &state,
+                    SESSION_ID,
+                    viewport,
+                    RootTabBar { position, visible },
+                )
                 .unwrap();
-            assert_eq!(top, window_top, "{layout}");
-            assert_eq!(bottom, window_top + i32::from(window_rows), "{layout}");
+                let window_top = i32::from(visible && position == TabBarPosition::Top);
+                let window_rows = viewport.height - u16::from(visible);
+                let tiled = model
+                    .leaves
+                    .iter()
+                    .filter(|leaf| leaf.floating_id.is_none())
+                    .collect::<Vec<_>>();
+                let top = tiled.iter().map(|leaf| leaf.rect.origin.y).min().unwrap();
+                let bottom = tiled
+                    .iter()
+                    .map(|leaf| leaf.rect.origin.y + i32::from(leaf.rect.size.height))
+                    .max()
+                    .unwrap();
+                assert_eq!(top, window_top, "{layout}");
+                assert_eq!(bottom, window_top + i32::from(window_rows), "{layout}");
 
-            // A hidden bar draws nothing and takes no clicks.
-            let root_bar = model.root_tabs.as_ref().unwrap();
-            assert_eq!(root_bar.rect.size.height, u16::from(visible), "{layout}");
-            // Status content goes over the bar, or the last row without it.
-            let status_row = match (visible, position) {
-                (true, TabBarPosition::Top) => 0,
-                _ => viewport.height - 1,
-            };
-            assert_eq!(model.status_row(), Some(status_row), "{layout}");
+                // A hidden bar draws nothing and takes no clicks.
+                let root_bar = model.root_tabs.as_ref().unwrap();
+                assert_eq!(root_bar.rect.size.height, u16::from(visible), "{layout}");
+                // Status content goes over the bar, or the last row without it.
+                let status_row = match (visible, position) {
+                    (true, TabBarPosition::Top) => 0,
+                    _ => viewport.height - 1,
+                };
+                assert_eq!(model.status_row(), Some(status_row), "{layout}");
 
-            // The reported viewport counts a hidden bar's row, so the CLI's
-            // projection, with the bar shown, gives the same sizes.
-            let layout_viewport = model.layout_viewport();
-            assert_eq!(
-                layout_viewport.height,
-                viewport.height + u16::from(!visible),
-                "{layout}"
-            );
-            let cli = PresentationModel::project(&state, SESSION_ID, layout_viewport).unwrap();
-            assert_eq!(pty_sizes(&model), pty_sizes(&cli), "{layout}");
+                // The reported viewport counts a hidden bar's row, so the
+                // CLI's projection, with the bar shown, gives the same sizes.
+                let layout_viewport = model.layout_viewport();
+                assert_eq!(
+                    layout_viewport.height,
+                    viewport.height + u16::from(!visible),
+                    "{layout}"
+                );
+                let cli = PresentationModel::project(&state, SESSION_ID, layout_viewport).unwrap();
+                assert_eq!(pty_sizes(&model), pty_sizes(&cli), "{layout}");
+            }
         }
     }
 }
