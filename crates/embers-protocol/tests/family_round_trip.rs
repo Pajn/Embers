@@ -107,7 +107,12 @@ fn client_message_families_round_trip() {
             command: vec!["sh".to_owned()],
             cwd: None,
             env: Default::default(),
-            size: Some(PtySize::new(100, 30)),
+            size: Some(PtySize {
+                cols: 100,
+                rows: 30,
+                pixel_width: 900,
+                pixel_height: 540,
+            }),
             session_id: Some(SessionId(10)),
         }),
         ClientMessage::Session(SessionRequest::SetEnvironment {
@@ -431,6 +436,8 @@ fn client_message_families_round_trip() {
             buffer_id: BufferId(22),
             cols: 132,
             rows: 42,
+            pixel_width: 1188,
+            pixel_height: 756,
         }),
         ClientMessage::Subscribe(SubscribeRequest {
             request_id: RequestId(31),
@@ -919,7 +926,12 @@ fn sample_buffer_record(
         read_only,
         helper_source_buffer_id,
         helper_scope,
-        pty_size: PtySize::new(120, 40),
+        pty_size: PtySize {
+            cols: 120,
+            rows: 40,
+            pixel_width: 1080,
+            pixel_height: 720,
+        },
         activity,
         last_snapshot_seq: 9,
         exit_code,

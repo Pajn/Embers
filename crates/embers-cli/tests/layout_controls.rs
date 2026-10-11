@@ -60,6 +60,8 @@ async fn draw_at_80x24(connection: &mut TestConnection, snapshot: &SessionSnapsh
                 buffer_id,
                 cols,
                 rows: 22,
+                pixel_width: 0,
+                pixel_height: 0,
             }))
             .await
             .expect("resize pane pty");

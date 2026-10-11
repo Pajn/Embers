@@ -1563,11 +1563,11 @@ fn encode_buffer_request<'a>(
     let user_option_key = user_option_key_str.map(|s| builder.create_string(s));
     let user_option_value = user_option_value_str.map(|s| builder.create_string(s));
 
-    let (pty_cols, pty_rows) = match req {
+    let pty_size = match req {
         BufferRequest::Create {
             size: Some(size), ..
-        } => (size.cols, size.rows),
-        _ => (0, 0),
+        } => *size,
+        _ => PtySize::new(0, 0),
     };
     let buffer_req = fb::BufferRequest::create(
         builder,
@@ -1590,8 +1590,10 @@ fn encode_buffer_request<'a>(
             env_values,
             user_option_key,
             user_option_value,
-            pty_cols,
-            pty_rows,
+            pty_cols: pty_size.cols,
+            pty_rows: pty_size.rows,
+            pty_pixel_width: pty_size.pixel_width,
+            pty_pixel_height: pty_size.pixel_height,
         },
     );
 
@@ -2787,16 +2789,33 @@ fn encode_input_request<'a>(
     req: &InputRequest,
 ) -> Result<flatbuffers::WIPOffset<fb::Envelope<'a>>, ProtocolError> {
     validate_input_request(req)?;
-    let (op, buffer_id, bytes_vec, cols, rows) = match req {
+    let (op, buffer_id, bytes_vec, size) = match req {
         InputRequest::Send {
             buffer_id, bytes, ..
-        } => (fb::InputOp::Send, (*buffer_id).into(), Some(bytes), 0, 0),
+        } => (
+            fb::InputOp::Send,
+            (*buffer_id).into(),
+            Some(bytes),
+            PtySize::new(0, 0),
+        ),
         InputRequest::Resize {
             buffer_id,
             cols,
             rows,
+            pixel_width,
+            pixel_height,
             ..
-        } => (fb::InputOp::Resize, (*buffer_id).into(), None, *cols, *rows),
+        } => (
+            fb::InputOp::Resize,
+            (*buffer_id).into(),
+            None,
+            PtySize {
+                cols: *cols,
+                rows: *rows,
+                pixel_width: *pixel_width,
+                pixel_height: *pixel_height,
+            },
+        ),
     };
 
     let bytes = bytes_vec.map(|b| builder.create_vector(b));
@@ -2806,8 +2825,10 @@ fn encode_input_request<'a>(
             op,
             buffer_id,
             bytes,
-            cols,
-            rows,
+            cols: size.cols,
+            rows: size.rows,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
         },
     );
 
@@ -3692,6 +3713,8 @@ fn encode_buffer_record<'a>(
             has_helper_scope: record.helper_scope.is_some(),
             pty_cols: record.pty_size.cols,
             pty_rows: record.pty_size.rows,
+            pty_pixel_width: record.pty_size.pixel_width,
+            pty_pixel_height: record.pty_size.pixel_height,
             activity,
             last_snapshot_seq: record.last_snapshot_seq,
             exit_code: record.exit_code.unwrap_or(0),
@@ -4068,7 +4091,12 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         req.pty_rows(),
                         "buffer_request.pty_size",
                     )?
-                    .map(|(cols, rows)| PtySize::new(cols, rows));
+                    .map(|(cols, rows)| PtySize {
+                        cols,
+                        rows,
+                        pixel_width: req.pty_pixel_width(),
+                        pixel_height: req.pty_pixel_height(),
+                    });
                     BufferRequest::Create {
                         request_id,
                         title: req.title().map(|t| t.to_owned()),
@@ -4511,6 +4539,8 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     )?,
                     cols: req.cols(),
                     rows: req.rows(),
+                    pixel_width: req.pixel_width(),
+                    pixel_height: req.pixel_height(),
                 },
                 _ => return Err(ProtocolError::InvalidMessage("unknown input op")),
             };
@@ -5169,8 +5199,8 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         pty_size: PtySize {
             cols: record.pty_cols(),
             rows: record.pty_rows(),
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: record.pty_pixel_width(),
+            pixel_height: record.pty_pixel_height(),
         },
         activity,
         last_snapshot_seq: record.last_snapshot_seq(),
@@ -6706,6 +6736,8 @@ mod tests {
             buffer_id: BufferId(0),
             cols: 80,
             rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
         }))
         .expect_err("zero resize buffer id should be rejected");
 

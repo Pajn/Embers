@@ -2351,6 +2351,13 @@ fn spawn_runtime_keeper(cli: RuntimeKeeperCli) -> Result<()> {
             .arg(cli.size.cols.to_string())
             .arg("--rows")
             .arg(cli.size.rows.to_string());
+        if cli.size.pixel_width != 0 || cli.size.pixel_height != 0 {
+            keeper
+                .arg("--pixel-width")
+                .arg(cli.size.pixel_width.to_string())
+                .arg("--pixel-height")
+                .arg(cli.size.pixel_height.to_string());
+        }
         if let Some(cwd) = &cli.cwd {
             keeper.arg("--cwd").arg(cwd);
         }

@@ -1990,19 +1990,22 @@ impl Runtime {
                 buffer_id,
                 cols,
                 rows,
+                pixel_width,
+                pixel_height,
             } => {
-                let (size, is_helper) = {
+                // The pixel size comes with the cells: a client that does not
+                // know its terminal's cell size sends 0, which the PTY reports
+                // as unknown rather than a stale size for other cells.
+                let size = PtySize {
+                    cols,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                };
+                let is_helper = {
                     let state = self.state.lock().await;
                     match state.buffer(buffer_id) {
-                        Ok(buffer) => (
-                            PtySize {
-                                cols,
-                                rows,
-                                pixel_width: buffer.pty_size.pixel_width,
-                                pixel_height: buffer.pty_size.pixel_height,
-                            },
-                            matches!(&buffer.kind, BufferKind::Helper(_)),
-                        ),
+                        Ok(buffer) => matches!(&buffer.kind, BufferKind::Helper(_)),
                         Err(error) => {
                             return (mux_error_response(Some(request_id), error), Vec::new());
                         }
@@ -5935,6 +5938,8 @@ mod tests {
                 buffer_id: helper_buffer_id,
                 cols: 80,
                 rows: 3,
+                pixel_width: 0,
+                pixel_height: 0,
             })
             .await;
 

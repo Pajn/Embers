@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
-    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, CellSize, ClipboardSelection, CursorPosition, FloatGeometry,
+    FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
@@ -144,6 +144,8 @@ pub struct ConfiguredClient<T> {
     reported_viewport: Option<(SessionId, Size)>,
     /// The base index last reported to the server, and for which session.
     reported_base_index: Option<(SessionId, Option<u32>)>,
+    /// The host terminal's cell size in pixels, when it reports one.
+    host_cell_size: Option<CellSize>,
     search_prompt: Option<SearchPrompt>,
     command_prompt: Option<CommandPrompt>,
     /// An open `confirm-before` question, shown in the status line.
@@ -198,6 +200,7 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             reported_base_index: None,
+            host_cell_size: None,
             search_prompt: None,
             command_prompt: None,
             confirm: None,
@@ -366,6 +369,13 @@ where
                 .loaded_config()
                 .terminal_features,
         )
+    }
+
+    /// Record the host terminal's cell size in pixels, `None` when it does not
+    /// report one. Pane PTYs are given the pixel size of the cells they are
+    /// drawn in, so programs that size images by it see the host's.
+    pub fn set_host_cell_size(&mut self, cell: Option<CellSize>) {
+        self.host_cell_size = cell;
     }
 
     /// Which panes may write to the host terminal through passthrough: the
@@ -2396,6 +2406,7 @@ where
                 presentation.viewport,
                 placement,
             )
+            .map(|size| size.with_cell_size(self.host_cell_size))
         };
         match tree {
             TreeSpec::BufferCurrent => presentation
@@ -3299,7 +3310,10 @@ where
         self.report_viewport(session_id, viewport).await;
         self.report_base_index(session_id).await;
         let presentation = self.project(session_id, viewport)?;
-        for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
+        for (buffer_id, size) in
+            self.pty_sizes
+                .plan(self.client.state(), &presentation, self.host_cell_size)
+        {
             let result = self
                 .client
                 .request_message(ClientMessage::Input(InputRequest::Resize {
@@ -3307,6 +3321,8 @@ where
                     buffer_id,
                     cols: size.cols,
                     rows: size.rows,
+                    pixel_width: size.pixel_width,
+                    pixel_height: size.pixel_height,
                 }))
                 .await;
             if let Err(error) = result {

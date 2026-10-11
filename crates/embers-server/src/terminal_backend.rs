@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink as AlacrittyHyperlink, LineLength};
@@ -101,12 +101,16 @@ pub enum TerminalQuery {
     /// XTGETTCAP (`DCS + q <hex name>;... ST`): look up terminfo capabilities.
     /// Holds the raw payload of hex-encoded names separated by `;`.
     Termcap(Vec<u8>),
+    /// XTWINOPS 16 (`CSI 16 t`): report the cell size in pixels. alacritty
+    /// answers the text area size (`CSI 14 t`) itself but not this.
+    CellSize,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RawByteRouter {
     osc7: Osc7Scanner,
     queries: DcsQueryScanner,
+    cell_size: CellSizeQueryScanner,
     passthrough: PassthroughScanner,
 }
 
@@ -164,7 +168,9 @@ impl RawByteRouter {
         self.osc7.feed(bytes);
         let mut start = 0;
         for (index, &byte) in bytes.iter().enumerate() {
-            if let Some(query) = self.queries.step(byte) {
+            let dcs_query = self.queries.step(byte);
+            let cell_size_query = self.cell_size.step(byte);
+            if let Some(query) = dcs_query.or(cell_size_query) {
                 backend.ingest_bytes(&bytes[start..=index]);
                 backend.answer_query(&query);
                 start = index + 1;
@@ -409,6 +415,31 @@ impl DcsQueryScanner {
             }
         }
         None
+    }
+}
+
+/// Streaming matcher for XTWINOPS 16 (`ESC [ 16 t`), the cell size query
+/// alacritty leaves unanswered. It is a fixed sequence, so the matcher only
+/// tracks how much of it it has seen; an ESC anywhere starts it over.
+#[derive(Clone, Debug, Default)]
+struct CellSizeQueryScanner {
+    matched: usize,
+}
+
+const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
+
+impl CellSizeQueryScanner {
+    fn step(&mut self, byte: u8) -> Option<TerminalQuery> {
+        if byte == CELL_SIZE_QUERY[self.matched] {
+            self.matched += 1;
+        } else {
+            self.matched = usize::from(byte == CELL_SIZE_QUERY[0]);
+        }
+        if self.matched < CELL_SIZE_QUERY.len() {
+            return None;
+        }
+        self.matched = 0;
+        Some(TerminalQuery::CellSize)
     }
 }
 
@@ -775,6 +806,8 @@ struct BackendEventState {
     bell_pending: bool,
     pty_write: Vec<u8>,
     clipboard: Option<ClipboardWrite>,
+    /// The PTY size, for the text area and cell size reports.
+    size: PtySize,
 }
 
 impl BackendEventProxy {
@@ -798,6 +831,21 @@ impl EventListener for BackendEventProxy {
             Event::ResetTitle => state.title = None,
             Event::Bell => state.bell_pending = true,
             Event::PtyWrite(text) => state.pty_write.extend_from_slice(text.as_bytes()),
+            // XTWINOPS 14, the text area in pixels. Like the cell size report,
+            // only answered once the pixel size is known.
+            Event::TextAreaSizeRequest(format) => {
+                // Unknown until a client that knows its terminal's cell size
+                // has sized the pane.
+                if let Some(cell) = state.size.cell_size() {
+                    let reply = format(WindowSize {
+                        num_lines: state.size.rows,
+                        num_cols: state.size.cols,
+                        cell_width: cell.width,
+                        cell_height: cell.height,
+                    });
+                    state.pty_write.extend_from_slice(reply.as_bytes());
+                }
+            }
             // OSC 52 stores. Loads (clipboard queries) never get here: the
             // emulator runs with `Osc52::OnlyCopy`, so it drops them unanswered.
             Event::ClipboardStore(clipboard, text) => {
@@ -844,7 +892,10 @@ impl AlacrittyTerminalBackend {
     /// the caller (the runtime keeper) so this emulation layer stays independent
     /// of server configuration and env.
     pub fn new(size: PtySize, max_scrollback_lines: usize) -> Self {
-        let events = Arc::new(Mutex::new(BackendEventState::default()));
+        let events = Arc::new(Mutex::new(BackendEventState {
+            size,
+            ..BackendEventState::default()
+        }));
         let dimensions = BackendSize {
             columns: size.cols as usize,
             screen_lines: size.rows as usize,
@@ -1065,6 +1116,10 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             columns: size.cols as usize,
             screen_lines: size.rows as usize,
         });
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .size = size;
     }
 
     fn visible_snapshot(
@@ -1172,6 +1227,10 @@ impl TerminalBackend for AlacrittyTerminalBackend {
     }
 
     fn answer_query(&mut self, query: &TerminalQuery) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let reply = match query {
             // DECRQSS for SGR. Neovim sets `4:3` and asks this to learn whether
             // the terminal keeps curly underlines before it uses them (and
@@ -1183,12 +1242,15 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             // Any other setting: the "invalid request" reply.
             TerminalQuery::RequestSetting(_) => "\x1bP0$r\x1b\\".to_owned(),
             TerminalQuery::Termcap(payload) => termcap_reply(payload),
+            // Only answered once the pixel size is known: a program that gets
+            // no answer falls back to its own guess, while a zero would break
+            // its arithmetic.
+            TerminalQuery::CellSize => match events.size.cell_size() {
+                Some(cell) => format!("\x1b[6;{};{}t", cell.height, cell.width),
+                None => return,
+            },
         };
-        self.events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pty_write
-            .extend_from_slice(reply.as_bytes());
+        events.pty_write.extend_from_slice(reply.as_bytes());
     }
 
     fn cursor_position(&self) -> CursorPosition {
@@ -1950,6 +2012,49 @@ mod tests {
     }
 
     #[test]
+    fn cell_and_text_area_size_reports_use_the_pixel_size() {
+        let size = PtySize {
+            cols: 10,
+            rows: 2,
+            pixel_width: 90,
+            pixel_height: 36,
+        };
+        let mut backend = backend(size);
+        let mut router = RawByteRouter::default();
+
+        let _ = router.route_output(&mut backend, b"\x1b[16t\x1b[14t\x1b[18t");
+
+        assert_eq!(
+            String::from_utf8(backend.take_events().replies).expect("utf8"),
+            "\x1b[6;18;9t\x1b[4;36;90t\x1b[8;2;10t"
+        );
+
+        // A resize carries the new pixel size into the reports.
+        backend.resize(PtySize {
+            cols: 20,
+            rows: 4,
+            pixel_width: 200,
+            pixel_height: 80,
+        });
+        let _ = router.route_output(&mut backend, b"\x1b[16t\x1b[14t");
+        assert_eq!(
+            String::from_utf8(backend.take_events().replies).expect("utf8"),
+            "\x1b[6;20;10t\x1b[4;80;200t"
+        );
+    }
+
+    #[test]
+    fn pixel_size_reports_wait_for_a_known_pixel_size() {
+        let mut backend = backend(PtySize::new(10, 2));
+        let mut router = RawByteRouter::default();
+
+        let _ = router.route_output(&mut backend, b"\x1b[16t\x1b[14t\x1b[5n");
+
+        // Only the status report: no made-up pixel sizes.
+        assert_eq!(backend.take_events().replies, b"\x1b[0n");
+    }
+
+    #[test]
     fn decrqm_reports_bracketed_paste_mode() {
         let mut backend = backend(PtySize::new(10, 2));
         let _ = backend.take_damage();
@@ -2036,6 +2141,26 @@ mod tests {
         assert_eq!(
             backend.ingested.len(),
             b"a\x1b[4:3m\x1bP$qm\x1b\\b\x1bP+q4D73;5463\x1b\\\x1bPq#0;2;0;0;0\x1b\\c".len()
+        );
+    }
+
+    #[test]
+    fn router_splits_output_after_each_cell_size_query() {
+        let mut router = RawByteRouter::default();
+        let mut backend = StubBackend::default();
+        // Split across chunks, and next to near misses.
+        router.route_output(&mut backend, b"a\x1b[1\x1b[16");
+        router.route_output(&mut backend, b"tb\x1b[161t\x1b[16t");
+
+        assert_eq!(
+            backend.queries,
+            vec![
+                (b"a\x1b[1\x1b[16t".len(), TerminalQuery::CellSize),
+                (
+                    b"a\x1b[1\x1b[16tb\x1b[161t\x1b[16t".len(),
+                    TerminalQuery::CellSize
+                ),
+            ]
         );
     }
 

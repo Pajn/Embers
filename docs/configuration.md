@@ -324,6 +324,17 @@ Programs that read capabilities only from terminfo still see plain
 `xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
 that lists the capabilities and that is installed where the program runs.
 
+### Cell size in pixels
+
+Programs that size images to the text, such as image previewers, need the
+size of a cell in pixels. A client whose terminal reports its size in pixels
+(`TIOCGWINSZ`) gives each pane's PTY the pixel size of the cells it draws the
+pane in, so `TIOCGWINSZ` in the pane reports the host terminal's cell size,
+and the pane answers the text area and cell size queries (`CSI 14 t`,
+`CSI 16 t`) from it. With several clients the pixel size goes with the cells,
+from the client that last sized the pane. Until a pane has a pixel size, it
+does not answer those two queries.
+
 ### The host terminal
 
 The terminal running the client is the host terminal. Underline styles,

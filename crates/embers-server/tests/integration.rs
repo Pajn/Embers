@@ -7,6 +7,7 @@ mod keeper_lifetime;
 mod keeper_spawn;
 mod model_state;
 mod nested_tabs;
+mod pane_pixel_size;
 mod persistence;
 mod ping_server;
 mod session_destroy;

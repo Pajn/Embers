@@ -620,6 +620,10 @@ pub enum InputRequest {
         buffer_id: BufferId,
         cols: u16,
         rows: u16,
+        /// The text area in pixels, 0 when the client does not know its
+        /// terminal's cell size.
+        pixel_width: u16,
+        pixel_height: u16,
     },
 }
 

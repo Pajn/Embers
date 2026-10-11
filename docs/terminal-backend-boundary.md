@@ -24,7 +24,7 @@ Today it is intentionally minimal:
 
 - input routing is passthrough
 - output routing first takes tmux passthrough sequences (`ESC P tmux; ... ESC \`) and unwrapped kitty graphics commands (`ESC _ G ... ESC \`) out of the stream (see below); the backend never sees them
-- the remaining bytes go directly to the backend, with two side scanners: one sniffs OSC 7 working-directory reports, and one picks out the DCS queries alacritty leaves unanswered (DECRQSS and XTGETTCAP). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
+- the remaining bytes go directly to the backend, with side scanners: one sniffs OSC 7 working-directory reports, and the others pick out the queries alacritty leaves unanswered (DECRQSS, XTGETTCAP and the cell size query `CSI 16 t`). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
 
 The seam is also where further special-case interception, or metadata extraction that must happen before backend ingestion, belongs.
 
@@ -66,6 +66,10 @@ The same scanner takes unwrapped kitty graphics commands, APC strings starting w
 The keeper queues the writes in order, numbered, under the surface lock the read loop already holds, and reports the latest number in its status reply. The queue holds at most 8 MiB and drops its oldest writes beyond that, which bounds memory while no server is attached. Unlike the latest-only clipboard write every write is kept, because an image is many sequences. When the number advances, the status poller takes the queued writes with `Passthrough { after }` requests, base64 in keeper JSON and at most 8 MiB per reply, and hands them to the server in one callback per poll. The poller seeds the number from the attach-time status, so a reattaching server drops what was queued for frames long gone.
 
 The server forwards each batch through one task per buffer runtime rather than a task per call, so writes reach clients in the order the program sent them. It targets the same clients as a clipboard write, splits the batch into `PassthroughEvent`s of at most 6 MiB to stay under the 8 MiB frame cap, and sends them best effort: a client too slow to take one misses it but stays attached. What a client does with them is in the [render-source contract](render-source-contract.md#passthrough-sequences).
+
+## Pixel size
+
+`PtySize` carries the text area in pixels with the cells. A client that knows its terminal's cell size (`TIOCGWINSZ`) sends it with each resize (`InputRequest::Resize`) and with the size of the panes it creates; the server keeps it on the buffer record, applies it to the PTY, so `TIOCGWINSZ` in the pane reports it, and hands it to the backend, which answers the text area (`CSI 14 t`) and cell size (`CSI 16 t`) queries from it. A pixel size of zero means unknown: the backend then answers neither.
 
 ## Metadata outside the backend
 
