@@ -14,8 +14,8 @@ use embers_protocol::{ClientMessage, ClientRequest, NodeRequest, SessionRequest}
 use tempfile::tempdir;
 
 use crate::support::{
-    FOCUSED_LEAF_ID, HIDDEN_NESTED_LEAF_ID, HIDDEN_ROOT_LEAF_ID, LEFT_LEAF_ID, SESSION_ID,
-    demo_state,
+    FOCUSED_LEAF_ID, HIDDEN_NESTED_LEAF_ID, HIDDEN_ROOT_LEAF_ID, LEFT_LEAF_ID, ROOT_SPLIT_ID,
+    SESSION_ID, demo_state,
 };
 
 const VIEWPORT: Size = Size {
@@ -123,7 +123,7 @@ fn window_and_session_scopes_start_collapsed() {
     let rows = windows.rows(&state, Some(SESSION_ID), None);
     assert_eq!(
         windows.selected(&rows),
-        Some(ChooserItem::Window(SESSION_ID, 1))
+        Some(ChooserItem::Window(SESSION_ID, ROOT_SPLIT_ID))
     );
 
     let sessions = Chooser::open(
@@ -156,7 +156,7 @@ fn moving_folding_and_filtering() {
     chooser.expand(&rows(&chooser));
     assert_eq!(
         chooser.selected(&rows(&chooser)),
-        Some(ChooserItem::Window(SESSION_ID, 0))
+        Some(ChooserItem::Window(SESSION_ID, HIDDEN_ROOT_LEAF_ID))
     );
     chooser.collapse(&rows(&chooser));
     assert_eq!(

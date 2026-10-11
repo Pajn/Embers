@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use embers_core::{NodeId, Point, Rect, SessionId, Size};
-use embers_protocol::NodeRecordKind;
+use embers_protocol::{NodeRecordKind, TabsRecord};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::grid::{BorderStyle, CellStyle, RenderGrid};
@@ -29,8 +29,10 @@ pub enum ChooserScope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ChooserItem {
     Session(SessionId),
-    /// A window by its position among the session's root tabs.
-    Window(SessionId, usize),
+    /// A window by its root tab's child node (the session's root node when
+    /// the root is not tabs). Its position is looked up only when it is
+    /// acted on, as windows before it may close while the picker is open.
+    Window(SessionId, NodeId),
     Pane(SessionId, NodeId),
 }
 
@@ -42,6 +44,51 @@ impl ChooserItem {
             }
         }
     }
+
+    /// What the item is, for messages: "session", "window" or "pane".
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Session(_) => "session",
+            Self::Window(..) => "window",
+            Self::Pane(..) => "pane",
+        }
+    }
+
+    /// Whether the item is still in `state`.
+    pub fn exists(self, state: &ClientState) -> bool {
+        match self {
+            Self::Session(session_id) => state.sessions.contains_key(&session_id),
+            Self::Window(session_id, window_id) => {
+                window_position(state, session_id, window_id).is_some()
+            }
+            Self::Pane(session_id, node_id) => state.nodes.get(&node_id).is_some_and(|node| {
+                node.session_id == session_id && node.kind == NodeRecordKind::BufferView
+            }),
+        }
+    }
+}
+
+/// The current position of the window `window_id` (a [`ChooserItem::Window`]'s
+/// node) among `session_id`'s windows, or `None` when it has closed.
+pub fn window_position(
+    state: &ClientState,
+    session_id: SessionId,
+    window_id: NodeId,
+) -> Option<usize> {
+    let session = state.sessions.get(&session_id)?;
+    match root_tabs(state, session.root_node_id) {
+        Some(tabs) => tabs.tabs.iter().position(|tab| tab.child_id == window_id),
+        None => (session.root_node_id == window_id).then_some(0),
+    }
+}
+
+/// The session's windows: its root node's tabs, when the root is tabs.
+fn root_tabs(state: &ClientState, root_id: NodeId) -> Option<&TabsRecord> {
+    state.nodes.get(&root_id).and_then(|root| {
+        root.tabs
+            .as_ref()
+            .filter(|_| root.kind == NodeRecordKind::Tabs)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +221,17 @@ impl Chooser {
         self.selected_index(rows).map(|index| rows[index].item)
     }
 
+    /// The item Enter and `x` act on. A selected item that has left `state`
+    /// is returned as it is, so the action finds it gone instead of acting on
+    /// the row highlighted in its place; one that is only filtered out gives
+    /// way to the highlighted row.
+    pub fn target(&self, state: &ClientState, rows: &[ChooserRow]) -> Option<ChooserItem> {
+        match self.selected {
+            Some(item) if !item.exists(state) => Some(item),
+            _ => self.selected(rows),
+        }
+    }
+
     /// Move the selection by `delta` rows, stopping at the ends.
     pub fn move_by(&mut self, rows: &[ChooserRow], delta: isize) {
         let Some(index) = self.selected_index(rows) else {
@@ -301,12 +359,7 @@ impl Chooser {
                 .find(|row| row.item == item)
                 .map(|row| row.label.as_str())
                 .unwrap_or_default();
-            let kind = match item {
-                ChooserItem::Session(_) => "session",
-                ChooserItem::Window(..) => "window",
-                ChooserItem::Pane(..) => "pane",
-            };
-            format!(" kill {kind} {label}? (y/n)")
+            format!(" kill {} {label}? (y/n)", item.kind())
         } else if self.editing_filter || !self.filter.is_empty() {
             format!(" filter: {}", self.filter)
         } else {
@@ -370,47 +423,38 @@ fn build_tree(
         .values()
         .map(|session| {
             let is_current_session = current_session == Some(session.id);
-            let windows: Vec<TreeNode> =
-                match state.nodes.get(&session.root_node_id).and_then(|root| {
-                    root.tabs
-                        .as_ref()
-                        .filter(|_| root.kind == NodeRecordKind::Tabs)
-                }) {
-                    Some(tabs) => tabs
-                        .tabs
-                        .iter()
-                        .enumerate()
-                        .map(|(position, tab)| {
-                            let is_current = is_current_session && position == tabs.active as usize;
-                            window_node(
-                                state,
-                                session.id,
-                                position,
-                                &tab.title,
-                                tab.child_id,
-                                is_current,
-                                session.focused_leaf_id,
-                                base_index,
-                            )
-                        })
-                        .collect(),
-                    // A session whose root is not tabs is one window, named
-                    // after its pane as `list-windows` names it.
-                    None => vec![window_node(
-                        state,
-                        session.id,
-                        0,
-                        &untabbed_window_title(
+            let windows: Vec<TreeNode> = match root_tabs(state, session.root_node_id) {
+                Some(tabs) => tabs
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(position, tab)| {
+                        let is_current = is_current_session && position == tabs.active as usize;
+                        window_node(
                             state,
-                            session.root_node_id,
+                            session.id,
+                            position,
+                            &tab.title,
+                            tab.child_id,
+                            is_current,
                             session.focused_leaf_id,
-                        ),
-                        session.root_node_id,
-                        is_current_session,
-                        session.focused_leaf_id,
-                        base_index,
-                    )],
-                };
+                            base_index,
+                        )
+                    })
+                    .collect(),
+                // A session whose root is not tabs is one window, named
+                // after its pane as `list-windows` names it.
+                None => vec![window_node(
+                    state,
+                    session.id,
+                    0,
+                    &untabbed_window_title(state, session.root_node_id, session.focused_leaf_id),
+                    session.root_node_id,
+                    is_current_session,
+                    session.focused_leaf_id,
+                    base_index,
+                )],
+            };
             let count = windows.len();
             TreeNode {
                 row: ChooserRow {
@@ -461,7 +505,7 @@ fn window_node(
     let count = panes.len();
     TreeNode {
         row: ChooserRow {
-            item: ChooserItem::Window(session_id, position),
+            item: ChooserItem::Window(session_id, child_id),
             depth: 1,
             label: format!(
                 "{}: {title} ({count} pane{})",

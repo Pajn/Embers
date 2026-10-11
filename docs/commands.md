@@ -44,6 +44,11 @@ filter does too.
 so the picker kills the way those commands do. Choosing a pane in a hidden
 nested tab reveals it. There is no preview.
 
+The tree follows changes while the picker is open, and the selection stays on
+the same session, window or pane, even when windows before it close. If the
+selected item itself closes, Enter and `x` do nothing and the status line says
+so, rather than acting on another row.
+
 ```rhai
 bind("normal", "<leader>w", action.choose_window());
 bind("normal", "<leader>s", action.choose_session());
