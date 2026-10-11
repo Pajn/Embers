@@ -192,7 +192,7 @@ impl ServerState {
         let safe_next_floating_id =
             checked_next_id(floating.keys().map(|id| id.0), "floating window")?;
 
-        let state = Self {
+        let mut state = Self {
             sessions,
             buffers,
             nodes,
@@ -206,8 +206,30 @@ impl ServerState {
             node_ids: IdAllocator::new(next_node_id.max(safe_next_node_id)),
             floating_ids: IdAllocator::new(next_floating_id.max(safe_next_floating_id)),
         };
+        state.wrap_untabbed_session_roots()?;
         state.validate()?;
         Ok(state)
+    }
+
+    /// Earlier versions collapsed a session's root tabs into its only window,
+    /// so a saved workspace may have a session whose root is that window.
+    /// Put it back in root tabs, named after its pane as it was shown, so the
+    /// session lists its window again.
+    fn wrap_untabbed_session_roots(&mut self) -> Result<()> {
+        let untabbed = self
+            .sessions
+            .values()
+            .filter_map(|session| match self.nodes.get(&session.root_node) {
+                // A missing root is left for `validate` to report.
+                Some(Node::Tabs(_)) | None => None,
+                Some(_) => Some(session.root_node),
+            })
+            .collect::<Vec<_>>();
+        for root_node in untabbed {
+            let title = self.default_tab_title(root_node)?;
+            self.wrap_node_in_tabs(root_node, title)?;
+        }
+        Ok(())
     }
 
     pub fn to_persisted(&self) -> PersistedWorkspace {
@@ -258,6 +280,9 @@ impl ServerState {
         Ok(self.session(session_id)?.root_node)
     }
 
+    /// The session's root tabs node, whose tabs are its windows. Every
+    /// session has one: empty until its first window, and kept with a single
+    /// window so the session always lists its windows, like tmux.
     pub fn root_tabs(&self, session_id: SessionId) -> Result<NodeId> {
         let root_node = self.root_node(session_id)?;
         if matches!(self.node(root_node)?, Node::Tabs(_)) {
@@ -269,28 +294,13 @@ impl ServerState {
         }
     }
 
-    fn root_tabs_node(&self, session_id: SessionId) -> Result<Option<NodeId>> {
-        let root_node = self.root_node(session_id)?;
-        Ok(matches!(self.node(root_node)?, Node::Tabs(_)).then_some(root_node))
-    }
-
-    fn ensure_root_tabs_container(&mut self, session_id: SessionId) -> Result<NodeId> {
-        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
-            return Ok(root_tabs);
-        }
-
-        let root_node = self.root_node(session_id)?;
-        let title = self.default_tab_title(root_node)?;
-        self.wrap_node_in_tabs(root_node, title)
-    }
-
     pub fn add_root_tab_from_buffer(
         &mut self,
         session_id: SessionId,
         title: impl Into<String>,
         buffer_id: BufferId,
     ) -> Result<usize> {
-        let root_tabs = self.ensure_root_tabs_container(session_id)?;
+        let root_tabs = self.root_tabs(session_id)?;
         let child = self.create_buffer_view(session_id, buffer_id)?;
         match self.add_tab_sibling(root_tabs, title, child) {
             Ok(index) => Ok(index),
@@ -307,22 +317,13 @@ impl ServerState {
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
-        let root_tabs = self.ensure_root_tabs_container(session_id)?;
+        let root_tabs = self.root_tabs(session_id)?;
         self.add_tab_sibling(root_tabs, title, child)
     }
 
     pub fn select_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
-        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
-            return self.switch_tab(root_tabs, index);
-        }
-
-        if index == 0 {
-            Ok(())
-        } else {
-            Err(MuxError::not_found(format!(
-                "tab index {index} is out of range for session {session_id}"
-            )))
-        }
+        let root_tabs = self.root_tabs(session_id)?;
+        self.switch_tab(root_tabs, index)
     }
 
     pub fn rename_root_tab(
@@ -331,38 +332,19 @@ impl ServerState {
         index: usize,
         title: impl Into<String>,
     ) -> Result<()> {
-        let root_tabs = if let Some(root_tabs) = self.root_tabs_node(session_id)? {
-            root_tabs
-        } else {
-            if index != 0 {
-                return Err(MuxError::not_found(format!(
-                    "tab index {index} is out of range for session {session_id}"
-                )));
-            }
-            self.ensure_root_tabs_container(session_id)?
-        };
+        let root_tabs = self.root_tabs(session_id)?;
         self.rename_tab(root_tabs, index, title)
     }
 
     /// Set tmux `synchronize-panes` for the window at `index`: `Some` sets it,
-    /// `None` flips it. Returns the new value. Like `rename_root_tab`, a
-    /// session whose root is a single untabbed window gets a root tabs node.
+    /// `None` flips it. Returns the new value.
     pub fn set_root_tab_synchronize_panes(
         &mut self,
         session_id: SessionId,
         index: usize,
         enabled: Option<bool>,
     ) -> Result<bool> {
-        let root_tabs = if let Some(root_tabs) = self.root_tabs_node(session_id)? {
-            root_tabs
-        } else {
-            if index != 0 {
-                return Err(MuxError::not_found(format!(
-                    "tab index {index} is out of range for session {session_id}"
-                )));
-            }
-            self.ensure_root_tabs_container(session_id)?
-        };
+        let root_tabs = self.root_tabs(session_id)?;
         let Node::Tabs(tabs) = self.node_mut(root_tabs)? else {
             return Err(MuxError::invalid_input("node is not a tabs container"));
         };
@@ -376,17 +358,8 @@ impl ServerState {
     }
 
     pub fn close_root_tab(&mut self, session_id: SessionId, index: usize) -> Result<()> {
-        if let Some(root_tabs) = self.root_tabs_node(session_id)? {
-            return self.close_tab(root_tabs, index);
-        }
-
-        if index == 0 {
-            self.clear_session_root(session_id)
-        } else {
-            Err(MuxError::not_found(format!(
-                "tab index {index} is out of range for session {session_id}"
-            )))
-        }
+        let root_tabs = self.root_tabs(session_id)?;
+        self.close_tab(root_tabs, index)
     }
 
     pub fn close_session(&mut self, session_id: SessionId) -> Result<()> {
@@ -982,7 +955,7 @@ impl ServerState {
         title: impl Into<String>,
         child: NodeId,
     ) -> Result<usize> {
-        let root_tabs = self.ensure_root_tabs_container(session_id)?;
+        let root_tabs = self.root_tabs(session_id)?;
         self.add_tab_sibling(root_tabs, title, child)
     }
 
@@ -1193,6 +1166,11 @@ impl ServerState {
         if self.floating_id_by_root(sibling).is_some() {
             return Err(MuxError::conflict(
                 "floating root cannot become a split child".to_owned(),
+            ));
+        }
+        if self.is_session_root(node_id) {
+            return Err(MuxError::conflict(
+                "session root tabs cannot be wrapped in a split".to_owned(),
             ));
         }
 
@@ -1675,7 +1653,7 @@ impl ServerState {
         } else {
             let tabs_id = match self.nearest_tabs_ancestor(old_parent)? {
                 Some(tabs_id) => tabs_id,
-                None => self.ensure_root_tabs_container(session_id)?,
+                None => self.root_tabs(session_id)?,
             };
             let insert_index = match self.node(tabs_id)? {
                 Node::Tabs(tabs) => tabs.tabs.len(),
@@ -1959,17 +1937,15 @@ impl ServerState {
     }
 
     /// The window a leaf of the session's layout is in: the root tab holding
-    /// it, or the root itself when the session has one window. `None` for a
-    /// leaf in a popup or outside the session.
+    /// it. `None` for a leaf in a popup or outside the session.
     fn window_of_leaf(&self, session_id: SessionId, leaf_id: NodeId) -> Result<Option<NodeId>> {
         let root = self.session(session_id)?.root_node;
-        let root_is_tabs = matches!(self.node(root)?, Node::Tabs(_));
         let mut current = leaf_id;
         loop {
             match self.node_parent(current)? {
-                Some(parent) if parent == root && root_is_tabs => return Ok(Some(current)),
+                Some(parent) if parent == root => return Ok(Some(current)),
                 Some(parent) => current = parent,
-                None => return Ok((current == root).then_some(root)),
+                None => return Ok(None),
             }
         }
     }
@@ -2062,6 +2038,11 @@ impl ServerState {
         if node_id == replacement {
             return Ok(());
         }
+        if self.is_session_root(node_id) {
+            return Err(MuxError::conflict(
+                "session root tabs cannot be replaced".to_owned(),
+            ));
+        }
         if self.node_parent(replacement)?.is_some() {
             return Err(MuxError::invalid_input(
                 "replacement node must not already have a parent".to_owned(),
@@ -2113,6 +2094,12 @@ impl ServerState {
             if root.parent().is_some() {
                 return Err(MuxError::conflict(format!(
                     "session {} root node {} must not have a parent",
+                    session.id, session.root_node
+                )));
+            }
+            if !matches!(root, Node::Tabs(_)) {
+                return Err(MuxError::conflict(format!(
+                    "session {} root node {} must be tabs",
                     session.id, session.root_node
                 )));
             }
@@ -2980,7 +2967,10 @@ impl ServerState {
             return Ok(parent);
         }
 
-        if tabs_len == 1 && floating_owner.is_none() {
+        // A single tab collapses into its child, except in a popup's root and
+        // in the session's root, whose tabs are its windows: a session with
+        // one window still lists it.
+        if tabs_len == 1 && floating_owner.is_none() && !is_root {
             let child = match self.node(node_id)? {
                 Node::Tabs(tabs) => tabs.tabs[0].child,
                 _ => unreachable!(),

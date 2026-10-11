@@ -1847,8 +1847,8 @@ async fn inserting_a_tab_next_to_the_only_window_adds_a_window() {
         .to_owned()
     };
 
-    // With one window the session's root is not tabbed, so there are no
-    // focused tabs; the new tab becomes a second window after it...
+    // With the focus in no nested tabs, the new tab is a second window after
+    // the only one...
     configured
         .handle_key(alpha, size, KeyEvent::Char('a'))
         .await
@@ -1880,6 +1880,88 @@ async fn inserting_a_tab_next_to_the_only_window_adds_a_window() {
         configured.notifications()
     );
     assert_eq!(windows(), "0\t1\tbefore\n1\t0\tone");
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+/// Killing a session's second window leaves its window list: the tab bar is
+/// still drawn, listing the window left under the name it was given, both by
+/// the default bar and by a scripted one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killing_the_second_window_keeps_the_tab_bar() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    for title in ["one", "two"] {
+        run_cli(
+            &server,
+            &[
+                "new-window",
+                "-t",
+                "alpha",
+                "--title",
+                title,
+                "--",
+                "/bin/sh",
+            ],
+        );
+    }
+    run_cli(&server, &["rename-window", "-t", "alpha:one", "renamed"]);
+    run_cli(&server, &["kill-window", "-t", "alpha:two"]);
+
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    for (source, expected) in [
+        (r#"tabbar.set_position("bottom");"#, "[ renamed]"),
+        (
+            r#"
+                fn format_tabs(ctx) {
+                    let tab = ctx.tabs()[ctx.active_index()];
+                    let scope = if ctx.is_root() { "ROOT" } else { "NESTED" };
+                    ui.bar([ui.segment(`${scope} ${ctx.tabs().len()} ${tab.number()} ${tab.title()}`)], [], [])
+                }
+                tabbar.set_formatter(format_tabs);
+                tabbar.set_position("bottom");
+            "#,
+            "ROOT 1 0 renamed",
+        ),
+    ] {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tempdir.path().join("config.rhai"), source).expect("write config");
+        let config = embers_client::ConfigManager::load(
+            embers_client::ConfigDiscoveryOptions::default()
+                .with_project_config_dir(tempdir.path()),
+        )
+        .expect("load config");
+        let client = MuxClient::connect(server.socket_path())
+            .await
+            .expect("client connects");
+        let mut configured = ConfiguredClient::new(client, config);
+        configured
+            .client_mut()
+            .resync_all_sessions()
+            .await
+            .expect("resync");
+        let alpha = session_id_by_name(configured.client(), "alpha");
+
+        let lines = configured
+            .render_session(alpha, viewport)
+            .await
+            .expect("render")
+            .lines();
+        assert!(
+            configured.notifications().is_empty(),
+            "{:?}",
+            configured.notifications()
+        );
+        assert!(
+            lines[usize::from(viewport.height) - 1].contains(expected),
+            "{lines:#?}"
+        );
+    }
 
     server.shutdown().await.expect("shutdown server");
 }
@@ -3150,8 +3232,7 @@ async fn new_window_action_adds_a_window_in_the_given_directory() {
         "{shown}"
     );
 
-    // With one window left the session is no longer tabbed; a new window
-    // still goes next to it rather than failing.
+    // With one window left, a new window still goes next to it.
     run_cli(&server, &["kill-window", "-t", "alpha:work"]);
     assert_eq!(windows().len(), 1);
     configured

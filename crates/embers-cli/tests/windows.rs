@@ -46,8 +46,12 @@ async fn window_commands_round_trip_through_cli() {
     let listed = run_cli(&server, ["list-windows", "-t", "alpha"]);
     assert_eq!(stdout(&listed).trim(), "0\t1\tops\n1\t0\tlogs");
 
+    run_cli(&server, ["rename-window", "-t", "alpha:logs", "tail"]);
     run_cli(&server, ["kill-window", "-t", "alpha:ops"]);
 
+    // The window left keeps its name and its place in the window list.
+    let listed = run_cli(&server, ["list-windows", "-t", "alpha"]);
+    assert_eq!(stdout(&listed).trim(), "0\t1\ttail");
     let mut connection = TestConnection::connect(server.socket_path())
         .await
         .expect("connect protocol client");
@@ -57,22 +61,17 @@ async fn window_commands_round_trip_through_cli() {
         .iter()
         .find(|node| node.id == snapshot.session.root_node_id)
         .expect("root node exists");
-    if let Some(tabs) = root.tabs.as_ref() {
-        assert_eq!(tabs.tabs.len(), 1);
-        assert_eq!(tabs.tabs[0].title, "logs");
-    } else {
-        let buffer_id = root
-            .buffer_view
-            .as_ref()
-            .expect("single remaining root window collapses to a buffer view")
-            .buffer_id;
-        let buffer = snapshot
-            .buffers
-            .iter()
-            .find(|buffer| buffer.id == buffer_id)
-            .expect("root buffer exists");
-        assert_eq!(buffer.title, "logs");
-    }
+    let tabs = root.tabs.as_ref().expect("one window keeps the root tabs");
+    assert_eq!(tabs.tabs.len(), 1);
+    assert_eq!(tabs.tabs[0].title, "tail");
+
+    // It is still addressed like any window.
+    run_cli(&server, ["select-window", "-t", "alpha:tail"]);
+    run_cli(&server, ["rename-window", "-t", "alpha:0", "last"]);
+    let synchronized = run_cli(&server, ["synchronize-panes", "-t", "alpha:last", "on"]);
+    assert_eq!(stdout(&synchronized).trim(), "on");
+    let listed = run_cli(&server, ["list-windows", "-t", "alpha"]);
+    assert_eq!(stdout(&listed).trim(), "0\t1\tlast");
 
     server.shutdown().await.expect("shutdown server");
 }

@@ -4316,12 +4316,7 @@ fn location_is_root_tab(state: &ServerState, location: &BufferLocation) -> Resul
     else {
         return Ok(false);
     };
-    let root_tabs_id = match state.root_tabs(session_id) {
-        Ok(root_tabs_id) => root_tabs_id,
-        Err(embers_core::MuxError::Conflict(_)) => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let Node::Tabs(tabs) = state.node(root_tabs_id)? else {
+    let Node::Tabs(tabs) = state.node(state.root_tabs(session_id)?)? else {
         return Ok(false);
     };
     Ok(tabs.tabs.iter().any(|tab| tab.child == node_id))

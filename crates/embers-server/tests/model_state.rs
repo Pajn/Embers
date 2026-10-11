@@ -156,8 +156,11 @@ fn split_normalization_collapses_single_child_split() {
     state.close_node(new_leaf).expect("close new leaf");
 
     assert!(!state.nodes.contains_key(&split_id));
-    assert_eq!(session_root(&state, session_id), leaf_id);
-    assert_eq!(state.node_parent(leaf_id).expect("leaf parent"), None);
+    assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+    assert_eq!(
+        state.node_parent(leaf_id).expect("leaf parent"),
+        Some(session_root(&state, session_id))
+    );
     state.validate().expect("state should validate");
 }
 
@@ -174,8 +177,11 @@ fn tabs_normalization_collapses_nested_singleton_tabs() {
         .expect("normalize wrapped tabs");
 
     assert!(!state.nodes.contains_key(&wrapped));
-    assert_eq!(session_root(&state, session_id), leaf_id);
-    assert_eq!(state.node_parent(leaf_id).expect("leaf parent"), None);
+    assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
+    assert_eq!(
+        state.node_parent(leaf_id).expect("leaf parent"),
+        Some(session_root(&state, session_id))
+    );
     state.validate().expect("state should validate");
 }
 
@@ -1217,6 +1223,6 @@ proptest! {
 
         state.normalize_upwards(current).expect("normalize wrappers");
         prop_assert!(state.validate().is_ok());
-        prop_assert_eq!(session_root(&state, session_id), leaf_id);
+        prop_assert_eq!(root_tab_child(&state, session_id, 0), leaf_id);
     }
 }
