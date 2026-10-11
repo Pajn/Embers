@@ -1199,4 +1199,6 @@ async fn list_clients_takes_a_format() {
         ["list-clients", "-t", "beta", "-F", "#{client_name}"],
     ));
     assert_eq!(only_beta.trim_end(), beta_id.to_string());
+
+    server.shutdown().await.expect("shutdown server");
 }
