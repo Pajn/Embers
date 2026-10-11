@@ -426,3 +426,39 @@ fn the_status_line_can_keep_a_row_of_its_own() {
     );
     assert!(load(r#"set_status_line("off");"#).is_err());
 }
+
+#[test]
+fn tab_bar_formatters_read_the_session_name() {
+    let engine = ScriptEngine::load(&LoadedConfigSource {
+        origin: ConfigOrigin::BuiltIn,
+        path: None,
+        source: r#"
+            fn format_tabs(ctx) {
+                ui.bar([ui.segment(`[${ctx.session_name()}]`)], [], [])
+            }
+            tabbar.set_formatter(format_tabs);
+        "#
+        .to_owned(),
+        source_hash: 0,
+    })
+    .unwrap();
+    let state = demo_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 80,
+            height: 20,
+        },
+    )
+    .unwrap();
+
+    let bar = engine
+        .format_tab_bar(
+            TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap(), "normal", 80)
+                .with_session_name("work"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(bar.left[0].text, "[work]");
+}

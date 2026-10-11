@@ -797,6 +797,19 @@ mod documented_ref_api {
         bar.mode.clone()
     }
 
+    /// Return the name of the session the bar belongs to, like tmux `#S`, for
+    /// a status line such as `[main] 1 shell 2 nvim`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// let left = [ui.segment(`[${ctx.session_name()}] `)];
+    /// ```
+    #[rhai_fn(name = "session_name")]
+    pub fn bar_session_name(bar: &mut TabBarContext) -> String {
+        bar.session_name.clone()
+    }
+
     /// Return the tab title.
     #[rhai_fn(name = "title")]
     pub fn tab_title(tab: &mut TabInfo) -> String {

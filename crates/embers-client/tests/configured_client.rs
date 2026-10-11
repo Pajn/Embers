@@ -823,6 +823,32 @@ async fn a_warning_shows_for_the_display_time_in_the_overlay() {
 }
 
 #[tokio::test]
+async fn tab_bar_formatters_see_the_session_name() {
+    let (config, _tempdir) = manager_from_source(
+        r#"
+        fn format_tabs(ctx) {
+            ui.bar([ui.segment("[" + ctx.session_name() + "] ")], [], [])
+        }
+        tabbar.set_formatter(format_tabs);
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(MuxClient::new(FakeTransport::default()), config);
+    *configured.client_mut().state_mut() = demo_state();
+    let lines = configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap()
+        .lines();
+    assert!(lines[0].starts_with("[demo] "), "{lines:#?}");
+}
+
+#[tokio::test]
 async fn reload_updates_live_bindings() {
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("config.rhai");

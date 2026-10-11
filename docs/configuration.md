@@ -216,7 +216,9 @@ the bar is hidden and sizes panes as if it were shown.
 
 The default bar starts with the session name, like tmux's default
 `status-left`. A formatter set with `tabbar.set_formatter` draws the whole bar
-instead (see [`TabBarContext`](config-api/tab-bar-context.md)).
+instead, and can start it with `ctx.session_name()` (see
+[`TabBarContext`](config-api/tab-bar-context.md) and the example
+`config.rhai`).
 
 ## Clipboard (OSC 52)
 

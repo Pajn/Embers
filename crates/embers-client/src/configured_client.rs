@@ -1103,7 +1103,8 @@ where
         {
             let bar_context =
                 TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
-                    .with_base_index(self.base_index());
+                    .with_base_index(self.base_index())
+                    .with_session_name(self.session_name(session_id));
             let result = self.config.active_script().format_tab_bar(bar_context);
 
             match result {
