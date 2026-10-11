@@ -15,10 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/install-flatc
-        with:
-          version: ${{ env.FLATBUFFERS_VERSION }}
-          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -52,15 +48,21 @@ jobs:
             printf '%s\n' "$status"
             exit 1
           fi
+      - name: Regenerate protocol code
+        run: cargo gen-protocol
+      - name: Verify checked-in protocol code
+        run: |
+          status="$(git status --porcelain -- crates/embers-protocol/src/generated)"
+          if [ -n "$status" ]; then
+            echo "Generated protocol code is out of date after regeneration:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
 
   pty-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/install-flatc
-        with:
-          version: ${{ env.FLATBUFFERS_VERSION }}
-          sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
