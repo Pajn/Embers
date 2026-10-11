@@ -1155,3 +1155,48 @@ async fn select_pane_and_select_window_elsewhere_do_not_move_the_client() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_clients_takes_a_format() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "alpha", "--", "/bin/sh"],
+    );
+    run_cli(
+        &server,
+        ["new-session", "-d", "-s", "beta", "--", "/bin/sh"],
+    );
+    let (_alpha_client, alpha_id) = attached_client(&server, "alpha").await;
+    let (_beta_client, beta_id) = attached_client(&server, "beta").await;
+
+    let listed = out(&run_cli(
+        &server,
+        [
+            "list-clients",
+            "-F",
+            "#{client_name} #{client_session} #{session_name}:#{window_index} #{pane_id}",
+        ],
+    ));
+    let alpha_pane = print(&server, "alpha:0.0", "#{pane_id}");
+    let beta_pane = print(&server, "beta:0.0", "#{pane_id}");
+    assert!(
+        listed
+            .lines()
+            .any(|line| line == format!("{alpha_id} alpha alpha:0 {alpha_pane}")),
+        "{listed}"
+    );
+    assert!(
+        listed
+            .lines()
+            .any(|line| line == format!("{beta_id} beta beta:0 {beta_pane}")),
+        "{listed}"
+    );
+
+    // -t limits the list to the clients showing that session.
+    let only_beta = out(&run_cli(
+        &server,
+        ["list-clients", "-t", "beta", "-F", "#{client_name}"],
+    ));
+    assert_eq!(only_beta.trim_end(), beta_id.to_string());
+}

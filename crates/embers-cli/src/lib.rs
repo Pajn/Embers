@@ -245,8 +245,18 @@ pub enum Command {
         #[arg(short = 't', long = "target")]
         target: Option<String>,
     },
-    #[command(name = "list-clients")]
-    ListClients,
+    #[command(name = "list-clients", visible_alias = "lsc")]
+    ListClients {
+        /// Only the clients showing this session.
+        #[arg(short = 't', long = "target")]
+        target: Option<String>,
+        /// Print each client with this format instead of `id<TAB>session<TAB>scope`.
+        /// Besides the variables of the client's session and focused pane, it
+        /// takes `#{client_name}` and `#{client_id}` (the client's id) and
+        /// `#{client_session}` (the name of the session it shows).
+        #[arg(short = 'F', value_name = "FORMAT")]
+        format: Option<String>,
+    },
     /// Detach a client: `-c`, else the client the command runs for (see
     /// `switch-client`).
     #[command(name = "detach-client", visible_alias = "detach")]
@@ -958,10 +968,46 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             expect_session_snapshot(response, "attach-buffer")?;
             Ok(String::new())
         }
-        Command::ListClients => {
+        Command::ListClients { target, format } => {
             let sessions = connection.list_sessions().await?;
-            let clients = connection.list_clients().await?;
-            Ok(format_clients(&clients, &sessions))
+            let mut clients = connection.list_clients().await?;
+            if let Some(target) = target {
+                let session = connection.resolve_session_record(Some(&target)).await?;
+                clients.retain(|client| client.current_session_id == Some(session.id));
+            }
+            let Some(format) = format else {
+                return Ok(format_clients(&clients, &sessions));
+            };
+            let mut lines = Vec::new();
+            for client in clients {
+                let session_name = client
+                    .current_session_id
+                    .and_then(|id| sessions.iter().find(|session| session.id == id))
+                    .map(|session| session.name.clone())
+                    .unwrap_or_default();
+                let extra = std::collections::BTreeMap::from([
+                    ("client_name".to_owned(), client.id.to_string()),
+                    ("client_id".to_owned(), client.id.to_string()),
+                    ("client_session".to_owned(), session_name),
+                ]);
+                let line = match client.current_session_id {
+                    Some(session_id) => {
+                        let snapshot = connection.session_snapshot(session_id).await?;
+                        connection
+                            .expand_for_pane_with(&snapshot, None, &format, extra)
+                            .await?
+                    }
+                    None => embers_client::expand_format(
+                        &format,
+                        &embers_client::FormatContext {
+                            extra,
+                            ..embers_client::FormatContext::default()
+                        },
+                    ),
+                };
+                lines.push(line);
+            }
+            Ok(lines.join("\n"))
         }
         Command::DetachClient { client_id, client } => {
             let client_id = connection.target_client(client_id.or(client)).await?;

@@ -209,6 +209,7 @@ A small part of tmux's format language is supported:
 | | `#{session_id}` | session id, as `$N` (a target) |
 | | `#{session_windows}` | number of windows in the session |
 | | `#{session_attached}` | number of clients showing the session (CLI only) |
+| | `#{client_name}`, `#{client_id}`, `#{client_session}` | the client's id and the name of the session it shows (`list-clients -F` only) |
 | | `#{window_id}` | window id, as `@N` (a target): the node the window shows |
 | | `#{window_active}` | 1 for the session's active window, else 0 |
 | | `#{window_panes}` | number of panes shown in the window |
@@ -421,6 +422,7 @@ command is window 12, not pane 12.
 | `set-option`, `show-options` | `-p` only; `-t`, `-u`, `-o`, `-q`; `show-options -v` | See [Options](#options). |
 | `capture-pane` | `-t`, `-p`, `-S`, `-E`, `-J`, `-e` | See below. |
 | `list-sessions`, `list-windows`, `list-panes` | `-F`; `list-windows -a`, `list-panes -s`/`-a` | Without `-F`, Embers' tab-separated columns. |
+| `list-clients` | `-F`, `-t session` | The format expands for each client's session and focused pane, plus `#{client_name}`/`#{client_id}` (the client's id; clients have no tty name) and `#{client_session}`. Without `-F`, Embers' tab-separated columns. |
 | `has-session`, `kill-session`, `kill-window`, `kill-pane`, `rename-session`, `rename-window`, `select-window`, `send-keys`, `resize-pane`, `display-message` | `-t` with any target | `send-keys` sends its words as text, joined by spaces (`--enter` presses Enter); tmux key names such as `C-c` are not translated. |
 
 `new`, `ls`, `neww`, `lsw`, `splitw`, `lsp`, `selectp`, `capturep`, `popup`,

@@ -8,6 +8,7 @@
 //! `select-pane -L/-R/-U/-D` sees it) and `#{session_attached}` (how many
 //! clients show the session).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use embers_client::{
@@ -56,14 +57,34 @@ impl CliConnection {
         pane_id: Option<NodeId>,
         template: &str,
     ) -> Result<String> {
+        self.expand_for_pane_with(snapshot, pane_id, template, BTreeMap::new())
+            .await
+    }
+
+    /// Like [`Self::expand_for_pane`], with `extra` variables on top, such as
+    /// a client's own for `list-clients -F`.
+    pub(crate) async fn expand_for_pane_with(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        pane_id: Option<NodeId>,
+        template: &str,
+        extra: BTreeMap<String, String>,
+    ) -> Result<String> {
         let base_index = self.base_index_for(snapshot);
         let mut state = ClientState::default();
         state.apply_session_snapshot(snapshot.clone());
         let Some(mut context) =
             FormatContext::from_state(&state, snapshot.session.id, pane_id, base_index)
         else {
-            return Ok(template.to_owned());
+            return Ok(expand_format(
+                template,
+                &FormatContext {
+                    extra,
+                    ..FormatContext::default()
+                },
+            ));
         };
+        context.extra.extend(extra);
         if template.contains("pane_at_")
             && let Some(pane_id) = context.pane_id
         {
