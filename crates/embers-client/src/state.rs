@@ -106,6 +106,10 @@ pub struct ClientState {
     pub view_state: BTreeMap<NodeId, BufferViewState>,
     pub dirty_sessions: BTreeSet<SessionId>,
     pub invalidated_buffers: BTreeSet<BufferId>,
+    /// Rows of terminal content this client draws for each pane view. The
+    /// server's `last_render_size` for a view is not kept up to date, so when
+    /// this client knows how tall it draws a pane, that size wins.
+    pub drawn_rows: BTreeMap<NodeId, u16>,
 }
 
 impl ClientState {
@@ -137,6 +141,9 @@ impl ClientState {
             window.session_id != session_id || current_floating_ids.contains(floating_id)
         });
         self.view_state.retain(|node_id, _| {
+            !previous_node_ids.contains(node_id) || current_node_ids.contains(node_id)
+        });
+        self.drawn_rows.retain(|node_id, _| {
             !previous_node_ids.contains(node_id) || current_node_ids.contains(node_id)
         });
 
@@ -280,6 +287,8 @@ impl ClientState {
             .retain(|_, window| window.session_id != session_id);
         self.view_state
             .retain(|node_id, _| !node_ids.contains(node_id));
+        self.drawn_rows
+            .retain(|node_id, _| !node_ids.contains(node_id));
         self.detach_buffers_for_nodes(&node_ids);
         self.dirty_sessions.remove(&session_id);
     }
@@ -309,6 +318,24 @@ impl ClientState {
             }
         }
         Some(())
+    }
+
+    /// Record that this client draws `rows` rows of the pane view `node_id`,
+    /// and size its scroll state to match.
+    pub fn set_view_drawn_rows(&mut self, node_id: NodeId, rows: u16) {
+        if self.drawn_rows.insert(node_id, rows) == Some(rows) {
+            return;
+        }
+        let Some(state) = self.view_state.get_mut(&node_id) else {
+            return;
+        };
+        state.visible_line_count = rows;
+        state.total_line_count = state.total_line_count.max(u64::from(rows));
+        state.scroll_top_line = if state.follow_output {
+            bottom_top_line(state.total_line_count, rows)
+        } else {
+            clamp_top_line(state.scroll_top_line, state.total_line_count, rows)
+        };
     }
 
     pub fn set_view_scroll_top(&mut self, node_id: NodeId, scroll_top_line: u64) -> Option<u64> {
@@ -376,7 +403,11 @@ impl ClientState {
                 continue;
             };
             let snapshot = self.snapshots.get(&buffer_view.buffer_id);
-            let visible_line_count = buffer_view.last_render_size.rows;
+            let visible_line_count = self
+                .drawn_rows
+                .get(node_id)
+                .copied()
+                .unwrap_or(buffer_view.last_render_size.rows);
             let total_line_count = snapshot
                 .map(|snapshot| snapshot.total_lines.max(u64::from(visible_line_count)))
                 .unwrap_or_else(|| u64::from(visible_line_count));

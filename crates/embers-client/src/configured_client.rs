@@ -3341,6 +3341,13 @@ where
         self.report_viewport(session_id, viewport).await;
         self.report_base_index(session_id).await;
         let presentation = self.project(session_id, viewport)?;
+        for leaf in &presentation.leaves {
+            if let Some(size) = leaf.pty_size() {
+                self.client
+                    .state_mut()
+                    .set_view_drawn_rows(leaf.node_id, size.rows);
+            }
+        }
         for (buffer_id, size) in
             self.pty_sizes
                 .plan(self.client.state(), &presentation, self.host_cell_size)
