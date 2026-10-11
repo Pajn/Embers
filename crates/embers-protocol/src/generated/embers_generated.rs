@@ -9694,6 +9694,8 @@ impl<'a> VisibleSnapshotResponse<'a> {
   pub const VT_CURSOR: ::flatbuffers::VOffsetT = 30;
   pub const VT_STYLES: ::flatbuffers::VOffsetT = 32;
   pub const VT_KEYBOARD_MODE: ::flatbuffers::VOffsetT = 34;
+  pub const VT_PIXEL_WIDTH: ::flatbuffers::VOffsetT = 36;
+  pub const VT_PIXEL_HEIGHT: ::flatbuffers::VOffsetT = 38;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9714,6 +9716,8 @@ impl<'a> VisibleSnapshotResponse<'a> {
     if let Some(x) = args.cwd { builder.add_cwd(x); }
     if let Some(x) = args.title { builder.add_title(x); }
     if let Some(x) = args.lines { builder.add_lines(x); }
+    builder.add_pixel_height(args.pixel_height);
+    builder.add_pixel_width(args.pixel_width);
     builder.add_rows(args.rows);
     builder.add_cols(args.cols);
     builder.add_keyboard_mode(args.keyboard_mode);
@@ -9837,6 +9841,20 @@ impl<'a> VisibleSnapshotResponse<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u8>(VisibleSnapshotResponse::VT_KEYBOARD_MODE, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn pixel_width(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(VisibleSnapshotResponse::VT_PIXEL_WIDTH, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn pixel_height(&self) -> u16 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u16>(VisibleSnapshotResponse::VT_PIXEL_HEIGHT, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for VisibleSnapshotResponse<'_> {
@@ -9861,6 +9879,8 @@ impl ::flatbuffers::Verifiable for VisibleSnapshotResponse<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<CursorState>>("cursor", Self::VT_CURSOR, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<StyledLine>>>>("styles", Self::VT_STYLES, false)?
      .visit_field::<u8>("keyboard_mode", Self::VT_KEYBOARD_MODE, false)?
+     .visit_field::<u16>("pixel_width", Self::VT_PIXEL_WIDTH, false)?
+     .visit_field::<u16>("pixel_height", Self::VT_PIXEL_HEIGHT, false)?
      .finish();
     Ok(())
   }
@@ -9882,6 +9902,8 @@ pub struct VisibleSnapshotResponseArgs<'a> {
     pub cursor: Option<::flatbuffers::WIPOffset<CursorState<'a>>>,
     pub styles: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StyledLine<'a>>>>>,
     pub keyboard_mode: u8,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
 }
 impl<'a> Default for VisibleSnapshotResponseArgs<'a> {
   #[inline]
@@ -9903,6 +9925,8 @@ impl<'a> Default for VisibleSnapshotResponseArgs<'a> {
       cursor: None,
       styles: None,
       keyboard_mode: 0,
+      pixel_width: 0,
+      pixel_height: 0,
     }
   }
 }
@@ -9977,6 +10001,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> VisibleSnapshotResponseBuilde
     self.fbb_.push_slot::<u8>(VisibleSnapshotResponse::VT_KEYBOARD_MODE, keyboard_mode, 0);
   }
   #[inline]
+  pub fn add_pixel_width(&mut self, pixel_width: u16) {
+    self.fbb_.push_slot::<u16>(VisibleSnapshotResponse::VT_PIXEL_WIDTH, pixel_width, 0);
+  }
+  #[inline]
+  pub fn add_pixel_height(&mut self, pixel_height: u16) {
+    self.fbb_.push_slot::<u16>(VisibleSnapshotResponse::VT_PIXEL_HEIGHT, pixel_height, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> VisibleSnapshotResponseBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     VisibleSnapshotResponseBuilder {
@@ -10010,6 +10042,8 @@ impl ::core::fmt::Debug for VisibleSnapshotResponse<'_> {
       ds.field("cursor", &self.cursor());
       ds.field("styles", &self.styles());
       ds.field("keyboard_mode", &self.keyboard_mode());
+      ds.field("pixel_width", &self.pixel_width());
+      ds.field("pixel_height", &self.pixel_height());
       ds.finish()
   }
 }

@@ -621,7 +621,12 @@ fn server_envelope_families_round_trip() {
             request_id: RequestId(401),
             buffer_id: BufferId(11),
             sequence: 10,
-            size: PtySize::new(120, 40),
+            size: PtySize {
+                cols: 120,
+                rows: 40,
+                pixel_width: 1080,
+                pixel_height: 720,
+            },
             lines: vec![
                 SnapshotLine {
                     text: "alpha".to_owned(),

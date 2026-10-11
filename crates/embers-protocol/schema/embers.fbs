@@ -620,6 +620,10 @@ table VisibleSnapshotResponse {
   // numbering (bit 0 disambiguate, bit 3 report-all-keys; bit 4 would be
   // report-associated-text, unused here).
   keyboard_mode:ubyte = 0;
+  // Appended: the text area in pixels (0 when no client has given the PTY a
+  // pixel size).
+  pixel_width:ushort = 0;
+  pixel_height:ushort = 0;
 }
 
 table ScrollbackSliceResponse {

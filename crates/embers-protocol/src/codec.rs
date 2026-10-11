@@ -3283,6 +3283,8 @@ fn encode_server_response<'a>(
                     cursor,
                     styles,
                     keyboard_mode: r.keyboard_mode,
+                    pixel_width: r.size.pixel_width,
+                    pixel_height: r.size.pixel_height,
                 },
             );
             fb::Envelope::create(
@@ -4876,8 +4878,8 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
                     size: PtySize {
                         cols: resp.cols(),
                         rows: resp.rows(),
-                        pixel_width: 0,
-                        pixel_height: 0,
+                        pixel_width: resp.pixel_width(),
+                        pixel_height: resp.pixel_height(),
                     },
                     lines: lines_vec,
                     title: resp.title().map(|t| t.to_owned()),
