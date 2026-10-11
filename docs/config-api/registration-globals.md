@@ -381,6 +381,48 @@ set_status_keys("vi");
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> set_status_line </h2>
+
+```rust,ignore
+fn set_status_line(value: String)
+```
+
+<div>
+<div class="tab">
+<button group="set_status_line" id="link-set_status_line-Description"  class="tablinks active"
+    onclick="openTab(event, 'set_status_line', 'Description')">
+Description
+</button>
+<button group="set_status_line" id="link-set_status_line-Example"  class="tablinks"
+    onclick="openTab(event, 'set_status_line', 'Example')">
+Example
+</button>
+</div>
+
+<div group="set_status_line" id="set_status_line-Description" class="tabcontent"  style="display: block;" >
+Choose where the status line goes: the command prompt, messages,
+`confirm` questions, the search prompt and warnings.
+
+- `"overlay"` (the default): like tmux, it is drawn over the session's
+  tab bar while there is something to show, and the tab bar comes
+  back afterwards. With the tab bar hidden, it is drawn over the last
+  row of the screen. The panes get every row but the tab bar's, and
+  are not resized when a message comes and goes.
+- `"separate"`: the last row of the screen is kept for it and always
+  shows the session name, so the panes have one row fewer.
+</div>
+<div group="set_status_line" id="set_status_line-Example" class="tabcontent"  style="display: none;" >
+
+```rhai
+set_status_line("separate");
+```
+
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> set_terminal_features </h2>
 
 ```rust,ignore

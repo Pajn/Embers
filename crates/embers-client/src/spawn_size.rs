@@ -7,7 +7,7 @@ use embers_protocol::{
     NodeRecord, NodeRecordKind, SplitRecord, TabRecord, TabsRecord,
 };
 
-use crate::presentation::PresentationModel;
+use crate::presentation::{PresentationModel, RootTabBar};
 use crate::state::ClientState;
 
 /// Where a pane about to be created will be placed, mirroring the server
@@ -41,13 +41,34 @@ pub enum PanePlacement {
 /// unknown or the new pane would not be drawn, in which case the server
 /// default applies and the client resizes the pane when it shows it.
 ///
-/// The root tab bar takes one row at the top or the bottom alike
-/// ([`crate::TabBarPosition`]), so sizes do not depend on where the client
-/// draws it, and callers without the client's config get the same answer.
+/// The root tab bar is taken to be shown. It takes one row at the top or the
+/// bottom alike ([`crate::TabBarPosition`]), so sizes do not depend on where
+/// the client draws it. A client that hides it reports a viewport with its
+/// row added ([`PresentationModel::layout_viewport`]), so callers without the
+/// client's config, given that viewport, get the same answer as
+/// [`spawn_pty_size_with`] gives the client.
 pub fn spawn_pty_size(
     state: &ClientState,
     session_id: SessionId,
     viewport: Size,
+    placement: PanePlacement,
+) -> Option<PtySize> {
+    spawn_pty_size_with(
+        state,
+        session_id,
+        viewport,
+        RootTabBar::default(),
+        placement,
+    )
+}
+
+/// [`spawn_pty_size`] for a client that draws the root tab bar as `tab_bar`
+/// says, in the viewport it draws the session in.
+pub fn spawn_pty_size_with(
+    state: &ClientState,
+    session_id: SessionId,
+    viewport: Size,
+    tab_bar: RootTabBar,
     placement: PanePlacement,
 ) -> Option<PtySize> {
     let mut layout = session_layout(state, session_id)?;
@@ -76,7 +97,7 @@ pub fn spawn_pty_size(
         PanePlacement::Replace { leaf_id } => leaf_id,
     };
 
-    PresentationModel::project(&layout, session_id, viewport)
+    PresentationModel::project_with(&layout, session_id, viewport, tab_bar)
         .ok()?
         .leaves
         .iter()

@@ -187,6 +187,51 @@ limits can be tuned together to fit a deployment.
 EMBERS_MAX_BUFFERS=256 EMBERS_MAX_SCROLLBACK_LINES=2000 embers
 ```
 
+## Screen layout
+
+Like tmux, the client keeps one row of the screen for the session's tab bar,
+its list of windows, and gives the panes the rest. The status line has no row
+of its own: while there is something to show (the command prompt, a
+`display-message`, a `confirm-before` question, the copy-mode search prompt or
+a warning such as a failed `run-shell` command) it is drawn over the tab bar,
+and the bar comes back when the prompt closes or the message's time is up.
+Messages show for their `display-message` duration, 3 seconds by default, and
+warnings for 3 seconds. Panes are never resized for the status line, so
+programs in them do not redraw when a message comes and goes.
+
+The bar is at the top of the screen unless `tabbar.set_position("bottom")`
+moves it (tmux `status-position`), and the status line goes with it. Tab bars
+of tabs nested inside a window stay at the top of their own area and are never
+covered. Without a root tab bar, as when a pane is zoomed, status content is
+drawn over the last row.
+
+`tabbar.set_visible(false)` hides the session's tab bar, like tmux's `status
+off`: the panes get the whole screen, and status content is drawn over the
+last row while it shows. Only the session's own bar is hidden; tab bars of
+nested tabs are still drawn, as `set_position` leaves them at the top.
+
+```rhai
+tabbar.set_position("bottom");   // status-position bottom
+tabbar.set_visible(false);       // status off
+```
+
+`set_status_line("separate")` brings back the earlier layout, where the last
+row of the screen is kept for the status line and shows the session name and
+the latest warning when there is nothing else to show. The panes then have one
+row fewer, two with the tab bar shown. `set_status_line("overlay")` is the
+default.
+
+Panes created from the CLI are sized from the viewport the client reports to
+the server. With the bar hidden the client reports one row more than the
+screen it draws on, the row the bar would take, since the CLI does not know
+the bar is hidden and sizes panes as if it were shown.
+
+The default bar starts with the session name, like tmux's default
+`status-left`. A formatter set with `tabbar.set_formatter` draws the whole bar
+instead, and can start it with `ctx.session_name()` (see
+[`TabBarContext`](config-api/tab-bar-context.md) and the example
+`config.rhai`).
+
 ## Clipboard (OSC 52)
 
 Programs in panes can set the system clipboard with OSC 52, the way they would

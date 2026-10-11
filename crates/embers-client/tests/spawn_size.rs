@@ -1,9 +1,13 @@
-use embers_client::{PanePlacement, PresentationModel, spawn_pty_size};
+use embers_client::{
+    PanePlacement, PresentationModel, RootTabBar, TabBarPosition, spawn_pty_size,
+    spawn_pty_size_with,
+};
 use embers_core::{FloatGeometry, NodeId, PtySize, Size, SplitDirection};
 
 use crate::support::{
-    FLOATING_TOP_LEAF_ID, NESTED_TABS_ID, ROOT_SPLIT_LEFT_LEAF_ID, ROOT_SPLIT_RIGHT_LEAF_ID,
-    ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state, root_split_state,
+    FLOATING_TOP_LEAF_ID, FOCUSED_LEAF_ID, NESTED_TABS_ID, ROOT_SPLIT_LEFT_LEAF_ID,
+    ROOT_SPLIT_RIGHT_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state,
+    root_split_state,
 };
 
 const VIEWPORT: Size = Size {
@@ -86,6 +90,47 @@ fn new_window_takes_the_area_below_the_root_tab_bar() {
     assert_eq!(
         spawn_pty_size(&demo_state(), SESSION_ID, VIEWPORT, PanePlacement::RootTab),
         Some(PtySize::new(41, 19))
+    );
+}
+
+#[test]
+fn a_hidden_root_tab_bar_leaves_its_row_to_new_windows() {
+    let state = demo_state();
+    let hidden = RootTabBar {
+        position: TabBarPosition::Bottom,
+        visible: false,
+    };
+    let size = spawn_pty_size_with(&state, SESSION_ID, VIEWPORT, hidden, PanePlacement::RootTab);
+    assert_eq!(size, Some(PtySize::new(41, 20)));
+
+    // The CLI, given the viewport the client reports, agrees.
+    let reported = PresentationModel::project_with(&state, SESSION_ID, VIEWPORT, hidden)
+        .unwrap()
+        .layout_viewport();
+    assert_eq!(
+        spawn_pty_size(&state, SESSION_ID, reported, PanePlacement::RootTab),
+        size
+    );
+    assert_eq!(
+        spawn_pty_size(
+            &state,
+            SESSION_ID,
+            reported,
+            PanePlacement::Split {
+                leaf_id: FOCUSED_LEAF_ID,
+                direction: SplitDirection::Horizontal,
+            },
+        ),
+        spawn_pty_size_with(
+            &state,
+            SESSION_ID,
+            VIEWPORT,
+            hidden,
+            PanePlacement::Split {
+                leaf_id: FOCUSED_LEAF_ID,
+                direction: SplitDirection::Horizontal,
+            },
+        )
     );
 }
 
