@@ -421,12 +421,13 @@ const TMUX_PASSTHROUGH_PREFIX: &[u8] = b"tmux;";
 /// - tmux passthrough (`ESC P tmux; <payload> ESC \`), returned unwrapped.
 ///   Inside the payload every ESC is doubled, so `ESC ESC` stands for one ESC
 ///   and `ESC \` ends the sequence; like tmux, an ESC followed by anything
-///   else is dropped.
+///   else is dropped. CAN or SUB, escaped or not, cancels the sequence
+///   instead, as it does any DCS, and runs as a control.
 /// - kitty graphics commands sent without the wrapper (`ESC _ G ... ESC \`),
 ///   returned whole. The emulator would drop them, and programs only send them
 ///   when they believe the terminal shows images, so they go the same way as
-///   wrapped ones. Like any APC, one ends at the first ESC; ended by anything
-///   but `ESC \`, it is dropped.
+///   wrapped ones. Like any APC, one ends at the first ESC, CAN or SUB; ended
+///   by anything but `ESC \`, it is dropped.
 ///
 /// Bytes that might begin either (`ESC`, `ESC P`, `ESC P tm`, `ESC _`, ...) are
 /// held back until it is clear whether they do, possibly across read chunks,
@@ -518,8 +519,8 @@ impl PassthroughScanner {
             }
             PassthroughState::Collect(kind) => match byte {
                 ESC => self.state = PassthroughState::CollectEscape(kind),
-                // CAN and SUB abort an APC, and run as controls.
-                CAN | SUB if kind == KittyGraphics => {
+                // CAN and SUB abort a DCS or APC, and run as controls.
+                CAN | SUB => {
                     self.payload.clear();
                     self.state = PassthroughState::Ground;
                     forward.push(byte);
@@ -536,6 +537,11 @@ impl PassthroughScanner {
                     return Some(payload);
                 }
                 match kind {
+                    Tmux if matches!(byte, CAN | SUB) => {
+                        self.payload.clear();
+                        self.state = PassthroughState::Ground;
+                        forward.push(byte);
+                    }
                     // `ESC ESC` is an escaped ESC; tmux drops an ESC before
                     // anything else.
                     Tmux => {
@@ -552,7 +558,7 @@ impl PassthroughScanner {
             }
             PassthroughState::Discard(kind) => match byte {
                 ESC => self.state = PassthroughState::DiscardEscape(kind),
-                CAN | SUB if kind == KittyGraphics => {
+                CAN | SUB => {
                     self.state = PassthroughState::Ground;
                     forward.push(byte);
                 }
@@ -561,6 +567,9 @@ impl PassthroughScanner {
             PassthroughState::DiscardEscape(kind) => {
                 if byte == b'\\' {
                     self.state = PassthroughState::Ground;
+                } else if kind == Tmux && matches!(byte, CAN | SUB) {
+                    self.state = PassthroughState::Ground;
+                    forward.push(byte);
                 } else if kind == Tmux {
                     self.state = PassthroughState::Discard(Tmux);
                 } else {
@@ -2128,6 +2137,37 @@ mod tests {
             router.route_output(&mut backend, &tmux_wrap(&vec![b'y'; MAX_PASSTHROUGH_BYTES]));
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].bytes.len(), MAX_PASSTHROUGH_BYTES);
+    }
+
+    #[test]
+    fn router_ends_tmux_passthrough_at_can_or_sub() {
+        for control in [0x18_u8, 0x1a] {
+            // Cancelled while collecting, after an escaped ESC, and while
+            // dropping an oversized payload.
+            let collecting = b"\x1bPtmux;abc".to_vec();
+            let after_escape = b"\x1bPtmux;abc\x1b".to_vec();
+            let mut discarding = b"\x1bPtmux;".to_vec();
+            discarding.extend(vec![b'x'; MAX_PASSTHROUGH_BYTES + 1]);
+            for start in [collecting, after_escape, discarding] {
+                let mut router = RawByteRouter::default();
+                let mut backend = StubBackend::default();
+                let mut output = start;
+                output.push(control);
+                output.extend_from_slice(b"visible text");
+
+                let writes = router.route_output(&mut backend, &output);
+
+                assert!(writes.is_empty(), "{control:#x}: {writes:?}");
+                let mut expected = vec![control];
+                expected.extend_from_slice(b"visible text");
+                assert_eq!(backend.ingested, expected, "{control:#x}");
+
+                // The scanner is back in ground state for the next sequence.
+                let writes = router.route_output(&mut backend, &tmux_wrap(b"\x1b]9;next\x07"));
+                assert_eq!(writes.len(), 1, "{control:#x}");
+                assert_eq!(writes[0].bytes, b"\x1b]9;next\x07");
+            }
+        }
     }
 
     #[test]

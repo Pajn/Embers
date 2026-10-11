@@ -1991,6 +1991,11 @@ impl CommandRunner for PromptCommandRunner {
     async fn run(&self, argv: Vec<String>, context: CommandContext) -> Result<String> {
         let cli = Cli::try_parse_from(std::iter::once("embers".to_owned()).chain(argv))
             .map_err(|error| MuxError::invalid_input(clap_error_summary(&error)))?;
+        if let Some(flag) = prompt_ignored_global_flag(&cli) {
+            return Err(MuxError::invalid_input(format!(
+                "{flag} cannot be used from the command prompt"
+            )));
+        }
         let base_index = cli.base_index.or(context.base_index);
         let command = cli
             .command
@@ -2005,6 +2010,23 @@ impl CommandRunner for PromptCommandRunner {
         connection.default_session = context.session_id;
         connection.default_client = context.client_id.and_then(NonZeroU64::new);
         execute_command(&mut connection, command).await
+    }
+}
+
+/// A global flag a prompt line gave that the prompt cannot honour: it always
+/// talks to the attached server, with the client's config and logging. Such
+/// lines are refused rather than run with the flag silently dropped.
+fn prompt_ignored_global_flag(cli: &Cli) -> Option<&'static str> {
+    if cli.socket.is_some() {
+        Some("--socket")
+    } else if cli.config.is_some() {
+        Some("--config")
+    } else if cli.log.is_some() {
+        Some("--log")
+    } else if cli.verbose != 0 {
+        Some("--verbose")
+    } else {
+        None
     }
 }
 

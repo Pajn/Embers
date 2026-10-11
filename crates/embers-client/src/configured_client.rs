@@ -18,7 +18,7 @@ use embers_protocol::{
 };
 
 use crate::RenderGrid;
-use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area};
+use crate::chooser::{Chooser, ChooserItem, ChooserScope, chooser_area, window_position};
 use crate::client::MuxClient;
 use crate::command_prompt::{
     CommandContext, CommandPrompt, CommandRunner, StatusKeys, record_history,
@@ -29,7 +29,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
-use crate::host_terminal::{HostCapabilities, is_attach_query_reply};
+use crate::host_terminal::{HostCapabilities, PendingAttachQueries};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
@@ -165,6 +165,8 @@ pub struct ConfiguredClient<T> {
     /// The buffer whose passthrough write last reached the host terminal: the
     /// pane a host reply to a query sent through passthrough is meant for.
     last_passthrough_buffer: Option<BufferId>,
+    /// The client's attach queries whose late replies are still expected.
+    pending_attach_queries: PendingAttachQueries,
     /// Host terminal output that must follow the frame `render_session` last
     /// returned (see [`ConfiguredClient::drain_frame_output`]).
     frame_output: Vec<u8>,
@@ -210,6 +212,7 @@ where
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
             last_passthrough_buffer: None,
+            pending_attach_queries: PendingAttachQueries::default(),
             frame_output: Vec::new(),
             detected_host: HostCapabilities::default(),
             socket_path: None,
@@ -812,12 +815,20 @@ where
             .await
     }
 
+    /// Record the attach queries the host had not answered when attaching
+    /// stopped waiting, so their late replies are dropped (see
+    /// [`ConfiguredClient::handle_host_reply`]).
+    pub fn set_pending_attach_queries(&mut self, pending: PendingAttachQueries) {
+        self.pending_attach_queries = pending;
+    }
+
     /// Deliver `bytes`, a reply from the host terminal (a DCS, APC or OSC
     /// string, or a CSI report), to the pane it is meant for. A reply is not
     /// typed input: it is never copied to synchronized panes, inserted into
     /// the command prompt or chooser filter, or matched against bindings.
-    /// Replies to the client's own attach queries are dropped whenever they
-    /// arrive (see [`is_attach_query_reply`]).
+    /// A reply to one of the client's own attach queries that is still
+    /// pending is dropped, and the query marked answered (see
+    /// [`PendingAttachQueries`]); an identical reply after that is a pane's.
     ///
     /// The host only answers what it was sent, and the only queries that do
     /// not come from the client come from panes through passthrough, so a
@@ -829,7 +840,10 @@ where
         viewport: Size,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        if is_attach_query_reply(&bytes) {
+        if self
+            .pending_attach_queries
+            .take_reply(&bytes, Instant::now())
+        {
             debug!("dropped a reply to the attach queries");
             return Ok(());
         }
@@ -3586,11 +3600,14 @@ where
             KeyEvent::Char('l' | '+') | KeyEvent::Right => chooser.expand(&rows),
             KeyEvent::Char('h' | '-') | KeyEvent::Left => chooser.collapse(&rows),
             KeyEvent::Char('/') => chooser.editing_filter = true,
-            KeyEvent::Char('x') => chooser.confirm_kill = chooser.selected(&rows),
+            KeyEvent::Char('x') => match chooser.target(self.client.state(), &rows) {
+                Some(item) if !item.exists(self.client.state()) => self.report_gone_item(item),
+                target => chooser.confirm_kill = target,
+            },
             KeyEvent::Escape if !chooser.filter.is_empty() => chooser.filter.clear(),
             KeyEvent::Char('q') | KeyEvent::Escape | KeyEvent::Ctrl('c') => self.close_chooser(),
             KeyEvent::Enter => {
-                let selected = chooser.selected(&rows);
+                let selected = chooser.target(self.client.state(), &rows);
                 self.close_chooser();
                 if let Some(item) = selected {
                     self.choose_item(session_id, item).await?;
@@ -3606,26 +3623,41 @@ where
         Ok(())
     }
 
+    /// Say that a picker item closed before it could be acted on.
+    fn report_gone_item(&mut self, item: ChooserItem) {
+        self.show_message(
+            &format!("{} no longer exists", item.kind()),
+            DEFAULT_DISPLAY_TIME,
+        );
+    }
+
     /// Switch to the chosen session, window or pane, like Enter in tmux
-    /// `choose-tree`.
+    /// `choose-tree`. An item that has closed is reported, not replaced.
     async fn choose_item(&mut self, session_id: SessionId, item: ChooserItem) -> Result<()> {
+        if !item.exists(self.client.state()) {
+            self.report_gone_item(item);
+            return Ok(());
+        }
         let target_session = item.session_id();
         if target_session != session_id || self.active_session_id != Some(target_session) {
             self.perform_session_switch(target_session).await?;
         }
         match item {
             ChooserItem::Session(_) => Ok(()),
-            ChooserItem::Window(session_id, position) => {
-                let has_root_tabs = self
-                    .client
-                    .state()
+            ChooserItem::Window(session_id, window_id) => {
+                let state = self.client.state();
+                let has_root_tabs = state
                     .sessions
                     .get(&session_id)
-                    .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
+                    .and_then(|session| state.nodes.get(&session.root_node_id))
                     .is_some_and(|root| root.tabs.is_some());
-                if !has_root_tabs {
+                let position = window_position(state, session_id, window_id);
+                let Some(position) = position.filter(|_| has_root_tabs) else {
+                    if position.is_none() {
+                        self.report_gone_item(item);
+                    }
                     return Ok(());
-                }
+                };
                 self.client
                     .request_message(ClientMessage::Session(SessionRequest::SelectRootTab {
                         request_id: self.client.next_request_id(),
@@ -3642,16 +3674,29 @@ where
     }
 
     /// Kill a picker item with the same commands as the CLI (`kill-session`,
-    /// `kill-window`, `kill-pane`), so it behaves exactly as they do.
+    /// `kill-window`, `kill-pane`), so it behaves exactly as they do. An item
+    /// that has closed is reported, not replaced: a window is killed by the
+    /// number it has now.
     async fn kill_chooser_item(&mut self, item: ChooserItem) {
+        if !item.exists(self.client.state()) {
+            self.report_gone_item(item);
+            return;
+        }
         let base_index = self.base_index().unwrap_or(0);
         let argv: Vec<String> = match item {
             ChooserItem::Session(_) => vec!["kill-session".to_owned()],
-            ChooserItem::Window(_, position) => vec![
-                "kill-window".to_owned(),
-                "-t".to_owned(),
-                crate::numbering::window_number(position, Some(base_index)).to_string(),
-            ],
+            ChooserItem::Window(session_id, window_id) => {
+                let Some(position) = window_position(self.client.state(), session_id, window_id)
+                else {
+                    self.report_gone_item(item);
+                    return;
+                };
+                vec![
+                    "kill-window".to_owned(),
+                    "-t".to_owned(),
+                    crate::numbering::window_number(position, Some(base_index)).to_string(),
+                ]
+            }
             ChooserItem::Pane(_, node_id) => {
                 vec!["kill-pane".to_owned(), "-t".to_owned(), node_id.to_string()]
             }

@@ -44,6 +44,11 @@ filter does too.
 so the picker kills the way those commands do. Choosing a pane in a hidden
 nested tab reveals it. There is no preview.
 
+The tree follows changes while the picker is open, and the selection stays on
+the same session, window or pane, even when windows before it close. If the
+selected item itself closes, Enter and `x` do nothing and the status line says
+so, rather than acting on another row.
+
 ```rhai
 bind("normal", "<leader>w", action.choose_window());
 bind("normal", "<leader>s", action.choose_session());
@@ -249,7 +254,10 @@ Two things differ from running the CLI in a shell:
 Window numbers follow the client's base index (`set_base_index`). Output, such
 as from `list-windows`, and errors are shown in the status line for a few
 seconds; lines of output are joined with `; `. `attach` and `automation` cannot
-be run from the prompt.
+be run from the prompt. Of the CLI's global options only `--base-index` applies:
+the prompt always talks to the attached server, so a line with `--socket`,
+`--config`, `--log` or `-v` is refused with an error rather than run with the
+option ignored.
 
 The alternative, mapping prompt commands onto client actions, would have meant
 a second command language whose options drift from the CLI's. Reusing the CLI

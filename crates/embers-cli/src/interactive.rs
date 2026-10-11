@@ -9,8 +9,8 @@ use embers_client::host_terminal::{MAX_HOST_REPLY_BYTES, ends_with_device_attrib
 use embers_client::{
     ConfigManager, ConfiguredClient, HOST_QUERIES, HostCapabilities, HostEnvironment, HostReplies,
     KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
-    MuxClient, PanePlacement, RenderGrid, SocketTransport, detect_host_capabilities,
-    spawn_pty_size,
+    MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
+    detect_host_capabilities, spawn_pty_size,
 };
 use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
@@ -81,6 +81,10 @@ async fn run_attached(
     configured.set_host_capabilities(detect_host_capabilities(
         &host_replies,
         &HostEnvironment::from_process(),
+    ));
+    configured.set_pending_attach_queries(PendingAttachQueries::after(
+        &host_replies,
+        std::time::Instant::now() + LATE_HOST_REPLY_WINDOW,
     ));
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
     let _input_thread = spawn_input_thread(input_tx.clone())?;
@@ -1137,6 +1141,13 @@ struct TerminalGuard {
 /// Terminals answer at once, or after one round trip over SSH; the wait only
 /// runs out for a terminal that does not answer DA1 at all.
 const HOST_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long after [`HOST_REPLY_TIMEOUT`] runs out a reply to [`HOST_QUERIES`]
+/// is still taken as one, and dropped, rather than handed to a pane. The
+/// replies can follow a slow link by a few seconds; a host that ignores a
+/// query never sends one, and after this a pane gets the same reply to a
+/// query it sent itself.
+const LATE_HOST_REPLY_WINDOW: Duration = Duration::from_secs(10);
 
 /// Read the host terminal's replies to [`HOST_QUERIES`], up to and including
 /// the DA1 reply that ends them, or until [`HOST_REPLY_TIMEOUT`]. This runs
