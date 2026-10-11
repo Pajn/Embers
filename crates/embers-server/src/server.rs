@@ -498,8 +498,9 @@ struct Runtime {
     subscriptions: Mutex<BTreeMap<u64, Subscription>>,
     clients: Mutex<BTreeMap<u64, ClientConnection>>,
     /// Whether any client forwards kitty graphics queries to a host terminal
-    /// that answers them, as every keeper was last told.
-    host_graphics: AtomicBool,
+    /// that answers them, as every keeper was last told. Held while keepers
+    /// are told, so they hear changes in order.
+    host_graphics: Mutex<bool>,
     next_connection_id: AtomicU64,
     next_subscription_id: AtomicU64,
     shutdown: ShutdownSignal,
@@ -601,7 +602,7 @@ impl Runtime {
             last_saved_workspace: Mutex::new(None),
             subscriptions: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
-            host_graphics: AtomicBool::new(false),
+            host_graphics: Mutex::new(false),
             next_connection_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
             shutdown: ShutdownSignal::new(),
@@ -711,11 +712,11 @@ impl Runtime {
             .await
             .insert(buffer_id, runtime.clone());
         // A keeper starts out holding no replies; tell this one if it should.
-        if self.host_graphics.load(Ordering::Acquire)
-            && let Err(error) = runtime.set_host_graphics(true).await
-        {
+        let host_graphics = self.host_graphics.lock().await;
+        if *host_graphics && let Err(error) = runtime.set_host_graphics(true).await {
             debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
         }
+        drop(host_graphics);
         let exited = self
             .state
             .lock()
@@ -4347,15 +4348,17 @@ impl Runtime {
     /// worked out per pane: a pane no such client shows waits out the hold's
     /// timeout instead.
     async fn sync_host_graphics(&self) {
+        let mut host_graphics = self.host_graphics.lock().await;
         let enabled = self
             .clients
             .lock()
             .await
             .values()
             .any(|client| client.host_graphics);
-        if self.host_graphics.swap(enabled, Ordering::AcqRel) == enabled {
+        if *host_graphics == enabled {
             return;
         }
+        *host_graphics = enabled;
         let runtimes: Vec<_> = self
             .buffer_runtimes
             .lock()
