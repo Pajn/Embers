@@ -651,6 +651,23 @@ impl ServerState {
         Ok(())
     }
 
+    /// Record the buffer's PTY size as the size of the view showing it, which
+    /// a client draws it at. Returns the view's session when that changed it.
+    pub fn sync_buffer_view_size(&mut self, buffer_id: BufferId) -> Result<Option<SessionId>> {
+        let buffer = self.buffer(buffer_id)?;
+        let BufferAttachment::Attached(node_id) = buffer.attachment else {
+            return Ok(None);
+        };
+        let size = buffer.pty_size;
+        match self.node_mut(node_id)? {
+            Node::BufferView(view) if view.view.last_render_size != size => {
+                view.view.last_render_size = size;
+                Ok(Some(view.session_id))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub fn note_buffer_output(&mut self, buffer_id: BufferId) -> Result<u64> {
         let buffer = self.buffer_mut(buffer_id)?;
         buffer.last_snapshot_seq = buffer.last_snapshot_seq.saturating_add(1);
@@ -730,7 +747,8 @@ impl ServerState {
         buffer_id: BufferId,
     ) -> Result<NodeId> {
         self.ensure_session_exists(session_id)?;
-        self.buffer(buffer_id)?;
+        // A buffer created with a size hint is drawn at that size.
+        let last_render_size = self.buffer(buffer_id)?.pty_size;
 
         let node_id = self.node_ids.next();
         self.nodes.insert(
@@ -740,7 +758,10 @@ impl ServerState {
                 session_id,
                 parent: None,
                 buffer_id,
-                view: BufferViewState::default(),
+                view: BufferViewState {
+                    last_render_size,
+                    ..BufferViewState::default()
+                },
             }),
         );
         Ok(node_id)

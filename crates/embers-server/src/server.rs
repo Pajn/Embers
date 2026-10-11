@@ -2021,19 +2021,30 @@ impl Runtime {
                     }
                 }
 
-                {
+                // The view showing the buffer records the size too, so its node
+                // record tells API users (popups sized from the session) the
+                // size it is drawn at.
+                let resized_session = {
                     let mut state = self.state.lock().await;
-                    if let Err(error) = state.set_buffer_size(buffer_id, size) {
-                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    match state
+                        .set_buffer_size(buffer_id, size)
+                        .and_then(|()| state.sync_buffer_view_size(buffer_id))
+                    {
+                        Ok(session_id) => session_id,
+                        Err(error) => {
+                            return (mux_error_response(Some(request_id), error), Vec::new());
+                        }
                     }
-                }
+                };
 
-                (
-                    ServerResponse::Ok(OkResponse { request_id }),
-                    vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
-                        buffer_id,
-                    })],
-                )
+                let mut events = vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                    buffer_id,
+                })];
+                if let Some(session_id) = resized_session {
+                    self.mark_workspace_metadata_dirty();
+                    events.push(ServerEvent::NodeChanged(NodeChangedEvent { session_id }));
+                }
+                (ServerResponse::Ok(OkResponse { request_id }), events)
             }
         }
     }
