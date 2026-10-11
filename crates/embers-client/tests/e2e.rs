@@ -3289,3 +3289,97 @@ async fn destroyed_session_detaches_the_client_by_default() {
     assert!(configured.should_exit());
     server.shutdown().await.expect("server shuts down");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scrolling_fills_the_pane_it_is_drawn_in() {
+    use embers_client::{ConfiguredClient, KeyEvent};
+
+    let server = TestServer::start().await.expect("server starts");
+    run_cli(&server, &["new-session", "alpha"]);
+    run_cli(&server, &["new-window", "-t", "alpha", "--", "/bin/sh"]);
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_socket_path(server.socket_path().to_path_buf());
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let (alpha, leaf, buffer) = {
+        let state = configured.client().state();
+        let session = state
+            .sessions
+            .values()
+            .find(|session| session.name == "alpha")
+            .expect("alpha session");
+        let leaf = session.focused_leaf_id.expect("focused leaf");
+        let buffer = state.nodes[&leaf]
+            .buffer_view
+            .as_ref()
+            .expect("buffer view")
+            .buffer_id;
+        (session.id, leaf, buffer)
+    };
+
+    // A pane far taller than the 24 rows a view starts out with.
+    let viewport = Size {
+        width: 120,
+        height: 50,
+    };
+    configured
+        .sync_pty_sizes(alpha, viewport)
+        .await
+        .expect("size the pane");
+    let drawn_rows = {
+        configured
+            .client_mut()
+            .resync_all_sessions()
+            .await
+            .expect("resync");
+        configured.client().state().buffers[&buffer].pty_size.rows
+    };
+    assert!(drawn_rows > 40, "pane is {drawn_rows} rows");
+
+    run_cli(&server, &["send-keys", "--enter", "seq 1 300"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !String::from_utf8_lossy(&run_cli(&server, &["capture-pane"]).stdout)
+        .lines()
+        .any(|line| line.trim() == "300")
+    {
+        assert!(Instant::now() < deadline, "seq output never arrived");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    configured
+        .client_mut()
+        .refresh_buffer_snapshot(buffer)
+        .await
+        .expect("refresh snapshot");
+
+    configured
+        .sync_pty_sizes(alpha, viewport)
+        .await
+        .expect("size the pane");
+    configured
+        .handle_key(alpha, viewport, KeyEvent::PageUp)
+        .await
+        .expect("page up");
+
+    let state = configured.client().state();
+    let view = state.view_state(leaf).expect("view state");
+    assert_eq!(view.visible_line_count, drawn_rows);
+    assert_eq!(view.visible_lines.len(), usize::from(drawn_rows));
+    assert!(
+        view.scroll_top_line + u64::from(drawn_rows) <= view.total_line_count,
+        "top line {} of {} lines",
+        view.scroll_top_line,
+        view.total_line_count
+    );
+}
