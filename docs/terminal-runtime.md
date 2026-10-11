@@ -238,7 +238,8 @@ later changes, so a pane that never stops changing its title is still saved, onc
 layout change during the longer wait is saved within 100 ms as usual. Output alone never triggers a
 save. Buffer activity is saved, but a write is skipped when nothing but activity changed since the
 last one; output sequence numbers are not saved, since they only mean something to the keeper that
-produced them. The state is copied under the server's state lock and encoded and written outside
+produced them (each buffer's `last_snapshot_seq` is written as `0`, which earlier servers need to
+load the file). The state is copied under the server's state lock and encoded and written outside
 it. Each write goes to a temp file next to the workspace file, is fsynced, renamed over it, and the
 directory is fsynced, so a crash leaves either the previous file or the new one. A crash or SIGKILL
 of the server therefore loses at most the changes of the last batch. A clean shutdown writes the
