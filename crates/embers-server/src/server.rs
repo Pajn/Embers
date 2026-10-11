@@ -3605,8 +3605,20 @@ impl Runtime {
     }
 
     async fn record_buffer_update(&self, buffer_id: BufferId, update: BufferRuntimeUpdate) {
+        let shown_sessions: BTreeSet<embers_core::SessionId> = self
+            .clients
+            .lock()
+            .await
+            .values()
+            .filter_map(|client| client.current_session_id)
+            .collect();
         let (render_invalidated, pipe_event, workspace_changed) = {
             let mut state = self.state.lock().await;
+            // Like tmux, a bell flags only a window no client is looking at:
+            // in the window a client shows it is ordinary output.
+            let shown = state
+                .session_showing_buffer(buffer_id)
+                .is_some_and(|session_id| shown_sessions.contains(&session_id));
             let Some(buffer) = state.buffers.get_mut(&buffer_id) else {
                 return;
             };
@@ -3623,12 +3635,20 @@ impl Runtime {
                 // replaced the runtime's activity before this update.
                 if update.bell_sequence > buffer.runtime_bell_sequence {
                     buffer.runtime_bell_sequence = update.bell_sequence;
-                    buffer.activity = embers_core::ActivityState::Bell;
+                    if !shown {
+                        buffer.activity = embers_core::ActivityState::Bell;
+                    }
                     render_invalidated = true;
                 }
                 if sequence_advanced {
                     buffer.last_snapshot_seq = update.sequence;
-                    let next_activity = max_activity(buffer.activity, update.activity);
+                    let activity = match update.activity {
+                        embers_core::ActivityState::Bell if shown => {
+                            embers_core::ActivityState::Activity
+                        }
+                        activity => activity,
+                    };
+                    let next_activity = max_activity(buffer.activity, activity);
                     if next_activity != buffer.activity {
                         buffer.activity = next_activity;
                     }
@@ -5332,6 +5352,136 @@ mod tests {
         // Exactly one copy, to the client on alpha; nothing from the detached
         // buffer; nothing for the clients elsewhere.
         assert_eq!(received, vec![(1, attached, "yank".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn bells_flag_only_windows_no_client_is_looking_at() {
+        let mut state = ServerState::new();
+        let session = state.create_session("alpha");
+        let shown_leaf = create_leaf(&mut state, session, "shown");
+        let hidden_leaf = create_leaf(&mut state, session, "hidden");
+        state
+            .add_root_tab(session, "one", shown_leaf)
+            .expect("attach shown leaf");
+        state
+            .add_root_tab(session, "two", hidden_leaf)
+            .expect("attach hidden leaf");
+        state
+            .focus_leaf(session, shown_leaf)
+            .expect("show the first window");
+        let buffer_of = |state: &ServerState, leaf| match state.node(leaf).expect("leaf exists") {
+            crate::Node::BufferView(view) => view.buffer_id,
+            other => panic!("expected buffer view, got {other:?}"),
+        };
+        let shown = buffer_of(&state, shown_leaf);
+        let hidden = buffer_of(&state, hidden_leaf);
+        let root = state.session(session).expect("session").root_node;
+        let runtime = Runtime::new(
+            state,
+            PathBuf::from("server.sock"),
+            PathBuf::from("workspace"),
+            PathBuf::from("runtime"),
+            BTreeMap::new(),
+            ResourceLimits::default(),
+        );
+        let runtime = &runtime;
+        let ring = |buffer_id, bells| {
+            runtime.record_buffer_update(
+                buffer_id,
+                BufferRuntimeUpdate {
+                    sequence: bells,
+                    activity: ActivityState::Bell,
+                    title: None,
+                    pipe: None,
+                    cwd: None,
+                    foreground_command: None,
+                    bell_sequence: bells,
+                },
+            )
+        };
+        let activity = |buffer_id| async move {
+            runtime
+                .state
+                .lock()
+                .await
+                .buffer(buffer_id)
+                .expect("buffer exists")
+                .activity
+        };
+
+        // No client shows the session: like tmux, a bell flags even the
+        // current window.
+        ring(shown, 1).await;
+        assert_eq!(activity(shown).await, ActivityState::Bell);
+        runtime
+            .state
+            .lock()
+            .await
+            .set_buffer_activity(shown, ActivityState::Idle)
+            .expect("clear the bell");
+
+        runtime.clients.lock().await.insert(
+            1,
+            super::ClientConnection {
+                current_session_id: Some(session),
+                shutdown: None,
+                stopped: None,
+            },
+        );
+
+        // A bell in the window the client shows is output, not a flag; one
+        // in a background window flags that window.
+        ring(shown, 2).await;
+        ring(hidden, 1).await;
+        assert_eq!(activity(shown).await, ActivityState::Activity);
+        assert_eq!(activity(hidden).await, ActivityState::Bell);
+
+        // Until the window is visited.
+        runtime
+            .state
+            .lock()
+            .await
+            .switch_tab(root, 1)
+            .expect("visit the second window");
+        assert_eq!(activity(hidden).await, ActivityState::Idle);
+    }
+
+    #[test]
+    fn visiting_a_window_clears_the_bells_of_all_its_panes() {
+        let mut state = ServerState::new();
+        let session = state.create_session("alpha");
+        let first = create_leaf(&mut state, session, "first");
+        let left = create_leaf(&mut state, session, "left");
+        state
+            .add_root_tab(session, "one", first)
+            .expect("attach first window");
+        state
+            .add_root_tab(session, "two", left)
+            .expect("attach second window");
+        let right_buffer = state.create_buffer("right", vec!["/bin/sh".to_owned()], None);
+        state
+            .split_leaf_with_new_buffer(left, SplitDirection::Vertical, right_buffer)
+            .expect("split the second window");
+        state
+            .focus_leaf(session, first)
+            .expect("show the first window");
+        let buffer_of = |leaf| match state.node(leaf).expect("leaf exists") {
+            crate::Node::BufferView(view) => view.buffer_id,
+            other => panic!("expected buffer view, got {other:?}"),
+        };
+        let left_buffer = buffer_of(left);
+        for buffer_id in [left_buffer, right_buffer] {
+            state
+                .set_buffer_activity(buffer_id, ActivityState::Bell)
+                .expect("ring");
+        }
+
+        // Focusing one pane of the window acknowledges the bell in the other
+        // pane too: tmux clears the window's flag, not a pane's.
+        state.focus_leaf(session, left).expect("visit the window");
+        let activity = |buffer_id| state.buffer(buffer_id).expect("buffer").activity;
+        assert_eq!(activity(left_buffer), ActivityState::Idle);
+        assert_eq!(activity(right_buffer), ActivityState::Activity);
     }
 
     #[tokio::test]

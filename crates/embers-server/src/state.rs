@@ -676,6 +676,41 @@ impl ServerState {
         Ok(())
     }
 
+    /// The session whose current window shows `buffer_id`: the buffer's pane
+    /// is in the session's active window or in one of its visible popups.
+    pub fn session_showing_buffer(&self, buffer_id: BufferId) -> Option<SessionId> {
+        let BufferAttachment::Attached(node_id) = self.buffer(buffer_id).ok()?.attachment else {
+            return None;
+        };
+        let session_id = self.node_session_id(node_id).ok()?;
+        self.is_node_visible_in_session(session_id, node_id)
+            .ok()?
+            .then_some(session_id)
+    }
+
+    /// Acknowledge the bells of every pane `session_id` shows, as tmux clears
+    /// a window's bell flag when the window becomes current. Their output
+    /// still counts as activity.
+    fn acknowledge_shown_bells(&mut self, session_id: SessionId) -> Result<()> {
+        let session = self.session(session_id)?;
+        let mut leaves = Vec::new();
+        self.collect_visible_leaf_ids(session.root_node, &mut leaves)?;
+        for floating_id in &session.floating {
+            if let Some(floating) = self.floating.get(floating_id)
+                && floating.visible
+            {
+                self.collect_visible_leaf_ids(floating.root_node, &mut leaves)?;
+            }
+        }
+        for leaf_id in leaves {
+            let buffer = self.buffer_mut(self.buffer_view_buffer_id(leaf_id)?)?;
+            if buffer.activity == ActivityState::Bell {
+                buffer.activity = ActivityState::Activity;
+            }
+        }
+        Ok(())
+    }
+
     pub fn create_buffer_view(
         &mut self,
         session_id: SessionId,
@@ -1907,6 +1942,7 @@ impl ServerState {
         }
 
         self.set_buffer_activity(buffer_id, ActivityState::Idle)?;
+        self.acknowledge_shown_bells(session_id)?;
 
         Ok(())
     }
