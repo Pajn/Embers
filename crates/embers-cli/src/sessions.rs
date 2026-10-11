@@ -2,7 +2,7 @@
 //! `-d`.
 
 use embers_client::PanePlacement;
-use embers_core::{MuxError, Result, Size, new_request_id};
+use embers_core::{MuxError, Result, SessionId, Size, new_request_id};
 use embers_protocol::{
     ClientMessage, ClientRequest, SessionRecord, SessionRequest, SessionSnapshot,
 };
@@ -58,23 +58,32 @@ impl CliConnection {
         match self.add_first_window(&snapshot, &args).await {
             Ok(created) => snapshot = created,
             Err(error) => {
-                if let Err(close_error) = self
-                    .request(ClientMessage::Session(SessionRequest::Close {
-                        request_id: new_request_id(),
-                        session_id,
-                        force: true,
-                    }))
-                    .await
-                {
-                    tracing::warn!(%session_id, %close_error, "failed to remove the new session");
-                }
+                self.discard_new_session(session_id).await;
                 return Err(error);
             }
         }
-        if !args.detached {
-            self.show_session(&snapshot).await?;
+        if !args.detached
+            && let Err(error) = self.show_session(&snapshot).await
+        {
+            self.discard_new_session(session_id).await;
+            return Err(error);
         }
         self.describe_session(&snapshot, args.format).await
+    }
+
+    /// Closes a session that new-session created but could not finish, so a
+    /// retry with the same name does not hit "duplicate session".
+    async fn discard_new_session(&mut self, session_id: SessionId) {
+        if let Err(close_error) = self
+            .request(ClientMessage::Session(SessionRequest::Close {
+                request_id: new_request_id(),
+                session_id,
+                force: true,
+            }))
+            .await
+        {
+            tracing::warn!(%session_id, %close_error, "failed to remove the new session");
+        }
     }
 
     async fn add_first_window(
