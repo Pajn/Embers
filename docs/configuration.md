@@ -175,6 +175,28 @@ limits can be tuned together to fit a deployment.
 EMBERS_MAX_BUFFERS=256 EMBERS_MAX_SCROLLBACK_LINES=2000 embers
 ```
 
+## Screen layout
+
+Like tmux, the client keeps one row of the screen for the session's tab bar,
+its list of windows, and gives the panes the rest. The status line has no row
+of its own: while there is something to show (the command prompt, a
+`display-message`, a `confirm-before` question, the copy-mode search prompt or
+a warning such as a failed `run-shell` command) it is drawn over the tab bar,
+and the bar comes back when the prompt closes or the message's time is up.
+Messages show for their `display-message` duration, 3 seconds by default, and
+warnings for 3 seconds. Panes are never resized for the status line, so
+programs in them do not redraw when a message comes and goes.
+
+The bar is at the top of the screen unless `tabbar.set_position("bottom")`
+moves it (tmux `status-position`), and the status line goes with it. Tab bars
+of tabs nested inside a window stay at the top of their own area and are never
+covered. Without a root tab bar, as when a pane is zoomed, status content is
+drawn over the last row.
+
+The default bar starts with the session name, like tmux's default
+`status-left`. A formatter set with `tabbar.set_formatter` draws the whole bar
+instead (see [`TabBarContext`](config-api/tab-bar-context.md)).
+
 ## Clipboard (OSC 52)
 
 Programs in panes can set the system clipboard with OSC 52, the way they would

@@ -206,6 +206,19 @@ impl PresentationModel {
         })
     }
 
+    /// The row status content (the command prompt, messages, warnings) is
+    /// drawn over while it shows, like tmux shows them in its status bar: the
+    /// root tab bar's row, or the last row when no root tab bar is drawn.
+    /// Nothing moves underneath, so panes keep their sizes. `None` for an
+    /// empty viewport.
+    pub fn status_row(&self) -> Option<u16> {
+        self.root_tabs
+            .as_ref()
+            .filter(|bar| bar.rect.size.height > 0)
+            .and_then(|bar| u16::try_from(bar.rect.origin.y).ok())
+            .or_else(|| self.viewport.height.checked_sub(1))
+    }
+
     pub fn focused_leaf(&self) -> Option<&LeafFrame> {
         self.leaves.iter().find(|leaf| leaf.focused)
     }

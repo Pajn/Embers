@@ -660,6 +660,167 @@ async fn tab_bar_at_the_bottom_moves_drawing_and_mouse_targets() {
 }
 
 #[tokio::test]
+async fn status_content_overlays_the_root_tab_bar_without_moving_panes() {
+    let terminal = Size {
+        width: 80,
+        height: 20,
+    };
+    for status_line in ["overlay"] {
+        for position in ["top", "bottom"] {
+            for visible in [true] {
+                let layout = format!("{status_line} {position} visible={visible}");
+                let (config, _tempdir) = manager_from_source(&format!(
+                    r#"
+                    tabbar.set_position("{position}");
+                    bind("normal", "<M-:>", action.command_prompt());
+                    "#
+                ));
+                let transport = FakeTransport::default();
+                let mut configured =
+                    ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+                *configured.client_mut().state_mut() = demo_state();
+                let overlay = status_line == "overlay";
+                let viewport = configured.content_viewport(terminal);
+                assert_eq!(
+                    viewport.height,
+                    terminal.height - u16::from(!overlay),
+                    "{layout}"
+                );
+
+                let plain = configured
+                    .render_session(SESSION_ID, viewport)
+                    .await
+                    .unwrap()
+                    .lines();
+                let bar_row = match (visible, position) {
+                    (true, "top") => Some(0),
+                    (true, _) => Some(usize::from(viewport.height) - 1),
+                    (false, _) => None,
+                };
+                for (row, line) in plain.iter().enumerate() {
+                    assert_eq!(
+                        line.contains("workspace"),
+                        Some(row) == bar_row,
+                        "{layout}: {plain:#?}"
+                    );
+                }
+
+                configured.show_message("hello-overlay", std::time::Duration::from_secs(60));
+                let shown = configured
+                    .render_session(SESSION_ID, viewport)
+                    .await
+                    .unwrap()
+                    .lines();
+                let status_row = match (visible, position) {
+                    (true, "top") => 0,
+                    _ => usize::from(viewport.height) - 1,
+                };
+                for (row, (before, after)) in plain.iter().zip(&shown).enumerate() {
+                    if overlay && row == status_row {
+                        assert!(after.starts_with("hello-overlay"), "{layout}: {shown:#?}");
+                        assert!(!after.contains("workspace"), "{layout}: {shown:#?}");
+                    } else {
+                        // Nothing else moves: the panes keep their rows.
+                        assert_eq!(before, after, "{layout} row {row}");
+                    }
+                }
+
+                // Once the message's time is up, the bar comes back.
+                configured.show_message("hello-overlay", std::time::Duration::ZERO);
+                assert!(configured.expire_status_message(), "{layout}");
+                let after = configured
+                    .render_session(SESSION_ID, viewport)
+                    .await
+                    .unwrap()
+                    .lines();
+                assert_eq!(after, plain, "{layout}");
+
+                // The prompt's cursor goes to the row it is drawn on.
+                configured
+                    .handle_key(SESSION_ID, viewport, KeyEvent::Alt(':'))
+                    .await
+                    .unwrap();
+                let prompt = configured
+                    .render_session(SESSION_ID, viewport)
+                    .await
+                    .unwrap();
+                if overlay {
+                    assert!(prompt.lines()[status_row].starts_with(':'), "{layout}");
+                    let cursor = prompt.cursor().expect("prompt cursor");
+                    assert_eq!(
+                        (cursor.x, usize::from(cursor.y)),
+                        (1, status_row),
+                        "{layout}"
+                    );
+                }
+
+                // Panes created here and from the CLI get the drawn sizes:
+                // the reported viewport counts a hidden bar's row.
+                configured
+                    .sync_pty_sizes(SESSION_ID, viewport)
+                    .await
+                    .unwrap();
+                let reported = transport
+                    .requests()
+                    .into_iter()
+                    .find_map(|request| match request {
+                        ClientMessage::Session(SessionRequest::SetViewport {
+                            viewport, ..
+                        }) => Some(viewport),
+                        _ => None,
+                    });
+                assert_eq!(
+                    reported,
+                    Some(Size {
+                        width: viewport.width,
+                        height: viewport.height + u16::from(!visible),
+                    }),
+                    "{layout}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_warning_shows_for_the_display_time_in_the_overlay() {
+    let (config, _tempdir) = manager_from_source(
+        r#"
+        tabbar.set_position("bottom");
+        bind("normal", "<M-w>", action.notify("warn", "something failed"));
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(MuxClient::new(FakeTransport::default()), config);
+    *configured.client_mut().state_mut() = demo_state();
+    let viewport = configured.content_viewport(Size {
+        width: 80,
+        height: 20,
+    });
+    // Nothing to show: the tab bar keeps its row.
+    assert_eq!(configured.status_text(SESSION_ID), None);
+
+    configured
+        .handle_key(SESSION_ID, viewport, KeyEvent::Alt('w'))
+        .await
+        .unwrap();
+    assert_eq!(
+        configured.status_text(SESSION_ID).as_deref(),
+        Some("[demo] warn: something failed")
+    );
+    let lines = configured
+        .render_session(SESSION_ID, viewport)
+        .await
+        .unwrap()
+        .lines();
+    assert!(
+        lines[19].starts_with("[demo] warn: something failed"),
+        "{lines:#?}"
+    );
+    // It is not dropped before its time is up.
+    assert!(!configured.expire_status_message());
+}
+
+#[tokio::test]
 async fn reload_updates_live_bindings() {
     let tempdir = tempdir().unwrap();
     let config_path = tempdir.path().join("config.rhai");
@@ -2734,7 +2895,23 @@ async fn formatter_failures_fall_back_to_default_rendering() {
         .unwrap();
     let rendered = grid.render();
 
-    assert!(rendered.contains("workspace"));
+    // The nested bar falls back to the default; the root bar's row shows the
+    // error until its time is up.
+    assert!(rendered.contains("!build"), "{rendered}");
+    assert!(grid.lines()[0].starts_with("[demo] "), "{rendered}");
+    assert_eq!(configured.notifications().len(), 1);
+
+    // Every frame fails the same way, but it is reported once.
+    configured
+        .render_session(
+            SESSION_ID,
+            Size {
+                width: 80,
+                height: 20,
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(configured.notifications().len(), 1);
 }
 

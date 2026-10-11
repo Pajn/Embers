@@ -58,9 +58,7 @@ async fn run_attached(
     let requested_target = target;
     // The first window of a new session is created before the first frame, so
     // size it from the terminal directly.
-    let initial_viewport = terminal_size(io::stdout().as_raw_fd())
-        .ok()
-        .map(content_viewport);
+    let initial_viewport = terminal_size(io::stdout().as_raw_fd()).ok();
     let initial_session_id =
         ensure_session_ready(&mut client, requested_target.as_deref(), initial_viewport).await?;
     client.switch_current_session(initial_session_id).await?;
@@ -96,7 +94,7 @@ async fn run_attached(
         if dirty {
             terminal.sync_mouse_capture(mouse_capture_enabled(&configured))?;
             terminal_size = terminal.size()?;
-            let viewport = content_viewport(terminal_size);
+            let viewport = configured.content_viewport(terminal_size);
             terminal.write_bytes(&drain_terminal_output(&mut configured))?;
             if let Some(active_session_id) = session_id
                 && !configured
@@ -132,7 +130,9 @@ async fn run_attached(
                     configured.status_cursor(),
                 )?;
             } else {
-                let grid = RenderGrid::new(viewport.width, viewport.height);
+                // Leave the last row to the status line, which says so.
+                let grid =
+                    RenderGrid::new(terminal_size.width, terminal_size.height.saturating_sub(1));
                 terminal.render(
                     &grid,
                     terminal_size,
@@ -149,7 +149,7 @@ async fn run_attached(
                 Ok(TerminalEvent::Key(key)) if is_quit_key(&key) => return Ok(()),
                 Ok(TerminalEvent::Key(key)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_key(active_session_id, viewport, key)
                             .await?;
@@ -159,7 +159,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Paste(bytes)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_paste(active_session_id, viewport, bytes)
                             .await?;
@@ -169,7 +169,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Focus(focused)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_focus_event(active_session_id, viewport, focused)
                             .await?;
@@ -179,7 +179,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::HostReply(bytes)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_host_reply(active_session_id, viewport, bytes)
                             .await?;
@@ -188,7 +188,7 @@ async fn run_attached(
                 }
                 Ok(TerminalEvent::Mouse(mouse)) => {
                     if let Some(active_session_id) = session_id {
-                        let viewport = content_viewport(terminal_size);
+                        let viewport = configured.content_viewport(terminal_size);
                         configured
                             .handle_mouse(active_session_id, viewport, mouse)
                             .await?;
@@ -222,12 +222,9 @@ async fn run_attached(
             // Detach (active becomes None) is left to the ClientChanged path, and
             // a not-yet-initialised None is ignored.
             if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-                ensure_root_window(
-                    configured.client_mut(),
-                    active_session_id,
-                    Some(content_viewport(terminal_size)),
-                )
-                .await?;
+                let viewport = configured.content_viewport(terminal_size);
+                ensure_root_window(configured.client_mut(), active_session_id, Some(viewport))
+                    .await?;
                 session_id = Some(active_session_id);
                 dirty = true;
             }
@@ -271,12 +268,9 @@ async fn run_attached(
                         .sessions
                         .contains_key(&next_session_id) =>
                 {
-                    ensure_root_window(
-                        configured.client_mut(),
-                        next_session_id,
-                        Some(content_viewport(terminal_size)),
-                    )
-                    .await?;
+                    let viewport = configured.content_viewport(terminal_size);
+                    ensure_root_window(configured.client_mut(), next_session_id, Some(viewport))
+                        .await?;
                     session_id = Some(next_session_id);
                 }
                 SwitchedSession::Detached => {
@@ -292,12 +286,8 @@ async fn run_attached(
             return Ok(());
         }
         if let Some(active_session_id) = moved_to_session(&configured, session_id) {
-            ensure_root_window(
-                configured.client_mut(),
-                active_session_id,
-                Some(content_viewport(terminal_size)),
-            )
-            .await?;
+            let viewport = configured.content_viewport(terminal_size);
+            ensure_root_window(configured.client_mut(), active_session_id, Some(viewport)).await?;
             session_id = Some(active_session_id);
         }
         // handle_event drains background notifications up front, but its own
@@ -544,17 +534,6 @@ fn default_title(command: &[String], fallback: &str) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn content_viewport(size: Size) -> Size {
-    if size.height > 1 {
-        Size {
-            width: size.width,
-            height: size.height - 1,
-        }
-    } else {
-        size
-    }
 }
 
 fn drain_terminal_output(configured: &mut ConfiguredClient<SocketTransport>) -> Vec<u8> {
@@ -1249,7 +1228,9 @@ impl TerminalGuard {
         Ok(())
     }
 
-    /// Draw `grid` and the status line below it. With `status_cursor` (the
+    /// Draw `grid`, and the status line below it when the grid leaves a row
+    /// free (otherwise the grid has status content drawn over its root tab
+    /// bar and its cursor at the prompt's). With `status_cursor` (the
     /// command prompt is open) the cursor goes to that column of the status
     /// line instead of the grid's cursor. Only sequences `host` supports are
     /// used.
@@ -1263,12 +1244,20 @@ impl TerminalGuard {
     ) -> Result<()> {
         let mut stdout = io::stdout();
         write!(stdout, "\x1b[H")?;
-        for line in grid.ansi_lines_for(host) {
-            write!(stdout, "{line}\x1b[K\r\n")?;
+        // Lines are separated, not ended, by newlines: one after a grid as
+        // tall as the terminal would scroll it.
+        for (index, line) in grid.ansi_lines_for(host).iter().enumerate() {
+            if index > 0 {
+                write!(stdout, "\r\n")?;
+            }
+            write!(stdout, "{line}\x1b[K")?;
         }
 
         if terminal_size.height > grid.height() {
             let status = fit_width(status.unwrap_or_default(), terminal_size.width);
+            if grid.height() > 0 {
+                write!(stdout, "\r\n")?;
+            }
             write!(stdout, "\x1b[7m{status}\x1b[0m\x1b[K")?;
         }
 

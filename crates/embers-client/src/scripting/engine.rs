@@ -1086,9 +1086,9 @@ mod tabbar_registration_api {
 
     /// Put the session's tab bar, its list of windows, at the `"top"` (the
     /// default) or `"bottom"` of the screen, like tmux's `status-position`.
-    /// At the bottom it sits just above the status line, where the command
-    /// prompt and messages appear. Tab bars of nested tabs stay at the top of
-    /// their own area.
+    /// The command prompt and messages are drawn over it while they show, so
+    /// they move with it. Tab bars of nested tabs stay at the top of their
+    /// own area.
     ///
     /// # Example
     ///

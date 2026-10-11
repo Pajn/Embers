@@ -104,6 +104,26 @@ fn root_tab_bar_can_sit_at_the_bottom() {
         );
     }
     assert_eq!(top.floating, bottom.floating);
+
+    // Status content is drawn over the root tab bar, wherever it is.
+    assert_eq!(top.status_row(), Some(0));
+    assert_eq!(bottom.status_row(), Some(13));
+}
+
+#[test]
+fn status_content_takes_the_last_row_without_a_root_tab_bar() {
+    let state = root_buffer_state();
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .unwrap();
+    assert!(presentation.root_tabs.is_none());
+    assert_eq!(presentation.status_row(), Some(13));
 }
 
 #[test]

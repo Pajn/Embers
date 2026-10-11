@@ -8,8 +8,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, CursorPosition, FloatGeometry, FloatingId,
-    MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, ClipboardSelection, CursorPosition, CursorShape, FloatGeometry,
+    FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
@@ -29,6 +29,7 @@ use crate::copy_mode::{
     CapturedText, CopyModeState, CopyMotion, CopyViewport, JumpKind, MotionOutcome, MouseSelection,
     apply_motion, jump, next_match_index, word_bounds,
 };
+use crate::grid::{CellStyle, GridCursor};
 use crate::host_terminal::{HostCapabilities, PendingAttachQueries};
 use crate::input::{
     COPY_MODE, FallbackPolicy, HINTS_MODE, InputResolution, InputState, KeyToken, NORMAL_MODE,
@@ -135,6 +136,8 @@ pub struct ConfiguredClient<T> {
     config: ConfigManager,
     input_state: InputState,
     notifications: Vec<String>,
+    /// Until when the latest notification shows over the tab bar.
+    notification_until: Option<Instant>,
     active_session_id: Option<SessionId>,
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
@@ -192,6 +195,7 @@ where
             config,
             input_state: InputState::default(),
             notifications: Vec::new(),
+            notification_until: None,
             active_session_id: None,
             previous_session_id: None,
             viewport: None,
@@ -323,18 +327,24 @@ where
             .map(|message| message.text.as_str())
     }
 
-    /// Drop a `display-message` whose time is up. Returns `true` when one was
-    /// dropped, so the caller redraws the status line.
+    /// Drop a `display-message` or warning whose time is up. Returns `true`
+    /// when one was dropped, so the caller redraws the status line.
     pub fn expire_status_message(&mut self) -> bool {
+        let now = Instant::now();
+        let mut expired = false;
         if self
             .status_message
             .as_ref()
-            .is_some_and(|message| message.until <= Instant::now())
+            .is_some_and(|message| message.until <= now)
         {
             self.status_message = None;
-            return true;
+            expired = true;
         }
-        false
+        if self.notification_until.is_some_and(|until| until <= now) {
+            self.notification_until = None;
+            expired = true;
+        }
+        expired
     }
 
     pub fn drain_terminal_output(&mut self) -> Vec<Vec<u8>> {
@@ -460,32 +470,75 @@ where
             .push_back(format!("\x1b]2;{title}\x07").into_bytes());
     }
 
+    /// The status line's text: what [`Self::status_text`] shows, else the
+    /// latest warning, else the session and how to quit.
     pub fn status_line(&self, session_id: SessionId, socket_path: &Path) -> String {
-        let session_name = self
-            .client
+        if let Some(text) = self.status_text(session_id) {
+            return text;
+        }
+        let session_name = self.session_name(session_id);
+        match self.notifications.last() {
+            Some(message) => format!("[{session_name}] {message}"),
+            None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
+        }
+    }
+
+    /// What the status line has to show right now: the command prompt, a
+    /// `confirm-before` question, the copy-mode search prompt, a
+    /// `display-message`, or a warning less than the display time old. `None`
+    /// when there is nothing, so the root tab bar shows instead.
+    pub fn status_text(&self, session_id: SessionId) -> Option<String> {
+        if let Some(prompt) = &self.command_prompt {
+            return Some(prompt.display());
+        }
+        if let Some(confirm) = &self.confirm {
+            return Some(confirm.prompt.clone());
+        }
+        let session_name = self.session_name(session_id);
+        if let Some(prompt) = &self.search_prompt {
+            let prefix = if prompt.backward { '?' } else { '/' };
+            return Some(format!("[{session_name}] {prefix}{}", prompt.query));
+        }
+        if let Some(message) = self.status_message() {
+            return Some(message.to_owned());
+        }
+        let now = Instant::now();
+        self.notifications
+            .last()
+            .filter(|_| self.notification_until.is_some_and(|until| until > now))
+            .map(|message| format!("[{session_name}] {message}"))
+    }
+
+    fn session_name(&self, session_id: SessionId) -> &str {
+        self.client
             .state()
             .sessions
             .get(&session_id)
             .map(|session| session.name.as_str())
-            .unwrap_or("<missing>");
-        if let Some(prompt) = &self.command_prompt {
-            return prompt.display();
-        }
-        if let Some(confirm) = &self.confirm {
-            return confirm.prompt.clone();
-        }
-        if let Some(prompt) = &self.search_prompt {
-            let prefix = if prompt.backward { '?' } else { '/' };
-            return format!("[{session_name}] {prefix}{}", prompt.query);
-        }
-        if let Some(message) = &self.status_message
-            && message.until > Instant::now()
-        {
-            return message.text.clone();
-        }
-        match self.notifications.last() {
-            Some(message) => format!("[{session_name}] {message}"),
-            None => format!("[{session_name}] {}  ctrl-q quit", socket_path.display()),
+            .unwrap_or("<missing>")
+    }
+
+    /// Draw [`Self::status_text`] over `presentation`'s status row of `grid`,
+    /// with the cursor at the command prompt's.
+    fn draw_status_overlay(
+        &self,
+        grid: &mut RenderGrid,
+        presentation: &PresentationModel,
+        session_id: SessionId,
+    ) {
+        let (Some(row), Some(text)) = (presentation.status_row(), self.status_text(session_id))
+        else {
+            return;
+        };
+        let style = CellStyle::default().with_reverse();
+        grid.put_str_styled(0, row, &" ".repeat(usize::from(grid.width())), style);
+        grid.put_str_styled(0, row, &crate::grid::replace_controls(&text), style);
+        if let Some(column) = self.status_cursor() {
+            grid.set_cursor(Some(GridCursor {
+                x: column.min(grid.width().saturating_sub(1)),
+                y: row,
+                shape: CursorShape::Beam,
+            }));
         }
     }
 
@@ -1054,7 +1107,12 @@ where
                 Ok(None) => {}
                 Err(error) if !recorded_formatter_error => {
                     recorded_formatter_error = true;
-                    self.record_notification(error.to_string());
+                    // Every frame fails the same way; showing it once, for
+                    // the display time, lets the default bar show after.
+                    let message = error.to_string();
+                    if self.notifications.last() != Some(&message) {
+                        self.record_notification(message);
+                    }
                 }
                 Err(_) => {}
             }
@@ -1081,7 +1139,15 @@ where
             chooser.render(&mut grid, chooser_area(viewport), &rows);
             grid.set_cursor(None);
         }
+        self.draw_status_overlay(&mut grid, &presentation, session_id);
         Ok(grid)
+    }
+
+    /// The part of a `terminal`-sized screen the session is drawn in: all of
+    /// it. Status content is drawn over the root tab bar while it shows, so
+    /// it never takes a row from the panes.
+    pub fn content_viewport(&self, terminal: Size) -> Size {
+        terminal
     }
 
     pub fn reload_config(&mut self) -> Result<()> {
@@ -5081,6 +5147,7 @@ where
         let message = message.into();
         warn!("{message}");
         self.notifications.push(message);
+        self.notification_until = Some(Instant::now() + DEFAULT_DISPLAY_TIME);
         enforce_notification_cap(&mut self.notifications);
     }
 }
