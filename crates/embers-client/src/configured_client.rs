@@ -2260,8 +2260,7 @@ where
                 }
             }
             Action::SetSynchronizePanes { mode } => {
-                // Windows are the root tabs; a session whose root is a single
-                // untabbed window addresses it as index 0.
+                // Windows are the root tabs; set it on the active one.
                 let index = self
                     .client
                     .state()
@@ -2646,10 +2645,8 @@ where
     }
 
     /// Insert a tab after (or before) the active tab of `tabs_node_id`, or of
-    /// the innermost tabs holding the focus. When the focus is in the
-    /// session's layout but in no tabs, the session has a single window,
-    /// whose root is not tabbed: the tab is then added as a second window,
-    /// beside that one, rather than failing.
+    /// the innermost tabs holding the focus: the session's root tabs, when
+    /// the focus is in no nested tabs, make it a window.
     async fn insert_tab(
         &mut self,
         session_id: SessionId,
@@ -2659,16 +2656,6 @@ where
         child: TreeSpec,
         after: bool,
     ) -> Result<()> {
-        if tabs_node_id.is_none()
-            && presentation.focused_tabs().is_none()
-            && presentation
-                .focused_leaf()
-                .is_some_and(|leaf| leaf.floating_id.is_none())
-        {
-            return self
-                .insert_beside_only_window(session_id, presentation, title, child, after)
-                .await;
-        }
         let tabs = self.resolve_tabs_target(presentation, tabs_node_id)?;
         let placement = PanePlacement::Tab {
             tabs_node_id: tabs.node_id,
@@ -2694,62 +2681,6 @@ where
             }))
             .await;
         rollback_created_buffer_on_error(self, buffer.created_by_helper(), "insert tab", result)
-            .await?;
-        self.client.resync_all_sessions().await
-    }
-
-    /// Add a second window to a session that has one, after it or before it.
-    async fn insert_beside_only_window(
-        &mut self,
-        session_id: SessionId,
-        presentation: &PresentationModel,
-        title: Option<String>,
-        child: TreeSpec,
-        after: bool,
-    ) -> Result<()> {
-        let old_root = self
-            .client
-            .state()
-            .sessions
-            .get(&session_id)
-            .map(|session| session.root_node_id)
-            .ok_or_else(|| MuxError::not_found(format!("session {session_id} is not cached")))?;
-        let buffer = self
-            .resolve_tree_buffer(session_id, presentation, child, PanePlacement::RootTab)
-            .await?;
-        let result = self
-            .client
-            .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
-                request_id: self.client.next_request_id(),
-                session_id,
-                title: title.unwrap_or_else(|| "tab".to_owned()),
-                buffer_id: Some(buffer.id()),
-                child_node_id: None,
-            }))
-            .await;
-        rollback_created_buffer_on_error(self, buffer.created_by_helper(), "insert tab", result)
-            .await?;
-        self.client.resync_all_sessions().await?;
-        if after {
-            return Ok(());
-        }
-        // The new window was appended; move it in front of the old one.
-        let new_window = self
-            .client
-            .state()
-            .sessions
-            .get(&session_id)
-            .and_then(|session| self.client.state().nodes.get(&session.root_node_id))
-            .and_then(|root| root.tabs.as_ref())
-            .and_then(|tabs| tabs.tabs.last())
-            .map(|tab| tab.child_id)
-            .ok_or_else(|| MuxError::protocol("new window was not added to root tabs"))?;
-        self.client
-            .request_message(ClientMessage::Node(NodeRequest::MoveNodeBefore {
-                request_id: self.client.next_request_id(),
-                node_id: new_window,
-                sibling_node_id: old_root,
-            }))
             .await?;
         self.client.resync_all_sessions().await
     }

@@ -58,13 +58,7 @@ impl FormatContext {
                         .unwrap_or_default();
                     (position, name)
                 }
-                // A session without root tabs is one window named after its pane.
-                None => (
-                    0,
-                    buffer
-                        .map(|buffer| buffer.title.clone())
-                        .unwrap_or_default(),
-                ),
+                None => (0, String::new()),
             };
 
         let pane_current_command = buffer

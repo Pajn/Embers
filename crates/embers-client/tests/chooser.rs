@@ -10,12 +10,14 @@ use embers_client::{
     NORMAL_MODE, TREE_MODE,
 };
 use embers_core::{BufferId, NodeId, Result, SessionId, Size};
-use embers_protocol::{ClientMessage, ClientRequest, NodeRequest, SessionRequest};
+use embers_protocol::{
+    ClientMessage, ClientRequest, NodeRequest, SessionRequest, TabRecord, TabsRecord,
+};
 use tempfile::tempdir;
 
 use crate::support::{
     FOCUSED_LEAF_ID, HIDDEN_NESTED_LEAF_ID, HIDDEN_ROOT_LEAF_ID, LEFT_LEAF_ID, ROOT_SPLIT_ID,
-    SESSION_ID, demo_state,
+    ROOT_TABS_ID, SESSION_ID, demo_state,
 };
 
 const VIEWPORT: Size = Size {
@@ -23,23 +25,37 @@ const VIEWPORT: Size = Size {
     height: 20,
 };
 const OTHER_SESSION: SessionId = SessionId(2);
+const OTHER_ROOT: NodeId = NodeId(201);
 const OTHER_LEAF: NodeId = NodeId(200);
 
-/// The demo session plus a second session "other" with one pane.
+/// The demo session plus a second session "other" with one window of one
+/// pane.
 fn two_sessions() -> ClientState {
     let mut state = demo_state();
     let mut session = state.sessions[&SESSION_ID].clone();
     session.id = OTHER_SESSION;
     session.name = "other".to_owned();
-    session.root_node_id = OTHER_LEAF;
+    session.root_node_id = OTHER_ROOT;
     session.focused_leaf_id = Some(OTHER_LEAF);
     session.focused_floating_id = None;
     session.floating_ids = Vec::new();
     state.sessions.insert(OTHER_SESSION, session);
+    let mut root = state.nodes[&ROOT_TABS_ID].clone();
+    root.id = OTHER_ROOT;
+    root.session_id = OTHER_SESSION;
+    root.tabs = Some(TabsRecord {
+        active: 0,
+        tabs: vec![TabRecord {
+            title: "notes".to_owned(),
+            child_id: OTHER_LEAF,
+            synchronize_panes: false,
+        }],
+    });
+    state.nodes.insert(OTHER_ROOT, root);
     let mut leaf = state.nodes[&LEFT_LEAF_ID].clone();
     leaf.id = OTHER_LEAF;
     leaf.session_id = OTHER_SESSION;
-    leaf.parent_id = None;
+    leaf.parent_id = Some(OTHER_ROOT);
     leaf.buffer_view.as_mut().unwrap().buffer_id = BufferId(9);
     state.nodes.insert(OTHER_LEAF, leaf);
     let mut buffer = state.buffers[&BufferId(2)].clone();

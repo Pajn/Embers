@@ -72,8 +72,11 @@ fn split_inside_a_floating_window_stays_inside_its_border() {
 
 #[test]
 fn new_window_takes_the_area_below_the_root_tab_bar() {
-    // A root that is not a tabs container is wrapped in one, which adds the
-    // tab bar row.
+    assert_eq!(
+        spawn_pty_size(&demo_state(), SESSION_ID, VIEWPORT, PanePlacement::RootTab),
+        Some(PtySize::new(41, 19))
+    );
+    // The server only adds windows to a root tabs container.
     assert_eq!(
         spawn_pty_size(
             &root_buffer_state(),
@@ -81,11 +84,7 @@ fn new_window_takes_the_area_below_the_root_tab_bar() {
             VIEWPORT,
             PanePlacement::RootTab,
         ),
-        Some(PtySize::new(41, 19))
-    );
-    assert_eq!(
-        spawn_pty_size(&demo_state(), SESSION_ID, VIEWPORT, PanePlacement::RootTab),
-        Some(PtySize::new(41, 19))
+        None
     );
 }
 

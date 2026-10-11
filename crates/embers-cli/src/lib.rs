@@ -1111,9 +1111,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 ))
                 .await?;
             let snapshot = expect_session_snapshot(response, "synchronize-panes")?;
-            let enabled = root_tabs(&snapshot)?
-                .and_then(|(_, tabs)| protocol_tab(tabs, window.index))
-                .is_some_and(|tab| tab.synchronize_panes);
+            let (_, tabs) = root_tabs(&snapshot)?;
+            let enabled = protocol_tab(tabs, window.index).is_some_and(|tab| tab.synchronize_panes);
             Ok(if enabled { "on" } else { "off" }.to_owned())
         }
         Command::KillWindow { target, detach } => {
@@ -2376,20 +2375,15 @@ impl CliConnection {
             .await?;
         let base_index = self.base_index_for(&snapshot);
         let (index, child_id) = {
-            if let Some((_, root_tabs)) = root_tabs(&snapshot)? {
-                let index = resolve_window_index(root_tabs, selector.as_deref(), base_index)?;
-                let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
-                    MuxError::not_found(format!(
-                        "window index {index} is not present in session {}",
-                        snapshot.session.id
-                    ))
-                })?;
-                (index, tab.child_id)
-            } else {
-                let title = window_title(&snapshot, snapshot.session.root_node_id)?;
-                let index = resolve_single_window_index(&title, selector.as_deref(), base_index)?;
-                (index, snapshot.session.root_node_id)
-            }
+            let (_, root_tabs) = root_tabs(&snapshot)?;
+            let index = resolve_window_index(root_tabs, selector.as_deref(), base_index)?;
+            let tab = protocol_tab(root_tabs, index).ok_or_else(|| {
+                MuxError::not_found(format!(
+                    "window index {index} is not present in session {}",
+                    snapshot.session.id
+                ))
+            })?;
+            (index, tab.child_id)
         };
         Ok(ResolvedWindow {
             snapshot,
@@ -2523,9 +2517,7 @@ struct ResolvedPane {
 
 /// The root window holding `node_id`: its index and the node it shows.
 fn window_containing(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<(u32, NodeId)> {
-    let Some((tabs_node, tabs)) = root_tabs(snapshot)? else {
-        return Ok((0, snapshot.session.root_node_id));
-    };
+    let (tabs_node, tabs) = root_tabs(snapshot)?;
     let mut child_id = node_id;
     loop {
         let parent_id = node_record(snapshot, child_id)?.parent_id.ok_or_else(|| {
@@ -2845,25 +2837,21 @@ fn session_label(sessions: &[SessionRecord], session_id: SessionId) -> String {
 }
 
 fn format_windows(snapshot: &SessionSnapshot, base_index: Option<u32>) -> Result<String> {
-    if let Some((_, tabs)) = root_tabs(snapshot)? {
-        Ok(tabs
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                format!(
-                    "{}\t{}\t{}",
-                    window_number(index, base_index),
-                    usize::from(u32::try_from(index).ok() == Some(tabs.active)),
-                    tab.title
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"))
-    } else {
-        let title = window_title(snapshot, snapshot.session.root_node_id)?;
-        Ok(format!("{}\t1\t{title}", window_number(0, base_index)))
-    }
+    let (_, tabs) = root_tabs(snapshot)?;
+    Ok(tabs
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            format!(
+                "{}\t{}\t{}",
+                window_number(index, base_index),
+                usize::from(u32::try_from(index).ok() == Some(tabs.active)),
+                tab.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<String> {
@@ -2890,13 +2878,10 @@ fn format_panes(snapshot: &SessionSnapshot, pane_ids: &[NodeId]) -> Result<Strin
 }
 
 fn active_root_window(snapshot: &SessionSnapshot) -> Result<(u32, String)> {
-    if let Some((_, tabs)) = root_tabs(snapshot)? {
-        let tab = protocol_tab(tabs, tabs.active)
-            .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
-        Ok((tabs.active, tab.title.clone()))
-    } else {
-        Ok((0, window_title(snapshot, snapshot.session.root_node_id)?))
-    }
+    let (_, tabs) = root_tabs(snapshot)?;
+    let tab = protocol_tab(tabs, tabs.active)
+        .ok_or_else(|| MuxError::protocol("session root tabs has invalid active index"))?;
+    Ok((tabs.active, tab.title.clone()))
 }
 
 /// Plan tmux `resize-pane -L/-R/-U/-D` for `pane`. The CLI has no viewport,
@@ -2917,11 +2902,18 @@ fn plan_directional_resize(
     Ok(presentation.resize_leaf(&state, pane.leaf_id, direction, cells))
 }
 
+/// The session's root tabs, whose tabs are its windows.
 fn root_tabs(
     snapshot: &SessionSnapshot,
-) -> Result<Option<(&embers_protocol::NodeRecord, &embers_protocol::TabsRecord)>> {
+) -> Result<(&embers_protocol::NodeRecord, &embers_protocol::TabsRecord)> {
     let node = node_record(snapshot, snapshot.session.root_node_id)?;
-    Ok(node.tabs.as_ref().map(|tabs| (node, tabs)))
+    let tabs = node.tabs.as_ref().ok_or_else(|| {
+        MuxError::protocol(format!(
+            "session {} root node {} is not tabs",
+            snapshot.session.id, node.id
+        ))
+    })?;
+    Ok((node, tabs))
 }
 
 fn node_record(
@@ -3045,60 +3037,6 @@ fn resolve_window_index(
             "window title '{selector}' matched multiple root tabs"
         ))),
     }
-}
-
-fn resolve_single_window_index(
-    title: &str,
-    selector: Option<&str>,
-    base_index: Option<u32>,
-) -> Result<u32> {
-    let Some(selector) = selector else {
-        return Ok(0);
-    };
-
-    if let Some(base_index) = base_index
-        && let Ok(number) = selector.parse::<u64>()
-    {
-        return window_position(number, 1, base_index)
-            .map(|_| 0)
-            .ok_or_else(|| {
-                MuxError::not_found(format!("window index '{selector}' is out of range"))
-            });
-    }
-
-    if let Ok(index) = selector.parse::<u32>() {
-        return match index {
-            0 | 1 => Ok(0),
-            _ => Err(MuxError::not_found(format!(
-                "window index '{selector}' is out of range"
-            ))),
-        };
-    }
-
-    if selector == title {
-        Ok(0)
-    } else {
-        Err(MuxError::not_found(format!(
-            "window '{selector}' was not found"
-        )))
-    }
-}
-
-fn window_title(snapshot: &SessionSnapshot, node_id: NodeId) -> Result<String> {
-    let visible_leaf_ids = visible_leaf_ids(snapshot, node_id)?;
-    let leaf_id = snapshot
-        .session
-        .focused_leaf_id
-        .filter(|leaf_id| visible_leaf_ids.contains(leaf_id))
-        .or_else(|| visible_leaf_ids.first().copied())
-        .ok_or_else(|| MuxError::not_found(format!("window {node_id} has no visible panes")))?;
-    let leaf = node_record(snapshot, leaf_id)?;
-    let buffer_id = leaf
-        .buffer_view
-        .as_ref()
-        .map(|view| view.buffer_id)
-        .ok_or_else(|| MuxError::invalid_input(format!("node {leaf_id} is not a pane leaf")))?;
-    Ok(buffer_record(snapshot, buffer_id)?.title.clone())
 }
 
 fn protocol_tab(
@@ -3350,8 +3288,7 @@ mod tests {
     use super::{
         BreakDestinationArg, BufferCommand, Cli, Command, HistoryPlacementArg, HistoryScopeArg,
         JoinPlacementArg, NodeCommand, ensure_history_attachment, format_buffer_details,
-        pane_buffer, resolve_single_window_index, resolve_window_index, split_scoped_required,
-        split_scoped_target,
+        pane_buffer, resolve_window_index, split_scoped_required, split_scoped_target,
     };
 
     #[test]
@@ -3509,11 +3446,6 @@ mod tests {
             resolve_window_index(&tabs, Some("two"), Some(1)).unwrap(),
             1
         );
-        assert_eq!(
-            resolve_single_window_index("solo", Some("1"), Some(1)).unwrap(),
-            0
-        );
-        assert!(resolve_single_window_index("solo", Some("0"), Some(1)).is_err());
     }
 
     #[test]
