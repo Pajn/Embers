@@ -2297,6 +2297,24 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            embers_protocol::NodeRequest::SelectPane {
+                request_id,
+                session_id,
+                node_id,
+            } => match state
+                .select_pane(session_id, node_id)
+                .and_then(|()| layout_changed_events(&state, session_id))
+                .and_then(|events| Ok((session_snapshot(&state, session_id)?, events)))
+            {
+                Ok((snapshot, events)) => (
+                    ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                        request_id,
+                        snapshot,
+                    }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
             embers_protocol::NodeRequest::FocusLast {
                 request_id,
                 session_id,

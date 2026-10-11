@@ -471,6 +471,15 @@ pub enum NodeRequest {
         request_id: RequestId,
         session_id: SessionId,
     },
+    /// Make leaf `node_id` the active pane of its window, like tmux
+    /// `select-pane -t`: focus it when its window is the session's current
+    /// one (or it is in a popup), else only make it the pane that window
+    /// focuses when it is selected, leaving the current window alone.
+    SelectPane {
+        request_id: RequestId,
+        session_id: SessionId,
+        node_id: NodeId,
+    },
     Close {
         request_id: RequestId,
         node_id: NodeId,
@@ -539,6 +548,7 @@ impl NodeRequest {
             | Self::SelectTab { request_id, .. }
             | Self::Focus { request_id, .. }
             | Self::FocusLast { request_id, .. }
+            | Self::SelectPane { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
             | Self::Resize { request_id, .. }

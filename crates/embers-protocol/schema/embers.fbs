@@ -128,6 +128,7 @@ enum NodeOp : ubyte {
   MoveNodeBefore = 19,
   MoveNodeAfter = 20,
   FocusLast = 21,
+  SelectPane = 22,
 }
 
 enum FloatingOp : ubyte {

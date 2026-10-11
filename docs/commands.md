@@ -417,7 +417,7 @@ command is window 12, not pane 12.
 | `display-popup` | `-t`, `-w`, `-h`, `-x`, `-y`, `-E`, `-EE`, `-d`, `-T`, `-P`, `-F`, `-- command` | See below. |
 | `switch-client` | `-c`, `-t`, `-n`, `-p` | No `-l`: the server does not record each client's previous session. |
 | `detach-client` | `-c` | Picks the client like `switch-client`. |
-| `select-pane` | `-t`, `-L`, `-R`, `-U`, `-D`, `-l` | Directional moves do not wrap around at the edge. No `-T`: pane titles come from the program. |
+| `select-pane` | `-t`, `-L`, `-R`, `-U`, `-D`, `-l` | Directional moves do not wrap around at the edge. No `-T`: pane titles come from the program. See below. |
 | `set-option`, `show-options` | `-p` only; `-t`, `-u`, `-o`, `-q`; `show-options -v` | See [Options](#options). |
 | `capture-pane` | `-t`, `-p`, `-S`, `-E`, `-J`, `-e` | See below. |
 | `list-sessions`, `list-windows`, `list-panes` | `-F`; `list-windows -a`, `list-panes -s`/`-a` | Without `-F`, Embers' tab-separated columns. |
@@ -491,6 +491,17 @@ escape sequences. Captured lines carry no wrap flag, so `-J` joins a line to
 the next when it fills the pane's width; a line that exactly fills the width
 without wrapping is joined too. Bare `capture-pane` prints the whole history
 and screen, as it always has (tmux would store it in a paste buffer).
+
+#### select-pane and select-window
+
+`select-pane -t` and `select-window -t` never move a client. `select-pane -t`
+with a pane in a window that is not its session's current one makes it the
+pane that window focuses, but leaves the current window as it is, as tmux
+does; selecting the window then focuses the pane. `#{pane_active}` is 1 only
+for the session's focused pane, so it reads 0 for such a pane until its window
+is selected (tmux reports each window's active pane). `select-window -t
+work:2` makes window 2 current in `work`, even when the client shows another
+session.
 
 #### Options
 

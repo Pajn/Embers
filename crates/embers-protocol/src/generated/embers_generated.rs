@@ -733,10 +733,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for BufferOp {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_NODE_OP: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_NODE_OP: u8 = 21;
+pub const ENUM_MAX_NODE_OP: u8 = 22;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_NODE_OP: [NodeOp; 22] = [
+pub const ENUM_VALUES_NODE_OP: [NodeOp; 23] = [
   NodeOp::GetTree,
   NodeOp::Split,
   NodeOp::WrapInTabs,
@@ -759,6 +759,7 @@ pub const ENUM_VALUES_NODE_OP: [NodeOp; 22] = [
   NodeOp::MoveNodeBefore,
   NodeOp::MoveNodeAfter,
   NodeOp::FocusLast,
+  NodeOp::SelectPane,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -788,9 +789,10 @@ impl NodeOp {
   pub const MoveNodeBefore: Self = Self(19);
   pub const MoveNodeAfter: Self = Self(20);
   pub const FocusLast: Self = Self(21);
+  pub const SelectPane: Self = Self(22);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 21;
+  pub const ENUM_MAX: u8 = 22;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::GetTree,
     Self::Split,
@@ -814,6 +816,7 @@ impl NodeOp {
     Self::MoveNodeBefore,
     Self::MoveNodeAfter,
     Self::FocusLast,
+    Self::SelectPane,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -840,6 +843,7 @@ impl NodeOp {
       Self::MoveNodeBefore => Some("MoveNodeBefore"),
       Self::MoveNodeAfter => Some("MoveNodeAfter"),
       Self::FocusLast => Some("FocusLast"),
+      Self::SelectPane => Some("SelectPane"),
       _ => None,
     }
   }

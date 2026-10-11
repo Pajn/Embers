@@ -950,3 +950,81 @@ async fn user_options_expand_in_formats_and_set_with_set_option_p() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn select_pane_and_select_window_elsewhere_do_not_move_the_client() {
+    let server = TestServer::start().await.expect("start server");
+    for session in ["alpha", "beta"] {
+        run_cli(
+            &server,
+            ["new-session", "-d", "-s", session, "--", "/bin/sh"],
+        );
+        run_cli(
+            &server,
+            ["new-window", "-d", "-t", session, "--", "/bin/sh"],
+        );
+    }
+    let first = print(&server, "=alpha:0", "#{pane_id}");
+    let other = out(&run_cli(
+        &server,
+        [
+            "--base-index",
+            "0",
+            "split-window",
+            "-d",
+            "-t",
+            "=alpha:1",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "--",
+            "/bin/sh",
+        ],
+    ));
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-window", "-t", "=alpha:0"],
+    );
+    let (_client, client_id) = attached_client(&server, "alpha").await;
+
+    // Like tmux, select-pane makes the pane its window's active pane but
+    // leaves the session's current window alone.
+    run_cli(&server, ["select-pane", "-t", &other]);
+    assert_eq!(
+        print(&server, "=alpha:", "#{window_index} #{pane_id}"),
+        format!("0 {first}")
+    );
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-window", "-t", "=alpha:1"],
+    );
+    assert_eq!(
+        print(
+            &server,
+            "=alpha:",
+            "#{window_index}.#{pane_index} #{pane_id}"
+        ),
+        format!("1.1 {other}")
+    );
+
+    // In another session's window, the client stays where it is.
+    let beta_pane = print(&server, "=beta:1", "#{pane_id}");
+    run_cli(&server, ["select-pane", "-t", &beta_pane]);
+    assert_eq!(print(&server, "=beta:", "#{window_index}"), "0");
+    run_cli(
+        &server,
+        ["--base-index", "0", "select-window", "-t", "=beta:1"],
+    );
+    assert_eq!(print(&server, "=beta:", "#{window_index}"), "1");
+    assert_eq!(shown_session(&server, client_id), "alpha");
+
+    // In the current window, select-pane focuses the pane.
+    let first_of_window = print(&server, "=alpha:1.0", "#{pane_id}");
+    run_cli(&server, ["select-pane", "-t", &first_of_window]);
+    assert_eq!(
+        print(&server, "=alpha:", "#{window_index}.#{pane_index}"),
+        "1.0"
+    );
+
+    server.shutdown().await.expect("shutdown server");
+}

@@ -395,6 +395,11 @@ fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
             session_id,
             node_id,
             ..
+        }
+        | NodeRequest::SelectPane {
+            session_id,
+            node_id,
+            ..
         } => {
             validate_required_session_id(*session_id, "node_request.session_id")?;
             validate_required_node_id(*node_id, "node_request.node_id")
@@ -2293,6 +2298,34 @@ fn encode_node_request<'a>(
             ..
         } => (
             fb::NodeOp::Focus,
+            (*session_id).into(),
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::SelectPane {
+            session_id,
+            node_id,
+            ..
+        } => (
+            fb::NodeOp::SelectPane,
             (*session_id).into(),
             (*node_id).into(),
             0,
@@ -4340,6 +4373,14 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     index: req.index(),
                 },
                 fb::NodeOp::Focus => NodeRequest::Focus {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                },
+                fb::NodeOp::SelectPane => NodeRequest::SelectPane {
                     request_id,
                     session_id: decode_required_session_id(
                         req.session_id(),

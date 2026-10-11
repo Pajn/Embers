@@ -311,6 +311,11 @@ fn client_message_families_round_trip() {
             request_id: RequestId(211),
             session_id: SessionId(10),
         }),
+        ClientMessage::Node(NodeRequest::SelectPane {
+            request_id: RequestId(212),
+            session_id: SessionId(10),
+            node_id: NodeId(30),
+        }),
         ClientMessage::Node(NodeRequest::Close {
             request_id: RequestId(22),
             node_id: NodeId(33),

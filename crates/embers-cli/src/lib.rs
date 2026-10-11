@@ -1632,8 +1632,10 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     }
                 }
             };
+            // Like tmux, a pane in another window becomes that window's
+            // active pane without making the window current.
             connection
-                .request(ClientMessage::Node(NodeRequest::Focus {
+                .request(ClientMessage::Node(NodeRequest::SelectPane {
                     request_id: new_request_id(),
                     session_id: pane.snapshot.session.id,
                     node_id: pane_id,
