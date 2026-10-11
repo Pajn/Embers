@@ -9,8 +9,8 @@ use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
     ActivityState, BufferId, CellSize, ClipboardSelection, CursorPosition, CursorShape,
-    FloatGeometry,
-    FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
+    FloatGeometry, FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result,
+    SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
