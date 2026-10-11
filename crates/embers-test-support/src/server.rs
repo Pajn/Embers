@@ -172,8 +172,22 @@ fn process_exists(pid: i32) -> bool {
 /// only once their socket directory no longer exists, which a running test
 /// keeps alive. Runtime keepers need no reaping here: a keeper whose socket
 /// was removed with its directory stops its child and exits by itself.
+///
+/// Outside the Embers workspace there is no such binary, and `TestServer`
+/// runs its keepers in-process, so there is nothing to reap.
 fn reap_stale_helper_processes() {
-    let binary = crate::cargo_bin_path("embers");
+    let current_target_dir = std::env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?;
+        Some(if dir.ends_with("deps") {
+            dir.parent()?.to_path_buf()
+        } else {
+            dir.to_path_buf()
+        })
+    });
+    let Some(binary) = embers_binary(std::env::var_os("CARGO_BIN_EXE_embers"), current_target_dir)
+    else {
+        return;
+    };
     let Ok(output) = Command::new("ps").args(["-eo", "pid,args"]).output() else {
         return;
     };
@@ -191,6 +205,21 @@ fn reap_stale_helper_processes() {
             "stopped stale __serve process"
         );
     }
+}
+
+/// The `embers` binary of this build: `CARGO_BIN_EXE_embers` when Cargo sets
+/// it, otherwise an `embers` binary in the test's target directory, the same
+/// lookup `assert_cmd` uses. `None` when neither exists, instead of the panic
+/// `assert_cmd::cargo::cargo_bin` gives.
+fn embers_binary(
+    cargo_bin_exe: Option<std::ffi::OsString>,
+    target_dir: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    if let Some(path) = cargo_bin_exe {
+        return Some(path.into());
+    }
+    let built = target_dir?.join(format!("embers{}", std::env::consts::EXE_SUFFIX));
+    built.exists().then_some(built)
 }
 
 /// Parse a `ps -eo pid,args` line into the pid and `--socket` path of a
@@ -213,9 +242,39 @@ fn stale_server_candidate(line: &str, binary: &Path) -> Option<(i32, std::path::
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::stale_server_candidate;
+    use super::{embers_binary, stale_server_candidate};
 
     const BINARY: &str = "/build/target/debug/embers";
+
+    #[test]
+    fn finds_no_binary_outside_the_embers_workspace() {
+        let target_dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            embers_binary(None, Some(target_dir.path().to_path_buf())),
+            None
+        );
+        assert_eq!(embers_binary(None, None), None);
+    }
+
+    #[test]
+    fn prefers_cargo_bin_exe_then_the_built_binary() {
+        let target_dir = tempfile::tempdir().expect("tempdir");
+        let built = target_dir
+            .path()
+            .join(format!("embers{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&built, b"").expect("write binary");
+        assert_eq!(
+            embers_binary(
+                Some("/cargo/bin/embers".into()),
+                Some(target_dir.path().to_path_buf())
+            ),
+            Some(PathBuf::from("/cargo/bin/embers"))
+        );
+        assert_eq!(
+            embers_binary(None, Some(target_dir.path().to_path_buf())),
+            Some(built)
+        );
+    }
 
     #[test]
     fn matches_servers_run_from_this_build() {
