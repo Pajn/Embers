@@ -42,6 +42,18 @@ commands on its session and `kill-popup` on the popup it is in. A buffer that
 is not shown in any pane still takes buffer commands such as `send-keys`,
 `capture-pane` and `buffer set-option`.
 
+### Set for `run_shell`
+
+A command started with `action.run_shell` (tmux `run-shell`) runs in the
+client's environment, with these added:
+
+| Variable | Value |
+| --- | --- |
+| `EMBERS_SOCKET` | The socket of the server the client is attached to. |
+| `EMBERS_CLIENT` | The id of the client the binding was pressed in, as `embers list-clients` prints it. A tool can use it to act on that client's session, for example to open a popup there, rather than on its own unattached connection. |
+| `EMBERS_BUFFER` | The id of the buffer in that client's focused pane, so `embers` commands without `-t` act on the focused pane as they do when run inside it. |
+| `EMBERS_BASE_INDEX` | The client's window base index, when set. |
+
 ## Socket path
 
 When `--socket`/`EMBERS_SOCKET` is not set, the socket is resolved to the first
