@@ -2146,7 +2146,7 @@ async fn run_shell_names_the_launching_client_and_focused_buffer() {
         config_dir.path().join("config.rhai"),
         format!(
             r#"
-                fn write_env(ctx) {{ action.run_shell("printf '%s %s' \"$EMBERS_CLIENT\" \"$EMBERS_BUFFER\" > {out}") }}
+                fn write_env(ctx) {{ action.run_shell("printf '%s %s' \"$EMBERS_CLIENT\" \"$EMBERS_BUFFER\" > '{out}'") }}
                 define_action("write-env", write_env);
                 bind("normal", "w", "write-env");
             "#,

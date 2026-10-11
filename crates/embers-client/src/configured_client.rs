@@ -3168,12 +3168,16 @@ where
         if let Some(socket_path) = &self.socket_path {
             process.env("EMBERS_SOCKET", socket_path);
         }
-        if let Some(client_id) = self.client.cached_client_id() {
-            process.env("EMBERS_CLIENT", client_id.to_string());
-        }
-        if let Some(buffer_id) = self.focused_buffer_id(session_id) {
-            process.env("EMBERS_BUFFER", buffer_id.0.to_string());
-        }
+        // Set or clear both: a client started inside an Embers pane inherits
+        // that pane's values, which must not leak to the child as its own.
+        match self.client.cached_client_id() {
+            Some(client_id) => process.env("EMBERS_CLIENT", client_id.to_string()),
+            None => process.env_remove("EMBERS_CLIENT"),
+        };
+        match self.focused_buffer_id(session_id) {
+            Some(buffer_id) => process.env("EMBERS_BUFFER", buffer_id.0.to_string()),
+            None => process.env_remove("EMBERS_BUFFER"),
+        };
         // So `embers` commands the child runs number windows like this client.
         if let Some(base_index) = self.base_index() {
             process.env(crate::numbering::BASE_INDEX_ENV_VAR, base_index.to_string());
