@@ -158,3 +158,65 @@ async fn display_message_from_the_prompt_goes_to_the_prompting_client() {
 
     server.shutdown().await.expect("shutdown server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_lines_with_global_flags_other_than_base_index_are_refused() {
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "alpha"]);
+    run_cli(&server, ["new-window", "-t", "alpha", "--", "/bin/sh"]);
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect");
+    let alpha = session_snapshot_by_name(&mut connection, "alpha")
+        .await
+        .session
+        .id;
+
+    let runner = PromptCommandRunner::new(server.socket_path().to_path_buf());
+    let context = CommandContext {
+        session_id: Some(alpha),
+        client_id: None,
+        base_index: None,
+    };
+
+    // The prompt always talks to the attached server, so a line naming
+    // another one must not run against this one.
+    let other_socket = server.socket_path().with_file_name("other.sock");
+    let line = vec![
+        "--socket".to_owned(),
+        other_socket.display().to_string(),
+        "kill-server".to_owned(),
+    ];
+    let error = runner
+        .run(line, context.clone())
+        .await
+        .expect_err("--socket is refused");
+    assert!(error.to_string().contains("--socket"), "{error}");
+
+    for line in [
+        "--config /nonexistent.rhai list-windows",
+        "--log debug list-windows",
+        "-v list-windows",
+        "list-windows --verbose",
+    ] {
+        let error = runner
+            .run(words(line), context.clone())
+            .await
+            .expect_err("global flag is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be used from the command prompt"),
+            "{line}: {error}"
+        );
+    }
+
+    // The server is still up, and --base-index still applies.
+    let listed = runner
+        .run(words("--base-index 1 list-windows"), context.clone())
+        .await
+        .expect("list-windows runs");
+    assert!(listed.starts_with("1\t"), "{listed}");
+
+    server.shutdown().await.expect("shutdown server");
+}

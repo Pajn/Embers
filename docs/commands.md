@@ -254,7 +254,10 @@ Two things differ from running the CLI in a shell:
 Window numbers follow the client's base index (`set_base_index`). Output, such
 as from `list-windows`, and errors are shown in the status line for a few
 seconds; lines of output are joined with `; `. `attach` and `automation` cannot
-be run from the prompt.
+be run from the prompt. Of the CLI's global options only `--base-index` applies:
+the prompt always talks to the attached server, so a line with `--socket`,
+`--config`, `--log` or `-v` is refused with an error rather than run with the
+option ignored.
 
 The alternative, mapping prompt commands onto client actions, would have meant
 a second command language whose options drift from the CLI's. Reusing the CLI
