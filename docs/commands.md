@@ -235,11 +235,13 @@ bind("normal", "<leader>i", action.display_message("#S:#I #{pane_current_path}")
 
 ## Command prompt
 
-The command prompt is tmux's `prefix :`. It opens in the status line, the last
-row of the screen, and on Enter runs the typed line as an `embers` command.
-The session's tab bar is at the top of the screen unless the config moves it
-to the bottom with `tabbar.set_position("bottom")` (tmux `status-position
-bottom`), where it sits just above the status line:
+The command prompt is tmux's `prefix :`. It opens in the status line and on
+Enter runs the typed line as an `embers` command. Like tmux's, the status line
+is drawn over the session's tab bar while it has something to show, so the
+prompt opens at the top of the screen, or at the bottom when the config moves
+the bar there with `tabbar.set_position("bottom")` (tmux `status-position
+bottom`; see [Screen layout](configuration.md#screen-layout)). Some lines it
+runs:
 
 ```text
 :split-window --horizontal

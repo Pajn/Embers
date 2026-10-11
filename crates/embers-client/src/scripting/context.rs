@@ -449,6 +449,8 @@ pub struct TabBarContext {
     pub mode: String,
     pub viewport_width: u16,
     pub tabs: Vec<TabInfo>,
+    /// The name of the session the bar belongs to, like tmux `#S`.
+    pub session_name: String,
 }
 
 impl TabBarContext {
@@ -478,11 +480,18 @@ impl TabBarContext {
                     pane: tab.pane.clone(),
                 })
                 .collect(),
+            session_name: String::new(),
         }
     }
 }
 
 impl TabBarContext {
+    /// Name the session the bar belongs to.
+    pub fn with_session_name(mut self, session_name: impl Into<String>) -> Self {
+        self.session_name = session_name.into();
+        self
+    }
+
     /// Number the tabs from `base_index` (tmux `base-index`) instead of 0.
     pub fn with_base_index(mut self, base_index: Option<u32>) -> Self {
         for tab in &mut self.tabs {

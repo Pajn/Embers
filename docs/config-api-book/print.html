@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b0e7bc90.js";
+            window.path_to_searchindex_js = "searchindex-ac55fc91.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -588,6 +588,45 @@ Esc in normal mode cancels the prompt; Enter runs it in either mode.</li>
 
 <div group="set_status_keys" id="set_status_keys-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">set_status_keys("vi");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_status_line </h2>
+
+<pre><code class="language-rust ignore">fn set_status_line(value: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_status_line" id="link-set_status_line-Description" class="tablinks active" onclick="openTab(event, &#39;set_status_line&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_status_line" id="link-set_status_line-Example" class="tablinks" onclick="openTab(event, &#39;set_status_line&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_status_line" id="set_status_line-Description" class="tabcontent" style="display: block;">
+Choose where the status line goes: the command prompt, messages,
+`confirm` questions, the search prompt and warnings.
+<ul>
+<li><code>"overlay"</code> (the default): like tmux, it is drawn over the session’s
+tab bar while there is something to show, and the tab bar comes
+back afterwards. With the tab bar hidden, it is drawn over the last
+row of the screen. The panes get every row but the tab bar’s, and
+are not resized when a message comes and goes.</li>
+<li><code>"separate"</code>: the last row of the screen is kept for it and always
+shows the session name, so the panes have one row fewer.</li>
+</ul>
+</div>
+
+<div group="set_status_line" id="set_status_line-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">set_status_line("separate");
 </code></pre>
 </div>
 
@@ -4659,13 +4698,47 @@ Example
 <div group="set_position" id="set_position-Description" class="tabcontent" style="display: block;">
 Put the session's tab bar, its list of windows, at the `"top"` (the
 default) or `"bottom"` of the screen, like tmux's `status-position`.
-At the bottom it sits just above the status line, where the command
-prompt and messages appear. Tab bars of nested tabs stay at the top of
-their own area.
+The command prompt and messages are drawn over it while they show, so
+they move with it. Tab bars of nested tabs stay at the top of their
+own area.
 </div>
 
 <div group="set_position" id="set_position-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">tabbar.set_position("bottom");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_visible </h2>
+
+<pre><code class="language-rust ignore">fn set_visible(tabbar: TabbarApi, visible: bool)</code></pre>
+<div>
+<div class="tab">
+<button group="set_visible" id="link-set_visible-Description" class="tablinks active" onclick="openTab(event, &#39;set_visible&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_visible" id="link-set_visible-Example" class="tablinks" onclick="openTab(event, &#39;set_visible&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_visible" id="set_visible-Description" class="tabcontent" style="display: block;">
+Show (`true`, the default) or hide (`false`) the session's tab bar,
+like tmux's `status on` and `status off`. Hidden, it gives its row to
+the panes, and the command prompt and messages are drawn over the last
+row of the screen while they show. Only the session's own tab bar is
+hidden; tab bars of nested tabs, like `set_position`, are not
+affected.
+</div>
+
+<div group="set_visible" id="set_visible-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">tabbar.set_visible(false);
 </code></pre>
 </div>
 
@@ -10027,6 +10100,36 @@ Description
 
 <div group="node_id" id="node_id-Description-2" class="tabcontent" style="display: block;">
 Return the tabs node id currently being formatted.
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> session_name </h2>
+
+<pre><code class="language-rust ignore">fn session_name(bar: TabBarContext) -&gt; String</code></pre>
+<div>
+<div class="tab">
+<button group="session_name" id="link-session_name-Description" class="tablinks active" onclick="openTab(event, &#39;session_name&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="session_name" id="link-session_name-Example" class="tablinks" onclick="openTab(event, &#39;session_name&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="session_name" id="session_name-Description" class="tabcontent" style="display: block;">
+Return the name of the session the bar belongs to, like tmux `#S`, for
+a status line such as `[main] 1 shell 2 nvim`.
+</div>
+
+<div group="session_name" id="session_name-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">let left = [ui.segment(`[${ctx.session_name()}] `)];
+</code></pre>
 </div>
 
 </div>

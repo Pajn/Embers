@@ -1867,3 +1867,98 @@ async fn command_prompt_picker_and_display_message_work_in_a_live_client() {
     harness.wait_timeout(IO_TIMEOUT).expect("client exits");
     server.shutdown().await.expect("shutdown server");
 }
+
+/// The text of the last full frame in `output`: frames start at the top left.
+fn last_frame(output: &str) -> &str {
+    output.rsplit("\x1b[H").next().unwrap_or(output)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_over_the_tab_bar_comes_and_goes_without_resizing_panes() {
+    let _guard = acquire_test_lock().await.expect("acquire test lock");
+    if !require_pty() {
+        return;
+    }
+    let server = TestServer::start().await.expect("start server");
+    run_cli(&server, ["new-session", "main"]);
+    run_cli(
+        &server,
+        [
+            "new-window",
+            "-t",
+            "main",
+            "--title",
+            "shell",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("config.rhai");
+    fs::write(&config_path, r#"tabbar.set_position("bottom");"#).expect("write config");
+
+    let socket_arg = server.socket_path().to_string_lossy().into_owned();
+    let config_arg = config_path.to_string_lossy().into_owned();
+    let socket_path = server.socket_path().to_path_buf();
+    let (_spawned, mut harness) = spawn_embers(
+        &[
+            "attach",
+            "--socket",
+            &socket_arg,
+            "--config",
+            &config_arg,
+            "-t",
+            "main",
+        ],
+        socket_path,
+    );
+    harness
+        .read_until_contains("[main]", STARTUP_TIMEOUT)
+        .expect("attach client renders");
+
+    // 24 rows: the pane's title row and the tab bar, and no status row.
+    run_pane_command(&mut harness, "stty size", "22 80");
+
+    // A program that reports every resize while the message comes and goes.
+    // The quotes keep the echoed command line from matching its output.
+    harness
+        .write_all("sh -c 'trap \"echo GOT-WIN\"\"CH\" WINCH; echo LOOP-RE\"\"ADY; while :; do sleep 0.1; done'\r")
+        .expect("start the resize watcher");
+    harness
+        .read_until_contains("LOOP-READY", IO_TIMEOUT)
+        .expect("resize watcher runs");
+
+    run_cli(
+        &server,
+        ["display-message", "-d", "300", "shown-over-the-bar"],
+    );
+    let shown = harness
+        .read_until_contains("shown-over-the-bar", IO_TIMEOUT)
+        .expect("display-message is drawn");
+    // Over the tab bar: the last row, where `[main]` was.
+    let frame = last_frame(&shown);
+    let last_row = frame
+        .split("\r\n")
+        .nth(23)
+        .unwrap_or_else(|| panic!("a full frame: {frame:?}"));
+    assert!(last_row.contains("shown-over-the-bar"), "{last_row:?}");
+
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let after = harness
+        .wait_for_quiet(QUIET_TIMEOUT, IO_TIMEOUT)
+        .expect("the message expires");
+    let frame = last_frame(&after);
+    assert!(!frame.contains("shown-over-the-bar"), "{frame:?}");
+    assert!(frame.contains("[main]"), "the tab bar is back: {frame:?}");
+
+    harness.write_all("\x03").expect("stop the resize watcher");
+    let output = run_pane_command(&mut harness, "stty size", "22 80");
+    assert!(
+        !format!("{shown}{after}{output}").contains("GOT-WINCH"),
+        "a pane was resized"
+    );
+
+    harness.write_all("\x11").expect("quit attached client");
+    harness.wait_timeout(IO_TIMEOUT).expect("client exits");
+    server.shutdown().await.expect("shutdown server");
+}

@@ -41,6 +41,7 @@ const REGISTRATION_PAGES: &[PageSpec<'_>] = &[
             "set_terminal_features",
             "set_detach_on_destroy",
             "set_status_keys",
+            "set_status_line",
         ],
     },
     PageSpec {
