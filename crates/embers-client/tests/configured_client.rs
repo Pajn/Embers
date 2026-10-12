@@ -4,7 +4,8 @@ use std::path::Path;
 
 use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseButton,
-    MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel, ScriptedTransport,
+    MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PaneTitles, PresentationModel,
+    ScriptedTransport,
 };
 use embers_core::{
     ActivityState, BufferId, NodeId, PtySize, RequestId, SessionId, Size, SnapshotLine,
@@ -186,6 +187,7 @@ fn second_session_state() -> embers_client::ClientState {
             zoomed_node_id: None,
             viewport: None,
             base_index: None,
+            pane_titles: false,
         },
     );
     state.nodes.insert(
@@ -643,8 +645,8 @@ async fn tab_bar_at_the_bottom_moves_drawing_and_mouse_targets() {
             SESSION_ID,
             viewport,
             MouseEvent {
-                row: focused.rect.origin.y as u16,
-                column: focused.rect.origin.x as u16,
+                row: (focused.content_rect.origin.y - 1) as u16,
+                column: focused.content_rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::Press(MouseButton::Left),
             },
@@ -892,9 +894,10 @@ async fn clicking_a_pane_beside_a_tagged_tab_bar_still_focuses_and_forwards() {
         embers_client::TabBarPosition::Bottom,
     )
     .unwrap();
+    // The first cell of the pane's content, below any title row.
     let pane_click = |leaf: &embers_client::LeafFrame| MouseEvent {
-        row: (leaf.rect.origin.y + 1) as u16,
-        column: leaf.rect.origin.x as u16,
+        row: leaf.content_rect.origin.y as u16,
+        column: leaf.content_rect.origin.x as u16,
         modifiers: MouseModifiers::default(),
         kind: MouseEventKind::Press(MouseButton::Left),
     };
@@ -1680,8 +1683,8 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
-                column: focused.rect.origin.x as u16,
+                row: focused.content_rect.origin.y as u16,
+                column: focused.content_rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
             },
@@ -1725,8 +1728,8 @@ async fn wheel_mouse_events_scroll_locally_or_forward_to_program() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
-                column: focused.rect.origin.x as u16,
+                row: focused.content_rect.origin.y as u16,
+                column: focused.content_rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
             },
@@ -1751,20 +1754,25 @@ async fn title_row_mouse_events_do_not_forward_to_programs() {
         .get_mut(&BufferId(4))
         .unwrap()
         .mouse_reporting = true;
-    let presentation = PresentationModel::project(
+    let presentation = PresentationModel::project_with(
         &state,
         SESSION_ID,
         Size {
             width: 80,
             height: 20,
         },
+        PaneTitles::Top,
     )
     .unwrap();
     let focused = presentation.focused_leaf().unwrap().clone();
+    assert_eq!(
+        focused.title_rect.map(|title| title.origin),
+        Some(focused.rect.origin)
+    );
 
     let transport = FakeTransport::default();
     let client = MuxClient::new(transport.clone());
-    let (config, _tempdir) = manager_from_source("");
+    let (config, _tempdir) = manager_from_source(r#"set_pane_titles("top");"#);
     let mut configured = ConfiguredClient::new(client, config);
     *configured.client_mut().state_mut() = state;
     configured
@@ -1829,8 +1837,8 @@ async fn content_row_mouse_events_forward_with_content_relative_coordinates() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
-                column: focused.rect.origin.x as u16,
+                row: focused.content_rect.origin.y as u16,
+                column: focused.content_rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::Press(MouseButton::Left),
             },
@@ -2284,8 +2292,8 @@ async fn disabling_wheel_scroll_in_config_suppresses_local_mouse_scrolling() {
                 height: 20,
             },
             MouseEvent {
-                row: (focused.rect.origin.y + 1) as u16,
-                column: focused.rect.origin.x as u16,
+                row: focused.content_rect.origin.y as u16,
+                column: focused.content_rect.origin.x as u16,
                 modifiers: MouseModifiers::default(),
                 kind: MouseEventKind::WheelUp,
             },

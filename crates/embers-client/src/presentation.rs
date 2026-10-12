@@ -96,6 +96,93 @@ impl StatusLineMode {
     }
 }
 
+/// Where each pane draws its title row (its title and activity marker), if at
+/// all, like tmux's `pane-border-status` (`set_pane_titles`). A title row
+/// takes the top or the bottom row of the pane alike, so the pane's terminal
+/// content has the same size either way. Panes in popups always have one at
+/// the top, under the popup's own frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneTitles {
+    /// No title rows; panes show terminal content in their whole area.
+    #[default]
+    Off,
+    Top,
+    Bottom,
+}
+
+impl PaneTitles {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    /// Whether panes give a row to their title.
+    pub fn shown(self) -> bool {
+        self != Self::Off
+    }
+
+    /// The title rows of the client that last drew `session`, as it reported
+    /// them to the server (`SessionRecord::pane_titles`). Only whether they
+    /// are shown is reported, which is all pane sizes depend on, so shown
+    /// ones are taken to be at the top.
+    pub fn reported(session: &SessionRecord) -> Self {
+        if session.pane_titles {
+            Self::Top
+        } else {
+            Self::Off
+        }
+    }
+}
+
+/// How a client lays a session out, from its config: the root tab bar and
+/// the panes' title rows. Everything that sizes or places panes the way the
+/// client draws them projects with the same options.
+///
+/// Converts from any one of its parts, the others left at their defaults
+/// (a root tab bar shown at the top, no title rows).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutOptions {
+    pub tab_bar: RootTabBar,
+    pub pane_titles: PaneTitles,
+}
+
+impl LayoutOptions {
+    pub fn new(tab_bar: impl Into<RootTabBar>, pane_titles: PaneTitles) -> Self {
+        Self {
+            tab_bar: tab_bar.into(),
+            pane_titles,
+        }
+    }
+}
+
+impl From<RootTabBar> for LayoutOptions {
+    fn from(tab_bar: RootTabBar) -> Self {
+        Self {
+            tab_bar,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<TabBarPosition> for LayoutOptions {
+    fn from(position: TabBarPosition) -> Self {
+        RootTabBar::from(position).into()
+    }
+}
+
+impl From<PaneTitles> for LayoutOptions {
+    fn from(pane_titles: PaneTitles) -> Self {
+        Self {
+            pane_titles,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabItem {
     pub title: String,
@@ -135,6 +222,12 @@ pub struct LeafFrame {
     pub node_id: NodeId,
     pub buffer_id: BufferId,
     pub rect: Rect,
+    /// The part of `rect` the pane's terminal content is drawn in: all of it,
+    /// or all but its title row.
+    pub content_rect: Rect,
+    /// The row of `rect` the pane's title is drawn in, if it has one
+    /// ([`PaneTitles`]).
+    pub title_rect: Option<Rect>,
     pub title: String,
     pub activity: ActivityState,
     pub focused: bool,
@@ -144,11 +237,11 @@ pub struct LeafFrame {
 
 impl LeafFrame {
     /// The PTY size matching the terminal content the renderer draws for this
-    /// leaf: its full width, minus the title row it draws on top. `None` when
-    /// the leaf is too small to show any terminal rows.
+    /// leaf, the size of its `content_rect`. `None` when the leaf is too small
+    /// to show any terminal rows.
     pub fn pty_size(&self) -> Option<PtySize> {
-        let rows = self.rect.size.height.saturating_sub(1);
-        (self.rect.size.width > 0 && rows > 0).then(|| PtySize::new(self.rect.size.width, rows))
+        let Size { width, height } = self.content_rect.size;
+        (width > 0 && height > 0).then(|| PtySize::new(width, height))
     }
 }
 
@@ -198,22 +291,27 @@ pub struct PresentationModel {
 }
 
 impl PresentationModel {
-    /// Project with the root tab bar at the top.
+    /// Project with the root tab bar at the top and no pane title rows, as
+    /// the client draws by default.
     pub fn project(state: &ClientState, session_id: SessionId, viewport: Size) -> Result<Self> {
-        Self::project_with(state, session_id, viewport, TabBarPosition::Top)
+        Self::project_with(state, session_id, viewport, LayoutOptions::default())
     }
 
-    /// Project with the root tab bar drawn as `tab_bar` says. A shown bar
-    /// takes one row at the top or the bottom alike, so panes have the same
-    /// sizes wherever it is; only their positions differ. A hidden one takes
-    /// none (see [`Self::layout_viewport`]).
+    /// Project with the root tab bar and pane title rows as `layout` says. A
+    /// shown bar takes one row at the top or the bottom alike, so panes have
+    /// the same sizes wherever it is; only their positions differ. A hidden
+    /// one takes none (see [`Self::layout_viewport`]). Title rows, at the top
+    /// or the bottom alike, take a row from every tiled pane.
     pub fn project_with(
         state: &ClientState,
         session_id: SessionId,
         viewport: Size,
-        tab_bar: impl Into<RootTabBar>,
+        layout: impl Into<LayoutOptions>,
     ) -> Result<Self> {
-        let tab_bar = tab_bar.into();
+        let LayoutOptions {
+            tab_bar,
+            pane_titles,
+        } = layout.into();
         let session = state
             .sessions
             .get(&session_id)
@@ -230,6 +328,7 @@ impl PresentationModel {
             activity_by_node: BTreeMap::new(),
             buffer_count_by_node: BTreeMap::new(),
             tab_bar,
+            pane_titles,
         };
         if let Some(zoomed_node_id) = session
             .zoomed_node_id
@@ -432,6 +531,8 @@ struct Projector<'a> {
     buffer_count_by_node: BTreeMap<NodeId, usize>,
     /// Where the root tab bar goes, if it is shown.
     tab_bar: RootTabBar,
+    /// Where tiled panes draw their title rows.
+    pane_titles: PaneTitles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -442,6 +543,15 @@ struct FocusScore {
 }
 
 impl Projector<'_> {
+    /// Title rows of panes in the popup `floating_id`, or tiled panes for
+    /// `None`. Popups keep theirs; see [`PaneTitles`].
+    fn pane_titles_in(&self, floating_id: Option<FloatingId>) -> PaneTitles {
+        match floating_id {
+            Some(_) => PaneTitles::Top,
+            None => self.pane_titles,
+        }
+    }
+
     fn project_node(
         &mut self,
         node_id: NodeId,
@@ -475,10 +585,14 @@ impl Projector<'_> {
                             buffer_view.buffer_id
                         ))
                     })?;
+                let (title_rect, content_rect) =
+                    split_title_row(rect, self.pane_titles_in(floating_id));
                 self.projection.leaves.push(LeafFrame {
                     node_id: node.id,
                     buffer_id: buffer.id,
                     rect,
+                    content_rect,
+                    title_rect,
                     title: buffer.title.clone(),
                     activity: buffer.activity,
                     focused: self.session.focused_leaf_id == Some(node.id),
@@ -594,7 +708,14 @@ impl Projector<'_> {
                     min_lengths: split
                         .child_ids
                         .iter()
-                        .map(|child_id| min_extent(self.state, *child_id, split.direction))
+                        .map(|child_id| {
+                            min_extent(
+                                self.state,
+                                *child_id,
+                                split.direction,
+                                self.pane_titles_in(floating_id),
+                            )
+                        })
                         .collect(),
                     floating_id,
                 });
@@ -798,15 +919,20 @@ fn axis_length(rect: Rect, direction: SplitDirection) -> u16 {
 
 /// The smallest extent `node_id` can be drawn at along `direction`'s axis
 /// while every visible pane keeps at least one cell of content: a pane needs
-/// its title row plus one row, a tab bar adds a row, and nested splits along
-/// the same axis add their dividers.
-pub(crate) fn min_extent(state: &ClientState, node_id: NodeId, direction: SplitDirection) -> u16 {
+/// one row plus its title row if it has one, a tab bar adds a row, and nested
+/// splits along the same axis add their dividers.
+pub(crate) fn min_extent(
+    state: &ClientState,
+    node_id: NodeId,
+    direction: SplitDirection,
+    pane_titles: PaneTitles,
+) -> u16 {
     let Some(node) = state.nodes.get(&node_id) else {
         return 1;
     };
     match node.kind {
         NodeRecordKind::BufferView => match direction {
-            SplitDirection::Horizontal => 2,
+            SplitDirection::Horizontal => 1 + u16::from(pane_titles.shown()),
             SplitDirection::Vertical => 1,
         },
         NodeRecordKind::Tabs => {
@@ -818,7 +944,9 @@ pub(crate) fn min_extent(state: &ClientState, node_id: NodeId, direction: SplitD
                 let active = usize::try_from(tabs.active).ok()?;
                 tabs.tabs.get(active).map(|tab| tab.child_id)
             });
-            bar + child.map_or(1, |child_id| min_extent(state, child_id, direction))
+            bar + child.map_or(1, |child_id| {
+                min_extent(state, child_id, direction, pane_titles)
+            })
         }
         NodeRecordKind::Split => {
             let Some(split) = node
@@ -831,7 +959,7 @@ pub(crate) fn min_extent(state: &ClientState, node_id: NodeId, direction: SplitD
             let mins = split
                 .child_ids
                 .iter()
-                .map(|child_id| min_extent(state, *child_id, direction));
+                .map(|child_id| min_extent(state, *child_id, direction, pane_titles));
             if split.direction == direction {
                 let dividers = u16::try_from(split.child_ids.len() - 1).unwrap_or(u16::MAX);
                 mins.fold(dividers, u16::saturating_add)
@@ -973,6 +1101,30 @@ fn divider_rect_for(
     }
 }
 
+/// A pane's `rect` split into its title row, if `pane_titles` gives it one,
+/// and the rest, where its content goes.
+fn split_title_row(rect: Rect, pane_titles: PaneTitles) -> (Option<Rect>, Rect) {
+    let title_row = |y: i32| Rect {
+        origin: Point {
+            x: rect.origin.x,
+            y,
+        },
+        size: Size {
+            width: rect.size.width,
+            height: 1,
+        },
+    };
+    match pane_titles {
+        PaneTitles::Off => (None, rect),
+        PaneTitles::Top => (Some(title_row(rect.origin.y)), inset_top(rect, 1)),
+        PaneTitles::Bottom => {
+            let content_rect = inset_bottom(rect, 1);
+            let y = rect.origin.y + i32::from(content_rect.size.height);
+            (Some(title_row(y)), content_rect)
+        }
+    }
+}
+
 fn inset_bottom(rect: Rect, amount: u16) -> Rect {
     Rect {
         origin: rect.origin,
@@ -1024,6 +1176,7 @@ mod zoom_tests {
                 zoomed_node_id: Some(NodeId(3)),
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         state.nodes.insert(
@@ -1120,6 +1273,7 @@ mod zoom_tests {
                 zoomed_node_id: Some(NodeId(99)),
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         state.nodes.insert(
@@ -1218,6 +1372,7 @@ mod zoom_tests {
                 zoomed_node_id: Some(NodeId(3)),
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         for (node_id, buffer_id, focused, zoomed) in [
@@ -1312,6 +1467,7 @@ mod zoom_tests {
                 zoomed_node_id: Some(NodeId(12)),
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         state.nodes.insert(
@@ -1469,6 +1625,7 @@ mod zoom_tests {
                 zoomed_node_id: Some(NodeId(1)),
                 viewport: None,
                 base_index: None,
+                pane_titles: false,
             },
         );
         state.nodes.insert(

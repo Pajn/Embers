@@ -106,6 +106,7 @@ impl CliConnection {
                 request_id: new_request_id(),
                 session_id,
                 viewport,
+                pane_titles: snapshot.session.pane_titles,
             }))
             .await?;
             snapshot.session.viewport = Some(viewport);

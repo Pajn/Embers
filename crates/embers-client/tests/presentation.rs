@@ -1,6 +1,8 @@
-use embers_client::{PresentationModel, RootTabBar, StatusLineMode, TabBarPosition};
+use embers_client::{
+    LayoutOptions, PaneTitles, PresentationModel, RootTabBar, StatusLineMode, TabBarPosition,
+};
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, NodeId, PtySize, SessionId, Size, SplitDirection,
+    ActivityState, BufferId, FloatGeometry, NodeId, Point, PtySize, SessionId, Size, SplitDirection,
 };
 use embers_protocol::{
     BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, NodeRecord, NodeRecordKind,
@@ -599,4 +601,290 @@ fn projects_root_split_without_tabs_frame() {
     );
     assert_eq!(presentation.dividers[0].floating_id, None);
     assert_ne!(ROOT_ONLY_SPLIT_ID, ROOT_SPLIT_LEFT_LEAF_ID);
+}
+
+#[test]
+fn panes_without_title_rows_draw_content_in_their_whole_rect() {
+    let state = root_buffer_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let presentation =
+        PresentationModel::project_with(&state, SESSION_ID, viewport, TabBarPosition::Top).unwrap();
+
+    let leaf = &presentation.leaves[0];
+    assert_eq!(leaf.title_rect, None);
+    assert_eq!(leaf.content_rect, leaf.rect);
+    assert_eq!(leaf.content_rect.size, viewport);
+    assert_eq!(leaf.pty_size(), Some(PtySize::new(40, 14)));
+}
+
+#[test]
+fn pane_title_rows_take_the_top_or_bottom_row_of_each_pane() {
+    let state = root_buffer_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let project = |pane_titles| {
+        PresentationModel::project_with(&state, SESSION_ID, viewport, pane_titles)
+            .unwrap()
+            .leaves[0]
+            .clone()
+    };
+
+    let top = project(PaneTitles::Top);
+    let title = top.title_rect.expect("title row");
+    assert_eq!(title.origin, Point { x: 0, y: 0 });
+    assert_eq!(title.size.height, 1);
+    assert_eq!(top.content_rect.origin, Point { x: 0, y: 1 });
+    assert_eq!(top.content_rect.size.height, 13);
+    assert_eq!(top.pty_size(), Some(PtySize::new(40, 13)));
+
+    let bottom = project(PaneTitles::Bottom);
+    assert_eq!(
+        bottom.title_rect.expect("title row").origin,
+        Point { x: 0, y: 13 }
+    );
+    assert_eq!(bottom.content_rect.origin, Point { x: 0, y: 0 });
+    assert_eq!(bottom.content_rect.size.height, 13);
+    assert_eq!(bottom.pty_size(), Some(PtySize::new(40, 13)));
+}
+
+#[test]
+fn split_panes_without_title_rows_keep_their_divider() {
+    let state = root_split_state();
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+        TabBarPosition::Top,
+    )
+    .unwrap();
+
+    assert_eq!(presentation.dividers.len(), 1);
+    let divider = presentation.dividers[0].rect;
+    assert_eq!(
+        divider.size,
+        Size {
+            width: 1,
+            height: 14
+        }
+    );
+    let mut widths = 0;
+    for leaf in &presentation.leaves {
+        assert_eq!(leaf.title_rect, None);
+        assert!(!leaf.rect.contains(divider.origin));
+        let size = leaf.pty_size().expect("pane has content");
+        assert_eq!(size.rows, 14);
+        widths += size.cols;
+    }
+    assert_eq!(widths + 1, 40);
+}
+
+#[test]
+fn popup_panes_keep_their_title_row_without_pane_titles() {
+    let state = demo_state();
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+        TabBarPosition::Top,
+    )
+    .unwrap();
+
+    assert!(
+        presentation
+            .leaves
+            .iter()
+            .any(|leaf| leaf.floating_id.is_some())
+    );
+    for leaf in &presentation.leaves {
+        assert_eq!(
+            leaf.title_rect.is_some(),
+            leaf.floating_id.is_some(),
+            "{leaf:?}"
+        );
+    }
+}
+
+/// Every root tab bar and status line layout, with every title row setting.
+fn every_layout() -> Vec<(StatusLineMode, LayoutOptions)> {
+    let mut layouts = Vec::new();
+    for status_line in [StatusLineMode::Overlay, StatusLineMode::Separate] {
+        for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
+            for visible in [true, false] {
+                for pane_titles in [PaneTitles::Off, PaneTitles::Top, PaneTitles::Bottom] {
+                    layouts.push((
+                        status_line,
+                        LayoutOptions::new(RootTabBar { position, visible }, pane_titles),
+                    ));
+                }
+            }
+        }
+    }
+    layouts
+}
+
+#[test]
+fn title_rows_and_root_tab_bar_layouts_hold_together() {
+    let state = demo_state();
+    let terminal = Size {
+        width: 40,
+        height: 14,
+    };
+    for (status_line, options) in every_layout() {
+        let layout = format!("{status_line:?} {options:?}");
+        let viewport = status_line.content_viewport(terminal);
+        let model = PresentationModel::project_with(&state, SESSION_ID, viewport, options).unwrap();
+        let bar = model.root_tabs.as_ref().unwrap().rect;
+
+        for leaf in model
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.floating_id.is_none())
+        {
+            // Title rows take a row of the pane and nothing of the bar's.
+            let title_rows = u16::from(options.pane_titles.shown());
+            assert_eq!(leaf.title_rect.is_some(), title_rows == 1, "{layout}");
+            assert_eq!(
+                leaf.content_rect.size.height + title_rows,
+                leaf.rect.size.height,
+                "{layout}"
+            );
+            assert_eq!(leaf.content_rect.size.width, leaf.rect.size.width);
+            let rows = |rect: embers_core::Rect| {
+                rect.origin.y..rect.origin.y + i32::from(rect.size.height)
+            };
+            for y in rows(leaf.rect) {
+                assert!(!rows(bar).contains(&y), "{layout}: pane over the bar");
+            }
+            if let Some(title) = leaf.title_rect {
+                let expected_y = match options.pane_titles {
+                    PaneTitles::Top => leaf.rect.origin.y,
+                    _ => leaf.rect.origin.y + i32::from(leaf.rect.size.height) - 1,
+                };
+                assert_eq!(title.origin.y, expected_y, "{layout}");
+                assert!(!rows(leaf.content_rect).contains(&title.origin.y));
+            }
+            assert_eq!(
+                leaf.pty_size().map(|size| size.rows),
+                Some(leaf.content_rect.size.height),
+                "{layout}"
+            );
+        }
+
+        // The status row is the bar's, or the last row without one shown,
+        // whatever the title rows are.
+        let status_row = if options.tab_bar.visible {
+            u16::try_from(bar.origin.y).unwrap()
+        } else {
+            viewport.height - 1
+        };
+        assert_eq!(model.status_row(), Some(status_row), "{layout}");
+
+        // The client reports the layout viewport and whether title rows are
+        // shown. The CLI, projecting that with the bar shown at the top and
+        // the reported title rows, sizes every pane as the client does.
+        let layout_viewport = model.layout_viewport();
+        assert_eq!(
+            layout_viewport.height,
+            viewport.height + u16::from(!options.tab_bar.visible),
+            "{layout}"
+        );
+        let reported = if options.pane_titles.shown() {
+            PaneTitles::Top
+        } else {
+            PaneTitles::Off
+        };
+        let cli =
+            PresentationModel::project_with(&state, SESSION_ID, layout_viewport, reported).unwrap();
+        let pty_sizes = |model: &PresentationModel| {
+            model
+                .leaves
+                .iter()
+                .map(|leaf| (leaf.node_id, leaf.pty_size()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pty_sizes(&model), pty_sizes(&cli), "{layout}");
+    }
+}
+
+#[test]
+fn without_title_rows_a_hidden_root_tab_bar_gives_panes_every_row() {
+    let state = demo_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let model = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        viewport,
+        LayoutOptions::new(
+            RootTabBar {
+                position: TabBarPosition::Bottom,
+                visible: false,
+            },
+            PaneTitles::Off,
+        ),
+    )
+    .unwrap();
+
+    let left = model
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == LEFT_LEAF_ID)
+        .unwrap();
+    assert_eq!(left.title_rect, None);
+    assert_eq!(left.content_rect, left.rect);
+    assert_eq!(left.rect.origin.y, 0);
+    assert_eq!(left.rect.size.height, 14);
+    assert_eq!(left.pty_size().map(|size| size.rows), Some(14));
+    // Status content goes over the last pane row, and the client reports a
+    // viewport with the hidden bar's row added.
+    assert_eq!(model.status_row(), Some(13));
+    assert_eq!(
+        model.layout_viewport(),
+        Size {
+            width: 40,
+            height: 15
+        }
+    );
+}
+
+#[test]
+fn top_title_rows_sit_under_the_window_with_the_root_tab_bar_at_the_bottom() {
+    let state = demo_state();
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    let model = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        viewport,
+        LayoutOptions::new(TabBarPosition::Bottom, PaneTitles::Top),
+    )
+    .unwrap();
+
+    assert_eq!(model.root_tabs.as_ref().unwrap().rect.origin.y, 13);
+    let left = model
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == LEFT_LEAF_ID)
+        .unwrap();
+    assert_eq!(left.title_rect.unwrap().origin, Point { x: 0, y: 0 });
+    assert_eq!(left.content_rect.origin, Point { x: 0, y: 1 });
+    assert_eq!(left.content_rect.size.height, 12);
+    assert_eq!(left.pty_size().map(|size| size.rows), Some(12));
+    assert_eq!(model.status_row(), Some(13));
+    assert_eq!(model.layout_viewport(), viewport);
 }

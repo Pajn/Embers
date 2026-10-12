@@ -18,8 +18,9 @@ follow tmux's `resize-pane -L/-R/-U/-D n`:
   `resize_left` shrinks the left pane and grows the right one, whichever of
   them is focused.
 - The space comes from the panes on the shrinking side of the divider,
-  nearest first. A pane keeps at least one column, or its title row plus one
-  row of content, and a nested split keeps room for all of its panes.
+  nearest first. A pane keeps at least one column, or one row of content plus
+  its title row if it has one (`set_pane_titles`), and a nested split keeps
+  room for all of its panes.
 - When there is no such split, or the divider is already as far as it can go,
   the action does nothing.
 - A popup's panes only resize splits inside the popup; the popup itself keeps

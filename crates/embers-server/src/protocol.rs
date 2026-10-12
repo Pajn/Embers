@@ -23,6 +23,7 @@ pub fn session_record(session: &Session) -> SessionRecord {
         focused_floating_id: session.focused_floating,
         zoomed_node_id: session.zoomed_node,
         viewport: session.viewport,
+        pane_titles: session.pane_titles,
         base_index: session.base_index,
     }
 }

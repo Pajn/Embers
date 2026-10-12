@@ -1517,7 +1517,8 @@ impl Runtime {
                 request_id,
                 session_id,
                 viewport,
-            } => match state.set_session_viewport(session_id, viewport) {
+                pane_titles,
+            } => match state.set_session_viewport(session_id, viewport, pane_titles) {
                 Ok(()) => {
                     self.mark_workspace_dirty();
                     (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
@@ -5062,12 +5063,15 @@ mod tests {
             name: name.to_owned(),
         };
         let session_viewport = |response| match response {
-            ServerResponse::SessionSnapshot(response) => response.snapshot.session.viewport,
+            ServerResponse::SessionSnapshot(response) => (
+                response.snapshot.session.viewport,
+                response.snapshot.session.pane_titles,
+            ),
             other => panic!("expected session snapshot, got {other:?}"),
         };
 
         let (response, _) = runtime.dispatch_session(create(1, "alpha")).await;
-        assert_eq!(session_viewport(response), None);
+        assert_eq!(session_viewport(response), (None, false));
         let alpha = runtime
             .state
             .lock()
@@ -5086,6 +5090,7 @@ mod tests {
                 request_id: RequestId(2),
                 session_id: alpha,
                 viewport,
+                pane_titles: true,
             })
             .await;
         assert!(matches!(response, ServerResponse::Ok(_)));
@@ -5096,11 +5101,12 @@ mod tests {
                 session_id: alpha,
             })
             .await;
-        assert_eq!(session_viewport(response), Some(viewport));
+        assert_eq!(session_viewport(response), (Some(viewport), true));
 
-        // A session no client has drawn yet starts with the last viewport.
+        // A session no client has drawn yet starts with the last viewport,
+        // and the title rows it was drawn with.
         let (response, _) = runtime.dispatch_session(create(4, "beta")).await;
-        assert_eq!(session_viewport(response), Some(viewport));
+        assert_eq!(session_viewport(response), (Some(viewport), true));
     }
 
     #[tokio::test]

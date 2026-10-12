@@ -1,4 +1,7 @@
-use embers_client::{NavigationDirection, PresentationModel, SplitResize, drawn_viewport};
+use embers_client::{
+    LayoutOptions, NavigationDirection, PaneTitles, PresentationModel, RootTabBar, SplitResize,
+    StatusLineMode, TabBarPosition, drawn_viewport,
+};
 use embers_core::{BufferId, FloatGeometry, NodeId, Point, PtySize, Size};
 
 use crate::support::{
@@ -45,7 +48,8 @@ fn split_frames_report_drawn_lengths_and_minimums() {
         .iter()
         .find(|split| split.node_id == FLOATING_SPLIT_ID)
         .expect("floating split is projected");
-    // Two stacked panes each need a title row and one content row.
+    // Panes in popups keep their title rows, so two stacked ones each need
+    // a title row and one content row.
     assert_eq!(floating.min_lengths, vec![2, 2]);
 }
 
@@ -209,9 +213,64 @@ fn dragging_a_divider_moves_it_to_the_pointer() {
 #[test]
 fn drawn_viewport_is_reconstructed_from_pane_pty_sizes() {
     let mut state = demo_state();
-    // The sizes a client drawing the session at 80x20 gives the visible panes.
+    // The sizes a client drawing the session at 80x20 without title rows
+    // gives the visible panes.
+    state.buffers.get_mut(&BufferId(2)).unwrap().pty_size = PtySize::new(26, 19);
+    state.buffers.get_mut(&BufferId(4)).unwrap().pty_size = PtySize::new(53, 18);
+    assert_eq!(drawn_viewport(&state, SESSION_ID), Some(VIEWPORT));
+
+    // With title rows, as the client reported, each pane has a row fewer.
+    state.sessions.get_mut(&SESSION_ID).unwrap().pane_titles = true;
     state.buffers.get_mut(&BufferId(2)).unwrap().pty_size = PtySize::new(26, 18);
     state.buffers.get_mut(&BufferId(4)).unwrap().pty_size = PtySize::new(53, 17);
-
     assert_eq!(drawn_viewport(&state, SESSION_ID), Some(VIEWPORT));
+}
+
+#[test]
+fn drawn_viewport_matches_the_reported_viewport_for_every_layout() {
+    let terminal = VIEWPORT;
+    for status_line in [StatusLineMode::Overlay, StatusLineMode::Separate] {
+        for position in [TabBarPosition::Top, TabBarPosition::Bottom] {
+            for visible in [true, false] {
+                for pane_titles in [PaneTitles::Off, PaneTitles::Top, PaneTitles::Bottom] {
+                    let options = LayoutOptions::new(RootTabBar { position, visible }, pane_titles);
+                    let layout = format!("{status_line:?} {options:?}");
+                    let viewport = status_line.content_viewport(terminal);
+                    // The PTY sizes and title rows a client drawing the
+                    // session this way gives the panes and reports.
+                    let mut state = demo_state();
+                    let model =
+                        PresentationModel::project_with(&state, SESSION_ID, viewport, options)
+                            .unwrap();
+                    for leaf in &model.leaves {
+                        let size = leaf.pty_size().unwrap();
+                        state.buffers.get_mut(&leaf.buffer_id).unwrap().pty_size = size;
+                    }
+                    state.sessions.get_mut(&SESSION_ID).unwrap().pane_titles = pane_titles.shown();
+
+                    // The CLI works out the viewport the client reports, a
+                    // hidden bar's row included, and with the reported title
+                    // rows plans resizes against the panes as drawn.
+                    let drawn = drawn_viewport(&state, SESSION_ID);
+                    assert_eq!(drawn, Some(model.layout_viewport()), "{layout}");
+                    let session = &state.sessions[&SESSION_ID];
+                    let cli = PresentationModel::project_with(
+                        &state,
+                        SESSION_ID,
+                        drawn.unwrap(),
+                        PaneTitles::reported(session),
+                    )
+                    .unwrap();
+                    let lengths = |model: &PresentationModel| {
+                        model
+                            .splits
+                            .iter()
+                            .map(|split| (split.node_id, split.lengths.clone()))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(lengths(&cli), lengths(&model), "{layout}");
+                }
+            }
+        }
+    }
 }

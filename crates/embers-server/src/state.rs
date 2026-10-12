@@ -81,6 +81,9 @@ pub struct ServerState {
     /// The viewport most recently reported for any session, which new
     /// sessions start with.
     last_viewport: Option<Size>,
+    /// Whether the client that reported `last_viewport` showed pane title
+    /// rows.
+    last_pane_titles: bool,
     /// The base index last reported for any session, which new sessions
     /// start with.
     last_base_index: Option<u32>,
@@ -108,6 +111,7 @@ impl ServerState {
             floating: BTreeMap::new(),
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_pane_titles: false,
             last_base_index: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(1),
@@ -199,6 +203,7 @@ impl ServerState {
             floating,
             environment: EnvironmentStore::default(),
             last_viewport: None,
+            last_pane_titles: false,
             last_base_index: None,
             remain_on_exit: RemainOnExit::default(),
             session_ids: IdAllocator::new(next_session_id.max(safe_next_session_id)),
@@ -408,6 +413,7 @@ impl ServerState {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: self.last_viewport,
+                pane_titles: self.last_pane_titles,
                 base_index: self.last_base_index,
                 focus_history: Vec::new(),
                 created_at: Timestamp::now(),
@@ -426,9 +432,17 @@ impl ServerState {
         Ok(())
     }
 
-    pub fn set_session_viewport(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
-        self.session_mut(session_id)?.viewport = Some(viewport);
+    pub fn set_session_viewport(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        pane_titles: bool,
+    ) -> Result<()> {
+        let session = self.session_mut(session_id)?;
+        session.viewport = Some(viewport);
+        session.pane_titles = pane_titles;
         self.last_viewport = Some(viewport);
+        self.last_pane_titles = pane_titles;
         Ok(())
     }
 

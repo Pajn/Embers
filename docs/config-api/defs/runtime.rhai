@@ -682,8 +682,8 @@ fn resize_left(_: ActionApi, cells: int) -> Action;
 fn resize_right(_: ActionApi, cells: int) -> Action;
 
 /// Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
-/// See `resize_left` for which divider moves; panes keep their title row and at least
-/// one row of content.
+/// See `resize_left` for which divider moves; panes keep at least one row of content,
+/// and their title row if they have one.
 fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
