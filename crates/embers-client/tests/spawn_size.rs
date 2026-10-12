@@ -2,7 +2,7 @@ use embers_client::{
     PanePlacement, PresentationModel, RootTabBar, TabBarPosition, spawn_pty_size,
     spawn_pty_size_with,
 };
-use embers_core::{FloatGeometry, NodeId, PtySize, Size, SplitDirection};
+use embers_core::{BufferId, FloatGeometry, NodeId, PtySize, Size, SplitDirection};
 
 use crate::support::{
     FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, NESTED_TABS_ID,
@@ -276,6 +276,29 @@ fn new_panes_take_the_cell_size_a_client_gave_the_sessions_panes() {
         Some(PtySize::new(41, 19))
     );
 
+    // A hidden pane kept the cell size of an older client: it is used only
+    // while no other pane has one.
+    state
+        .buffers
+        .get_mut(&BufferId(1))
+        .expect("hidden buffer")
+        .pty_size = PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 800,
+        pixel_height: 528,
+    };
+    assert_eq!(
+        spawn_pty_size(&state, SESSION_ID, VIEWPORT, PanePlacement::RootTab),
+        Some(PtySize {
+            cols: 41,
+            rows: 19,
+            pixel_width: 410,
+            pixel_height: 418,
+        })
+    );
+
+    // The focused pane's cell size wins over it.
     state
         .buffers
         .get_mut(&FOCUSED_BUFFER_ID)

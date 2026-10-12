@@ -67,14 +67,21 @@ pub fn spawn_pty_size(
     Some(size.with_cell_size(session_cell_size(state, session_id)))
 }
 
-/// The cell size, in pixels, of a pane in `session_id` whose PTY has one.
+/// The cell size, in pixels, of a pane in `session_id` whose PTY has one:
+/// the focused pane's, which a client drew last, else any other pane's.
 fn session_cell_size(state: &ClientState, session_id: SessionId) -> Option<CellSize> {
-    state
-        .nodes
-        .values()
-        .filter(|node| node.session_id == session_id)
-        .filter_map(|node| state.buffers.get(&node.buffer_view.as_ref()?.buffer_id))
-        .find_map(|buffer| buffer.pty_size.cell_size())
+    let cell_size = |node_id: &NodeId| {
+        let buffer_id = state.nodes.get(node_id)?.buffer_view.as_ref()?.buffer_id;
+        state.buffers.get(&buffer_id)?.pty_size.cell_size()
+    };
+    let focused = state.sessions.get(&session_id)?.focused_leaf_id;
+    focused.as_ref().and_then(cell_size).or_else(|| {
+        state
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.session_id == session_id)
+            .find_map(|(node_id, _)| cell_size(node_id))
+    })
 }
 
 /// [`spawn_pty_size`] for a client that draws the root tab bar as `tab_bar`
