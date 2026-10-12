@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-fc920e63.js";
+            window.path_to_searchindex_js = "searchindex-2b6930fb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -216,6 +216,13 @@ Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling
 [<code>StyleSpec</code>] values and no click target.</p>
 <p>See the overloaded <code>segment(_: UiApi, text: String, options: Map) -&gt; BarSegment</code> doc for
 the full <code>options: Map</code> styling keys.</p>
+<p>Its <code>tab</code> key tags the segment with one of the bar’s tabs, so a left click on it selects
+that tab, like a click on a window in tmux’s status line. Tag every segment a tab is
+drawn with; untagged segments do nothing when clicked:</p>
+<pre><code class="language-rhai">for tab in ctx.tabs() {
+    left.push(ui.segment(tab.title(), #{ bold: tab.is_active(), tab: tab }));
+}
+</code></pre>
 </div>
 
 </div>

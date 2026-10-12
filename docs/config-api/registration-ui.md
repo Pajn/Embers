@@ -48,6 +48,16 @@ Create a [`BarSegment`] from a [`UiApi`] receiver and text using default styling
 
 See the overloaded `segment(_: UiApi, text: String, options: Map) -> BarSegment` doc for
 the full `options: Map` styling keys.
+
+Its `tab` key tags the segment with one of the bar's tabs, so a left click on it selects
+that tab, like a click on a window in tmux's status line. Tag every segment a tab is
+drawn with; untagged segments do nothing when clicked:
+
+```rhai
+for tab in ctx.tabs() {
+    left.push(ui.segment(tab.title(), #{ bold: tab.is_active(), tab: tab }));
+}
+```
 </div>
 
 </div>

@@ -373,14 +373,16 @@ fn format_tabs(ctx) {
         let bg = if tab.is_active() { theme.color("accent") } else { theme.color("surface") };
         let fg = if tab.is_active() { theme.color("base") } else { theme.color("text") };
         let label = if ctx.is_root() { `${tab.number()} ${window_label(tab)}` } else { tab.title() };
-        left.push(ui.segment("\uE0B6", #{ fg: bg }));
-        left.push(ui.segment(label, #{ fg: fg, bg: bg, bold: tab.is_active() }));
-        left.push(ui.segment("\uE0B4", #{ fg: bg }));
+        // Segments tagged with `tab` select it when clicked, like a window
+        // in tmux's status line.
+        left.push(ui.segment("\uE0B6", #{ fg: bg, tab: tab }));
+        left.push(ui.segment(label, #{ fg: fg, bg: bg, bold: tab.is_active(), tab: tab }));
+        left.push(ui.segment("\uE0B4", #{ fg: bg, tab: tab }));
         if tab.has_bell() {
-            left.push(ui.segment(" !", #{ fg: theme.color("urgent") }));
+            left.push(ui.segment(" !", #{ fg: theme.color("urgent"), tab: tab }));
         }
         if tab.synchronize_panes() {
-            left.push(ui.segment(" sync", #{ fg: theme.color("urgent") }));
+            left.push(ui.segment(" sync", #{ fg: theme.color("urgent"), tab: tab }));
         }
         left.push(ui.segment(" "));
     }

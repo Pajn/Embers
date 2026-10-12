@@ -43,8 +43,9 @@ use crate::presentation::{
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
 use crate::scripting::{
-    Action, BarSpec, Context, DetachOnDestroy, EventInfo, FloatingAnchor, FloatingGeometrySpec,
-    FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext, TreeSpec,
+    Action, BarSpec, BarTarget, Context, DetachOnDestroy, EventInfo, FloatingAnchor,
+    FloatingGeometrySpec, FloatingSize, MouseSettings, NotifyLevel, PassthroughMode, TabBarContext,
+    TreeSpec,
 };
 use crate::spawn_size::{PanePlacement, spawn_pty_size_with};
 use crate::split_resize::SplitResize;
@@ -827,6 +828,24 @@ where
                 .continue_mouse_selection(&presentation, point, event.kind)
                 .await;
         }
+        // A left press on a tab selects it, like a click on a window in
+        // tmux's status line.
+        if settings.click_focus
+            && event.kind == MouseEventKind::Press(MouseButton::Left)
+            && let Some((tabs_node_id, index)) =
+                self.clicked_tab(session_id, viewport, &presentation, point)
+        {
+            return self
+                .execute_actions(
+                    Some(session_id),
+                    Some(viewport),
+                    vec![Action::SelectTab {
+                        tabs_node_id: Some(tabs_node_id),
+                        index,
+                    }],
+                )
+                .await;
+        }
         let Some(target_leaf) = self.mouse_target_leaf(&presentation, point).cloned() else {
             return Ok(());
         };
@@ -1145,40 +1164,19 @@ where
     ) -> Result<RenderGrid> {
         self.set_active_view(session_id, viewport);
         let presentation = self.prepare_presentation(session_id, viewport).await?;
-        let mut custom_bars = BTreeMap::<embers_core::NodeId, BarSpec>::new();
-        let mut recorded_formatter_error = false;
-        for tabs in presentation
-            .tab_bars
-            .iter()
-            .filter(|tabs| tabs.rect.size.height > 0)
-        {
-            let bar_context =
-                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
-                    .with_base_index(self.base_index())
-                    .with_session_name(self.session_name(session_id));
-            let result = self.config.active_script().format_tab_bar(bar_context);
-
-            match result {
-                Ok(Some(bar)) => {
-                    custom_bars.insert(tabs.node_id, bar);
-                }
-                Ok(None) => {}
-                Err(error) if !recorded_formatter_error => {
-                    recorded_formatter_error = true;
-                    // Every frame fails the same way; showing it once, for
-                    // the display time, lets the default bar show after.
-                    let message = error.to_string();
-                    if self.notifications.last() != Some(&message) {
-                        self.record_notification(message);
-                    }
-                }
-                Err(_) => {}
+        let (custom_bars, formatter_error) =
+            self.format_tab_bars(session_id, viewport, &presentation);
+        if let Some(message) = formatter_error {
+            // Every frame fails the same way; showing it once, for the
+            // display time, lets the default bar show after.
+            if self.notifications.last() != Some(&message) {
+                self.record_notification(message);
             }
         }
 
-        let renderer = Renderer::from_theme(&self.config.active_script().loaded_config().theme);
         let mut grid =
-            renderer.render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
+            self.renderer()
+                .render_with_tab_bars(self.client.state(), &presentation, &custom_bars);
         self.flush_passthrough(&presentation);
         if let Some(chooser) = &mut self.chooser {
             let rows = chooser.rows(self.client.state(), self.active_session_id, {
@@ -1195,6 +1193,75 @@ where
             self.draw_status_overlay(&mut grid, &presentation, session_id);
         }
         Ok(grid)
+    }
+
+    /// The bars the config's tab bar formatter draws for `presentation`'s tab
+    /// bars, by tabs node; bars it leaves to the default are missing. Also
+    /// the first error the formatter raised, if any.
+    fn format_tab_bars(
+        &self,
+        session_id: SessionId,
+        viewport: Size,
+        presentation: &PresentationModel,
+    ) -> (BTreeMap<NodeId, BarSpec>, Option<String>) {
+        let mut custom_bars = BTreeMap::new();
+        let mut first_error = None;
+        for tabs in presentation
+            .tab_bars
+            .iter()
+            .filter(|tabs| tabs.rect.size.height > 0)
+        {
+            let bar_context =
+                TabBarContext::from_frame(tabs, self.input_state.current_mode(), viewport.width)
+                    .with_base_index(self.base_index())
+                    .with_session_name(self.session_name(session_id));
+            match self.config.active_script().format_tab_bar(bar_context) {
+                Ok(Some(bar)) => {
+                    custom_bars.insert(tabs.node_id, bar);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    first_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+        (custom_bars, first_error)
+    }
+
+    fn renderer(&self) -> Renderer {
+        Renderer::from_theme(&self.config.active_script().loaded_config().theme)
+    }
+
+    /// The tab a left press at `point` selects in the tab bars, as
+    /// `render_session` draws them. Status content drawn over the root tab
+    /// bar hides it, so clicks there select nothing.
+    fn clicked_tab(
+        &self,
+        session_id: SessionId,
+        viewport: Size,
+        presentation: &PresentationModel,
+        point: Point,
+    ) -> Option<(NodeId, usize)> {
+        let covered_row = presentation
+            .status_row()
+            .filter(|_| self.status_line_mode() == StatusLineMode::Overlay)
+            .filter(|_| self.status_text(session_id).is_some());
+        if covered_row.is_some_and(|row| point.y == i32::from(row)) {
+            return None;
+        }
+        let (custom_bars, _) = self.format_tab_bars(session_id, viewport, presentation);
+        match self.renderer().tab_bar_target_at(
+            self.client.state(),
+            presentation,
+            &custom_bars,
+            point,
+        )? {
+            BarTarget::Tab {
+                tabs_node_id,
+                index,
+            } => Some((tabs_node_id, index)),
+            BarTarget::Floating { .. } | BarTarget::Buffer { .. } => None,
+        }
     }
 
     /// The part of a `terminal`-sized screen the session is drawn in. With

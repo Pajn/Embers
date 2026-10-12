@@ -22,7 +22,8 @@ use embers_protocol::{
 use tempfile::tempdir;
 
 use crate::support::{
-    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID, SESSION_ID, demo_state, root_focus_state,
+    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID,
+    demo_state, root_focus_state,
 };
 
 const SECOND_SESSION_ID: SessionId = SessionId(2);
@@ -659,6 +660,307 @@ async fn tab_bar_at_the_bottom_moves_drawing_and_mouse_targets() {
             buffer_id: BufferId(4),
             bytes: b"\x1b[<0;1;1M".to_vec(),
         })
+    );
+}
+
+const TAB_BAR_VIEWPORT: Size = Size {
+    width: 80,
+    height: 20,
+};
+
+/// Where `label` is drawn in a frame of `configured`: its column and row.
+async fn find_in_frame<T: embers_client::Transport>(
+    configured: &mut ConfiguredClient<T>,
+    label: &str,
+) -> (u16, u16) {
+    let lines = configured
+        .render_session(SESSION_ID, TAB_BAR_VIEWPORT)
+        .await
+        .unwrap()
+        .lines();
+    lines
+        .iter()
+        .enumerate()
+        .find_map(|(row, line)| line.find(label).map(|column| (column as u16, row as u16)))
+        .unwrap_or_else(|| panic!("{label:?} is not on screen: {lines:#?}"))
+}
+
+/// A left click as the host terminal reports it: a press, then a release.
+async fn click<T: embers_client::Transport>(
+    configured: &mut ConfiguredClient<T>,
+    (column, row): (u16, u16),
+) {
+    for kind in [
+        MouseEventKind::Press(MouseButton::Left),
+        MouseEventKind::Release(Some(MouseButton::Left)),
+    ] {
+        configured
+            .handle_mouse(
+                SESSION_ID,
+                TAB_BAR_VIEWPORT,
+                MouseEvent {
+                    row,
+                    column,
+                    modifiers: MouseModifiers::default(),
+                    kind,
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// Script the requests `action.select_tab(tabs_node_id, index)` makes.
+fn expect_select_tab(
+    transport: &ScriptedTransport,
+    first_request_id: u64,
+    tabs_node_id: NodeId,
+    index: u32,
+) {
+    let mut state = demo_state();
+    state
+        .nodes
+        .get_mut(&tabs_node_id)
+        .and_then(|node| node.tabs.as_mut())
+        .unwrap()
+        .active = index;
+    let snapshot = session_snapshot_from_state(&state, SESSION_ID);
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::SelectTab {
+            request_id: RequestId(first_request_id),
+            tabs_node_id,
+            index,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(first_request_id),
+            snapshot: snapshot.clone(),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(first_request_id + 1),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(first_request_id + 1),
+            snapshot,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn clicking_a_tab_in_the_default_tab_bars_selects_it() {
+    let transport = ScriptedTransport::default();
+    let (config, _tempdir) = manager_from_source(r#"tabbar.set_position("bottom");"#);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    // The root bar is the last row.
+    let shell = find_in_frame(&mut configured, "shell").await;
+    assert_eq!(shell.1, TAB_BAR_VIEWPORT.height - 1);
+    expect_select_tab(&transport, 1, ROOT_TABS_ID, 0);
+    click(&mut configured, shell).await;
+    transport.assert_exhausted().unwrap();
+
+    // A nested tab bar selects in its own tabs node.
+    *configured.client_mut().state_mut() = demo_state();
+    let build = find_in_frame(&mut configured, "build").await;
+    expect_select_tab(&transport, 3, NESTED_TABS_ID, 0);
+    click(&mut configured, build).await;
+    transport.assert_exhausted().unwrap();
+
+    // The session name and the rest of the row select nothing: the
+    // transport has no exchange for them.
+    *configured.client_mut().state_mut() = demo_state();
+    let (name, row) = find_in_frame(&mut configured, "[demo]").await;
+    click(&mut configured, (name + 1, row)).await;
+    click(&mut configured, (TAB_BAR_VIEWPORT.width - 1, row)).await;
+    assert!(configured.notifications().is_empty());
+}
+
+const TAGGED_FORMATTER: &str = r#"
+    fn format_tabs(ctx) {
+        let left = [];
+        if ctx.is_root() {
+            left.push(ui.segment("[" + ctx.session_name() + "] "));
+        }
+        for tab in ctx.tabs() {
+            left.push(ui.segment("<", #{ tab: tab }));
+            left.push(ui.segment(`${tab.number()}:${tab.title()}`, #{ bold: true, tab: tab }));
+            left.push(ui.segment(">", #{ tab: tab }));
+            left.push(ui.segment(" "));
+        }
+        ui.bar(left, [], [ui.segment("RIGHT")])
+    }
+    tabbar.set_formatter(format_tabs);
+    tabbar.set_position("bottom");
+"#;
+
+#[tokio::test]
+async fn clicking_a_formatter_segment_tagged_with_a_tab_selects_it() {
+    let transport = ScriptedTransport::default();
+    let (config, _tempdir) = manager_from_source(TAGGED_FORMATTER);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    // Every segment tagged with the tab selects it: the caps and the label.
+    let (column, row) = find_in_frame(&mut configured, "<0:shell>").await;
+    assert_eq!(row, TAB_BAR_VIEWPORT.height - 1);
+    for (step, offset) in [0_u16, 3, 8].into_iter().enumerate() {
+        *configured.client_mut().state_mut() = demo_state();
+        expect_select_tab(&transport, 1 + 2 * step as u64, ROOT_TABS_ID, 0);
+        click(&mut configured, (column + offset, row)).await;
+        transport.assert_exhausted().unwrap();
+    }
+
+    // Nested bars tag their own tabs.
+    *configured.client_mut().state_mut() = demo_state();
+    let build = find_in_frame(&mut configured, "0:build").await;
+    expect_select_tab(&transport, 7, NESTED_TABS_ID, 0);
+    click(&mut configured, build).await;
+    transport.assert_exhausted().unwrap();
+    assert!(configured.notifications().is_empty());
+}
+
+#[tokio::test]
+async fn clicking_an_untagged_formatter_segment_does_nothing() {
+    // The transport has no exchange: any request fails the click.
+    let transport = ScriptedTransport::default();
+    let (config, _tempdir) = manager_from_source(TAGGED_FORMATTER);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+    let (name, row) = find_in_frame(&mut configured, "[demo]").await;
+    let (shell, _) = find_in_frame(&mut configured, "<0:shell>").await;
+    let (right, _) = find_in_frame(&mut configured, "RIGHT").await;
+    for column in [name + 1, shell + 9, right] {
+        click(&mut configured, (column, row)).await;
+    }
+
+    // Formatters written before segments could be tagged keep working, and
+    // clicks on them do nothing.
+    let (config, _tempdir) = manager_from_source(
+        r#"
+        fn format_tabs(ctx) {
+            let left = [];
+            for tab in ctx.tabs() {
+                left.push(ui.segment(" " + tab.title() + " ", #{ bold: tab.is_active() }));
+            }
+            ui.bar(left, [], [])
+        }
+        tabbar.set_formatter(format_tabs);
+        tabbar.set_position("bottom");
+        "#,
+    );
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+    for label in ["shell", "build"] {
+        let at = find_in_frame(&mut configured, label).await;
+        click(&mut configured, at).await;
+    }
+    assert!(configured.notifications().is_empty());
+}
+
+#[tokio::test]
+async fn clicking_the_status_line_over_the_tab_bar_selects_nothing() {
+    let transport = ScriptedTransport::default();
+    let (config, _tempdir) = manager_from_source(TAGGED_FORMATTER);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+
+    let shell = find_in_frame(&mut configured, "0:shell").await;
+    configured.show_message("hello-overlay", std::time::Duration::from_secs(60));
+    click(&mut configured, shell).await;
+
+    // Once the message is gone, the tab is there to click again.
+    configured.show_message("hello-overlay", std::time::Duration::ZERO);
+    assert!(configured.expire_status_message());
+    expect_select_tab(&transport, 1, ROOT_TABS_ID, 0);
+    click(&mut configured, shell).await;
+    transport.assert_exhausted().unwrap();
+}
+
+#[tokio::test]
+async fn clicking_a_pane_beside_a_tagged_tab_bar_still_focuses_and_forwards() {
+    let mut state = demo_state();
+    state
+        .snapshots
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .unwrap()
+        .mouse_reporting = true;
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        TAB_BAR_VIEWPORT,
+        embers_client::TabBarPosition::Bottom,
+    )
+    .unwrap();
+    // The first cell of the pane's content, below any title row.
+    let pane_click = |leaf: &embers_client::LeafFrame| MouseEvent {
+        row: leaf.content_rect.origin.y as u16,
+        column: leaf.content_rect.origin.x as u16,
+        modifiers: MouseModifiers::default(),
+        kind: MouseEventKind::Press(MouseButton::Left),
+    };
+
+    // A click in another pane focuses it.
+    let transport = ScriptedTransport::default();
+    let mut focused_state = state.clone();
+    focused_state
+        .sessions
+        .get_mut(&SESSION_ID)
+        .unwrap()
+        .focused_leaf_id = Some(LEFT_LEAF_ID);
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::Focus {
+            request_id: RequestId(1),
+            session_id: SESSION_ID,
+            node_id: LEFT_LEAF_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(1),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(2),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(2),
+            snapshot: session_snapshot_from_state(&focused_state, SESSION_ID),
+        }),
+    );
+    let (config, _tempdir) = manager_from_source(TAGGED_FORMATTER);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = state.clone();
+    let left = presentation
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == LEFT_LEAF_ID)
+        .unwrap();
+    configured
+        .handle_mouse(SESSION_ID, TAB_BAR_VIEWPORT, pane_click(left))
+        .await
+        .unwrap();
+    transport.assert_exhausted().unwrap();
+
+    // A click in a pane whose program asked for the mouse reaches it.
+    let transport = FakeTransport::default();
+    push_send_input_refresh_responses(&transport, &state, FOCUSED_BUFFER_ID);
+    let (config, _tempdir) = manager_from_source(TAGGED_FORMATTER);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = state;
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            TAB_BAR_VIEWPORT,
+            pane_click(presentation.focused_leaf().unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.requests(),
+        expected_send_input_refresh_requests(FOCUSED_BUFFER_ID, b"\x1b[<0;1;1M")
     );
 }
 

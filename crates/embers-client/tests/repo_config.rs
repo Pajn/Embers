@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 
 use embers_client::{
-    Action, BufferSpawnSpec, ChooserScope, ClientState, Context, FloatingAnchor,
-    FloatingGeometrySpec, FloatingSize, KeyToken, NavigationDirection, PaneBorderColors,
-    PresentationModel, ScriptEngine, StatusKeys, StatusLineMode, TabBarContext, TabBarPosition,
-    TerminalColor, TreeSpec,
+    Action, BarSpec, BarTarget, BufferSpawnSpec, ChooserScope, ClientState, Context,
+    FloatingAnchor, FloatingGeometrySpec, FloatingSize, KeyToken, NavigationDirection,
+    PaneBorderColors, PresentationModel, ScriptEngine, StatusKeys, StatusLineMode, TabBarContext,
+    TabBarPosition, TerminalColor, TreeSpec,
     config::{ConfigOrigin, LoadedConfigSource},
     input::parse_key_sequence,
 };
@@ -428,6 +428,46 @@ fn example_config_labels_windows_from_their_panes() {
     assert!(left.contains(" sync"), "{left:?}");
 }
 
+#[test]
+fn example_config_tab_bar_selects_the_clicked_window() {
+    let engine = example_config_engine();
+    let state = demo_state();
+    let bar = root_tab_bar(&engine, &state);
+    // Each window's caps, label and bell flag select it; the session name,
+    // the gaps and the directory on the right select nothing.
+    let targets = bar
+        .left
+        .iter()
+        .map(|segment| segment.target.clone())
+        .collect::<Vec<_>>();
+    let tab = |index| {
+        Some(BarTarget::Tab {
+            tabs_node_id: ROOT_TABS_ID,
+            index,
+        })
+    };
+    assert_eq!(bar.left[2].text, "\u{E0B6}");
+    assert_eq!(
+        targets,
+        vec![
+            None,
+            None,
+            tab(0),
+            tab(0),
+            tab(0),
+            None,
+            tab(1),
+            tab(1),
+            tab(1),
+            tab(1),
+            None,
+        ],
+        "{:?}",
+        bar.left
+    );
+    assert!(bar.right.iter().all(|segment| segment.target.is_none()));
+}
+
 fn binding(engine: &ScriptEngine, mode: &str, notation: &str) -> Vec<Action> {
     engine.loaded_config().bindings[mode]
         .iter()
@@ -452,6 +492,17 @@ fn run(engine: &ScriptEngine, name: &str, state: &ClientState) -> Vec<Action> {
 }
 
 fn tab_bar_text(engine: &ScriptEngine, state: &ClientState) -> (String, String) {
+    let bar = root_tab_bar(engine, state);
+    let text = |segments: &[embers_client::BarSegment]| {
+        segments
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>()
+    };
+    (text(&bar.left), text(&bar.right))
+}
+
+fn root_tab_bar(engine: &ScriptEngine, state: &ClientState) -> BarSpec {
     let presentation = PresentationModel::project(
         state,
         SESSION_ID,
@@ -461,21 +512,14 @@ fn tab_bar_text(engine: &ScriptEngine, state: &ClientState) -> (String, String) 
         },
     )
     .unwrap();
-    let bar = engine
+    engine
         .format_tab_bar(
             TabBarContext::from_frame(presentation.root_tabs.as_ref().unwrap(), "normal", 80)
                 .with_base_index(Some(1))
                 .with_session_name("demo"),
         )
         .unwrap()
-        .expect("formatter produces a bar");
-    let text = |segments: &[embers_client::BarSegment]| {
-        segments
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect::<String>()
-    };
-    (text(&bar.left), text(&bar.right))
+        .expect("formatter produces a bar")
 }
 
 fn example_config_engine() -> ScriptEngine {

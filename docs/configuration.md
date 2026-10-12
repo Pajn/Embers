@@ -236,6 +236,24 @@ instead, and can start it with `ctx.session_name()` (see
 [`TabBarContext`](config-api/tab-bar-context.md) and the example
 `config.rhai`).
 
+With the mouse on (`mouse.set_click_focus`, on by default), a left click on a
+tab selects it, like a click on a window in tmux's status line: in the
+session's bar it switches windows, in the bar of nested tabs it switches those
+tabs. The tab is selected on the press. On the default bar a tab's label is the
+place to click. A formatter's bar is made of segments the client cannot tell
+apart, so a formatter tags the segments it draws a tab with, and a click on
+any of them selects that tab:
+
+```rhai
+for tab in ctx.tabs() {
+    left.push(ui.segment(`${tab.number()} ${tab.title()}`, #{ bold: tab.is_active(), tab: tab }));
+}
+```
+
+Untagged segments, such as the session name, do nothing when clicked. While
+status content is drawn over the bar, the bar cannot be seen, and clicks on
+its row select nothing.
+
 ## Clipboard (OSC 52)
 
 Programs in panes can set the system clipboard with OSC 52, the way they would
