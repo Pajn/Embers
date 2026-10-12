@@ -139,12 +139,7 @@ async fn run_attached(
                     Some(&status),
                     configured.status_cursor(),
                     configured.host_capabilities(),
-                )?;
-                terminal.write_after_frame(
                     &configured.drain_frame_output(),
-                    &grid,
-                    terminal_size,
-                    configured.status_cursor(),
                 )?;
             } else {
                 // Leave the last row to the status line, which says so.
@@ -156,6 +151,7 @@ async fn run_attached(
                     Some("detached"),
                     None,
                     configured.host_capabilities(),
+                    &[],
                 )?;
             }
             dirty = false;
@@ -1307,10 +1303,11 @@ impl TerminalGuard {
 
     /// Draw `grid`, and the status line below it when the grid leaves a row
     /// free (otherwise the grid has status content drawn over its root tab
-    /// bar and its cursor at the prompt's). With `status_cursor` (the
-    /// command prompt is open) the cursor goes to that column of the status
-    /// line instead of the grid's cursor. Only sequences `host` supports are
-    /// used.
+    /// bar and its cursor at the prompt's), then `after_frame`: what must
+    /// follow the frame, such as passthrough sequences from panes. With
+    /// `status_cursor` (the command prompt is open) the cursor goes to that
+    /// column of the status line instead of the grid's cursor. Only sequences
+    /// `host` supports are used.
     fn render(
         &self,
         grid: &RenderGrid,
@@ -1318,83 +1315,88 @@ impl TerminalGuard {
         status: Option<&str>,
         status_cursor: Option<u16>,
         host: HostCapabilities,
+        after_frame: &[u8],
     ) -> Result<()> {
+        let frame = frame_bytes(
+            grid,
+            terminal_size,
+            status,
+            status_cursor,
+            host,
+            after_frame,
+        );
         let mut stdout = io::stdout();
-        write!(stdout, "\x1b[H")?;
-        // Lines are separated, not ended, by newlines: one after a grid as
-        // tall as the terminal would scroll it.
-        for (index, line) in grid.ansi_lines_for(host).iter().enumerate() {
-            if index > 0 {
-                write!(stdout, "\r\n")?;
-            }
-            write!(stdout, "{line}\x1b[K")?;
-        }
-
-        if terminal_size.height > grid.height() {
-            let status = fit_width(status.unwrap_or_default(), terminal_size.width);
-            if grid.height() > 0 {
-                write!(stdout, "\r\n")?;
-            }
-            write!(stdout, "\x1b[7m{status}\x1b[0m\x1b[K")?;
-        }
-
-        write!(stdout, "\x1b[J")?;
-        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
-        stdout.flush()?;
-        Ok(())
-    }
-
-    /// Write what must follow the frame `render` just drew (passthrough
-    /// sequences from panes, which move the cursor), then put the cursor back
-    /// where the frame left it.
-    fn write_after_frame(
-        &self,
-        bytes: &[u8],
-        grid: &RenderGrid,
-        terminal_size: Size,
-        status_cursor: Option<u16>,
-    ) -> Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let mut stdout = io::stdout();
-        stdout.write_all(bytes)?;
-        write_cursor(&mut stdout, grid, terminal_size, status_cursor)?;
+        stdout.write_all(&frame)?;
         stdout.flush()?;
         Ok(())
     }
 }
 
-/// Place and show the cursor for a frame: in the status line while the command
-/// prompt is open (`status_cursor`), else at the grid's cursor, else hidden.
-fn write_cursor(
-    stdout: &mut impl Write,
+/// The bytes that draw one frame. The terminal gets them in one write, as one
+/// synchronized update (`CSI ? 2026 h` to `l`; terminals without it ignore
+/// it), with the cursor hidden until it is at its place: a frame drawn in
+/// pieces, or with the cursor showing, flashes the cursor wherever drawing
+/// happens to be.
+fn frame_bytes(
     grid: &RenderGrid,
     terminal_size: Size,
+    status: Option<&str>,
     status_cursor: Option<u16>,
-) -> io::Result<()> {
+    host: HostCapabilities,
+    after_frame: &[u8],
+) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(b"\x1b[?2026h\x1b[?25l\x1b[H");
+    // Lines are separated, not ended, by newlines: one after a grid as
+    // tall as the terminal would scroll it.
+    for (index, line) in grid.ansi_lines_for(host).iter().enumerate() {
+        if index > 0 {
+            frame.extend_from_slice(b"\r\n");
+        }
+        frame.extend_from_slice(line.as_bytes());
+        frame.extend_from_slice(b"\x1b[K");
+    }
+
+    if terminal_size.height > grid.height() {
+        let status = fit_width(status.unwrap_or_default(), terminal_size.width);
+        if grid.height() > 0 {
+            frame.extend_from_slice(b"\r\n");
+        }
+        frame.extend_from_slice(format!("\x1b[7m{status}\x1b[0m\x1b[K").as_bytes());
+    }
+
+    frame.extend_from_slice(b"\x1b[J");
+    frame.extend_from_slice(after_frame);
+    frame.extend_from_slice(cursor_bytes(grid, terminal_size, status_cursor).as_bytes());
+    frame.extend_from_slice(b"\x1b[?2026l");
+    frame
+}
+
+/// Place and show the cursor for a frame: in the status line while the command
+/// prompt is open (`status_cursor`), else at the grid's cursor, else hidden.
+/// The cursor moves before it shows, so it never appears where the frame's
+/// drawing left it.
+fn cursor_bytes(grid: &RenderGrid, terminal_size: Size, status_cursor: Option<u16>) -> String {
     if let Some(column) = status_cursor
         && terminal_size.height > grid.height()
     {
-        write!(
-            stdout,
-            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-            cursor_shape_code(CursorShape::Beam),
+        format!(
+            "\x1b[{};{}H\x1b[{} q\x1b[?25h",
             terminal_size.height,
             column
                 .min(terminal_size.width.saturating_sub(1))
-                .saturating_add(1)
+                .saturating_add(1),
+            cursor_shape_code(CursorShape::Beam),
         )
     } else if let Some(cursor) = grid.cursor() {
-        write!(
-            stdout,
-            "\x1b[{} q\x1b[?25h\x1b[{};{}H",
-            cursor_shape_code(cursor.shape),
+        format!(
+            "\x1b[{};{}H\x1b[{} q\x1b[?25h",
             cursor.y.saturating_add(1),
-            cursor.x.saturating_add(1)
+            cursor.x.saturating_add(1),
+            cursor_shape_code(cursor.shape),
         )
     } else {
-        write!(stdout, "\x1b[?25l")
+        "\x1b[?25l".to_owned()
     }
 }
 
@@ -1538,11 +1540,46 @@ fn cursor_shape_code(shape: CursorShape) -> u8 {
 mod tests {
     use super::{
         TERMINAL_DISABLE_MOUSE_SEQUENCE, TERMINAL_ENABLE_MOUSE_SEQUENCE, TerminalEvent,
-        is_quit_key, read_terminal_event, terminal_enter_sequence, terminal_exit_sequence,
+        frame_bytes, is_quit_key, read_terminal_event, terminal_enter_sequence,
+        terminal_exit_sequence,
     };
     use embers_client::{
-        KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+        GridCursor, HostCapabilities, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
+        MouseEventKind, MouseModifiers, RenderGrid,
     };
+    use embers_core::{CursorShape, Size};
+
+    #[test]
+    fn a_frame_is_one_synchronized_update_with_the_cursor_hidden_until_placed() {
+        let mut grid = RenderGrid::new(10, 3);
+        grid.set_cursor(Some(GridCursor {
+            x: 4,
+            y: 1,
+            shape: CursorShape::Block,
+        }));
+        let frame = frame_bytes(
+            &grid,
+            Size {
+                width: 10,
+                height: 4,
+            },
+            Some("status"),
+            None,
+            HostCapabilities::ALL,
+            b"after",
+        );
+        let frame = String::from_utf8(frame).expect("frame is text");
+
+        assert!(frame.starts_with("\x1b[?2026h\x1b[?25l"), "{frame:?}");
+        assert!(frame.ends_with("\x1b[?2026l"), "{frame:?}");
+        // The cursor shows only at the end, after it moved to its cell, and
+        // after what follows the frame.
+        let show = frame.find("\x1b[?25h").expect("cursor shown");
+        let place = frame.rfind("\x1b[2;5H").expect("cursor placed");
+        assert!(place < show, "{frame:?}");
+        assert!(frame.find("after").expect("after-frame bytes") < place);
+        assert_eq!(frame.matches("\x1b[?25h").count(), 1);
+    }
 
     #[test]
     fn parses_csi_u_and_modified_legacy_keys() {
