@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
 use crate::support::integration_test_lock;
-use embers_core::{SplitDirection, new_request_id};
+use embers_core::{PtySize, SplitDirection, new_request_id};
 use embers_protocol::{
     BufferRecord, BufferRequest, BuffersResponse, ClientMessage, InputRequest, NodeRequest,
-    ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse, SnapshotResponse,
+    ServerEvent, ServerResponse, SessionRequest, SessionSnapshot, SessionSnapshotResponse,
+    SnapshotResponse,
 };
 use embers_test_support::{TestConnection, TestServer};
 use tokio::time::sleep;
@@ -399,6 +400,85 @@ async fn detach_and_reattach_preserve_runtime_identity_size_and_capture() {
 
     send_input(&mut connection, primary.id, "reattached\n").await;
     wait_for_capture_contains(&mut connection, primary.id, "seen:reattached").await;
+
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resizing_a_buffer_updates_its_view_render_size() {
+    let _guard = integration_test_lock().lock().await;
+    let server = TestServer::start().await.expect("start server");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect protocol client");
+    let mut watcher = TestConnection::connect(server.socket_path())
+        .await
+        .expect("connect watching client");
+
+    let session = create_session(&mut connection, "main").await;
+    let session_id = session.snapshot.session.id;
+
+    // A buffer created with a size hint is drawn at that size.
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Create {
+            request_id: new_request_id(),
+            title: Some("sized".to_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            env: Default::default(),
+            size: Some(PtySize::new(97, 31)),
+            session_id: None,
+        }))
+        .await
+        .expect("create buffer request succeeds");
+    let buffer = match response {
+        ServerResponse::Buffer(buffer) => buffer.buffer,
+        other => panic!("expected buffer response, got {other:?}"),
+    };
+    add_root_tab(&mut connection, session_id, "sized", buffer.id).await;
+    let node_id = get_buffer(&mut connection, buffer.id)
+        .await
+        .attachment_node_id
+        .expect("buffer is attached");
+    let render_size = |snapshot: SessionSnapshot| {
+        snapshot
+            .nodes
+            .into_iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| node.buffer_view)
+            .map(|view| (view.last_render_size.cols, view.last_render_size.rows))
+            .expect("node is a buffer view")
+    };
+    assert_eq!(
+        render_size(get_session(&mut connection, session_id).await),
+        (97, 31)
+    );
+
+    // Resizing the PTY updates the view, and subscribers hear the node change.
+    watcher
+        .subscribe(Some(session_id))
+        .await
+        .expect("subscribe to the session");
+    resize_buffer(&mut connection, buffer.id, 120, 40).await;
+    assert_eq!(
+        render_size(get_session(&mut connection, session_id).await),
+        (120, 40)
+    );
+    watcher
+        .wait_for_event(Duration::from_secs(3), |event| {
+            matches!(event, ServerEvent::NodeChanged(changed) if changed.session_id == session_id)
+        })
+        .await
+        .expect("a resize announces the node change");
+
+    // Resizing to the same size changes nothing, so no node change follows.
+    resize_buffer(&mut connection, buffer.id, 120, 40).await;
+    let repeated = watcher
+        .wait_for_event(Duration::from_millis(300), |event| {
+            matches!(event, ServerEvent::NodeChanged(_))
+        })
+        .await;
+    assert!(repeated.is_err(), "unexpected {repeated:?}");
 
     server.shutdown().await.expect("shutdown server");
 }

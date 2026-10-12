@@ -514,6 +514,20 @@ async fn send_buffer_input(connection: &mut TestConnection, buffer_id: BufferId,
     );
 }
 
+async fn buffer_activity(connection: &mut TestConnection, buffer_id: BufferId) -> ActivityState {
+    let response = connection
+        .request(&ClientMessage::Buffer(BufferRequest::Get {
+            request_id: new_request_id(),
+            buffer_id,
+        }))
+        .await
+        .expect("buffer get succeeds");
+    match response {
+        ServerResponse::Buffer(response) => response.buffer.activity,
+        other => panic!("expected buffer response, got {other:?}"),
+    }
+}
+
 async fn wait_for_buffer_activity(
     connection: &mut TestConnection,
     buffer_id: BufferId,
@@ -521,17 +535,7 @@ async fn wait_for_buffer_activity(
 ) {
     let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
     loop {
-        let response = connection
-            .request(&ClientMessage::Buffer(BufferRequest::Get {
-                request_id: new_request_id(),
-                buffer_id,
-            }))
-            .await
-            .expect("buffer get succeeds");
-        let activity = match response {
-            ServerResponse::Buffer(response) => response.buffer.activity,
-            other => panic!("expected buffer response, got {other:?}"),
-        };
+        let activity = buffer_activity(connection, buffer_id).await;
         if activity == expected {
             return;
         }
@@ -1457,7 +1461,7 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
         &server,
         ["new-window", "-t", "main", "--title", "bg", "--", "/bin/sh"],
     );
-    run_cli(&server, ["select-window", "-t", "main:0"]);
+    run_cli(&server, ["select-window", "-t", "main:shell"]);
 
     let mut connection = TestConnection::connect(server.socket_path())
         .await
@@ -1466,6 +1470,9 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
     let hidden_pane_id = root_tab_child_id(&snapshot, "bg").0;
     let hidden_buffer_id = pane_buffer_id(&snapshot, hidden_pane_id);
     disable_echo_in_pane(&server, hidden_pane_id).await;
+    let shown_pane_id = root_tab_child_id(&snapshot, "shell").0;
+    let shown_buffer_id = pane_buffer_id(&snapshot, shown_pane_id);
+    disable_echo_in_pane(&server, shown_pane_id).await;
 
     let socket_arg = server.socket_path().to_string_lossy().into_owned();
     let socket_path = server.socket_path().to_path_buf();
@@ -1476,6 +1483,56 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
     harness
         .read_until_contains("[main]", STARTUP_TIMEOUT)
         .expect("attach client renders");
+
+    // Output streaming in the window the client shows does not flag it, as
+    // in tmux.
+    send_buffer_input(
+        &mut connection,
+        shown_buffer_id,
+        b"for i in 1 2 3 4 5; do echo shown-$i; sleep 0.1; done; echo shown-done\r",
+    )
+    .await;
+    connection
+        .wait_for_capture_contains(shown_buffer_id, "shown-done", IO_TIMEOUT)
+        .await
+        .expect("shown buffer output appears");
+    let output = harness
+        .read_until_contains("shown-done", IO_TIMEOUT)
+        .expect("attached client shows the output");
+    assert!(!output.contains("+shell"), "{output:?}");
+    assert_eq!(
+        buffer_activity(&mut connection, shown_buffer_id).await,
+        ActivityState::Idle
+    );
+
+    // Nor does a bell there. A capture syncs the buffer's status, so the bell
+    // has been seen once the output after it is.
+    send_buffer_input(
+        &mut connection,
+        shown_buffer_id,
+        b"printf 'shown-bell\\a\\n'\r",
+    )
+    .await;
+    connection
+        .wait_for_capture_contains(shown_buffer_id, "shown-bell", IO_TIMEOUT)
+        .await
+        .expect("shown buffer output appears");
+    assert_eq!(
+        buffer_activity(&mut connection, shown_buffer_id).await,
+        ActivityState::Idle
+    );
+
+    // Output in a background window flags it.
+    send_buffer_input(&mut connection, hidden_buffer_id, b"echo hidden-output\r").await;
+    connection
+        .wait_for_capture_contains(hidden_buffer_id, "hidden-output", IO_TIMEOUT)
+        .await
+        .expect("hidden buffer output accumulates");
+    wait_for_buffer_activity(&mut connection, hidden_buffer_id, ActivityState::Activity).await;
+    let output = harness
+        .read_until_contains("+bg", IO_TIMEOUT)
+        .expect("hidden output updates tab marker in attached client");
+    assert!(!output.contains("+shell"), "{output:?}");
 
     send_buffer_input(
         &mut connection,
@@ -1488,14 +1545,20 @@ async fn hidden_buffer_bells_surface_in_the_attached_client_and_reveal_buffered_
         .await
         .expect("hidden buffer output accumulates");
     wait_for_buffer_activity(&mut connection, hidden_buffer_id, ActivityState::Bell).await;
-    harness
+    let output = harness
         .read_until_contains("!bg", IO_TIMEOUT)
         .expect("hidden bell updates tab marker in attached client");
+    assert!(!output.contains("!shell"), "{output:?}");
 
+    // Visiting the window acknowledges its bell.
     run_cli(&server, ["select-window", "-t", "main:bg"]);
     harness
         .read_until_contains("hidden-bell", IO_TIMEOUT)
         .expect("revealed hidden buffer shows accumulated output");
+    assert_eq!(
+        buffer_activity(&mut connection, hidden_buffer_id).await,
+        ActivityState::Idle
+    );
 
     harness.write_all("\x11").expect("quit attached client");
     harness.wait_timeout(IO_TIMEOUT).expect("client exits");

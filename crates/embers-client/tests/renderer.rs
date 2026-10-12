@@ -8,8 +8,8 @@ use embers_core::{
 };
 
 use crate::support::{
-    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_BUFFER_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
-    root_buffer_state, root_split_state,
+    FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_BUFFER_LEAF_ID,
+    ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state, root_split_state,
 };
 
 /// Build a single-run styled line covering the whole text.
@@ -112,13 +112,13 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
             "line two     |logs visible              \n",
             "line three   |second row                \n",
             "             |third row                 \n",
-            "             |+-popup------------+      \n",
-            "             ||   popup-top      |      \n",
-            "             ||popup top         |      \n",
-            "             ||------------------|      \n",
-            "             ||   popup-bottom   |      \n",
-            "             ||popup bottom      |      \n",
-            "             |+------------------+      \n",
+            "             |╭─popup────────────╮      \n",
+            "             |│popup top         │      \n",
+            "             |│                  │      \n",
+            "             |│------------------│      \n",
+            "             |│popup bottom      │      \n",
+            "             |│                  │      \n",
+            "             |╰──────────────────╯      \n",
             "             |                          \n",
             "             |                          "
         )
@@ -146,6 +146,7 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
             active: Some(active),
             inactive: Some(inactive),
         },
+        ..Renderer::default()
     };
 
     let grid = renderer.render(&state, &presentation);
@@ -169,6 +170,242 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
         let style = plain.cell_style(13, row).unwrap();
         assert_eq!(style.fg, None, "row {row}");
         assert!(style.dim, "row {row}");
+    }
+}
+
+/// The demo popup's frame spans columns 14 to 33 and rows 5 to 11, with its
+/// title "popup" from column 16 on the top row.
+fn render_popup(focused: bool, renderer: Renderer) -> embers_client::RenderGrid {
+    let mut state = demo_state();
+    state.floating.get_mut(&FLOATING_ID).unwrap().focused = focused;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    renderer.render(&state, &presentation)
+}
+
+fn char_at(grid: &embers_client::RenderGrid, x: usize, y: usize) -> char {
+    grid.render()
+        .lines()
+        .nth(y)
+        .unwrap()
+        .chars()
+        .nth(x)
+        .unwrap()
+}
+
+#[test]
+fn popup_frames_draw_the_configured_border_lines() {
+    use embers_client::{PopupBorderLines, PopupBorders};
+
+    // Corners, then a horizontal and a vertical cell.
+    let cases = [
+        (PopupBorderLines::Rounded, "╭╮╰╯─│"),
+        (PopupBorderLines::Single, "┌┐└┘─│"),
+        (PopupBorderLines::Double, "╔╗╚╝═║"),
+        (PopupBorderLines::Heavy, "┏┓┗┛━┃"),
+        (PopupBorderLines::Ascii, "++++-|"),
+        (PopupBorderLines::None, "      "),
+    ];
+    for (lines, expected) in cases {
+        for focused in [true, false] {
+            let renderer = Renderer {
+                popup_borders: PopupBorders {
+                    lines,
+                    ..PopupBorders::default()
+                },
+                ..Renderer::default()
+            };
+            let grid = render_popup(focused, renderer);
+            let drawn: String = [(14, 5), (33, 5), (14, 11), (33, 11), (20, 11), (14, 8)]
+                .into_iter()
+                .map(|(x, y)| char_at(&grid, x, y))
+                .collect();
+            assert_eq!(drawn, expected, "{lines:?} focused={focused}");
+            // The title stays on the top border and the content inside it.
+            let rendered = grid.render();
+            let top = rendered.lines().nth(5).unwrap();
+            assert!(top.contains("popup"), "{lines:?}: {top}");
+            assert_eq!(char_at(&grid, 15, 6), 'p', "{lines:?}");
+        }
+    }
+}
+
+#[test]
+fn popup_frames_are_bold_when_focused_and_dim_when_not_without_reverse_video() {
+    let focused = render_popup(true, Renderer::default());
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = focused.cell_style(x, y).unwrap();
+        assert!(style.bold, "({x}, {y})");
+        assert!(!style.reverse, "({x}, {y})");
+        assert!(!style.dim, "({x}, {y})");
+        assert_eq!(style.fg, None, "({x}, {y})");
+    }
+
+    let unfocused = render_popup(false, Renderer::default());
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = unfocused.cell_style(x, y).unwrap();
+        assert!(style.dim, "({x}, {y})");
+        assert!(!style.bold, "({x}, {y})");
+        assert!(!style.reverse, "({x}, {y})");
+        assert_eq!(style.fg, None, "({x}, {y})");
+    }
+}
+
+#[test]
+fn popup_frames_take_theme_colors() {
+    use embers_client::{PopupBorders, TerminalColor};
+
+    let active = TerminalColor::Indexed(5);
+    let inactive = TerminalColor::Indexed(8);
+    let renderer = Renderer {
+        popup_borders: PopupBorders {
+            active: Some(active),
+            inactive: Some(inactive),
+            ..PopupBorders::default()
+        },
+        ..Renderer::default()
+    };
+
+    let focused = render_popup(true, renderer);
+    for (x, y) in [(14, 5), (20, 11), (14, 8)] {
+        let style = focused.cell_style(x, y).unwrap();
+        assert_eq!(style.fg, Some(active), "({x}, {y})");
+        assert!(!style.reverse && !style.dim, "({x}, {y})");
+    }
+    // The title takes the frame's color and stays bold.
+    let title = focused.cell_style(16, 5).unwrap();
+    assert_eq!(title.fg, Some(active));
+    assert!(title.bold);
+
+    let unfocused = render_popup(false, renderer);
+    for (x, y) in [(14, 5), (20, 11), (14, 8), (16, 5)] {
+        let style = unfocused.cell_style(x, y).unwrap();
+        assert_eq!(style.fg, Some(inactive), "({x}, {y})");
+        assert!(!style.reverse && !style.dim && !style.bold, "({x}, {y})");
+    }
+}
+
+#[test]
+fn borderless_popups_draw_no_frame_and_their_content_fills_them() {
+    use embers_core::PtySize;
+
+    let mut state = demo_state();
+    state.floating.get_mut(&FLOATING_ID).unwrap().border = false;
+    let presentation = PresentationModel::project(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+
+    // The content gets the whole popup, columns 14 to 33 and rows 5 to 11.
+    let floating = &presentation.floating[0];
+    assert!(!floating.border);
+    assert_eq!(floating.content_rect, floating.rect);
+    let top = presentation
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == FLOATING_TOP_LEAF_ID)
+        .unwrap();
+    assert_eq!((top.rect.origin.x, top.rect.origin.y), (14, 5));
+    assert_eq!(top.rect.size.width, 20);
+    // Without title rows, the default, its PTY is the whole pane.
+    assert_eq!(top.title_rect, None);
+    assert_eq!(top.pty_size(), Some(PtySize::new(20, top.rect.size.height)));
+
+    let grid = Renderer::default().render(&state, &presentation);
+    let rendered = grid.render();
+    let lines: Vec<&str> = rendered.lines().collect();
+    // No frame, popup title or pane title: the content starts in the
+    // popup's corner.
+    let top_row: String = lines[5].chars().skip(14).take(20).collect();
+    assert_eq!(top_row, "popup top           ");
+    assert!(!rendered.contains("popup─") && !rendered.contains('╭'));
+    assert!(!rendered.contains("popup-top"));
+    assert_eq!(char_at(&grid, 14, 11), ' ');
+
+    // With title rows, the pane's own title row is its only title.
+    let presentation = PresentationModel::project_with(
+        &state,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+        PaneTitles::Top,
+    )
+    .expect("projection succeeds");
+    let top = presentation
+        .leaves
+        .iter()
+        .find(|leaf| leaf.node_id == FLOATING_TOP_LEAF_ID)
+        .unwrap();
+    assert_eq!(
+        top.pty_size(),
+        Some(PtySize::new(20, top.rect.size.height - 1))
+    );
+    let grid = Renderer::default().render(&state, &presentation);
+    let rendered = grid.render();
+    let lines: Vec<&str> = rendered.lines().collect();
+    let top_row: String = lines[5].chars().skip(14).take(20).collect();
+    assert_eq!(top_row, "   popup-top        ");
+    assert_eq!(rendered.matches("popup-top").count(), 1);
+    assert_eq!(char_at(&grid, 14, 6), 'p');
+}
+
+#[test]
+fn a_framed_popup_shows_its_title_once_on_its_frame() {
+    let mut state = demo_state();
+    // A popup titled like its pane, as display-popup creates them (this one
+    // holds a split, whose other pane is titled `popup-bottom`).
+    let floating = state.floating.get_mut(&FLOATING_ID).unwrap();
+    floating.title = Some("picker".to_owned());
+    state
+        .buffers
+        .get_mut(&embers_core::BufferId(5))
+        .unwrap()
+        .title = "picker".to_owned();
+    for pane_titles in [PaneTitles::Off, PaneTitles::Top, PaneTitles::Bottom] {
+        let presentation = PresentationModel::project_with(
+            &state,
+            SESSION_ID,
+            Size {
+                width: 40,
+                height: 14,
+            },
+            pane_titles,
+        )
+        .expect("projection succeeds");
+        for leaf in presentation
+            .leaves
+            .iter()
+            .filter(|leaf| leaf.floating_id.is_some())
+        {
+            assert_eq!(leaf.title_rect, None, "{pane_titles:?}");
+            assert_eq!(leaf.content_rect, leaf.rect, "{pane_titles:?}");
+        }
+        let rendered = Renderer::default().render(&state, &presentation).render();
+        assert_eq!(
+            rendered.matches("picker").count(),
+            1,
+            "{pane_titles:?}\n{rendered}"
+        );
+        assert!(!rendered.contains("popup-bottom"), "{rendered}");
+        // On the frame's top edge.
+        assert!(
+            rendered.lines().nth(5).unwrap().contains("─picker─"),
+            "{rendered}"
+        );
     }
 }
 

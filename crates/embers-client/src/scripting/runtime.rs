@@ -1767,7 +1767,17 @@ mod documented_action_api {
         })
     }
 
-    /// Open a floating view around the provided tree.
+    /// Open a floating view around the provided tree. Takes the options of
+    /// `move_buffer_to_floating`; `border: false` opens it without a frame,
+    /// its content filling the whole window, like tmux's `display-popup -B`.
+    ///
+    /// # Example
+    ///
+    /// ```rhai
+    /// action.open_floating(tree.buffer_spawn(["lazygit"]), #{
+    ///     width: "90%", height: "90%", border: false
+    /// })
+    /// ```
     #[rhai_fn(return_raw, name = "open_floating")]
     pub fn open_floating(
         ctx: NativeCallContext,
@@ -2211,6 +2221,7 @@ mod documented_action_api {
     /// - `title` (Option\<String\>): window title (default: none)
     /// - `focus` (bool): whether to focus the window after creation (default: true)
     /// - `close_on_empty` (bool): whether to close the window when its buffer empties (default: true)
+    /// - `border` (bool): frame the window and show its title; without a frame its content fills the window, like tmux's `display-popup -B` (default: true)
     #[rhai_fn(return_raw, name = "move_buffer_to_floating")]
     pub fn move_buffer_to_floating(
         ctx: NativeCallContext,
@@ -2226,6 +2237,7 @@ mod documented_action_api {
                 title: spec.title,
                 focus: spec.focus,
                 close_on_empty: spec.close_on_empty,
+                border: spec.border,
             })
         })
     }
@@ -3130,6 +3142,7 @@ fn parse_floating_spec(tree: TreeSpec, options: Map) -> ScriptResult<FloatingSpe
         title: options.title,
         focus: options.focus,
         close_on_empty: options.close_on_empty,
+        border: options.border,
     })
 }
 
@@ -3138,6 +3151,7 @@ struct ParsedFloatingOptions {
     title: Option<String>,
     focus: bool,
     close_on_empty: bool,
+    border: bool,
 }
 
 fn parse_floating_options(mut options: Map) -> ScriptResult<ParsedFloatingOptions> {
@@ -3155,6 +3169,7 @@ fn parse_floating_options(mut options: Map) -> ScriptResult<ParsedFloatingOption
         title: parse_optional_string(options.remove("title"))?,
         focus: parse_bool_field(options.remove("focus"))?.unwrap_or(true),
         close_on_empty: parse_bool_field(options.remove("close_on_empty"))?.unwrap_or(true),
+        border: parse_bool_field(options.remove("border"))?.unwrap_or(true),
     };
     if !options.is_empty() {
         return Err(runtime_error(format!(

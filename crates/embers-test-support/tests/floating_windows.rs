@@ -129,6 +129,7 @@ async fn create_focus_move_and_close_floating_window_via_socket() {
             title: Some("popup".to_owned()),
             focus: true,
             close_on_empty: true,
+            border: true,
         }))
         .await
         .expect("create floating request succeeds");
@@ -234,6 +235,7 @@ async fn closing_last_tab_in_floating_tabs_removes_popup() {
             title: Some("popup".to_owned()),
             focus: true,
             close_on_empty: true,
+            border: true,
         }))
         .await
         .expect("create floating request succeeds");

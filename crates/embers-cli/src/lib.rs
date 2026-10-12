@@ -585,6 +585,9 @@ pub enum Command {
         /// Return once the popup is shown and print its id.
         #[arg(long)]
         no_wait: bool,
+        /// Draw no frame or title: the command fills the whole popup.
+        #[arg(short = 'B', long = "no-border")]
+        no_border: bool,
         #[arg(long, action = clap::ArgAction::Help)]
         help: Option<bool>,
         #[arg(last = true)]
@@ -1915,6 +1918,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             print,
             format,
             no_wait,
+            no_border,
             help: _,
             command,
         } => {
@@ -1960,7 +1964,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             } else {
                 popup::CloseOnExit::Always
             };
-            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry });
+            let border = !no_border;
+            let size = spawn_size(&snapshot, PanePlacement::Floating { geometry, border });
             let buffer = connection
                 .create_buffer(Some(popup_title.clone()), command, cwd, size, session_id)
                 .await?;
@@ -1998,6 +2003,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     title: Some(popup_title),
                     focus: true,
                     close_on_empty: true,
+                    border,
                 }))
                 .await;
             let response = rollback_created_buffer_on_error(

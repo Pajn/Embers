@@ -198,6 +198,7 @@ pub fn floating_record(floating: &FloatingWindow) -> FloatingRecord {
         focused: floating.focused,
         visible: floating.visible,
         close_on_empty: floating.close_on_empty,
+        border: floating.border,
     }
 }
 

@@ -163,6 +163,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
             focused: false,
             visible: true,
             close_on_empty: true,
+            border: true,
         }],
     }
 }

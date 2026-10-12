@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-b29373c6.js";
+            window.path_to_searchindex_js = "searchindex-fc920e63.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -499,8 +499,9 @@ the <code>theme.set_pane_border_color</code> colors, tell them apart.</li>
 <li><code>"top"</code> / <code>"bottom"</code>: each pane gives its top or bottom row to its
 title, so its program has one row fewer.</li>
 </ul>
-<p>Panes in popups keep their title row whatever the setting. The client
-reports whether title rows are shown to the server with the size it
+<p>A framed popup shows its title on its frame, so its panes have no title
+row whatever the setting; panes in a borderless popup follow it. The
+client reports whether title rows are shown to the server with the size it
 draws the session at, so panes created with the <code>embers</code> CLI start at
 the size this client draws them.</p>
 </div>
