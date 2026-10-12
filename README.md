@@ -247,6 +247,14 @@ The CI workflow also runs an ignored PTY smoke test:
 cargo test -p embers-test-support pty_round_trips_input -- --ignored
 ```
 
+To try panes emulated by Ghostty's libghostty-vt instead of alacritty, run `embers-ghostty`. It is
+Embers with the other emulator, on a server of its own (`embers-ghostty.sock`), so it neither joins
+nor disturbs a running `embers`:
+
+```sh
+cargo run --manifest-path crates/embers-ghostty-backend/Cargo.toml --bin embers-ghostty
+```
+
 ## Workspace Layout
 
 - [`crates/embers-core`](crates/embers-core): shared IDs, geometry, snapshots, diagnostics, and error types
@@ -255,6 +263,9 @@ cargo test -p embers-test-support pty_round_trips_input -- --ignored
 - [`crates/embers-client`](crates/embers-client): client state, rendering, input handling, configuration, scripting, and docs generation
 - [`crates/embers-cli`](crates/embers-cli): `embers` binary, interactive terminal UI, and CLI command implementations
 - [`crates/embers-test-support`](crates/embers-test-support): shared test harnesses for server, protocol, PTY, and CLI tests
+- [`crates/embers-ghostty-sys`](crates/embers-ghostty-sys): bindings to libghostty-vt, built from a pinned Ghostty commit (outside the workspace; needs Zig)
+- [`crates/embers-ghostty-gen`](crates/embers-ghostty-gen): regenerates those bindings (`cargo gen-ghostty`)
+- [`crates/embers-ghostty-backend`](crates/embers-ghostty-backend): a terminal backend on libghostty-vt and the `embers-ghostty` binary that uses it (outside the workspace; needs Zig)
 
 ## Architecture Notes
 

@@ -12,11 +12,15 @@ version = "0.0.0"
 doctest = false
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
+embers-cli = { path = "../embers-cli" }
 embers-core = { path = "../embers-core" }
 embers-ghostty-sys = { path = "../embers-ghostty-sys" }
 embers-server = { path = "../embers-server" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 proptest = "1"
 serde_json = "1"
+tempfile = "3"
 unicode-segmentation = "1.12"

@@ -8,6 +8,9 @@ use crate::model::RemainOnExit;
 use crate::runtime_dir::keeper_socket_path;
 
 pub const SOCKET_ENV_VAR: &str = "EMBERS_SOCKET";
+/// Environment variable naming the executable a server starts keepers with,
+/// as `<executable> __runtime-keeper`; by default the server's own.
+pub const RUNTIME_KEEPER_BIN_ENV_VAR: &str = "EMBERS_RUNTIME_KEEPER_BIN";
 /// Environment variable set in every buffer's environment to the buffer's
 /// id, like tmux's `TMUX_PANE`, so a program can name its own pane: `embers`
 /// commands run inside a pane without a target act on that pane.

@@ -19,7 +19,8 @@ pub use buffer_runtime::{
 };
 pub use config::{
     BUFFER_ENV_VAR, DEFAULT_RESTORE_COMMANDS, REMAIN_ON_EXIT_ENV_VAR, RESTORE_COMMANDS_ENV_VAR,
-    RESTORE_ENV_VAR, ResourceLimits, RestoreConfig, SOCKET_ENV_VAR, ServerConfig,
+    RESTORE_ENV_VAR, RUNTIME_KEEPER_BIN_ENV_VAR, ResourceLimits, RestoreConfig, SOCKET_ENV_VAR,
+    ServerConfig,
 };
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
@@ -31,6 +32,6 @@ pub use server::{Server, ServerHandle};
 pub use state::ServerState;
 pub use terminal_backend::{
     AlacrittyTerminalBackend, BackendDamage, BackendEvents, BackendMetadata,
-    BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalQuery, sgr_report,
-    termcap_reply,
+    BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalBackendFactory, TerminalQuery,
+    set_terminal_backend, sgr_report, termcap_reply,
 };

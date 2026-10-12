@@ -2295,7 +2295,10 @@ fn default_socket_path() -> PathBuf {
     default_runtime_dir().join("embers.sock")
 }
 
-fn default_runtime_dir() -> PathBuf {
+/// The directory the default socket is in, and with it a server's saved
+/// layout: `$XDG_RUNTIME_DIR/embers`, else `/run/user/<uid>/embers`, else
+/// `/tmp/embers-<uid>`.
+pub fn default_runtime_dir() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
     {
         return PathBuf::from(runtime_dir).join("embers");

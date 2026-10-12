@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Row};
@@ -94,6 +94,32 @@ pub trait TerminalBackend: Send {
     fn answer_query(&mut self, query: &TerminalQuery);
     /// Where the cursor is on the screen, whether or not it is shown.
     fn cursor_position(&self) -> CursorPosition;
+}
+
+/// Makes the backend a buffer's keeper emulates its pane with, from the pane's
+/// size and the scrollback ceiling in lines.
+pub type TerminalBackendFactory = fn(PtySize, usize) -> Box<dyn TerminalBackend>;
+
+static TERMINAL_BACKEND: OnceLock<TerminalBackendFactory> = OnceLock::new();
+
+/// Emulate panes with the backends `factory` makes instead of alacritty's, for
+/// a binary that brings its own emulation. Keepers are processes of their own,
+/// so the binary sets it early in `main`, whatever it runs as. Only the first
+/// call counts; it returns whether this one did.
+pub fn set_terminal_backend(factory: TerminalBackendFactory) -> bool {
+    TERMINAL_BACKEND.set(factory).is_ok()
+}
+
+/// A backend for a new buffer: the one [`set_terminal_backend`] chose, else
+/// alacritty's.
+pub(crate) fn new_terminal_backend(
+    size: PtySize,
+    max_scrollback_lines: usize,
+) -> Box<dyn TerminalBackend> {
+    match TERMINAL_BACKEND.get() {
+        Some(factory) => factory(size, max_scrollback_lines),
+        None => Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
+    }
 }
 
 /// A DCS query intercepted by [`RawByteRouter`] for the backend to answer.

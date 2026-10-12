@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
 use crate::reply_hold::ReplyHold;
-use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
+use crate::{BackendEvents, RawByteRouter, TerminalBackend};
 
 /// How long spawning a buffer waits for its runtime keeper to report that it
 /// is ready (socket listening, child running) or that it failed to start.
@@ -1038,7 +1038,7 @@ impl KeeperSurface {
         let max_scrollback_lines = crate::config::ResourceLimits::from_env().max_scrollback_lines;
         Self {
             router: RawByteRouter::default(),
-            backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
+            backend: crate::terminal_backend::new_terminal_backend(size, max_scrollback_lines),
             size,
             passthrough: PassthroughQueue::default(),
             reply_hold: ReplyHold::default(),
@@ -2576,7 +2576,7 @@ fn reap_keeper_process(mut child: std::process::Child) {
 }
 
 fn resolve_runtime_keeper_executable() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("EMBERS_RUNTIME_KEEPER_BIN").map(PathBuf::from)
+    if let Some(path) = env::var_os(crate::config::RUNTIME_KEEPER_BIN_ENV_VAR).map(PathBuf::from)
         && is_executable_file(&path)
     {
         return Some(path);
