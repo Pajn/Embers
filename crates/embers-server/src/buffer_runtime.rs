@@ -229,7 +229,14 @@ enum KeeperResponse {
     ScrollbackSlice(KeeperScrollbackSlice),
     PipeStatus(BufferRuntimePipeStatus),
     Ok,
-    Error { message: String },
+    /// `conflict` marks a conflict with the runtime's state (e.g. its child
+    /// already exited), so the server reports it as one rather than as a
+    /// transport failure. Absent from older keepers.
+    Error {
+        message: String,
+        #[serde(default)]
+        conflict: bool,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -781,7 +788,11 @@ impl KeeperConnection {
     fn request(&mut self, request: KeeperRequest) -> Result<KeeperResponse> {
         write_message(&mut self.stream, &request)?;
         match read_message(&mut self.stream)? {
-            Some(KeeperResponse::Error { message }) => Err(MuxError::transport(message)),
+            Some(KeeperResponse::Error { message, conflict }) => Err(if conflict {
+                MuxError::conflict(message)
+            } else {
+                MuxError::transport(message)
+            }),
             Some(response) => Ok(response),
             None => Err(MuxError::transport("runtime keeper disconnected")),
         }
@@ -1449,6 +1460,7 @@ fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) ->
             Err(error) => {
                 let response = KeeperResponse::Error {
                     message: error.to_string(),
+                    conflict: false,
                 };
                 if write_message(stream, &response).is_err() {
                     return Ok(false);
@@ -1459,9 +1471,7 @@ fn handle_keeper_client(runtime: Arc<KeeperRuntime>, stream: &mut UnixStream) ->
         let (response, terminate) = match handle_keeper_request(&runtime, request) {
             Ok(result) => result,
             Err(error) => {
-                let response = KeeperResponse::Error {
-                    message: error.to_string(),
-                };
+                let response = keeper_error_response(error);
                 if write_message(stream, &response).is_err() {
                     return Ok(false);
                 }
@@ -2526,6 +2536,21 @@ fn encode_runtime_keeper_env_value(value: &OsStr) -> String {
     }
 }
 
+/// The reply for a request the keeper could not carry out. A conflict keeps
+/// its kind; anything else travels as its message.
+fn keeper_error_response(error: MuxError) -> KeeperResponse {
+    match error {
+        MuxError::Conflict(message) => KeeperResponse::Error {
+            message,
+            conflict: true,
+        },
+        other => KeeperResponse::Error {
+            message: other.to_string(),
+            conflict: false,
+        },
+    }
+}
+
 fn write_message<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
     let payload =
         serde_json::to_vec(value).map_err(|error| MuxError::internal(error.to_string()))?;
@@ -3140,6 +3165,25 @@ mod tests {
     }
 
     #[test]
+    fn killing_an_exited_keeper_child_is_a_conflict() {
+        // A caller racing a buffer's exit (e.g. a waiting display-popup after
+        // kill-popup) must see the keeper's conflict as a conflict, not a
+        // transport failure.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (socket_path, _done) =
+            start_in_process_keeper(dir.path(), &["/bin/sh", "-c", "exit 0"]);
+        wait_for_exited_status(&socket_path);
+        let stream = super::connect_to_keeper(&socket_path).expect("connect to keeper");
+        let mut connection = KeeperConnection { stream };
+        let error = connection.kill().expect_err("the child already exited");
+        assert!(error.is_conflict(), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "conflict: buffer runtime has already exited"
+        );
+    }
+
+    #[test]
     fn keeper_retires_only_once_its_exit_is_acknowledged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (socket_path, done) = start_in_process_keeper(dir.path(), &["/bin/sh", "-c", "exit 3"]);
@@ -3181,6 +3225,7 @@ mod tests {
             let response = match name.as_str() {
                 "Kill" | "ExitRecorded" => super::KeeperResponse::Ok,
                 _ => super::KeeperResponse::Error {
+                    conflict: false,
                     message: format!("unknown variant `{name}`"),
                 },
             };

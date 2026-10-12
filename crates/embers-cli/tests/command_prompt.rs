@@ -124,6 +124,7 @@ async fn display_message_from_the_prompt_goes_to_the_prompting_client() {
             request_id: new_request_id(),
             client_id: None,
             session_id,
+            node_id: None,
         }))
         .await
         .expect("switch")

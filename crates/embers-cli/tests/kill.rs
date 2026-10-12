@@ -187,6 +187,7 @@ async fn kill_session_ends_every_program_in_the_session() {
         &server,
         [
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--",
@@ -217,6 +218,7 @@ async fn kill_popup_ends_the_popup_program() {
         &server,
         [
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--",

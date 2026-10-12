@@ -75,12 +75,18 @@ Embers exposes both an interactive client and command-oriented operations throug
 ```sh
 embers --help
 embers list-sessions
-embers new-session work
-embers new-window --title logs -- tail -f app.log
-embers split-window --horizontal -- cargo test
-embers list-panes
-embers capture-pane
+embers new-session -d -s work -c ~/src/app
+embers new-window -t work -n logs -- tail -f app.log
+embers split-window -v -t work:logs -c '#{pane_current_path}' -- cargo test
+embers list-panes -t work:logs
+embers capture-pane -p -t work:logs.1
+embers display-popup -E -w 90% -h 90% -- "$EDITOR" notes.md
 ```
+
+The commands take tmux's flags and target syntax (`-t =work:logs.1`,
+`-t %$EMBERS_BUFFER`), so scripts written for tmux can drive Embers; see
+[tmux compatibility](docs/commands.md#tmux-compatibility) for what is supported
+and where Embers differs.
 
 By default, Embers uses a runtime socket at:
 
@@ -108,7 +114,7 @@ Useful subcommand groups include:
 
 - `session`: `new-session`, `list-sessions`, `rename-session`, `kill-session`, `set-environment`, `show-environment`
 - `window`: `new-window`, `list-windows`, `select-window`, `rename-window`, `kill-window`, `synchronize-panes`
-- `pane`: `split-window`, `list-panes`, `select-pane` (`-t`, or `-l` for the last pane), `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
+- `pane`: `split-window`, `list-panes`, `select-pane` (`-t`, `-L/-R/-U/-D`, or `-l` for the last pane), `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
 - `popup`: `display-popup`, `kill-popup`
@@ -133,7 +139,8 @@ the focused ones, so a script or editor in a pane can run, for example,
 ## Logging
 
 The tracing filter is resolved from the first of these that is set, highest
-precedence first: `--log <FILTER>` (alias `--log-level`), `-v`/`-vv`,
+precedence first: `--log <FILTER>` (alias `--log-level`), `-v`/`-vv` (before the
+command, as in `embers -v attach`; `--verbose` may go anywhere),
 `EMBERS_LOG`, `RUST_LOG`, then the default of `info`. `<FILTER>` accepts the full
 `tracing` env-filter syntax (a bare level like `debug`, or per-target directives
 like `embers_server=trace,info`).

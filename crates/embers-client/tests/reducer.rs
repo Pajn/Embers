@@ -59,6 +59,7 @@ fn buffer_view_node(
         }),
         split: None,
         tabs: None,
+        focus_leaf_id: None,
     }
 }
 
@@ -100,6 +101,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
                         },
                     ],
                 }),
+                focus_leaf_id: None,
             },
             buffer_view_node(11, 1, Some(10), 1),
             NodeRecord {
@@ -124,6 +126,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
                         },
                     ],
                 }),
+                focus_leaf_id: None,
             },
             buffer_view_node(21, 1, Some(20), 2),
             NodeRecord {
@@ -138,6 +141,7 @@ fn session_snapshot(root_active: u32, nested_active: u32) -> SessionSnapshot {
                     sizes: vec![2, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
             buffer_view_node(23, 1, Some(22), 3),
             buffer_view_node(24, 1, Some(22), 4),

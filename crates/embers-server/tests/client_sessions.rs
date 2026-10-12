@@ -179,6 +179,7 @@ async fn closing_session_clears_client_binding_and_retires_session_subscriptions
             request_id: RequestId(5),
             client_id: None,
             session_id: main_id,
+            node_id: None,
         },
     )
     .await
