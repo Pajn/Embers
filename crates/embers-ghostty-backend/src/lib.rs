@@ -151,17 +151,27 @@ impl GhosttyTerminalBackend {
     /// pass that can stall on a long scrollback. Reading compressed lines
     /// restores them. Whether this platform supports it.
     pub fn compress_scrollback(&mut self) -> bool {
+        self.compress(sys::GhosttyTerminalCompressionMode::GHOSTTY_TERMINAL_COMPRESSION_MODE_FULL)
+            != sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED
+    }
+
+    /// One bounded step of compressing the scrollback, for a pane that has
+    /// gone idle. Whether more steps are left.
+    pub fn compress_scrollback_step(&mut self) -> bool {
+        self.compress(
+            sys::GhosttyTerminalCompressionMode::GHOSTTY_TERMINAL_COMPRESSION_MODE_INCREMENTAL,
+        ) == sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_PENDING
+    }
+
+    fn compress(
+        &mut self,
+        mode: sys::GhosttyTerminalCompressionMode::Type,
+    ) -> sys::GhosttyTerminalCompressionResult::Type {
         let mut result =
             sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
         // SAFETY: a plain call on the terminal this value owns.
-        check(unsafe {
-            sys::ghostty_terminal_compress(
-                self.terminal,
-                sys::GhosttyTerminalCompressionMode::GHOSTTY_TERMINAL_COMPRESSION_MODE_FULL,
-                &mut result,
-            )
-        });
-        result != sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED
+        check(unsafe { sys::ghostty_terminal_compress(self.terminal, mode, &mut result) });
+        result
     }
 
     fn configure(&mut self, max_scrollback_lines: usize) {

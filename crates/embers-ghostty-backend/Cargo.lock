@@ -494,10 +494,12 @@ dependencies = [
  "embers-ghostty-sys",
  "embers-server",
  "proptest",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
