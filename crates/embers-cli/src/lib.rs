@@ -141,6 +141,10 @@ pub enum Command {
         cols: u16,
         #[arg(long)]
         rows: u16,
+        #[arg(long = "pixel-width", default_value_t = 0)]
+        pixel_width: u16,
+        #[arg(long = "pixel-height", default_value_t = 0)]
+        pixel_height: u16,
         #[arg(long)]
         cwd: Option<PathBuf>,
         #[arg(long = "env", value_parser = parse_env_arg)]
@@ -2200,6 +2204,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             keeper_socket,
             cols,
             rows,
+            pixel_width,
+            pixel_height,
             cwd,
             env,
             command,
@@ -2208,7 +2214,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             command,
             cwd,
             env: env.into_iter().collect(),
-            size: embers_core::PtySize::new(cols, rows),
+            size: embers_core::PtySize {
+                cols,
+                rows,
+                pixel_width,
+                pixel_height,
+            },
         }),
         command => {
             let socket = resolve_socket_path(socket.as_deref());

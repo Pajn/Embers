@@ -457,6 +457,10 @@ stay as detected. Like tmux's `terminal-features`.
 - `hyperlinks`: OSC 8 links. Without it links are plain text.
 - `passthrough`: sequences programs send for the terminal, such as
   images (see `set_allow_passthrough`). Without it they are dropped.
+- `kitty_graphics`: answers to kitty graphics queries. With it and
+  passthrough on, a program's replies to the queries it sends after
+  one wait for the terminal's answer, so programs that check for image
+  support that way find it.
 </div>
 <div group="set_terminal_features" id="set_terminal_features-Example" class="tabcontent"  style="display: none;" >
 

@@ -1,5 +1,5 @@
 use embers_core::{
-    ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
+    ActivityState, BufferId, CellSize, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
     SplitDirection,
 };
 use embers_protocol::{
@@ -47,19 +47,41 @@ pub enum PanePlacement {
 /// row added ([`PresentationModel::layout_viewport`]), so callers without the
 /// client's config, given that viewport, get the same answer as
 /// [`spawn_pty_size_with`] gives the client.
+///
+/// Without the client's terminal at hand, the pixel size uses the cell size
+/// the session's panes were given by a client that draws them, so a program
+/// started in the new pane can size images before that client resizes it.
 pub fn spawn_pty_size(
     state: &ClientState,
     session_id: SessionId,
     viewport: Size,
     placement: PanePlacement,
 ) -> Option<PtySize> {
-    spawn_pty_size_with(
+    let size = spawn_pty_size_with(
         state,
         session_id,
         viewport,
         RootTabBar::default(),
         placement,
-    )
+    )?;
+    Some(size.with_cell_size(session_cell_size(state, session_id)))
+}
+
+/// The cell size, in pixels, of a pane in `session_id` whose PTY has one:
+/// the focused pane's, which a client drew last, else any other pane's.
+fn session_cell_size(state: &ClientState, session_id: SessionId) -> Option<CellSize> {
+    let cell_size = |node_id: &NodeId| {
+        let buffer_id = state.nodes.get(node_id)?.buffer_view.as_ref()?.buffer_id;
+        state.buffers.get(&buffer_id)?.pty_size.cell_size()
+    };
+    let focused = state.sessions.get(&session_id)?.focused_leaf_id;
+    focused.as_ref().and_then(cell_size).or_else(|| {
+        state
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.session_id == session_id)
+            .find_map(|(node_id, _)| cell_size(node_id))
+    })
 }
 
 /// [`spawn_pty_size`] for a client that draws the root tab bar as `tab_bar`

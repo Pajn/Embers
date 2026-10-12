@@ -2184,6 +2184,144 @@ async fn host_replies_go_to_the_pane_whose_passthrough_asked() {
     server.shutdown().await.expect("server shuts down");
 }
 
+/// A program that detects kitty graphics as ratatui-image does (a graphics
+/// query, DA1, the cell size query and a status report, read up to the status
+/// reply) reads the host's answer to the graphics query first, then the pane's
+/// replies, with the host terminal's cell size.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kitty_graphics_detection_sees_the_hosts_answer_first() {
+    use embers_client::ConfiguredClient;
+
+    let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
+    let session = create_session(&mut connection, "alpha").await;
+    let detecting = create_buffer_with_command(
+        &mut connection,
+        "detecting",
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "read _; stty raw -echo; \
+             printf '\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\\\033[c\\033[16t\\033[5n'; \
+             printf '\\033Ptmux;\\033\\033]9;done\\007\\033\\\\'; cat -v"
+                .to_owned(),
+        ],
+    )
+    .await;
+    let _ = connection
+        .request(&ClientMessage::Session(SessionRequest::AddRootTab {
+            request_id: new_request_id(),
+            session_id: session.session.id,
+            title: "images".to_owned(),
+            buffer_id: Some(detecting.id),
+            child_node_id: None,
+        }))
+        .await
+        .expect("add tab succeeds");
+
+    let config_dir = tempfile::tempdir().expect("config tempdir");
+    std::fs::write(config_dir.path().join("config.rhai"), PASSTHROUGH_ON).expect("write config");
+    let config = embers_client::ConfigManager::load(
+        embers_client::ConfigDiscoveryOptions::default().with_project_config_dir(config_dir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(server.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured.set_host_capabilities(embers_client::HostCapabilities::ALL);
+    configured.set_host_cell_size(Some(embers_core::CellSize {
+        width: 9,
+        height: 18,
+    }));
+    configured
+        .client_mut()
+        .subscribe(None)
+        .await
+        .expect("subscribe");
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    configured
+        .client_mut()
+        .switch_current_session(session.session.id)
+        .await
+        .expect("switch to alpha");
+    let viewport = Size {
+        width: 80,
+        height: 24,
+    };
+    // What the interactive client does before each frame.
+    configured
+        .sync_pty_sizes(session.session.id, viewport)
+        .await
+        .expect("size the panes");
+    configured.sync_host_graphics().await;
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("first frame");
+
+    let _ = connection
+        .request(&ClientMessage::Input(embers_protocol::InputRequest::Send {
+            request_id: new_request_id(),
+            buffer_id: detecting.id,
+            bytes: b"\r".to_vec(),
+        }))
+        .await
+        .expect("start the script");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "passthrough event never arrived");
+        let event = configured
+            .process_next_event_timeout(Duration::from_millis(20))
+            .await
+            .expect("process event");
+        if let Some(embers_protocol::ServerEvent::Passthrough(event)) = event
+            && event
+                .writes
+                .iter()
+                .any(|write| write.bytes == b"\x1b]9;done\x07")
+        {
+            break;
+        }
+    }
+    let _ = configured
+        .render_session(session.session.id, viewport)
+        .await
+        .expect("frame after passthrough");
+    assert!(contains_subslice(
+        &configured.drain_frame_output(),
+        b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"
+    ));
+    configured
+        .handle_host_reply(
+            session.session.id,
+            viewport,
+            b"\x1b_Gi=31;OK\x1b\\".to_vec(),
+        )
+        .await
+        .expect("reply delivered");
+
+    let snapshot = wait_for_visible_snapshot(
+        &mut connection,
+        detecting.id,
+        Duration::from_secs(5),
+        |snapshot| lines_text(&snapshot.lines).contains("^[[0n"),
+    )
+    .await;
+    let text = lines_text(&snapshot.lines);
+    assert!(
+        text.contains("^[_Gi=31;OK^[\\^[[?6c^[[6;18;9t^[[0n"),
+        "replies out of order: {text:?}"
+    );
+    server.shutdown().await.expect("server shuts down");
+}
+
 fn session_switch_config() -> (embers_client::ConfigManager, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
