@@ -58,6 +58,16 @@ impl std::fmt::Debug for GhosttyTerminalBackend {
     }
 }
 
+/// What a terminal holds in memory: see [`GhosttyTerminalBackend::memory_usage`].
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryUsage {
+    /// Physical memory its screens' pages use, compressed pages counted at
+    /// their compressed size.
+    pub resident_bytes: u64,
+    pub compressed_pages: u64,
+    pub compression_supported: bool,
+}
+
 /// What libghostty's callbacks report while output is ingested, drained by
 /// [`TerminalBackend::take_events`].
 #[derive(Default)]
@@ -114,6 +124,44 @@ impl GhosttyTerminalBackend {
         backend.configure(max_scrollback_lines);
         backend.resize(size);
         backend
+    }
+
+    /// What the terminal holds in memory, as libghostty counts it.
+    pub fn memory_usage(&self) -> MemoryUsage {
+        let mut usage = sys::GhosttyTerminalMemoryUsage {
+            size: size_of::<sys::GhosttyTerminalMemoryUsage>(),
+            ..Default::default()
+        };
+        // SAFETY: the memory usage's output type is the sized struct given.
+        check(unsafe {
+            sys::ghostty_terminal_get(
+                self.terminal,
+                sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_MEMORY_USAGE,
+                (&raw mut usage).cast(),
+            )
+        });
+        MemoryUsage {
+            resident_bytes: usage.primary_resident_bytes + usage.alternate_resident_bytes,
+            compressed_pages: usage.primary_compressed_pages + usage.alternate_compressed_pages,
+            compression_supported: usage.compression_supported,
+        }
+    }
+
+    /// Compress the scrollback libghostty finds worth compressing, in one
+    /// pass that can stall on a long scrollback. Reading compressed lines
+    /// restores them. Whether this platform supports it.
+    pub fn compress_scrollback(&mut self) -> bool {
+        let mut result =
+            sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
+        // SAFETY: a plain call on the terminal this value owns.
+        check(unsafe {
+            sys::ghostty_terminal_compress(
+                self.terminal,
+                sys::GhosttyTerminalCompressionMode::GHOSTTY_TERMINAL_COMPRESSION_MODE_FULL,
+                &mut result,
+            )
+        });
+        result != sys::GhosttyTerminalCompressionResult::GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED
     }
 
     fn configure(&mut self, max_scrollback_lines: usize) {
