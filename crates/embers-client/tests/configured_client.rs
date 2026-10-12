@@ -204,6 +204,7 @@ fn second_session_state() -> embers_client::ClientState {
             }),
             split: None,
             tabs: None,
+            focus_leaf_id: None,
         },
     );
     state.buffers.insert(

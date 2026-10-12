@@ -39,7 +39,7 @@ async fn display_message_print_expands_formats() {
             "-p",
             "-t",
             &pane,
-            "[#S] #I:#W pane #D ## #{pane_current_command}",
+            "[#S] #I:#W pane #{node_id} ## #{pane_current_command}",
         ],
     );
     assert_eq!(
@@ -95,6 +95,7 @@ async fn display_message_reaches_clients_showing_the_session() {
             request_id: new_request_id(),
             client_id: None,
             session_id,
+            node_id: None,
         }))
         .await
         .expect("switch");

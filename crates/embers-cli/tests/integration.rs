@@ -12,5 +12,7 @@ mod ping;
 mod popups;
 mod sessions;
 mod support;
+mod targets;
+mod tmux_compat;
 mod window_numbering;
 mod windows;

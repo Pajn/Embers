@@ -43,7 +43,7 @@ fn format_context_describes_the_pane_and_its_window() {
     assert_eq!(focused.window_name, "workspace");
     assert_eq!(focused.pane_id, Some(FOCUSED_LEAF_ID));
     assert_eq!(
-        expand_format("#S:#I:#W #D", &focused),
+        expand_format("#S:#I:#W #{node_id}", &focused),
         format!("demo:1:workspace {FOCUSED_LEAF_ID}")
     );
 
