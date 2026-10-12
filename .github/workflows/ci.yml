@@ -72,19 +72,18 @@ jobs:
       - name: Run ignored PTY smoke test
         run: cargo test -p embers-test-support pty_round_trips_input -- --ignored
 
-  # embers-ghostty-sys is outside the workspace, since building it needs Zig.
-  ghostty-sys:
+  # The Ghostty crates are outside the workspace, since building them needs Zig.
+  ghostty:
     runs-on: ubuntu-latest
+    env:
+      # Shared, so libghostty-vt is built once for both crates.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            crates/embers-ghostty-sys
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
@@ -101,8 +100,17 @@ jobs:
             exit 1
           fi
       - name: Check formatting
-        run: cargo fmt --manifest-path crates/embers-ghostty-sys/Cargo.toml -- --check
+        run: |
+          for crate in embers-ghostty-sys embers-ghostty-backend; do
+            cargo fmt --manifest-path "crates/${crate}/Cargo.toml" -- --check
+          done
       - name: Lint
-        run: cargo clippy --manifest-path crates/embers-ghostty-sys/Cargo.toml --all-targets -- -D warnings
+        run: |
+          for crate in embers-ghostty-sys embers-ghostty-backend; do
+            cargo clippy --locked --manifest-path "crates/${crate}/Cargo.toml" --all-targets -- -D warnings
+          done
       - name: Test
-        run: cargo test --manifest-path crates/embers-ghostty-sys/Cargo.toml
+        run: |
+          for crate in embers-ghostty-sys embers-ghostty-backend; do
+            cargo test --locked --manifest-path "crates/${crate}/Cargo.toml"
+          done

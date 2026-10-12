@@ -9,9 +9,9 @@ members = [
   "crates/embers-test-support",
   "crates/embers-ghostty-gen",
 ]
-# Building it needs Zig, which the rest of the workspace does not: it builds on
-# its own (`--manifest-path crates/embers-ghostty-sys/Cargo.toml`).
-exclude = ["crates/embers-ghostty-sys"]
+# Building these needs Zig, which the rest of the workspace does not: they build
+# on their own (`--manifest-path crates/<crate>/Cargo.toml`).
+exclude = ["crates/embers-ghostty-sys", "crates/embers-ghostty-backend"]
 resolver = "2"
 
 [workspace.package]

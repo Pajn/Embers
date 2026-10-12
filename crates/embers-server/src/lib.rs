@@ -31,5 +31,6 @@ pub use server::{Server, ServerHandle};
 pub use state::ServerState;
 pub use terminal_backend::{
     AlacrittyTerminalBackend, BackendDamage, BackendEvents, BackendMetadata,
-    BackendScrollbackSlice, RawByteRouter, TerminalBackend,
+    BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalQuery, sgr_report,
+    termcap_reply,
 };

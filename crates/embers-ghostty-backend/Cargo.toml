@@ -1,0 +1,21 @@
+[package]
+name = "embers-ghostty-backend"
+description = "An Embers terminal backend on libghostty-vt, Ghostty's terminal emulation, to try beside the alacritty one."
+publish = false
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/Pajn/Embers"
+rust-version = "1.92"
+version = "0.0.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+embers-core = { path = "../embers-core" }
+embers-ghostty-sys = { path = "../embers-ghostty-sys" }
+embers-server = { path = "../embers-server" }
+
+[dev-dependencies]
+proptest = "1"
+unicode-segmentation = "1.12"

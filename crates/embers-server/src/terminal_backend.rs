@@ -695,8 +695,9 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// XTGETTCAP reply: one `DCS 1 + r name=value ST` per known name and
-/// `DCS 0 + r name ST` per unknown one, in request order.
-fn termcap_reply(payload: &[u8]) -> String {
+/// `DCS 0 + r name ST` per unknown one, in request order. `payload` is the
+/// query's hex-encoded names separated by `;`.
+pub fn termcap_reply(payload: &[u8]) -> String {
     let mut reply = String::new();
     for hex_name in payload.split(|&byte| byte == b';') {
         let decoded = hex_decode(hex_name).unwrap_or_default();
@@ -724,46 +725,59 @@ fn termcap_reply(payload: &[u8]) -> String {
     reply
 }
 
-/// The SGR parameters (without `CSI` and `m`) that recreate `template`'s pen,
-/// for a DECRQSS reply. Always starts with `0` so the report is absolute.
-fn sgr_report(template: &Cell) -> String {
+/// The SGR parameters (without `CSI` and `m`) that recreate a pen with these
+/// attributes and colors, for a DECRQSS reply. Always starts with `0` so the
+/// report is absolute.
+pub fn sgr_report(
+    attrs: CellAttrs,
+    fg: TermColor,
+    bg: TermColor,
+    underline_color: TermColor,
+) -> String {
     use std::fmt::Write as _;
     let mut params = String::from("0");
-    let flags = template.flags;
-    for (flag, code) in [
-        (Flags::BOLD, "1"),
-        (Flags::DIM, "2"),
-        (Flags::ITALIC, "3"),
-        (Flags::UNDERLINE, "4"),
-        (Flags::DOUBLE_UNDERLINE, "4:2"),
-        (Flags::UNDERCURL, "4:3"),
-        (Flags::DOTTED_UNDERLINE, "4:4"),
-        (Flags::DASHED_UNDERLINE, "4:5"),
-        (Flags::INVERSE, "7"),
-        (Flags::HIDDEN, "8"),
-        (Flags::STRIKEOUT, "9"),
+    for (attr, code) in [
+        (CellAttrs::BOLD, "1"),
+        (CellAttrs::DIM, "2"),
+        (CellAttrs::ITALIC, "3"),
+        (CellAttrs::UNDERLINE, "4"),
+        (CellAttrs::DOUBLE_UNDERLINE, "4:2"),
+        (CellAttrs::CURLY_UNDERLINE, "4:3"),
+        (CellAttrs::DOTTED_UNDERLINE, "4:4"),
+        (CellAttrs::DASHED_UNDERLINE, "4:5"),
+        (CellAttrs::INVERSE, "7"),
+        (CellAttrs::HIDDEN, "8"),
+        (CellAttrs::STRIKEOUT, "9"),
     ] {
-        if flags.contains(flag) {
+        if attrs.contains(attr) {
             params.push(';');
             params.push_str(code);
         }
     }
-    for (color, base) in [
-        (Some(template.fg), 38),
-        (Some(template.bg), 48),
-        (template.underline_color(), 58),
-    ] {
-        match color.map(map_color) {
-            None | Some(TermColor::Default) => {}
-            Some(TermColor::Indexed(index)) => {
+    for (color, base) in [(fg, 38), (bg, 48), (underline_color, 58)] {
+        match color {
+            TermColor::Default => {}
+            TermColor::Indexed(index) => {
                 let _ = write!(params, ";{base}:5:{index}");
             }
-            Some(TermColor::Rgb { r, g, b }) => {
+            TermColor::Rgb { r, g, b } => {
                 let _ = write!(params, ";{base}:2::{r}:{g}:{b}");
             }
         }
     }
     params
+}
+
+/// The SGR parameters for alacritty's pen, `template`.
+fn template_sgr_report(template: &Cell) -> String {
+    sgr_report(
+        map_attrs(template.flags),
+        map_color(template.fg),
+        map_color(template.bg),
+        template
+            .underline_color()
+            .map_or(TermColor::Default, map_color),
+    )
 }
 
 /// Percent-decode a byte slice (`%XX` escapes) as used by `file://` URIs.
@@ -1294,7 +1308,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             // the terminal keeps curly underlines before it uses them (and
             // underline colors) under a TERM without `Smulx`.
             TerminalQuery::RequestSetting(setting) if setting == b"m" => {
-                let pen = sgr_report(&self.term.grid().cursor.template);
+                let pen = template_sgr_report(&self.term.grid().cursor.template);
                 format!("\x1bP1$r{pen}m\x1b\\")
             }
             // Any other setting: the "invalid request" reply.
