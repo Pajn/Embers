@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d1510023d93ad4277a9c7d1d7c19be37f1dc5adad1cab168c3f4c924fbcf7486 # shrinks to steps = [[27, 35, 56]]
+cc 627ad51b44b3f82653f2df65579c36440ff733621614afd9665fd306d1791727 # shrinks to steps = [[27, 91, 52, 109], [32], [32]]
+cc 8ae76f2ca6b5bfd9038db4b5b4f90b64e8d236a39947a6d0f7381a47722ddf2a # shrinks to steps = [[27, 91, 52, 109], [27, 91, 56, 109], [230, 188, 162]]
+cc db354c9256151d5e80a405b564ed59f4535942e82a392fe46ae92d3093d67fa8 # shrinks to steps = [[97, 97, 230, 188, 162], [97], [27, 91, 49, 59, 52, 72], [27, 91, 52, 56, 59, 53, 59, 55, 109], [27, 91, 74]]
+cc f505a379dcdf39292c38ffc7e8b878dfa517b940b1701d104d0565bcd32bb5fe # shrinks to steps = [[230, 188, 162, 13], [27, 91, 80]]

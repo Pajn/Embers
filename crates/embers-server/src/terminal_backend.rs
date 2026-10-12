@@ -991,14 +991,11 @@ impl AlacrittyTerminalBackend {
         let content_len = content_length(row);
         let mut text = String::new();
         for column in 0..content_len {
-            let cell = &row[Column(column)];
-            if cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-            {
-                continue;
+            match cell_glyph(row, column) {
+                CellGlyph::Covered => {}
+                CellGlyph::Blank => text.push(' '),
+                CellGlyph::Shown => emit_cell_text(&row[Column(column)], &mut text),
             }
-            emit_cell_text(cell, &mut text);
         }
         text
     }
@@ -1007,7 +1004,8 @@ impl AlacrittyTerminalBackend {
     ///
     /// Column count comes from `row.len()` (alacritty reflows history on resize,
     /// so a cached `columns()` can disagree with a history row). Trailing painted
-    /// cells (non-default background or inverse) survive as styled spaces; default
+    /// cells (non-default background, inverse, underline or strikeout) survive as
+    /// styled spaces; default
     /// trailing blanks are trimmed so the plain-text projection matches the legacy
     /// extraction.
     fn styled_line(&self, line: Line) -> SnapshotLine {
@@ -1022,7 +1020,8 @@ impl AlacrittyTerminalBackend {
         for column in 0..content_len {
             let cell = &row[Column(column)];
             let flags = cell.flags;
-            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            let glyph = cell_glyph(row, column);
+            if glyph == CellGlyph::Covered {
                 continue;
             }
 
@@ -1035,7 +1034,11 @@ impl AlacrittyTerminalBackend {
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
             let start = text.len();
-            emit_cell_text(cell, &mut text);
+            if glyph == CellGlyph::Blank {
+                text.push(' ');
+            } else {
+                emit_cell_text(cell, &mut text);
+            }
             let byte_len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
 
             if fg != TermColor::Default
@@ -1081,16 +1084,32 @@ impl AlacrittyTerminalBackend {
         }
     }
 
+    /// Worked out here rather than taken from `renderable_content`, which moves
+    /// a cursor on the right half of a wide character back a column without
+    /// checking that it is not in the first one, where only the right half is
+    /// left after the left half was deleted.
     fn cursor_state(&self) -> Option<CursorState> {
-        let cursor = self.term.renderable_content().cursor;
-        let shape = match cursor.shape {
+        if !self.term.mode().contains(TermMode::SHOW_CURSOR) {
+            return None;
+        }
+        let grid = self.term.grid();
+        let mut point = grid.cursor.point;
+        if point.column.0 > 0
+            && grid[point].flags.contains(Flags::WIDE_CHAR_SPACER)
+            && grid[point.line][point.column - 1]
+                .flags
+                .contains(Flags::WIDE_CHAR)
+        {
+            point.column -= 1;
+        }
+        let shape = match self.term.cursor_style().shape {
             AlacrittyCursorShape::Hidden => return None,
             AlacrittyCursorShape::Block | AlacrittyCursorShape::HollowBlock => CursorShape::Block,
             AlacrittyCursorShape::Underline => CursorShape::Underline,
             AlacrittyCursorShape::Beam => CursorShape::Beam,
         };
-        let row = u16::try_from(cursor.point.line.0).ok()?;
-        let col = u16::try_from(cursor.point.column.0).ok()?;
+        let row = u16::try_from(point.line.0).ok()?;
+        let col = u16::try_from(point.column.0).ok()?;
         Some(CursorState {
             position: CursorPosition { row, col },
             shape,
@@ -1351,9 +1370,10 @@ impl LineLinks {
 /// Occupied width of a row, extended to keep trailing painted cells.
 ///
 /// `line_length` trims trailing spaces (default blanks), which is right for
-/// plain text. But a trailing space with a non-default background or the inverse
-/// flag is a painted cell the client must draw (vim/htop status bars), so extend
-/// the length to the furthest painted column.
+/// plain text. But a trailing space with a non-default background, the inverse
+/// flag, an underline or a strikeout is a painted cell the client must draw
+/// (vim/htop status bars, underlined form fields), so extend the length to the
+/// furthest painted column.
 fn content_length(row: &Row<Cell>) -> usize {
     let columns = row.len();
     if columns == 0 {
@@ -1361,7 +1381,7 @@ fn content_length(row: &Row<Cell>) -> usize {
     }
     let mut content_len = row.line_length().0;
     for column in (content_len..columns).rev() {
-        if cell_paints_background(&row[Column(column)]) {
+        if cell_shows_without_glyph(&row[Column(column)]) {
             content_len = column + 1;
             break;
         }
@@ -1369,10 +1389,52 @@ fn content_length(row: &Row<Cell>) -> usize {
     content_len
 }
 
-/// Whether a cell paints a visible background even when it holds no glyph.
-fn cell_paints_background(cell: &Cell) -> bool {
+/// Whether a cell shows anything even when it holds no glyph: a background,
+/// or a line drawn through or under it.
+fn cell_shows_without_glyph(cell: &Cell) -> bool {
     !matches!(cell.bg, AnsiColor::Named(NamedColor::Background))
-        || cell.flags.contains(Flags::INVERSE)
+        || cell
+            .flags
+            .intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)
+}
+
+/// What a cell contributes to its row's text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CellGlyph {
+    /// The cell's own text.
+    Shown,
+    /// Nothing: the cell is covered by the wide character before it, or
+    /// holds the place of one wrapped to the next row.
+    Covered,
+    /// A space in the cell's style: the cell is half of a wide character
+    /// whose other half was overwritten or erased. The emulator keeps the
+    /// half that is left, but a terminal shows neither, as xterm does.
+    Blank,
+}
+
+fn cell_glyph(row: &Row<Cell>, column: usize) -> CellGlyph {
+    let flags = row[Column(column)].flags;
+    if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+        CellGlyph::Covered
+    } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
+        let covered = column
+            .checked_sub(1)
+            .is_some_and(|left| row[Column(left)].flags.contains(Flags::WIDE_CHAR));
+        if covered {
+            CellGlyph::Covered
+        } else {
+            CellGlyph::Blank
+        }
+    } else if flags.contains(Flags::WIDE_CHAR)
+        && !(column + 1 < row.len()
+            && row[Column(column + 1)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER))
+    {
+        CellGlyph::Blank
+    } else {
+        CellGlyph::Shown
+    }
 }
 
 /// Emit a cell's text into `text`.
@@ -1757,6 +1819,25 @@ mod tests {
     }
 
     #[test]
+    fn half_a_wide_char_left_by_an_edit_is_a_blank() {
+        let size = PtySize::new(6, 1);
+
+        // Erasing the right half leaves the left: the line keeps its width.
+        let mut erased = backend(size);
+        erased.ingest_bytes("ab界c\x1b[1;4H\x1b[X".as_bytes());
+        assert_eq!(first_line(&erased, size).text, "ab  c");
+
+        // Deleting the left half leaves the right, under the cursor.
+        let mut deleted = backend(size);
+        deleted.ingest_bytes("界a\r\x1b[P".as_bytes());
+        assert_eq!(first_line(&deleted, size).text, " a");
+        assert_eq!(
+            deleted.metadata().cursor.map(|cursor| cursor.position),
+            Some(CursorPosition { row: 0, col: 0 })
+        );
+    }
+
+    #[test]
     fn combining_char_folds_into_the_base_cell_run() {
         let size = PtySize::new(4, 1);
         let mut backend = backend(size);
@@ -1796,6 +1877,25 @@ mod tests {
         let plain_line = first_line(&plain, PtySize::new(6, 1));
         assert_eq!(plain_line.text, "hi");
         assert!(plain_line.runs.is_empty());
+    }
+
+    #[test]
+    fn trailing_underlined_and_struck_cells_survive() {
+        let size = PtySize::new(6, 2);
+        let mut backend = backend(size);
+        backend.ingest_bytes(b"a\x1b[4m  \x1b[0m\r\nb\x1b[9m \x1b[0m");
+
+        let snapshot = backend.visible_snapshot(0, size, None);
+        assert_eq!(snapshot.lines[0].text, "a  ");
+        assert_eq!(
+            snapshot.lines[0].runs[1].attrs,
+            CellAttrs(CellAttrs::UNDERLINE)
+        );
+        assert_eq!(snapshot.lines[1].text, "b ");
+        assert_eq!(
+            snapshot.lines[1].runs[1].attrs,
+            CellAttrs(CellAttrs::STRIKEOUT)
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ version.workspace = true
 doctest = false
 
 [dependencies]
-alacritty_terminal = "0.25.1"
+alacritty_terminal.workspace = true
 base64.workspace = true
 embers-core.workspace = true
 embers-protocol.workspace = true

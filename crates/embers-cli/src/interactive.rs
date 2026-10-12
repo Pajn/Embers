@@ -1347,6 +1347,11 @@ fn frame_bytes(
 ) -> Vec<u8> {
     let mut frame = Vec::new();
     frame.extend_from_slice(b"\x1b[?2026h\x1b[?25l\x1b[H");
+    // Terminals disagree on whether erasing right after a write to the last
+    // column keeps that cell, so a row is erased only when it ends short of
+    // the edge, and the screen below only when the frame ends above the
+    // bottom.
+    let grid_fills_rows = grid.width() >= terminal_size.width;
     // Lines are separated, not ended, by newlines: one after a grid as
     // tall as the terminal would scroll it.
     for (index, line) in grid.ansi_lines_for(host).iter().enumerate() {
@@ -1354,18 +1359,27 @@ fn frame_bytes(
             frame.extend_from_slice(b"\r\n");
         }
         frame.extend_from_slice(line.as_bytes());
-        frame.extend_from_slice(b"\x1b[K");
+        if !grid_fills_rows {
+            frame.extend_from_slice(b"\x1b[K");
+        }
     }
 
+    let mut drawn_rows = grid.height();
     if terminal_size.height > grid.height() {
         let status = fit_width(status.unwrap_or_default(), terminal_size.width);
         if grid.height() > 0 {
             frame.extend_from_slice(b"\r\n");
         }
-        frame.extend_from_slice(format!("\x1b[7m{status}\x1b[0m\x1b[K").as_bytes());
+        frame.extend_from_slice(format!("\x1b[7m{status}\x1b[0m").as_bytes());
+        if UnicodeWidthStr::width(status.as_str()) < usize::from(terminal_size.width) {
+            frame.extend_from_slice(b"\x1b[K");
+        }
+        drawn_rows += 1;
     }
 
-    frame.extend_from_slice(b"\x1b[J");
+    if drawn_rows < terminal_size.height {
+        frame.extend_from_slice(b"\x1b[J");
+    }
     frame.extend_from_slice(after_frame);
     frame.extend_from_slice(cursor_bytes(grid, terminal_size, status_cursor).as_bytes());
     frame.extend_from_slice(b"\x1b[?2026l");
@@ -1535,6 +1549,9 @@ fn cursor_shape_code(shape: CursorShape) -> u8 {
         CursorShape::Beam => 6,
     }
 }
+
+#[cfg(test)]
+mod round_trip;
 
 #[cfg(test)]
 mod tests {
