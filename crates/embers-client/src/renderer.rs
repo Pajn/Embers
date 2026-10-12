@@ -248,28 +248,40 @@ impl Renderer {
             return;
         }
 
-        let x = clamp_i32_to_u16(leaf.rect.origin.x);
-        let y = clamp_i32_to_u16(leaf.rect.origin.y);
-        let width = leaf.rect.size.width;
-        let height = leaf.rect.size.height;
-        let blank_line = " ".repeat(usize::from(width));
-        for row in 0..height {
-            grid.put_str(x, y + row, &blank_line);
+        let blank_line = " ".repeat(usize::from(leaf.rect.size.width));
+        for row in 0..leaf.rect.size.height {
+            grid.put_str(
+                clamp_i32_to_u16(leaf.rect.origin.x),
+                clamp_i32_to_u16(leaf.rect.origin.y).saturating_add(row),
+                &blank_line,
+            );
         }
 
-        let activity = activity_marker(leaf.activity);
-        let title = truncate(
-            &format!(
-                "{}{} {}",
-                if leaf.focused { '>' } else { ' ' },
-                activity,
-                leaf.title
-            ),
-            width,
-        );
-        grid.put_str_styled(x, y, &title, leaf_title_style(leaf.focused));
+        if let Some(title_rect) = leaf.title_rect {
+            let activity = activity_marker(leaf.activity);
+            let title = truncate(
+                &format!(
+                    "{}{} {}",
+                    if leaf.focused { '>' } else { ' ' },
+                    activity,
+                    leaf.title
+                ),
+                title_rect.size.width,
+            );
+            grid.put_str_styled(
+                clamp_i32_to_u16(title_rect.origin.x),
+                clamp_i32_to_u16(title_rect.origin.y),
+                &title,
+                leaf_title_style(leaf.focused),
+            );
+        }
 
-        if height <= 1 {
+        // Everything below is drawn in the content area: `y` is its first row.
+        let x = clamp_i32_to_u16(leaf.content_rect.origin.x);
+        let y = clamp_i32_to_u16(leaf.content_rect.origin.y);
+        let width = leaf.content_rect.size.width;
+        let height = leaf.content_rect.size.height;
+        if height == 0 {
             return;
         }
 
@@ -293,7 +305,7 @@ impl Renderer {
                     .map(|snapshot| snapshot.lines.as_slice())
             });
 
-        let content_rows = usize::from(height.saturating_sub(1));
+        let content_rows = usize::from(height);
         let position = view_state
             .map(|view| {
                 follow_output_position(
@@ -325,7 +337,7 @@ impl Renderer {
                 let Some(row) = u16::try_from(row).ok() else {
                     break;
                 };
-                grid.put_snapshot_line(x, y + 1 + row, width, line);
+                grid.put_snapshot_line(x, y + row, width, line);
             }
         }
 
@@ -336,7 +348,7 @@ impl Renderer {
                 render_search_overlay(
                     grid,
                     x,
-                    y + 1,
+                    y,
                     width,
                     displayed_top_line,
                     displayed_view_lines.unwrap_or(rendered_lines.unwrap_or(&[])),
@@ -347,7 +359,7 @@ impl Renderer {
                 render_selection_overlay(
                     grid,
                     x,
-                    y + 1,
+                    y,
                     width,
                     displayed_top_line,
                     displayed_view_lines.unwrap_or(rendered_lines.unwrap_or(&[])),
@@ -358,7 +370,7 @@ impl Renderer {
                 render_hints_overlay(
                     grid,
                     x,
-                    y + 1,
+                    y,
                     width,
                     content_rows,
                     displayed_top_line,
@@ -366,10 +378,15 @@ impl Renderer {
                 );
             }
             if !view_state.follow_output {
+                // On the title row, or over the content's top-right corner
+                // like tmux's position indicator.
+                let indicator_y = leaf
+                    .title_rect
+                    .map_or(y, |title| clamp_i32_to_u16(title.origin.y));
                 render_scroll_indicator(
                     grid,
                     x,
-                    y,
+                    indicator_y,
                     width,
                     view_state.scroll_top_line,
                     view_state.total_line_count,
@@ -396,7 +413,7 @@ impl Renderer {
             {
                 grid.set_cursor(Some(GridCursor {
                     x: x + cursor.column,
-                    y: y + 1 + row as u16,
+                    y: y + row as u16,
                     shape: CursorShape::Block,
                 }));
             }
@@ -412,7 +429,7 @@ impl Renderer {
                 && let Some(cursor) = snapshot.cursor
                 && cursor.position.col < width
             {
-                let cursor_y = y + 1 + cursor.position.row;
+                let cursor_y = y + cursor.position.row;
                 if cursor_y < y.saturating_add(height) {
                     grid.set_cursor(Some(GridCursor {
                         x: x + cursor.position.col,

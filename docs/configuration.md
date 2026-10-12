@@ -227,7 +227,8 @@ default.
 Panes created from the CLI are sized from the viewport the client reports to
 the server. With the bar hidden the client reports one row more than the
 screen it draws on, the row the bar would take, since the CLI does not know
-the bar is hidden and sizes panes as if it were shown.
+the bar is hidden and sizes panes as if it were shown. Whether panes have
+title rows is reported with it ([Pane titles](#pane-titles)).
 
 The default bar starts with the session name, like tmux's default
 `status-left`. A formatter set with `tabbar.set_formatter` draws the whole bar
@@ -484,3 +485,27 @@ it shows (OSC 2), when it attaches and whenever it switches sessions or the
 session is renamed, like tmux with `set-titles on` and `set-titles-string
 '#S'`. It does not restore the previous title on exit; most terminals do that
 themselves.
+
+## Pane titles
+
+Like tmux with its default `pane-border-status off`, panes have no title row:
+the program in a pane gets its whole area, and a single or zoomed pane fills
+the screen apart from the tab bar. Split panes are told apart by the one-cell
+dividers between them, which `theme.set_pane_border_color` and
+`theme.set_pane_active_border_color` color.
+
+`set_pane_titles("top")` or `set_pane_titles("bottom")` gives every pane a
+title row, showing its title, `>` on the focused pane and `+` or `!` for
+activity or a bell; the program in it then has one row fewer.
+`set_pane_titles("off")` is the default. Panes in popups keep their title row
+under the popup's frame either way.
+
+```rhai
+set_pane_titles("top");   // pane-border-status top
+```
+
+The client reports whether it shows title rows to the server along with the
+viewport it draws the session in. The `embers` CLI has no config of its own,
+so it sizes the panes it creates (`split-window`, `new-window`,
+`display-popup`) and plans `resize-pane` from what was reported, and they
+match what the client draws.

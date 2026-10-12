@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use embers_client::{
-    ClientState, FormatContext, NavigationDirection, PresentationModel, drawn_viewport,
+    ClientState, FormatContext, NavigationDirection, PaneTitles, PresentationModel, drawn_viewport,
     expand_format,
 };
 use embers_core::{NodeId, Result, Size};
@@ -39,8 +39,9 @@ pub(crate) fn session_viewport(snapshot: &SessionSnapshot) -> Size {
 }
 
 /// `snapshot`'s session laid out the way a client draws it at
-/// [`session_viewport`], with the window and tabs holding `pane_id` shown, so
-/// a pane of a window that is not current is laid out too.
+/// [`session_viewport`] with the title rows it reported, with the window and
+/// tabs holding `pane_id` shown, so a pane of a window that is not current is
+/// laid out too.
 pub(crate) fn project(
     snapshot: &SessionSnapshot,
     pane_id: NodeId,
@@ -67,7 +68,12 @@ pub(crate) fn project(
     }
     let mut state = ClientState::default();
     state.apply_session_snapshot(shown);
-    let presentation = PresentationModel::project(&state, snapshot.session.id, viewport)?;
+    let presentation = PresentationModel::project_with(
+        &state,
+        snapshot.session.id,
+        viewport,
+        PaneTitles::reported(&snapshot.session),
+    )?;
     Ok((state, presentation))
 }
 

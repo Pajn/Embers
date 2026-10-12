@@ -581,7 +581,8 @@ fn content_origin(client: &ConfiguredClient<FakeTransport>) -> (u16, u16) {
     let presentation =
         PresentationModel::project(client.client().state(), SESSION_ID, VIEWPORT).unwrap();
     let leaf = presentation.focused_leaf().unwrap();
-    (leaf.rect.origin.x as u16, leaf.rect.origin.y as u16 + 1)
+    let origin = leaf.content_rect.origin;
+    (origin.x as u16, origin.y as u16)
 }
 
 fn mouse(column: u16, row: u16, kind: MouseEventKind) -> MouseEvent {

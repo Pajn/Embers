@@ -3046,6 +3046,7 @@ impl<'a> SessionRequest<'a> {
   pub const VT_ENV_VALUE: ::flatbuffers::VOffsetT = 26;
   pub const VT_BASE_INDEX: ::flatbuffers::VOffsetT = 28;
   pub const VT_HAS_BASE_INDEX: ::flatbuffers::VOffsetT = 30;
+  pub const VT_PANE_TITLES: ::flatbuffers::VOffsetT = 32;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3067,6 +3068,7 @@ impl<'a> SessionRequest<'a> {
     if let Some(x) = args.name { builder.add_name(x); }
     builder.add_viewport_rows(args.viewport_rows);
     builder.add_viewport_cols(args.viewport_cols);
+    builder.add_pane_titles(args.pane_titles);
     builder.add_has_base_index(args.has_base_index);
     builder.add_synchronize_panes(args.synchronize_panes);
     builder.add_force(args.force);
@@ -3173,6 +3175,13 @@ impl<'a> SessionRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(SessionRequest::VT_HAS_BASE_INDEX, Some(false)).unwrap()}
   }
+  #[inline]
+  pub fn pane_titles(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(SessionRequest::VT_PANE_TITLES, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for SessionRequest<'_> {
@@ -3195,6 +3204,7 @@ impl ::flatbuffers::Verifiable for SessionRequest<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("env_value", Self::VT_ENV_VALUE, false)?
      .visit_field::<u32>("base_index", Self::VT_BASE_INDEX, false)?
      .visit_field::<bool>("has_base_index", Self::VT_HAS_BASE_INDEX, false)?
+     .visit_field::<bool>("pane_titles", Self::VT_PANE_TITLES, false)?
      .finish();
     Ok(())
   }
@@ -3214,6 +3224,7 @@ pub struct SessionRequestArgs<'a> {
     pub env_value: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub base_index: u32,
     pub has_base_index: bool,
+    pub pane_titles: bool,
 }
 impl<'a> Default for SessionRequestArgs<'a> {
   #[inline]
@@ -3233,6 +3244,7 @@ impl<'a> Default for SessionRequestArgs<'a> {
       env_value: None,
       base_index: 0,
       has_base_index: false,
+      pane_titles: false,
     }
   }
 }
@@ -3299,6 +3311,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SessionRequestBuilder<'a, 'b,
     self.fbb_.push_slot::<bool>(SessionRequest::VT_HAS_BASE_INDEX, has_base_index, false);
   }
   #[inline]
+  pub fn add_pane_titles(&mut self, pane_titles: bool) {
+    self.fbb_.push_slot::<bool>(SessionRequest::VT_PANE_TITLES, pane_titles, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SessionRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SessionRequestBuilder {
@@ -3330,6 +3346,7 @@ impl ::core::fmt::Debug for SessionRequest<'_> {
       ds.field("env_value", &self.env_value());
       ds.field("base_index", &self.base_index());
       ds.field("has_base_index", &self.has_base_index());
+      ds.field("pane_titles", &self.pane_titles());
       ds.finish()
   }
 }
@@ -5424,6 +5441,7 @@ impl<'a> SessionRecord<'a> {
   pub const VT_VIEWPORT_ROWS: ::flatbuffers::VOffsetT = 20;
   pub const VT_BASE_INDEX: ::flatbuffers::VOffsetT = 22;
   pub const VT_HAS_BASE_INDEX: ::flatbuffers::VOffsetT = 24;
+  pub const VT_PANE_TITLES: ::flatbuffers::VOffsetT = 26;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5445,6 +5463,7 @@ impl<'a> SessionRecord<'a> {
     if let Some(x) = args.name { builder.add_name(x); }
     builder.add_viewport_rows(args.viewport_rows);
     builder.add_viewport_cols(args.viewport_cols);
+    builder.add_pane_titles(args.pane_titles);
     builder.add_has_base_index(args.has_base_index);
     builder.finish()
   }
@@ -5527,6 +5546,13 @@ impl<'a> SessionRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<bool>(SessionRecord::VT_HAS_BASE_INDEX, Some(false)).unwrap()}
   }
+  #[inline]
+  pub fn pane_titles(&self) -> bool {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<bool>(SessionRecord::VT_PANE_TITLES, Some(false)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for SessionRecord<'_> {
@@ -5546,6 +5572,7 @@ impl ::flatbuffers::Verifiable for SessionRecord<'_> {
      .visit_field::<u16>("viewport_rows", Self::VT_VIEWPORT_ROWS, false)?
      .visit_field::<u32>("base_index", Self::VT_BASE_INDEX, false)?
      .visit_field::<bool>("has_base_index", Self::VT_HAS_BASE_INDEX, false)?
+     .visit_field::<bool>("pane_titles", Self::VT_PANE_TITLES, false)?
      .finish();
     Ok(())
   }
@@ -5562,6 +5589,7 @@ pub struct SessionRecordArgs<'a> {
     pub viewport_rows: u16,
     pub base_index: u32,
     pub has_base_index: bool,
+    pub pane_titles: bool,
 }
 impl<'a> Default for SessionRecordArgs<'a> {
   #[inline]
@@ -5578,6 +5606,7 @@ impl<'a> Default for SessionRecordArgs<'a> {
       viewport_rows: 0,
       base_index: 0,
       has_base_index: false,
+      pane_titles: false,
     }
   }
 }
@@ -5632,6 +5661,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> SessionRecordBuilder<'a, 'b, 
     self.fbb_.push_slot::<bool>(SessionRecord::VT_HAS_BASE_INDEX, has_base_index, false);
   }
   #[inline]
+  pub fn add_pane_titles(&mut self, pane_titles: bool) {
+    self.fbb_.push_slot::<bool>(SessionRecord::VT_PANE_TITLES, pane_titles, false);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> SessionRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     SessionRecordBuilder {
@@ -5660,6 +5693,7 @@ impl ::core::fmt::Debug for SessionRecord<'_> {
       ds.field("viewport_rows", &self.viewport_rows());
       ds.field("base_index", &self.base_index());
       ds.field("has_base_index", &self.has_base_index());
+      ds.field("pane_titles", &self.pane_titles());
       ds.finish()
   }
 }

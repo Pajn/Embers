@@ -37,7 +37,8 @@ use crate::input::{
     PROMPT_MODE, SEARCH_MODE, SELECT_MODE, TREE_MODE, resolve_key,
 };
 use crate::presentation::{
-    LeafFrame, NavigationDirection, PresentationModel, RootTabBar, StatusLineMode,
+    LayoutOptions, LeafFrame, NavigationDirection, PaneTitles, PresentationModel, RootTabBar,
+    StatusLineMode,
 };
 use crate::pty_sizes::PtySizeSync;
 use crate::renderer::Renderer;
@@ -65,16 +66,17 @@ const MAX_EVENT_BATCH: usize = 256;
 const MAX_PENDING_PASSTHROUGH_BYTES: usize = 32 * 1024 * 1024;
 
 /// Where on the host screen a passthrough write from `leaf` goes: the pane's
-/// `cursor`, clamped into the pane's content, which starts below its title row.
-/// `None` when the pane shows no content or that cell is off screen.
+/// `cursor`, clamped into the pane's content area. `None` when the pane shows
+/// no content or that cell is off screen.
 fn passthrough_cursor(
     leaf: &LeafFrame,
     cursor: CursorPosition,
     viewport: Size,
 ) -> Option<(u16, u16)> {
     let pty = leaf.pty_size()?;
-    let x = i64::from(leaf.rect.origin.x) + i64::from(cursor.col.min(pty.cols - 1));
-    let y = i64::from(leaf.rect.origin.y) + 1 + i64::from(cursor.row.min(pty.rows - 1));
+    let origin = leaf.content_rect.origin;
+    let x = i64::from(origin.x) + i64::from(cursor.col.min(pty.cols - 1));
+    let y = i64::from(origin.y) + i64::from(cursor.row.min(pty.rows - 1));
     let x = u16::try_from(x).ok().filter(|x| *x < viewport.width)?;
     let y = u16::try_from(y).ok().filter(|y| *y < viewport.height)?;
     Some((x, y))
@@ -145,9 +147,9 @@ pub struct ConfiguredClient<T> {
     previous_session_id: Option<SessionId>,
     viewport: Option<Size>,
     pty_sizes: PtySizeSync,
-    /// The viewport last reported to the server, so it is only sent again
-    /// when it changes.
-    reported_viewport: Option<(SessionId, Size)>,
+    /// The viewport and whether panes have title rows, last reported to the
+    /// server, so they are only sent again when they change.
+    reported_viewport: Option<(SessionId, Size, bool)>,
     /// The base index last reported to the server, and for which session.
     reported_base_index: Option<(SessionId, Option<u32>)>,
     /// What the server was last told about this client forwarding kitty
@@ -831,7 +833,7 @@ where
 
         let target_snapshot = self.client.state().snapshots.get(&target_leaf.buffer_id);
         let mouse_reporting = target_snapshot.is_some_and(|snapshot| snapshot.mouse_reporting);
-        let point_in_content = point.y > target_leaf.rect.origin.y;
+        let point_in_content = target_leaf.content_rect.contains(point);
 
         match event.kind {
             MouseEventKind::WheelUp | MouseEventKind::WheelDown => {
@@ -2523,7 +2525,7 @@ where
                 self.client.state(),
                 session_id,
                 presentation.viewport,
-                self.root_tab_bar(),
+                self.layout_options(),
                 placement,
             )
             .map(|size| size.with_cell_size(self.host_cell_size))
@@ -2874,14 +2876,23 @@ where
     }
 
     /// Project `session_id` the way this client draws it, with the root tab
-    /// bar where the config puts it, if it shows it.
+    /// bar and pane title rows where the config puts them.
     fn project(&self, session_id: SessionId, viewport: Size) -> Result<PresentationModel> {
         PresentationModel::project_with(
             self.client.state(),
             session_id,
             viewport,
-            self.root_tab_bar(),
+            self.layout_options(),
         )
+    }
+
+    /// How the config has sessions laid out: the root tab bar and the panes'
+    /// title rows.
+    pub fn layout_options(&self) -> LayoutOptions {
+        LayoutOptions {
+            tab_bar: self.root_tab_bar(),
+            pane_titles: self.pane_titles(),
+        }
     }
 
     /// How the config has the session's root tab bar drawn.
@@ -2891,6 +2902,11 @@ where
             position: config.tab_bar_position,
             visible: config.tab_bar_visible,
         }
+    }
+
+    /// Where the config has panes draw their title rows.
+    pub fn pane_titles(&self) -> PaneTitles {
+        self.config.active_script().loaded_config().pane_titles
     }
 
     async fn prepare_presentation(
@@ -3385,11 +3401,13 @@ where
     /// meanwhile) only leaves that PTY at its old size, so it is logged and
     /// left for a later sync to retry rather than returned.
     ///
-    /// The viewport itself is reported to the server too, so panes created
-    /// from the CLI can be spawned at the size this client will draw them.
-    /// The CLI does not know whether the root tab bar is hidden, so the
-    /// viewport reported is one in which it is shown and the panes keep
-    /// their sizes ([`PresentationModel::layout_viewport`]).
+    /// The viewport itself is reported to the server too, with whether panes
+    /// have title rows, so panes created from the CLI can be spawned at the
+    /// size this client will draw them. The CLI does not know whether the
+    /// root tab bar is hidden, so the viewport reported is one in which it is
+    /// shown and the panes keep their sizes
+    /// ([`PresentationModel::layout_viewport`]). Title rows cannot be made up
+    /// for that way, since every pane has one, so they are reported as such.
     pub async fn sync_pty_sizes(&mut self, session_id: SessionId, viewport: Size) -> Result<()> {
         let presentation = self.project(session_id, viewport)?;
         self.report_viewport(session_id, presentation.layout_viewport())
@@ -3458,7 +3476,8 @@ where
     }
 
     async fn report_viewport(&mut self, session_id: SessionId, viewport: Size) {
-        if self.reported_viewport == Some((session_id, viewport))
+        let pane_titles = self.pane_titles().shown();
+        if self.reported_viewport == Some((session_id, viewport, pane_titles))
             || viewport.width == 0
             || viewport.height == 0
         {
@@ -3470,10 +3489,11 @@ where
                 request_id: self.client.next_request_id(),
                 session_id,
                 viewport,
+                pane_titles,
             }))
             .await;
         match result {
-            Ok(_) => self.reported_viewport = Some((session_id, viewport)),
+            Ok(_) => self.reported_viewport = Some((session_id, viewport, pane_titles)),
             // Only the size of panes created later depends on it, so a
             // failure is retried on the next sync rather than returned.
             Err(error) => warn!("failed to report viewport of session {session_id}: {error}"),
@@ -4080,7 +4100,7 @@ where
             };
             let scroll_top = view_state.map(|view| view.scroll_top_line).unwrap_or(0);
             let follow = view_state.map(|view| view.follow_output).unwrap_or(true);
-            let content_rows = usize::from(leaf.rect.size.height.saturating_sub(1));
+            let content_rows = usize::from(leaf.content_rect.size.height);
             let position = crate::renderer::follow_output_position(
                 &rendered,
                 content_rows,
@@ -4890,10 +4910,11 @@ where
         if state.alternate_screen {
             return Ok(());
         }
-        let row = u64::try_from(point.y - leaf.rect.origin.y - 1).unwrap_or(0);
+        let origin = leaf.content_rect.origin;
+        let row = u64::try_from(point.y - origin.y).unwrap_or(0);
         let at = SelectionPoint {
             line: state.scroll_top_line.saturating_add(row),
-            column: u16::try_from(point.x - leaf.rect.origin.x).unwrap_or(0),
+            column: u16::try_from(point.x - origin.x).unwrap_or(0),
         };
         match self.copy.clicks.press(leaf.node_id, at, Instant::now()) {
             2 => {
@@ -4975,7 +4996,8 @@ where
             return Ok(());
         };
         let rows = i64::try_from(viewport.rows).unwrap_or(i64::MAX);
-        let row = i64::from(point.y) - i64::from(leaf.rect.origin.y) - 1;
+        let origin = leaf.content_rect.origin;
+        let row = i64::from(point.y) - i64::from(origin.y);
         let top = if row < 0 {
             viewport.top.saturating_sub(1)
         } else if row >= rows {
@@ -4983,15 +5005,13 @@ where
         } else {
             viewport.top
         };
-        let width = i64::from(leaf.rect.size.width.max(1));
+        let width = i64::from(leaf.content_rect.size.width.max(1));
         let at = SelectionPoint {
             line: top
                 .saturating_add(u64::try_from(row.clamp(0, rows - 1)).unwrap_or(0))
                 .min(viewport.total.saturating_sub(1)),
-            column: u16::try_from(
-                (i64::from(point.x) - i64::from(leaf.rect.origin.x)).clamp(0, width - 1),
-            )
-            .unwrap_or(0),
+            column: u16::try_from((i64::from(point.x) - i64::from(origin.x)).clamp(0, width - 1))
+                .unwrap_or(0),
         };
         if !drag.dragging {
             if !self.ensure_copy_cursor(drag.node_id) {
@@ -5393,8 +5413,8 @@ fn slice_display_range(line: &str, start_column: u16, end_column: u16) -> String
 }
 
 fn encode_mouse_event(leaf: &LeafFrame, event: MouseEvent) -> Result<Vec<u8>> {
-    let origin_x = clamp_origin(leaf.rect.origin.x);
-    let origin_y = clamp_origin(leaf.rect.origin.y).saturating_add(1);
+    let origin_x = clamp_origin(leaf.content_rect.origin.x);
+    let origin_y = clamp_origin(leaf.content_rect.origin.y);
     let local_column = event
         .column
         .checked_sub(origin_x)

@@ -2548,8 +2548,8 @@ Description
 
 <div group="resize_up" id="resize_up-Description" class="tabcontent"  style="display: block;" >
 Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
-See `resize_left` for which divider moves; panes keep their title row and at least
-one row of content.
+See `resize_left` for which divider moves; panes keep at least one row of content,
+and their title row if they have one.
 </div>
 
 </div>

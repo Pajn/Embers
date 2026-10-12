@@ -52,6 +52,9 @@ pub struct PersistedSession {
     /// after a restart, before a client attaches, still start at that size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Size>,
+    /// Whether that client gave each pane a title row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pane_titles: bool,
     /// The base index of the client that last showed the session, so the
     /// CLI numbers windows the same way after a restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,6 +432,7 @@ pub fn persisted_session(session: &Session) -> PersistedSession {
         focused_floating: session.focused_floating.map(|id| id.0),
         zoomed_node: session.zoomed_node.map(|id| id.0),
         viewport: session.viewport,
+        pane_titles: session.pane_titles,
         base_index: session.base_index,
         created_at_ms: timestamp_to_millis(session.created_at),
     }
@@ -444,6 +448,7 @@ pub fn restored_session(session: PersistedSession) -> Result<Session> {
         focused_floating: session.focused_floating.map(FloatingId),
         zoomed_node: session.zoomed_node.map(NodeId),
         viewport: session.viewport,
+        pane_titles: session.pane_titles,
         base_index: session.base_index,
         focus_history: Vec::new(),
         created_at: timestamp_from_millis(session.created_at_ms)?,
@@ -921,7 +926,7 @@ mod tests {
             height: 40,
         };
         state
-            .set_session_viewport(session_id, viewport)
+            .set_session_viewport(session_id, viewport, true)
             .expect("viewport is set");
         state
             .set_session_base_index(session_id, Some(1))
@@ -936,6 +941,7 @@ mod tests {
             restored.session(session_id).expect("session").viewport,
             Some(viewport)
         );
+        assert!(restored.session(session_id).expect("session").pane_titles);
         assert_eq!(
             restored.session(session_id).expect("session").base_index,
             Some(1)
@@ -1119,6 +1125,7 @@ mod tests {
                 focused_floating: None,
                 zoomed_node: None,
                 viewport: None,
+                pane_titles: false,
                 base_index: None,
                 created_at_ms: 1234,
             }],

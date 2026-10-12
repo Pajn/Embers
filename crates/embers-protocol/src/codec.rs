@@ -1190,9 +1190,13 @@ fn encode_session_request<'a>(
             0,
         ),
     };
-    let (viewport_cols, viewport_rows) = match req {
-        SessionRequest::SetViewport { viewport, .. } => (viewport.width, viewport.height),
-        _ => (0, 0),
+    let (viewport_cols, viewport_rows, pane_titles) = match req {
+        SessionRequest::SetViewport {
+            viewport,
+            pane_titles,
+            ..
+        } => (viewport.width, viewport.height, *pane_titles),
+        _ => (0, 0, false),
     };
     let base_index = match req {
         SessionRequest::SetBaseIndex { base_index, .. } => *base_index,
@@ -1232,6 +1236,7 @@ fn encode_session_request<'a>(
             env_value,
             base_index: base_index.unwrap_or(0),
             has_base_index: base_index.is_some(),
+            pane_titles,
         },
     );
 
@@ -3689,6 +3694,7 @@ fn encode_session_record<'a>(
             viewport_rows: record.viewport.map_or(0, |viewport| viewport.height),
             base_index: record.base_index.unwrap_or(0),
             has_base_index: record.base_index.is_some(),
+            pane_titles: record.pane_titles,
         },
     )
 }
@@ -4108,6 +4114,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                             width: req.viewport_cols(),
                             height: req.viewport_rows(),
                         },
+                        pane_titles: req.pane_titles(),
                     }
                 }
                 fb::SessionOp::SetEnvironment => {
@@ -5195,6 +5202,7 @@ fn decode_session_record(record: fb::SessionRecord) -> Result<SessionRecord, Pro
         )?
         .map(|(width, height)| Size { width, height }),
         base_index: record.has_base_index().then(|| record.base_index()),
+        pane_titles: record.pane_titles(),
     })
 }
 
@@ -6484,6 +6492,7 @@ mod tests {
                     zoomed_node_id: Some(NodeId(0)),
                     viewport: None,
                     base_index: None,
+                    pane_titles: false,
                 }],
             }),
         ))

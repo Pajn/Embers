@@ -617,8 +617,8 @@ fn resize_left(_: ActionApi, cells: int) -> Action;
 fn resize_right(_: ActionApi, cells: int) -> Action;
 
 /// Move the focused pane's border `cells` rows up (tmux `resize-pane -U`).
-/// See `resize_left` for which divider moves; panes keep their title row and at least
-/// one row of content.
+/// See `resize_left` for which divider moves; panes keep at least one row of content,
+/// and their title row if they have one.
 fn resize_up(_: ActionApi, cells: int) -> Action;
 
 /// Reveal a specific buffer by id.
@@ -1101,6 +1101,30 @@ fn set_detach_on_destroy(value: string) -> ();
 ///
 /// # rhai-autodocs:index:1
 fn set_leader(notation: string) -> ();
+
+/// Choose whether each pane gets a title row, and where, like tmux's
+/// `pane-border-status`. The title row shows the pane's title, `>` on the
+/// focused pane and a marker for activity (`+`) or a bell (`!`).
+///
+/// - `"off"` (the default, as in tmux): no title rows. Panes show their
+///   program in their whole area; the dividers between split panes, in
+///   the `theme.set_pane_border_color` colors, tell them apart.
+/// - `"top"` / `"bottom"`: each pane gives its top or bottom row to its
+///   title, so its program has one row fewer.
+///
+/// Panes in popups keep their title row whatever the setting. The client
+/// reports whether title rows are shown to the server with the size it
+/// draws the session at, so panes created with the `embers` CLI start at
+/// the size this client draws them.
+///
+/// # Example
+///
+/// ```rhai
+/// set_pane_titles("top");
+/// ```
+///
+/// # rhai-autodocs:index:15
+fn set_pane_titles(value: string) -> ();
 
 /// Choose the keys the command prompt and the rename prompts are edited
 /// with, like tmux's `status-keys`.

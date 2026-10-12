@@ -456,6 +456,7 @@ async fn set_viewport(server: &TestServer, session: &str, width: u16, height: u1
             request_id: new_request_id(),
             session_id,
             viewport: Size { width, height },
+            pane_titles: false,
         }))
         .await
         .expect("set viewport");
