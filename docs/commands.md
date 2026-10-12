@@ -2,8 +2,9 @@
 
 This page covers the tmux-style commands Embers offers beyond the basics in the
 [README](../README.md): the session/window/pane picker, the command prompt,
-`display-message`, session environments, how windows are numbered, and the
-client actions that go with them.
+`display-message`, session environments, how windows are numbered, the client
+actions that go with them, and [how closely the CLI follows
+tmux](#tmux-compatibility).
 
 ## Picker (choose-tree)
 
@@ -121,8 +122,10 @@ zero-based index.
 
 ### Panes
 
-Panes are addressed by id (`list-panes` prints them, and `-t <id>` selects
-one), not by a per-window index, so there is no `pane-base-index`.
+Panes have ids (`list-panes` prints them, and `-t <id>` selects one). Like
+tmux with its default `pane-base-index` of 0, `-t work:2.1` is the second pane
+of window 2, counting in `list-panes` order from 0; there is no setting to
+count from another number. See [Targets](#targets).
 
 ## Last pane
 
@@ -183,7 +186,7 @@ embers display-message -c 3 "hello"                # client 3 only (see list-cli
 embers display-message -p "#{pane_current_path}"   # print, show nothing
 ```
 
-The message is expanded for the target pane (`-t`, a pane id), or the focused
+The message is expanded for the target pane (`-t`, any [target](#targets)), or the focused
 pane of the session or client. Words after the options are joined with
 spaces. Without a message it shows `[#S] #I:#W, current pane #D -
 (#{pane_current_command})`. If no client shows the session, the command fails,
@@ -198,14 +201,32 @@ A small part of tmux's format language is supported:
 | `#S` | `#{session_name}` | session name |
 | `#I` | `#{window_index}` | window number, counting from the base index |
 | `#W` | `#{window_name}` | window title |
-| `#D` | `#{pane_id}` | pane id, as `list-panes` prints it and `-t` takes it |
+| `#D` | `#{pane_id}` | pane id, as `%N` like tmux (the pane showing buffer `N`); `-t` takes it |
+| | `#{node_id}` | the pane's layout node, as `list-panes` prints it; `-t` takes it as a plain number |
 | `#T` | `#{pane_title}` | pane title |
 | | `#{pane_current_path}` | the pane's working directory |
 | | `#{pane_current_command}` | the program in the pane's foreground, or the one it started with when that is unknown |
+| | `#{session_id}` | session id, as `$N` (a target) |
+| | `#{session_windows}` | number of windows in the session |
+| | `#{session_attached}` | number of clients showing the session (CLI only) |
+| | `#{client_name}`, `#{client_id}`, `#{client_session}` | the client's id and the name of the session it shows (`list-clients -F` only) |
+| | `#{window_id}` | window id, as `@N` (a target): the node the window shows |
+| | `#{window_active}` | 1 for the session's active window, else 0 |
+| | `#{window_panes}` | number of panes shown in the window |
+| | `#{buffer_id}` | the pane's buffer, the value of `EMBERS_BUFFER`; `-t %N` takes it |
+| | `#{pane_index}` | the pane's position in its window, from 0, as `-t :window.N` takes it |
+| | `#{pane_active}` | 1 for the session's focused pane, else 0 |
+| | `#{pane_pid}` | process id of the pane's program |
+| | `#{pane_width}`, `#{pane_height}` | the pane's size in cells |
+| | `#{pane_dead}`, `#{pane_dead_status}` | 1 when the pane's program has exited (kept by `remain-on-exit`), and its exit status |
+| | `#{pane_at_left}`, `#{pane_at_right}`, `#{pane_at_top}`, `#{pane_at_bottom}` | 1 when no pane is drawn on that side, as `select-pane -L/-R/-U/-D` sees it (CLI only) |
+| | `#{@name}` | the pane's option `@name` (see [Options](#options)), or nothing when it is not set |
 | `##` | | a literal `#` |
 
 An unknown `#{name}` expands to nothing. Conditionals, modifiers and styles
 are not supported. A pane in a popup reports the session's active window.
+Variables marked CLI only need the session's layout or client list, which the
+`embers` command looks up; the client's own formats leave them empty.
 
 From the Rhai config, `action.display_message(text)` and
 `action.display_message(text, milliseconds)` expand the same formats for the
@@ -342,3 +363,190 @@ default `x` and `&` bindings ask this way:
 bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_command("kill-pane")));
 bind("normal", "<leader>&", action.confirm("kill-window #W? (y/n)", action.run_command("kill-window")));
 ```
+
+## tmux compatibility
+
+The commands a script or tool typically sends to tmux take tmux's flags and
+targets, so the same code can drive either. Inside a pane, `EMBERS_SOCKET` and
+`EMBERS_BUFFER` play the part of `TMUX` and `TMUX_PANE`; `-t
+%$EMBERS_BUFFER` is the counterpart of `-t $TMUX_PANE`.
+
+```sh
+embers new-session -d -s review -c ~/src/app
+embers switch-client -t =review
+embers split-window -h -c '#{pane_current_path}' -P -F '#{pane_id}'
+embers display-popup -E -w 90% -h 90% -d ~/src/app -- "$EDITOR" draft.md
+embers select-pane -L
+embers capture-pane -p -S -100 -J
+```
+
+Commands still take a command to run only after `--`, as they always have:
+`new-window -- vim`, not tmux's `new-window vim`.
+
+### Targets
+
+Every `-t` takes tmux's forms:
+
+| Target | Means |
+| --- | --- |
+| `work` | session `work`, or the one session whose name starts with `work` |
+| `=work` | session `work` exactly |
+| `$3` | session id 3 (`#{session_id}`) |
+| `work:2`, `work:logs`, `work:=logs` | window 2 (counting from the base index), the window named or starting with `logs`, or named exactly `logs` |
+| `work:^`, `work:$`, `work:+`, `work:-2` | the first, last, next or second previous window |
+| `@7` | the window showing node 7 (`#{window_id}`) |
+| `work:2.1`, `:2.1`, `.1` | pane 1 (from 0) of that window, of window 2 of the current session, of the current window |
+| `:`, `work:` | the current window and pane, or those of `work` |
+| `%12` | the pane showing buffer 12 (`#{buffer_id}`, `EMBERS_BUFFER`) |
+| `12` | as a pane target, pane id 12 (`#D`, `list-panes`); as a window target, window 12 |
+
+A word without `:` names a window of the current session and, failing that, a
+session, as in tmux. A session target may name a window or pane, meaning its
+session. "Current" means the pane the command runs in, else the command
+prompt's session, else the only session. tmux's glob patterns, `{last}`/`!`
+and the pane tokens such as `{left-of}` are not supported; `kill-popup -t`
+still takes popup ids. Unlike earlier versions, `work:12` given to a pane
+command is window 12, not pane 12.
+
+### Commands
+
+| Command | Supported | Differences |
+| --- | --- | --- |
+| `new-session` | `-d`, `-A`, `-s`, `-n`, `-c`, `-x`, `-y`, `-P`, `-F`, `-- command` | See below. `new-session NAME` (no flags) is the older Embers form: an empty session, printing its id and name. |
+| `new-window` | `-t`, `-n`, `-c`, `-d`, `-P`, `-F`, `-- command` | `-t` names the session; the window is always added last. Without `-P` it prints the window's number and title. |
+| `split-window` | `-t`, `-h`, `-v`, `-c`, `-d`, `-P`, `-F`, `-- command` | Without `-h` or `-v` the new pane goes to the right (tmux: below). Without `-P` it prints the new pane's id. No `-l`, `-p`, `-b` or `-f`. |
+| `display-popup` | `-t`, `-w`, `-h`, `-x`, `-y`, `-E`, `-EE`, `-d`, `-T`, `-P`, `-F`, `-- command` | See below. |
+| `switch-client` | `-c`, `-t`, `-n`, `-p` | No `-l`: the server does not record each client's previous session. See below. |
+| `detach-client` | `-c` | Picks the client like `switch-client`. |
+| `select-pane` | `-t`, `-L`, `-R`, `-U`, `-D`, `-l` | Directional moves do not wrap around at the edge. No `-T`: pane titles come from the program. See below. |
+| `set-option`, `show-options` | `-p` only; `-t`, `-u`, `-o`, `-q`; `show-options -v` | See [Options](#options). |
+| `capture-pane` | `-t`, `-p`, `-S`, `-E`, `-J`, `-e` | See below. |
+| `list-sessions`, `list-windows`, `list-panes` | `-F`; `list-windows -a`, `list-panes -s`/`-a` | Without `-F`, Embers' tab-separated columns. |
+| `list-clients` | `-F`, `-t session` | The format expands for each client's session and focused pane, plus `#{client_name}`/`#{client_id}` (the client's id; clients have no tty name) and `#{client_session}`. Without `-F`, Embers' tab-separated columns. |
+| `has-session`, `kill-session`, `kill-window`, `kill-pane`, `rename-session`, `rename-window`, `select-window`, `send-keys`, `resize-pane`, `display-message` | `-t` with any target | `send-keys` sends its words as text, joined by spaces (`--enter` presses Enter); tmux key names such as `C-c` are not translated. |
+
+`new`, `ls`, `neww`, `lsw`, `splitw`, `lsp`, `selectp`, `capturep`, `popup`,
+`switchc`, `detach`, `set` and `show` are accepted as short names. `-h` is not help for
+`split-window` and `display-popup`; use `--help`. The global `-v` (verbose)
+goes before the command, which leaves `-v` to `split-window`.
+
+#### new-session
+
+`new-session` creates the session with a first window running the command, or
+`$SHELL`, in `-c DIR`. Like tmux it attaches unless `-d` is given, but only
+from a terminal: run from a script, it creates the session and leaves it
+detached. From inside a pane it refuses to attach (tmux: "sessions should be
+nested with care"); use `-d` and `switch-client`. From the command prompt it
+switches the client to the new session instead. `-A` attaches to an existing
+session of that name instead of failing with `duplicate session`. Without
+`-s`, sessions are named `0`, `1`, ... as in tmux. `-x` and `-y` set the size
+the session is laid out at until a client shows it.
+
+#### Working directories
+
+`-c` (and `display-popup -d`) may use formats, expanded for the pane being
+split, the pane the command runs in, or the session's focused pane, so
+`split-window -c '#{pane_current_path}'` works as in tmux. Relative
+directories are taken from where the command runs. Without `-c`, a pane
+created by a command run from a shell starts in that shell's directory, which
+is what tmux does for commands run from a shell; from the command prompt it
+starts where the server runs, as panes created by key bindings do. Embers has
+no per-session start directory, which is what tmux uses for key bindings.
+
+#### display-popup
+
+Run from a shell, `display-popup` waits until the popup closes and exits with
+its command's status, like tmux, so a tool can open an editor and read the
+file back afterwards. `--no-wait` returns at once and prints the popup id,
+which is how the command behaved before; from the command prompt and from
+`embers automation` it never waits.
+
+- The popup closes when its command exits, with or without `-E`; `-EE` keeps
+  it open when the command fails, until it is closed. tmux keeps a popup
+  without `-E` open.
+- Closing the popup (`kill-popup`, a binding) ends the wait and the command;
+  the status is then 0. A popup belongs to its session, not to a client, so a
+  client detaching does not close it and the wait goes on. If the server goes
+  away, the command fails. Interrupting the waiting command (`C-c`) leaves the
+  popup to close by itself when its command exits.
+- `-w` and `-h` are cells or a percentage of the session's view; the default is
+  half the view each way, centred, as in tmux. `-x` and `-y` place the top-left
+  corner in cells or percent, or take `C` (centre) and, for `-x`, `R` (right
+  edge). The view is the size the client showing the session last reported;
+  before any client has shown it, the size its panes add up to, else 80x24.
+- The working directory is `-d DIR`, tmux's letter. `-c DIR` is accepted too,
+  although in tmux `-c` names the client. Popups belong to sessions, so `-t`
+  picks the session through any target and there is no client option.
+- `-T` is a format. `-P` prints the popup with `-F` (default `#{popup_id}`) as
+  soon as it is shown.
+- To wait for the status, the popup's buffer is created with the
+  `remain-on-exit` option on, and the command closes the popup once it has the
+  status.
+
+#### capture-pane
+
+With any of `-p`, `-S`, `-E`, `-J` or `-e`, `capture-pane` prints like tmux
+`capture-pane -p`: the screen, or lines `-S` to `-E`, where 0 is the screen's
+first row, negative numbers go into the history and `-` is the start of the
+history or the end of the screen. `-e` keeps colours and attributes as SGR
+escape sequences. Captured lines carry no wrap flag, so `-J` joins a line to
+the next when it fills the pane's width; a line that exactly fills the width
+without wrapping is joined too. Bare `capture-pane` prints the whole history
+and screen, as it always has (tmux would store it in a paste buffer).
+
+#### switch-client, select-pane and select-window
+
+As in tmux, `switch-client -t` with a window or pane shows that window with
+that pane focused: `switch-client -t %3` moves the client to the session of
+the pane showing buffer 3, makes its window current and focuses it. A target
+with `:`, `.` or `%` is read as a pane, so `work:2` shows window 2 with the
+pane it last focused; a plain word is a session, shown as it was. The server
+changes the window and focus before it switches the client, so the client
+never shows the session's old window.
+
+`select-pane -t` and `select-window -t` never move a client. `select-pane -t`
+with a pane in a window that is not its session's current one makes it the
+pane that window focuses, but leaves the current window as it is, as tmux
+does; selecting the window then focuses the pane. `#{pane_active}` is 1 only
+for the session's focused pane, so it reads 0 for such a pane until its window
+is selected (tmux reports each window's active pane). `select-window -t
+work:2` makes window 2 current in `work`, even when the client shows another
+session.
+
+#### Options
+
+Embers keeps options on panes only, as the options of the buffer a pane
+shows. `set-option -p` and `show-options -p` work on those, so tmux scripts
+that keep their state in pane user options run unchanged:
+
+```sh
+embers set-option -p -t %3 @tria-open-socket /tmp/tria.sock
+embers list-panes -a -F '#{pane_id} #{@tria-open-socket}'
+embers show-options -p -t %3              # @tria-open-socket /tmp/tria.sock
+embers show-options -pv -t %3 @tria-open-socket
+embers set-option -pu -t %3 @tria-open-socket
+```
+
+A user option `@name` is the buffer option `name`: the one `embers buffer
+set-option name` sets, the config reads with `buffer.user_option("name")`, and
+`#{@name}` expands to. So `set-option -p @is-vim 1` and `buffer set-option
+is-vim 1` set the same option. The only other option `set-option -p` takes is
+`remain-on-exit`; any other name is an invalid option, as an unknown one is in
+tmux. Options are saved with the workspace.
+
+Windows, sessions and the server have no options: `set-option` and
+`show-options` without `-p`, or with `-w`, `-s` or `-g`, fail. `#{@name}` reads
+the pane's option in every format; `list-windows -F` and `list-sessions -F`
+read it from the pane they expand for (the focused pane, else the window's
+first), where tmux would look up a window or session option.
+`set-option -a` (append) and `-F` are not supported.
+
+#### Choosing the client
+
+`switch-client` and `detach-client` without `-c` act on the command prompt's
+client; else on `EMBERS_CLIENT`, which `run_shell` children get; else on the
+client showing the session of the pane the command runs in, the one that
+attached last when several do (tmux picks the most recently active, which
+Embers does not track); else on the only attached client. Only when none of
+these decides, because several clients are attached, does the command ask for
+`-c`.

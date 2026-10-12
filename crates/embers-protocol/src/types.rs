@@ -471,6 +471,15 @@ pub enum NodeRequest {
         request_id: RequestId,
         session_id: SessionId,
     },
+    /// Make leaf `node_id` the active pane of its window, like tmux
+    /// `select-pane -t`: focus it when its window is the session's current
+    /// one (or it is in a popup), else only make it the pane that window
+    /// focuses when it is selected, leaving the current window alone.
+    SelectPane {
+        request_id: RequestId,
+        session_id: SessionId,
+        node_id: NodeId,
+    },
     Close {
         request_id: RequestId,
         node_id: NodeId,
@@ -539,6 +548,7 @@ impl NodeRequest {
             | Self::SelectTab { request_id, .. }
             | Self::Focus { request_id, .. }
             | Self::FocusLast { request_id, .. }
+            | Self::SelectPane { request_id, .. }
             | Self::Close { request_id, .. }
             | Self::MoveBufferToNode { request_id, .. }
             | Self::Resize { request_id, .. }
@@ -660,10 +670,14 @@ pub enum ClientRequest {
         request_id: RequestId,
         client_id: Option<NonZeroU64>,
     },
+    /// Show `session_id` on the client. With `node_id`, a window (the node
+    /// a root tab shows) or pane of that session, first make it current
+    /// and focused, as tmux `switch-client -t` does for a window or pane.
     Switch {
         request_id: RequestId,
         client_id: Option<NonZeroU64>,
         session_id: SessionId,
+        node_id: Option<NodeId>,
     },
     /// tmux `display-message`: show `message` in the status line of
     /// `client_id`, or of every client whose current session is `session_id`,
@@ -891,6 +905,9 @@ pub struct NodeRecord {
     pub buffer_view: Option<BufferViewRecord>,
     pub split: Option<SplitRecord>,
     pub tabs: Option<TabsRecord>,
+    /// The pane that focusing this node lands on: the node itself for a
+    /// pane, else the pane it last focused or its first visible one.
+    pub focus_leaf_id: Option<NodeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

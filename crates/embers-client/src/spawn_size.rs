@@ -201,6 +201,7 @@ fn add_new_leaf(layout: &mut ClientState, session_id: SessionId) {
             }),
             split: None,
             tabs: None,
+            focus_leaf_id: None,
         },
     );
 }
@@ -232,6 +233,7 @@ fn split_leaf(
                 sizes: vec![1, 1],
             }),
             tabs: None,
+            focus_leaf_id: None,
         },
     );
     set_parent(layout, leaf_id, NEW_CONTAINER);
@@ -263,6 +265,7 @@ fn root_tabs(layout: &mut ClientState, session_id: SessionId) -> Option<NodeId> 
                     synchronize_panes: false,
                 }],
             }),
+            focus_leaf_id: None,
         },
     );
     set_parent(layout, root_id, NEW_CONTAINER);

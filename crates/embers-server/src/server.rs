@@ -1301,12 +1301,46 @@ impl Runtime {
                 request_id,
                 client_id,
                 session_id,
+                node_id,
             } => {
                 let target_id = client_id.map(|id| id.get()).unwrap_or(connection_id);
+                // The window and pane change before the client switches, so
+                // it never shows the session as it was, and every client of
+                // the session sees the same change.
+                let mut events = Vec::new();
+                if let Some(node_id) = node_id {
+                    if self.client_record(target_id).await.is_none() {
+                        return (
+                            mux_error_response(
+                                Some(request_id),
+                                MuxError::not_found(format!("client {target_id} was not found")),
+                            ),
+                            Vec::new(),
+                            None,
+                        );
+                    }
+                    let state = &mut *self.state.lock().await;
+                    match state
+                        .show_node(session_id, node_id)
+                        .and_then(|()| layout_changed_events(state, session_id))
+                    {
+                        Ok(layout_events) => events = layout_events,
+                        Err(error) => {
+                            return (
+                                mux_error_response(Some(request_id), error),
+                                Vec::new(),
+                                None,
+                            );
+                        }
+                    }
+                }
                 match self.set_client_session(target_id, Some(session_id)).await {
                     Ok((client, event)) => (
                         ServerResponse::Client(ClientResponse { request_id, client }),
-                        vec![event],
+                        {
+                            events.push(event);
+                            events
+                        },
                         None,
                     ),
                     Err(error) => (
@@ -2329,6 +2363,24 @@ impl Runtime {
                     Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
                 }
             }
+            embers_protocol::NodeRequest::SelectPane {
+                request_id,
+                session_id,
+                node_id,
+            } => match state
+                .select_pane(session_id, node_id)
+                .and_then(|()| layout_changed_events(&state, session_id))
+                .and_then(|events| Ok((session_snapshot(&state, session_id)?, events)))
+            {
+                Ok((snapshot, events)) => (
+                    ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+                        request_id,
+                        snapshot,
+                    }),
+                    events,
+                ),
+                Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
+            },
             embers_protocol::NodeRequest::FocusLast {
                 request_id,
                 session_id,
