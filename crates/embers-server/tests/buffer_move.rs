@@ -33,11 +33,11 @@ fn moving_buffer_between_leaves_replaces_target_and_closes_source_view() {
         .move_buffer_to_leaf(first_buffer, second_leaf)
         .expect("move buffer into target leaf");
 
+    let root_tabs = state.root_tabs(session_id).expect("root stays tabs");
     assert_eq!(
-        state.session(session_id).expect("session exists").root_node,
-        second_leaf
+        state.node_parent(second_leaf).expect("target parent"),
+        Some(root_tabs)
     );
-    assert_eq!(state.node_parent(second_leaf).expect("target parent"), None);
     match state.node(second_leaf).expect("target leaf exists") {
         Node::BufferView(view) => assert_eq!(view.buffer_id, first_buffer),
         other => panic!("expected target buffer view, got {other:?}"),

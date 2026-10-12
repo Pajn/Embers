@@ -492,8 +492,7 @@ fn insert_tab_after(_: ActionApi, tabs_node_id: int, title: string, tree: TreeSp
 /// Insert a tab after the active tab of the innermost tabs that hold the
 /// focus, and select it. When the focus is inside nested tabs, the new tab
 /// is a nested tab there, not a window; use `new_window` for tmux's
-/// `new-window`. In a session with a single window, whose root is not
-/// tabbed, the new tab becomes a second window after that one.
+/// `new-window`. Otherwise the new tab is a window, after the current one.
 ///
 /// # Example
 ///
@@ -507,8 +506,8 @@ fn insert_tab_before(_: ActionApi, tabs_node_id: int, title: string, tree: TreeS
 
 /// Insert a tab before the active tab of the innermost tabs that hold the
 /// focus, and select it. Like `insert_tab_after_current`, this makes a
-/// nested tab when the focus is in nested tabs, and a second window, before
-/// the only one, in a session with a single window.
+/// nested tab when the focus is in nested tabs, and otherwise a window,
+/// before the current one.
 fn insert_tab_before_current(_: ActionApi, title: string, tree: TreeSpec) -> Action;
 
 /// Attach a buffer at the current node.

@@ -281,14 +281,13 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    assert!(root_tabs(&closed_second.snapshot).is_none());
-    let root = root_node(&closed_second.snapshot);
-    let root_buffer = root
-        .buffer_view
-        .as_ref()
-        .expect("single remaining root window collapses to a buffer view");
-    assert_eq!(root.id, first_leaf);
-    assert_eq!(root_buffer.buffer_id, first_buffer.id);
+    // The session keeps its root tabs, listing the window left under the
+    // name it was given.
+    let tabs = root_tabs(&closed_second.snapshot).expect("one window keeps the tabs root");
+    assert_eq!(closed_second.snapshot.session.root_node_id, root_node_id);
+    assert_eq!(tabs.tabs.len(), 1);
+    assert_eq!(tabs.tabs[0].child_id, first_leaf);
+    assert_eq!(tabs.tabs[0].title, "editor");
     assert_eq!(
         get_buffer(&mut connection, second_buffer.id)
             .await
@@ -309,7 +308,7 @@ async fn create_select_rename_and_close_root_tabs_via_socket() {
         other => panic!("expected session snapshot response, got {other:?}"),
     };
     let final_tabs = root_tabs(&closed_last.snapshot)
-        .expect("closing the last implicit root window resets the empty root tabs");
+        .expect("closing the last root window leaves the root tabs empty");
     assert!(final_tabs.tabs.is_empty());
     assert_eq!(closed_last.snapshot.session.focused_leaf_id, None);
     assert_eq!(

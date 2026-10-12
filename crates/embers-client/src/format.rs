@@ -91,13 +91,7 @@ impl FormatContext {
                         .unwrap_or_default();
                     (position, name)
                 }
-                // A session without root tabs is one window named after its pane.
-                None => (
-                    0,
-                    buffer
-                        .map(|buffer| buffer.title.clone())
-                        .unwrap_or_default(),
-                ),
+                None => (0, String::new()),
             };
 
         let pane_current_command = buffer
@@ -108,10 +102,8 @@ impl FormatContext {
             .nodes
             .get(&session.root_node_id)
             .and_then(|root| root.tabs.as_ref());
-        let window_id = match root_tabs {
-            Some(tabs) => tabs.tabs.get(window_position).map(|tab| tab.child_id),
-            None => Some(session.root_node_id),
-        };
+        let window_id =
+            root_tabs.and_then(|tabs| tabs.tabs.get(window_position).map(|tab| tab.child_id));
         let window_leaves = window_id
             .map(|window_id| visible_leaves(state, window_id))
             .unwrap_or_default();
@@ -119,9 +111,9 @@ impl FormatContext {
         Some(Self {
             session_id: Some(session_id),
             window_id,
-            window_active: root_tabs.is_none_or(|tabs| tabs.active as usize == window_position),
+            window_active: root_tabs.is_some_and(|tabs| tabs.active as usize == window_position),
             window_panes: window_leaves.len(),
-            session_windows: root_tabs.map_or(1, |tabs| tabs.tabs.len()),
+            session_windows: root_tabs.map_or(0, |tabs| tabs.tabs.len()),
             buffer_id: buffer.map(|buffer| buffer.id),
             pane_index: pane_id
                 .and_then(|pane_id| window_leaves.iter().position(|leaf| *leaf == pane_id)),

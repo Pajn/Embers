@@ -133,13 +133,10 @@ fn closing_leaf_normalizes_split_and_detaches_buffer() {
 
     state.close_node(second_leaf).expect("close focused leaf");
 
-    assert_eq!(
-        state.session(session_id).expect("session exists").root_node,
-        first_leaf
-    );
+    let root_tabs = state.root_tabs(session_id).expect("root stays tabs");
     assert_eq!(
         state.node_parent(first_leaf).expect("first leaf parent"),
-        None
+        Some(root_tabs)
     );
     assert_eq!(
         state

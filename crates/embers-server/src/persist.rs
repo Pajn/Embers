@@ -853,6 +853,63 @@ mod tests {
         assert_eq!(earlier.buffers[0].last_snapshot_seq, 0);
     }
 
+    /// Earlier servers collapsed a one-window session's root tabs into the
+    /// window, and saved it that way.
+    #[test]
+    fn collapsed_one_window_root_loads_back_into_root_tabs() {
+        let tempdir = tempdir().expect("tempdir");
+        let workspace_path = tempdir.path().join("workspace.json");
+        let mut state = ServerState::new();
+        let session_id = state.create_session("main");
+        let first = state.create_buffer("editor", vec!["/bin/sh".to_owned()], None);
+        state
+            .add_root_tab_from_buffer(session_id, "one", first)
+            .expect("add window");
+        let first_view = state.session(session_id).expect("session").focused_leaf;
+        let first_view = first_view.expect("window focuses its pane");
+        let second = state.create_buffer("logs", vec!["/bin/sh".to_owned()], None);
+        let split_id = state
+            .split_leaf_with_new_buffer(first_view, SplitDirection::Vertical, second)
+            .expect("split window");
+        let root_tabs = state.root_tabs(session_id).expect("root tabs");
+
+        let mut workspace = state.to_persisted();
+        workspace
+            .nodes
+            .retain(|node| !matches!(node, PersistedNode::Tabs { id, .. } if *id == root_tabs.0));
+        for node in &mut workspace.nodes {
+            if let PersistedNode::Split { id, parent, .. } = node
+                && *id == split_id.0
+            {
+                *parent = None;
+            }
+        }
+        workspace.sessions[0].root_node = split_id.0;
+        write_workspace(
+            &workspace_path,
+            &encode_persisted_workspace(&workspace).expect("encodes"),
+        )
+        .expect("workspace saves");
+
+        let restored = load_workspace(&workspace_path)
+            .expect("collapsed workspace loads")
+            .expect("workspace exists");
+        let root_tabs = restored.root_tabs(session_id).expect("root is tabs again");
+        let Node::Tabs(tabs) = restored.node(root_tabs).expect("root tabs node") else {
+            panic!("root is not tabs");
+        };
+        assert_eq!(tabs.tabs.len(), 1);
+        assert_eq!(tabs.active, 0);
+        assert_eq!(tabs.tabs[0].child, split_id);
+        // Named after the focused pane, as the window was shown without tabs.
+        assert_eq!(tabs.tabs[0].title, "logs");
+        assert_eq!(
+            restored.node_parent(split_id).expect("window parent"),
+            Some(root_tabs)
+        );
+        restored.validate().expect("restored workspace is valid");
+    }
+
     #[test]
     fn session_viewport_round_trips_through_persistence() {
         let tempdir = tempdir().expect("tempdir");

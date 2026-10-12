@@ -91,14 +91,6 @@ fn root_tabs(snapshot: &SessionSnapshot) -> TabsRecord {
         .expect("session root snapshot includes tabs record")
 }
 
-fn root_node(snapshot: &SessionSnapshot) -> &embers_protocol::NodeRecord {
-    snapshot
-        .nodes
-        .iter()
-        .find(|node| node.id == snapshot.session.root_node_id)
-        .expect("session root snapshot includes root node")
-}
-
 fn split_record(snapshot: &SessionSnapshot, node_id: embers_core::NodeId) -> SplitRecord {
     snapshot
         .nodes
@@ -249,13 +241,21 @@ async fn focus_and_close_requests_normalize_layout_and_detach_buffers() {
         ServerResponse::SessionSnapshot(snapshot) => snapshot.snapshot,
         other => panic!("expected session snapshot response, got {other:?}"),
     };
-    let root = root_node(&closed);
-    let root_buffer = root
-        .buffer_view
-        .as_ref()
-        .expect("single remaining pane collapses to the root buffer view");
-    assert_eq!(root.id, second_leaf);
-    assert_eq!(root_buffer.buffer_id, second_buffer.id);
+    // The split collapses into its remaining pane, which stays the window.
+    let tabs = root_tabs(&closed);
+    assert_eq!(tabs.tabs.len(), 1);
+    assert_eq!(tabs.tabs[0].child_id, second_leaf);
+    assert_eq!(tabs.tabs[0].title, "one");
+    let window = closed
+        .nodes
+        .iter()
+        .find(|node| node.id == second_leaf)
+        .expect("remaining pane exists");
+    assert_eq!(window.parent_id, Some(closed.session.root_node_id));
+    assert_eq!(
+        window.buffer_view.as_ref().map(|view| view.buffer_id),
+        Some(second_buffer.id)
+    );
     assert_eq!(closed.session.focused_leaf_id, Some(second_leaf));
     assert_eq!(
         get_buffer(&mut connection, first_buffer.id)
