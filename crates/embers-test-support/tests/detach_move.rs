@@ -156,6 +156,8 @@ async fn resize_buffer(
             buffer_id,
             cols,
             rows,
+            pixel_width: 0,
+            pixel_height: 0,
         }))
         .await
         .expect("resize request succeeds");

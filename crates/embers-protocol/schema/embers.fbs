@@ -149,6 +149,7 @@ enum ClientOp : ubyte {
   Detach = 2,
   Switch = 3,
   DisplayMessage = 4,
+  SetHostGraphics = 5,
 }
 
 enum SplitDirectionWire : ubyte {
@@ -275,6 +276,8 @@ table BufferRequest {
   user_option_value:string (id: 17);
   pty_cols:ushort = 0 (id: 18);
   pty_rows:ushort = 0 (id: 19);
+  pty_pixel_width:ushort = 0 (id: 20);
+  pty_pixel_height:ushort = 0 (id: 21);
 }
 
 table NodeRequest {
@@ -326,6 +329,10 @@ table InputRequest {
   bytes:[ubyte] (id: 2);
   cols:ushort = 0 (id: 3);
   rows:ushort = 0 (id: 4);
+  // Resize: the text area in pixels, as TIOCGWINSZ reports it (0 when the
+  // client does not know its terminal's cell size).
+  pixel_width:ushort = 0 (id: 5);
+  pixel_height:ushort = 0 (id: 6);
 }
 
 table SubscribeRequest {
@@ -345,6 +352,9 @@ table ClientRequest {
   duration_ms:uint = 0;
   // Switch: the window or pane of the session to show (0 = as it is).
   node_id:ulong = 0;
+  // SetHostGraphics: whether the client forwards kitty graphics queries to a
+  // host terminal that answers them.
+  enabled:bool = false;
 }
 
 table PingResponse {
@@ -400,6 +410,8 @@ table BufferRecord {
   user_option_values:[string] (id: 23);
   // Absent while the buffer's own process is in the foreground.
   foreground_command:[string] (id: 24);
+  pty_pixel_width:ushort = 0 (id: 25);
+  pty_pixel_height:ushort = 0 (id: 26);
 }
 
 table BufferPipeRecord {
@@ -620,6 +632,10 @@ table VisibleSnapshotResponse {
   // numbering (bit 0 disambiguate, bit 3 report-all-keys; bit 4 would be
   // report-associated-text, unused here).
   keyboard_mode:ubyte = 0;
+  // Appended: the text area in pixels (0 when no client has given the PTY a
+  // pixel size).
+  pixel_width:ushort = 0;
+  pixel_height:ushort = 0;
 }
 
 table ScrollbackSliceResponse {
