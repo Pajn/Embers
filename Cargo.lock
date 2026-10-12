@@ -625,6 +625,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "embers-ghostty-gen"
+version = "0.3.3"
+
+[[package]]
 name = "embers-protocol"
 version = "0.3.3"
 dependencies = [

@@ -30,6 +30,9 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Rust `1.92` or newer
 - `flatc` from FlatBuffers `25.12.19` when changing the protocol schema
 - `mdbook` when regenerating the config API docs
+- Zig `0.16.0` when building `crates/embers-ghostty-sys`, the bindings to Ghostty's terminal
+  emulation library, and `bindgen` `0.72.1` (`bindgen-cli`) when regenerating them with
+  `cargo gen-ghostty`. The crate is outside the workspace, so the rest builds without either.
 
 Building needs only Cargo: the Rust code generated from the protocol schema
 (`crates/embers-protocol/schema/embers.fbs`) is checked in. After changing the schema, regenerate it

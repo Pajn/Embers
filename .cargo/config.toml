@@ -1,3 +1,4 @@
 [alias]
 gen-docs = "run -p embers-client --bin gen-docs --"
 gen-protocol = "run -p embers-protocol-gen --"
+gen-ghostty = "run -p embers-ghostty-gen --"

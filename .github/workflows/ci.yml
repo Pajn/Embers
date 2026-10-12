@@ -9,6 +9,10 @@ on:
 env:
   FLATBUFFERS_VERSION: 25.12.19
   FLATBUFFERS_SHA256: 9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039
+  # Keep in step with ZIG_VERSION in crates/embers-ghostty-sys/ghostty_source.rs
+  # and BINDGEN_VERSION in crates/embers-ghostty-gen.
+  ZIG_VERSION: 0.16.0
+  BINDGEN_VERSION: 0.72.1
 
 jobs:
   fmt-lint:
@@ -67,3 +71,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
         run: cargo test -p embers-test-support pty_round_trips_input -- --ignored
+
+  # embers-ghostty-sys is outside the workspace, since building it needs Zig.
+  ghostty-sys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            crates/embers-ghostty-sys
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install bindgen
+        run: cargo install bindgen-cli --version "${BINDGEN_VERSION}" --locked
+      - name: Regenerate libghostty-vt bindings
+        run: cargo gen-ghostty
+      - name: Verify checked-in libghostty-vt bindings
+        run: |
+          status="$(git status --porcelain -- crates/embers-ghostty-sys/src/bindings.rs)"
+          if [ -n "$status" ]; then
+            echo "libghostty-vt bindings are out of date after regeneration:"
+            git diff --stat -- crates/embers-ghostty-sys/src/bindings.rs
+            exit 1
+          fi
+      - name: Check formatting
+        run: cargo fmt --manifest-path crates/embers-ghostty-sys/Cargo.toml -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path crates/embers-ghostty-sys/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path crates/embers-ghostty-sys/Cargo.toml
