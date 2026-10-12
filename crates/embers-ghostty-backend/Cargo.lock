@@ -175,6 +175,7 @@ dependencies = [
  "embers-ghostty-sys",
  "embers-server",
  "proptest",
+ "serde_json",
  "unicode-segmentation",
 ]
 

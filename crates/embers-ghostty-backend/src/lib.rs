@@ -31,8 +31,11 @@ const MODE_BRACKETED_PASTE: u16 = 2004;
 
 pub struct GhosttyTerminalBackend {
     terminal: sys::GhosttyTerminal,
-    /// Only for the cursor shape, which libghostty reports nowhere else.
+    /// The viewport and cursor as of the last snapshot, read through
+    /// `row_iterator` and `row_cells`, which are kept to be reused.
     render_state: sys::GhosttyRenderState,
+    row_iterator: sys::GhosttyRenderStateRowIterator,
+    row_cells: sys::GhosttyRenderStateRowCells,
     /// Owned here and handed to libghostty's callbacks as their userdata.
     events: *mut Events,
     /// Where the replies to the output last ingested start, so a query
@@ -72,6 +75,8 @@ impl GhosttyTerminalBackend {
     pub fn new(size: PtySize, max_scrollback_lines: usize) -> Self {
         let mut terminal = ptr::null_mut();
         let mut render_state = ptr::null_mut();
+        let mut row_iterator = ptr::null_mut();
+        let mut row_cells = ptr::null_mut();
         // SAFETY: plain constructors writing to the out pointers given.
         unsafe {
             check(sys::ghostty_terminal_new(
@@ -84,6 +89,14 @@ impl GhosttyTerminalBackend {
                 ptr::null(),
                 &mut render_state,
             ));
+            check(sys::ghostty_render_state_row_iterator_new(
+                ptr::null(),
+                &mut row_iterator,
+            ));
+            check(sys::ghostty_render_state_row_cells_new(
+                ptr::null(),
+                &mut row_cells,
+            ));
         }
         let events = Box::into_raw(Box::new(Events {
             size,
@@ -92,6 +105,8 @@ impl GhosttyTerminalBackend {
         let mut backend = Self {
             terminal,
             render_state,
+            row_iterator,
+            row_cells,
             events,
             last_ingest_replies: 0,
             dirty: true,
@@ -210,17 +225,189 @@ impl GhosttyTerminalBackend {
             .unwrap_or_default()
     }
 
-    fn cols(&self) -> u16 {
-        self.get_u16(sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_COLS)
+    /// One cell anywhere on the screen, scrollback included, through a grid
+    /// ref: slower per cell than the render state, which only holds the
+    /// viewport.
+    /// Bring the render state up to date with the terminal: the viewport and
+    /// cursor read next are the terminal's now.
+    fn update_render_state(&self) {
+        // SAFETY: the render state belongs to this value, and nothing it
+        // handed out (rows, cells) outlives the reads that follow an update.
+        check(unsafe { sys::ghostty_render_state_update(self.render_state, self.terminal) });
     }
 
-    fn rows(&self) -> u16 {
-        self.get_u16(sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_ROWS)
+    /// The viewport's rows, from the render state as last updated.
+    fn viewport_rows(&self) -> Vec<Row> {
+        use sys::GhosttyRenderStateRowCellsData as Data;
+        let mut rows = Vec::new();
+        // SAFETY: the iterator and cells are this value's, populated from its
+        // render state, and read before it is updated again; every out
+        // pointer is valid for its documented type.
+        unsafe {
+            let mut iterator = self.row_iterator;
+            check(sys::ghostty_render_state_get(
+                self.render_state,
+                sys::GhosttyRenderStateData::GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                (&raw mut iterator).cast(),
+            ));
+            let mut utf8 = vec![0_u8; 64];
+            let default_style = default_style();
+            let plain = Pen::of(&default_style);
+            let mut y: u32 = 0;
+            while sys::ghostty_render_state_row_iterator_next(iterator) {
+                let mut cells = self.row_cells;
+                check(sys::ghostty_render_state_row_get(
+                    iterator,
+                    sys::GhosttyRenderStateRowData::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                    (&raw mut cells).cast(),
+                ));
+                // The row's raw cells in one call, decoded here; libghostty is
+                // only asked for what a raw cell does not hold: styles,
+                // clusters of several codepoints and links.
+                let mut view = sys::GhosttyCellsView {
+                    ptr: ptr::null(),
+                    len: 0,
+                };
+                check(sys::ghostty_render_state_row_get(
+                    iterator,
+                    sys::GhosttyRenderStateRowData::GHOSTTY_RENDER_STATE_ROW_DATA_CELLS_RAW,
+                    (&raw mut view).cast(),
+                ));
+                let raw_cells: &[sys::GhosttyCell] = if view.ptr.is_null() {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(view.ptr, view.len)
+                };
+                let mut row = Row {
+                    cells: Vec::with_capacity(raw_cells.len()),
+                    ..Row::default()
+                };
+                // Style ids are only unique within a page, and a row lives in
+                // one, so a style is reused only within its row.
+                let mut last_pen: Option<(sys::GhosttyStyleId, Pen)> = None;
+                for (x, &raw) in raw_cells.iter().enumerate() {
+                    let x = u16::try_from(x).unwrap_or(u16::MAX);
+                    let fields = RawCell::decode(raw);
+                    let pen = match last_pen {
+                        _ if !fields.has_styling => plain,
+                        Some((id, pen)) if id == fields.style_id => pen,
+                        _ => {
+                            let mut style = default_style;
+                            check(sys::ghostty_render_state_row_cells_select(cells, x));
+                            check(sys::ghostty_render_state_row_cells_get(
+                                cells,
+                                Data::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+                                (&raw mut style).cast(),
+                            ));
+                            let pen = Pen::of(&style);
+                            last_pen = Some((fields.style_id, pen));
+                            pen
+                        }
+                    };
+
+                    let text = match fields.single_char() {
+                        Some(text) => text,
+                        None => {
+                            check(sys::ghostty_render_state_row_cells_select(cells, x));
+                            let mut cluster = String::new();
+                            loop {
+                                let mut buffer = sys::GhosttyBuffer {
+                                    ptr: utf8.as_mut_ptr(),
+                                    cap: utf8.len(),
+                                    len: 0,
+                                };
+                                let result = sys::ghostty_render_state_row_cells_get(
+                                    cells,
+                                    Data::GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_UTF8,
+                                    (&raw mut buffer).cast(),
+                                );
+                                if result == sys::GhosttyResult::GHOSTTY_OUT_OF_SPACE {
+                                    utf8.resize(buffer.len, 0);
+                                    continue;
+                                }
+                                if result == sys::GhosttyResult::GHOSTTY_SUCCESS {
+                                    cluster.push_str(&String::from_utf8_lossy(&utf8[..buffer.len]));
+                                }
+                                break;
+                            }
+                            row.cluster(cluster)
+                        }
+                    };
+
+                    // The render state holds no hyperlinks; the few linked
+                    // cells are looked up on the terminal.
+                    let link = if fields.has_link {
+                        let uri = self.viewport_link(x, y);
+                        row.link(uri)
+                    } else {
+                        0
+                    };
+                    row.cells.push(CellView::new(&fields, pen, text, link));
+                }
+                rows.push(row);
+                y += 1;
+            }
+        }
+        rows
     }
 
-    fn cell(&self, tag: sys::GhosttyPointTag::Type, x: u16, y: u32) -> Option<CellView> {
+    /// The rows from `start` to `end`, counted from the top of the
+    /// scrollback, read a viewport at a time through the render state, which
+    /// is many times faster than a cell at a time through grid refs.
+    ///
+    /// Scrolls libghostty's viewport there and back to the bottom, where
+    /// Embers keeps it: Embers scrolls its own copies of the screen, never
+    /// libghostty's.
+    fn screen_rows(&self, start: u64, end: u64) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let mut line = start;
+        while line < end {
+            self.scroll_viewport(
+                sys::GhosttyTerminalScrollViewportTag::GHOSTTY_SCROLL_VIEWPORT_ROW,
+                sys::GhosttyTerminalScrollViewportValue {
+                    row: usize::try_from(line).unwrap_or(usize::MAX),
+                },
+            );
+            self.update_render_state();
+            // Near the bottom the viewport stops short of `line`.
+            let top = self.scrollbar().offset;
+            let page = self.viewport_rows();
+            let page_end = top + page.len() as u64;
+            if page_end <= line {
+                break;
+            }
+            rows.extend(
+                page.into_iter()
+                    .skip(usize::try_from(line - top).unwrap_or(usize::MAX))
+                    .take(usize::try_from(end - line).unwrap_or(usize::MAX)),
+            );
+            line = page_end;
+        }
+        self.scroll_viewport(
+            sys::GhosttyTerminalScrollViewportTag::GHOSTTY_SCROLL_VIEWPORT_BOTTOM,
+            sys::GhosttyTerminalScrollViewportValue { row: 0 },
+        );
+        rows
+    }
+
+    fn scroll_viewport(
+        &self,
+        tag: sys::GhosttyTerminalScrollViewportTag::Type,
+        value: sys::GhosttyTerminalScrollViewportValue,
+    ) {
+        // SAFETY: a plain call on the terminal this value owns; nothing read
+        // from the render state is held across it.
+        unsafe {
+            sys::ghostty_terminal_scroll_viewport(
+                self.terminal,
+                sys::GhosttyTerminalScrollViewport { tag, value },
+            );
+        }
+    }
+
+    fn viewport_link(&self, x: u16, y: u32) -> Option<String> {
         let point = sys::GhosttyPoint {
-            tag,
+            tag: sys::GhosttyPointTag::GHOSTTY_POINT_TAG_VIEWPORT,
             value: sys::GhosttyPointValue {
                 coordinate: sys::GhosttyPointCoordinate { x, y },
             },
@@ -229,226 +416,93 @@ impl GhosttyTerminalBackend {
             size: size_of::<sys::GhosttyGridRef>(),
             ..Default::default()
         };
-        // SAFETY: the grid ref is read before any further terminal call and
-        // every out pointer is valid for its documented type.
+        // SAFETY: the grid ref is read straight away, before any other
+        // terminal call.
         unsafe {
-            if sys::ghostty_terminal_grid_ref(self.terminal, point, &mut grid_ref)
-                != sys::GhosttyResult::GHOSTTY_SUCCESS
+            (sys::ghostty_terminal_grid_ref(self.terminal, point, &mut grid_ref)
+                == sys::GhosttyResult::GHOSTTY_SUCCESS)
+                .then(|| hyperlink_uri(&grid_ref))
+                .flatten()
+        }
+    }
+
+    /// The cursor, from the render state as last updated.
+    fn render_state_cursor(&self) -> Option<CursorState> {
+        use sys::GhosttyRenderStateData as Data;
+        // SAFETY: each output type is the one documented for its data.
+        unsafe {
+            let get = |data, out: *mut c_void| {
+                sys::ghostty_render_state_get(self.render_state, data, out)
+                    == sys::GhosttyResult::GHOSTTY_SUCCESS
+            };
+            let mut visible = false;
+            let mut in_viewport = false;
+            if !get(
+                Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
+                (&raw mut visible).cast(),
+            ) || !visible
+                || !get(
+                    Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+                    (&raw mut in_viewport).cast(),
+                )
+                || !in_viewport
             {
                 return None;
             }
-            let mut cell: sys::GhosttyCell = 0;
-            check(sys::ghostty_grid_ref_cell(&grid_ref, &mut cell));
-            let wide: sys::GhosttyCellWide::Type =
-                cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_WIDE);
-            let tag: sys::GhosttyCellContentTag::Type =
-                cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_CONTENT_TAG);
-
-            let has_styling: bool =
-                cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_HAS_STYLING);
-            let has_text: bool = cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_HAS_TEXT);
-            let has_link: bool =
-                cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_HAS_HYPERLINK);
-
-            let mut style = sys::GhosttyStyle {
-                size: size_of::<sys::GhosttyStyle>(),
-                ..Default::default()
+            let (mut x, mut y, mut wide_tail) = (0_u16, 0_u16, false);
+            let mut style = sys::GhosttyRenderStateCursorVisualStyle::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
+            get(
+                Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X,
+                (&raw mut x).cast(),
+            );
+            get(
+                Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y,
+                (&raw mut y).cast(),
+            );
+            get(
+                Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_WIDE_TAIL,
+                (&raw mut wide_tail).cast(),
+            );
+            get(
+                Data::GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
+                (&raw mut style).cast(),
+            );
+            use sys::GhosttyRenderStateCursorVisualStyle as Style;
+            let shape = match style {
+                Style::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => CursorShape::Beam,
+                Style::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => CursorShape::Underline,
+                _ => CursorShape::Block,
             };
-            if has_styling {
-                check(sys::ghostty_grid_ref_style(&grid_ref, &mut style));
-            } else {
-                sys::ghostty_style_default(&mut style);
-            }
-            let mut bg = style_color(style.bg_color);
-            // A blank cell erased in a background color holds the color
-            // instead of a style.
-            if tag == sys::GhosttyCellContentTag::GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE {
-                let index: sys::GhosttyColorPaletteIndex =
-                    cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_COLOR_PALETTE);
-                bg = TermColor::Indexed(index);
-            } else if tag == sys::GhosttyCellContentTag::GHOSTTY_CELL_CONTENT_BG_COLOR_RGB {
-                let rgb: sys::GhosttyColorRgb =
-                    cell_get(cell, sys::GhosttyCellData::GHOSTTY_CELL_DATA_COLOR_RGB);
-                bg = TermColor::Rgb {
-                    r: rgb.r,
-                    g: rgb.g,
-                    b: rgb.b,
-                };
-            }
-
-            let mut codepoints = [0_u32; 16];
-            let mut len = 0;
-            let mut text = String::new();
-            if has_text
-                && sys::ghostty_grid_ref_graphemes(
-                    &grid_ref,
-                    codepoints.as_mut_ptr(),
-                    codepoints.len(),
-                    &mut len,
-                ) == sys::GhosttyResult::GHOSTTY_SUCCESS
-            {
-                text.extend(codepoints[..len].iter().filter_map(|&c| char::from_u32(c)));
-            }
-
-            let link = if has_link {
-                hyperlink_uri(&grid_ref)
-            } else {
-                None
-            };
-
-            Some(CellView {
-                wide,
-                text,
-                fg: style_color(style.fg_color),
-                bg,
-                underline_color: style_color(style.underline_color),
-                attrs: style_attrs(&style),
-                link,
+            Some(CursorState {
+                // On the right half of a wide character, the cursor is drawn
+                // on the character.
+                position: CursorPosition {
+                    row: y,
+                    col: if wide_tail { x.saturating_sub(1) } else { x },
+                },
+                shape,
             })
         }
     }
 
-    fn row(&self, tag: sys::GhosttyPointTag::Type, y: u32) -> Vec<CellView> {
-        (0..self.cols())
-            .map_while(|x| self.cell(tag, x, y))
-            .collect()
-    }
-
-    /// One row as a snapshot line, the way the alacritty backend builds one.
-    fn styled_line(&self, tag: sys::GhosttyPointTag::Type, y: u32) -> SnapshotLine {
-        let cells = self.row(tag, y);
-        let content_len = cells
-            .iter()
-            .rposition(|cell| cell.shows())
-            .map_or(0, |last| last + 1);
-
-        let mut text = String::new();
-        let mut runs: Vec<StyledRun> = Vec::new();
-        let mut links: Vec<Hyperlink> = Vec::new();
-        let mut styled = false;
-        for column in 0..content_len {
-            let cell = &cells[column];
-            let blank = match cell.wide {
-                sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_HEAD => continue,
-                sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_TAIL => {
-                    let covered = column.checked_sub(1).is_some_and(|left| {
-                        cells[left].wide == sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE
-                    });
-                    if covered {
-                        continue;
-                    }
-                    true
-                }
-                sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE => {
-                    cells.get(column + 1).is_none_or(|right| {
-                        right.wide != sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_TAIL
-                    })
-                }
-                _ => false,
-            };
-
-            let start = text.len();
-            if blank || cell.text.is_empty() {
-                text.push(' ');
-            } else {
-                text.push_str(&cell.text);
-            }
-            let len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
-
-            let link = match &cell.link {
-                None => 0,
-                Some(uri) => {
-                    let position = links.iter().position(|known| known.uri == *uri);
-                    let index = position.unwrap_or_else(|| {
-                        links.push(Hyperlink {
-                            id: None,
-                            uri: uri.clone(),
-                        });
-                        links.len() - 1
-                    });
-                    u16::try_from(index + 1).unwrap_or(u16::MAX)
-                }
-            };
-            if cell.fg != TermColor::Default
-                || cell.bg != TermColor::Default
-                || cell.attrs != CellAttrs::empty()
-                || cell.underline_color != TermColor::Default
-                || link != 0
-            {
-                styled = true;
-            }
-            match runs.last_mut() {
-                Some(last)
-                    if last.fg == cell.fg
-                        && last.bg == cell.bg
-                        && last.attrs == cell.attrs
-                        && last.underline_color == cell.underline_color
-                        && last.link == link =>
-                {
-                    last.len += len;
-                }
-                _ => runs.push(StyledRun {
-                    len,
-                    fg: cell.fg,
-                    bg: cell.bg,
-                    attrs: cell.attrs,
-                    underline_color: cell.underline_color,
-                    link,
-                }),
-            }
-        }
-        if !styled {
-            runs.clear();
-        }
-        SnapshotLine { text, runs, links }
-    }
-
     fn cursor_state(&self) -> Option<CursorState> {
-        // SAFETY: cursor visibility's output type is bool.
-        let visible: bool =
-            unsafe { self.get(sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE) }
-                .unwrap_or(false);
-        if !visible {
-            return None;
+        self.update_render_state();
+        self.render_state_cursor()
+    }
+
+    fn metadata_with(&self, cursor: Option<CursorState>) -> BackendMetadata {
+        let modes = self.terminal_modes();
+        BackendMetadata {
+            title: self.string(sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_TITLE),
+            viewport_top_line: self.scrollbar().offset,
+            total_lines: self.total_lines(),
+            alternate_screen: modes.alternate_screen,
+            mouse_reporting: modes.mouse_reporting,
+            focus_reporting: modes.focus_reporting,
+            bracketed_paste: modes.bracketed_paste,
+            keyboard_mode: modes.keyboard_mode,
+            cursor,
         }
-        let mut position = self.cursor_position();
-        // On the right half of a wide character, the cursor is drawn on the
-        // character.
-        if position.col > 0 {
-            let y = u32::from(position.row);
-            let tag = sys::GhosttyPointTag::GHOSTTY_POINT_TAG_ACTIVE;
-            let on_tail = self.cell(tag, position.col, y).is_some_and(|cell| {
-                cell.wide == sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_TAIL
-            });
-            let left_wide = self
-                .cell(tag, position.col - 1, y)
-                .is_some_and(|cell| cell.wide == sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE);
-            if on_tail && left_wide {
-                position.col -= 1;
-            }
-        }
-        let mut style: sys::GhosttyRenderStateCursorVisualStyle::Type =
-            sys::GhosttyRenderStateCursorVisualStyle::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
-        // SAFETY: the render state belongs to this value and is only updated
-        // here; the cursor style's output type is the visual style enum.
-        unsafe {
-            check(sys::ghostty_render_state_update(
-                self.render_state,
-                self.terminal,
-            ));
-            check(sys::ghostty_render_state_get(
-                self.render_state,
-                sys::GhosttyRenderStateData::GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
-                (&raw mut style).cast(),
-            ));
-        }
-        use sys::GhosttyRenderStateCursorVisualStyle as Style;
-        let shape = match style {
-            Style::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => CursorShape::Beam,
-            Style::GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => CursorShape::Underline,
-            _ => CursorShape::Block,
-        };
-        Some(CursorState { position, shape })
     }
 
     fn terminal_modes(&self) -> TerminalModes {
@@ -492,6 +546,8 @@ impl Drop for GhosttyTerminalBackend {
         // SAFETY: each handle was created in `new` and is freed once; the
         // terminal goes before the events its callbacks point to.
         unsafe {
+            sys::ghostty_render_state_row_cells_free(self.row_cells);
+            sys::ghostty_render_state_row_iterator_free(self.row_iterator);
             sys::ghostty_render_state_free(self.render_state);
             sys::ghostty_terminal_free(self.terminal);
             drop(Box::from_raw(self.events));
@@ -533,15 +589,14 @@ impl TerminalBackend for GhosttyTerminalBackend {
         size: PtySize,
         cwd: Option<PathBuf>,
     ) -> TerminalSnapshot {
-        let metadata = self.metadata();
-        let tag = sys::GhosttyPointTag::GHOSTTY_POINT_TAG_VIEWPORT;
+        // One update for both the cursor and the rows.
+        self.update_render_state();
+        let metadata = self.metadata_with(self.render_state_cursor());
         TerminalSnapshot {
             sequence,
             size,
             cursor: metadata.cursor,
-            lines: (0..u32::from(self.rows()))
-                .map(|y| self.styled_line(tag, y))
-                .collect(),
+            lines: self.viewport_rows().iter().map(snapshot_line).collect(),
             title: metadata.title,
             cwd,
             viewport_top_line: metadata.viewport_top_line,
@@ -557,9 +612,11 @@ impl TerminalBackend for GhosttyTerminalBackend {
     }
 
     fn capture_scrollback(&self) -> Vec<String> {
-        let tag = sys::GhosttyPointTag::GHOSTTY_POINT_TAG_SCREEN;
-        let total = u32::try_from(self.total_lines()).unwrap_or(u32::MAX);
-        let mut lines: Vec<String> = (0..total).map(|y| self.styled_line(tag, y).text).collect();
+        let mut lines: Vec<String> = self
+            .screen_rows(0, self.total_lines())
+            .iter()
+            .map(|row| snapshot_line(row).text)
+            .collect();
         while matches!(lines.last(), Some(last) if last.is_empty()) {
             lines.pop();
         }
@@ -572,29 +629,19 @@ impl TerminalBackend for GhosttyTerminalBackend {
         let end_line = start_line
             .saturating_add(u64::from(line_count))
             .min(total_lines);
-        let tag = sys::GhosttyPointTag::GHOSTTY_POINT_TAG_SCREEN;
         BackendScrollbackSlice {
             start_line,
             total_lines,
-            lines: (start_line..end_line)
-                .map(|line| self.styled_line(tag, u32::try_from(line).unwrap_or(u32::MAX)))
+            lines: self
+                .screen_rows(start_line, end_line)
+                .iter()
+                .map(snapshot_line)
                 .collect(),
         }
     }
 
     fn metadata(&self) -> BackendMetadata {
-        let modes = self.terminal_modes();
-        BackendMetadata {
-            title: self.string(sys::GhosttyTerminalData::GHOSTTY_TERMINAL_DATA_TITLE),
-            viewport_top_line: self.scrollbar().offset,
-            total_lines: self.total_lines(),
-            alternate_screen: modes.alternate_screen,
-            mouse_reporting: modes.mouse_reporting,
-            focus_reporting: modes.focus_reporting,
-            bracketed_paste: modes.bracketed_paste,
-            keyboard_mode: modes.keyboard_mode,
-            cursor: self.cursor_state(),
-        }
+        self.metadata_with(self.cursor_state())
     }
 
     fn take_events(&mut self) -> BackendEvents {
@@ -676,26 +723,296 @@ impl TerminalBackend for GhosttyTerminalBackend {
     }
 }
 
-/// One cell as the snapshot needs it.
-struct CellView {
+/// A row's cells as a snapshot line, the way the alacritty backend builds one.
+fn snapshot_line(row: &Row) -> SnapshotLine {
+    let cells = &row.cells;
+    let content_len = cells
+        .iter()
+        .rposition(CellView::shows)
+        .map_or(0, |last| last + 1);
+
+    let mut text = String::with_capacity(content_len);
+    let mut runs: Vec<StyledRun> = Vec::new();
+    let mut links: Vec<Hyperlink> = Vec::new();
+    // The line's link index for each of the row's links, once used.
+    let mut line_links: Vec<u16> = vec![0; row.links.len()];
+    let mut styled = false;
+    for column in 0..content_len {
+        let cell = &cells[column];
+        let blank = match cell.wide {
+            sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_HEAD => continue,
+            sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_TAIL => {
+                let covered = column.checked_sub(1).is_some_and(|left| {
+                    cells[left].wide == sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE
+                });
+                if covered {
+                    continue;
+                }
+                true
+            }
+            sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE => {
+                cells.get(column + 1).is_none_or(|right| {
+                    right.wide != sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_SPACER_TAIL
+                })
+            }
+            _ => false,
+        };
+
+        let start = text.len();
+        if blank {
+            text.push(' ');
+        } else {
+            row.push_text(cell.text, &mut text);
+        }
+        let len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
+
+        let link = match usize::from(cell.link).checked_sub(1) {
+            None => 0,
+            Some(index) => {
+                if line_links[index] == 0 {
+                    links.push(Hyperlink {
+                        id: None,
+                        uri: row.links[index].clone(),
+                    });
+                    line_links[index] = u16::try_from(links.len()).unwrap_or(u16::MAX);
+                }
+                line_links[index]
+            }
+        };
+        let pen = cell.pen;
+        if !pen.is_plain() || link != 0 {
+            styled = true;
+        }
+        match runs.last_mut() {
+            Some(last)
+                if last.fg == pen.fg
+                    && last.bg == pen.bg
+                    && last.attrs == pen.attrs
+                    && last.underline_color == pen.underline_color
+                    && last.link == link =>
+            {
+                last.len += len;
+            }
+            _ => runs.push(StyledRun {
+                len,
+                fg: pen.fg,
+                bg: pen.bg,
+                attrs: pen.attrs,
+                underline_color: pen.underline_color,
+                link,
+            }),
+        }
+    }
+    if !styled {
+        runs.clear();
+    }
+    SnapshotLine { text, runs, links }
+}
+
+/// The parts of a raw cell the snapshot needs, read in one call.
+struct RawCell {
+    raw: sys::GhosttyCell,
     wide: sys::GhosttyCellWide::Type,
-    text: String,
+    content: sys::GhosttyCellContentTag::Type,
+    has_text: bool,
+    has_styling: bool,
+    has_link: bool,
+    codepoint: u32,
+    style_id: sys::GhosttyStyleId,
+}
+
+/// Where each field of a raw cell lies in its 64 bits, as `(lowest bit,
+/// width)`, at the pinned Ghostty commit. libghostty keeps the layout out of
+/// its ABI and describes it in `ghostty_type_json` instead; a test checks
+/// these against that description, so a new pin that moves a field fails it.
+mod cell_bits {
+    pub const CONTENT_TAG: (u32, u32) = (0, 2);
+    pub const CONTENT: (u32, u32) = (2, 24);
+    pub const CODEPOINT_WIDTH: u32 = 21;
+    pub const STYLE_ID: (u32, u32) = (26, 16);
+    pub const WIDE: (u32, u32) = (42, 2);
+    pub const HYPERLINK: (u32, u32) = (45, 1);
+}
+
+fn bits(raw: sys::GhosttyCell, (lsb, width): (u32, u32)) -> u64 {
+    (raw >> lsb) & ((1 << width) - 1)
+}
+
+impl RawCell {
+    /// Decode `raw` without calling into libghostty: reading cell by cell
+    /// through calls costs more than everything else a snapshot does.
+    fn decode(raw: sys::GhosttyCell) -> Self {
+        use sys::GhosttyCellContentTag as Content;
+        let content = bits(raw, cell_bits::CONTENT_TAG) as sys::GhosttyCellContentTag::Type;
+        let codepoint =
+            (bits(raw, cell_bits::CONTENT) & ((1 << cell_bits::CODEPOINT_WIDTH) - 1)) as u32;
+        let style_id = bits(raw, cell_bits::STYLE_ID) as sys::GhosttyStyleId;
+        Self {
+            raw,
+            wide: bits(raw, cell_bits::WIDE) as sys::GhosttyCellWide::Type,
+            content,
+            has_text: (content == Content::GHOSTTY_CELL_CONTENT_CODEPOINT
+                || content == Content::GHOSTTY_CELL_CONTENT_CODEPOINT_GRAPHEME)
+                && codepoint != 0,
+            has_styling: style_id != 0,
+            has_link: bits(raw, cell_bits::HYPERLINK) != 0,
+            codepoint,
+            style_id,
+        }
+    }
+
+    /// The cell's text, when it is a single character; a cluster of several
+    /// needs reading from where the cell lives.
+    fn single_char(&self) -> Option<CellText> {
+        if !self.has_text {
+            return Some(CellText::Empty);
+        }
+        (self.content == sys::GhosttyCellContentTag::GHOSTTY_CELL_CONTENT_CODEPOINT)
+            .then(|| char::from_u32(self.codepoint).map_or(CellText::Empty, CellText::Char))
+    }
+
+    /// The background of a blank cell erased in a background color, which
+    /// holds the color instead of a style.
+    fn erased_background(&self) -> Option<TermColor> {
+        use sys::GhosttyCellContentTag as Content;
+        let color = bits(self.raw, cell_bits::CONTENT);
+        match self.content {
+            Content::GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => Some(TermColor::Indexed(color as u8)),
+            Content::GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => Some(TermColor::Rgb {
+                r: color as u8,
+                g: (color >> 8) as u8,
+                b: (color >> 16) as u8,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn default_style() -> sys::GhosttyStyle {
+    let mut style = sys::GhosttyStyle {
+        size: size_of::<sys::GhosttyStyle>(),
+        ..Default::default()
+    };
+    // SAFETY: fills the style it is given.
+    unsafe { sys::ghostty_style_default(&mut style) };
+    style
+}
+
+/// A cell's text: most cells hold one character, which needs no allocation;
+/// a cluster of several is kept in its row's [`Row::clusters`].
+#[derive(Clone, Copy)]
+enum CellText {
+    Empty,
+    Char(char),
+    Cluster(u32),
+}
+
+/// A style as the snapshot needs it, converted once per style in a row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Pen {
     fg: TermColor,
     bg: TermColor,
     underline_color: TermColor,
     attrs: CellAttrs,
-    link: Option<String>,
 }
 
-impl CellView {
-    /// Whether the cell shows anything: a glyph other than a space, or a
-    /// background or line drawn without one.
-    fn shows(&self) -> bool {
-        (!self.text.is_empty() && self.text != " ")
-            || self.bg != TermColor::Default
+impl Pen {
+    fn of(style: &sys::GhosttyStyle) -> Self {
+        Self {
+            fg: style_color(style.fg_color),
+            bg: style_color(style.bg_color),
+            underline_color: style_color(style.underline_color),
+            attrs: style_attrs(style),
+        }
+    }
+
+    fn is_plain(&self) -> bool {
+        self.fg == TermColor::Default
+            && self.bg == TermColor::Default
+            && self.underline_color == TermColor::Default
+            && self.attrs == CellAttrs::empty()
+    }
+
+    /// Whether a cell in this pen shows without a glyph: a background, or a
+    /// line drawn through or under it.
+    fn shows_alone(&self) -> bool {
+        self.bg != TermColor::Default
             || self.attrs.contains(CellAttrs::INVERSE)
             || self.attrs.contains(CellAttrs::ANY_UNDERLINE)
             || self.attrs.contains(CellAttrs::STRIKEOUT)
+    }
+}
+
+/// One cell as the snapshot needs it.
+#[derive(Clone, Copy)]
+struct CellView {
+    wide: sys::GhosttyCellWide::Type,
+    text: CellText,
+    pen: Pen,
+    /// 1-based index into the row's [`Row::links`]; 0 for none.
+    link: u16,
+}
+
+impl CellView {
+    fn new(cell: &RawCell, pen: Pen, text: CellText, link: u16) -> Self {
+        let mut pen = pen;
+        if let Some(bg) = cell.erased_background() {
+            pen.bg = bg;
+        }
+        Self {
+            wide: cell.wide,
+            text,
+            pen,
+            link,
+        }
+    }
+
+    /// Whether the cell shows anything: a glyph other than a space, or a
+    /// background or line drawn without one.
+    fn shows(&self) -> bool {
+        let glyph = match self.text {
+            CellText::Empty => false,
+            CellText::Char(ch) => ch != ' ',
+            CellText::Cluster(_) => true,
+        };
+        glyph || self.pen.shows_alone()
+    }
+}
+
+/// A row's cells, with the clusters and link URIs they point into.
+#[derive(Default)]
+struct Row {
+    cells: Vec<CellView>,
+    clusters: Vec<String>,
+    links: Vec<String>,
+}
+
+impl Row {
+    fn cluster(&mut self, cluster: String) -> CellText {
+        self.clusters.push(cluster);
+        CellText::Cluster(u32::try_from(self.clusters.len() - 1).unwrap_or(u32::MAX))
+    }
+
+    fn link(&mut self, uri: Option<String>) -> u16 {
+        let Some(uri) = uri else {
+            return 0;
+        };
+        let index = match self.links.iter().position(|known| *known == uri) {
+            Some(index) => index,
+            None => {
+                self.links.push(uri);
+                self.links.len() - 1
+            }
+        };
+        u16::try_from(index + 1).unwrap_or(u16::MAX)
+    }
+
+    fn push_text(&self, text: CellText, out: &mut String) {
+        match text {
+            CellText::Empty => out.push(' '),
+            CellText::Char(ch) => out.push(ch),
+            CellText::Cluster(index) => out.push_str(&self.clusters[index as usize]),
+        }
     }
 }
 
@@ -767,16 +1084,6 @@ unsafe fn hyperlink_uri(grid_ref: &sys::GhosttyGridRef) -> Option<String> {
             _ => return None,
         }
     }
-}
-
-/// # Safety
-///
-/// `T` must be the output type `ghostty_cell_get` documents for `data`.
-unsafe fn cell_get<T: Default>(cell: sys::GhosttyCell, data: sys::GhosttyCellData::Type) -> T {
-    let mut out = T::default();
-    // SAFETY: as the caller promises.
-    unsafe { sys::ghostty_cell_get(cell, data, (&raw mut out).cast()) };
-    out
 }
 
 /// libghostty only fails these calls on arguments this crate gets right, so a
@@ -920,4 +1227,141 @@ unsafe fn ghostty_str(string: sys::GhosttyString) -> String {
     // SAFETY: as the caller promises.
     let bytes = unsafe { std::slice::from_raw_parts(string.ptr, string.len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// # Safety
+    ///
+    /// `T` must be the output type `ghostty_cell_get` documents for `data`.
+    unsafe fn cell_get<T: Default>(cell: sys::GhosttyCell, data: sys::GhosttyCellData::Type) -> T {
+        let mut out = T::default();
+        // SAFETY: as the caller promises.
+        unsafe { sys::ghostty_cell_get(cell, data, (&raw mut out).cast()) };
+        out
+    }
+
+    #[test]
+    fn the_cell_layout_is_the_one_libghostty_describes() {
+        // SAFETY: libghostty returns a static, NUL-terminated manifest.
+        let manifest = unsafe { std::ffi::CStr::from_ptr(sys::ghostty_type_json()) };
+        let manifest: serde_json::Value =
+            serde_json::from_slice(manifest.to_bytes()).expect("the manifest is JSON");
+        let cell = &manifest["types"]["GhosttyCell"]["bits"];
+        let field = |value: &serde_json::Value| {
+            (
+                value["lsb"].as_u64().expect("lsb") as u32,
+                value["width"].as_u64().expect("width") as u32,
+            )
+        };
+        assert_eq!(field(&cell["content_tag"]), cell_bits::CONTENT_TAG);
+        assert_eq!(field(&cell["content"]), cell_bits::CONTENT);
+        assert_eq!(
+            field(&cell["content"]["arms"]["CODEPOINT"]["bits"]["codepoint"]),
+            (0, cell_bits::CODEPOINT_WIDTH)
+        );
+        assert_eq!(field(&cell["style_id"]), cell_bits::STYLE_ID);
+        assert_eq!(field(&cell["wide"]), cell_bits::WIDE);
+        assert_eq!(field(&cell["hyperlink"]), cell_bits::HYPERLINK);
+    }
+
+    #[test]
+    fn decoded_cells_match_what_libghostty_reports() {
+        use sys::GhosttyCellData as Data;
+        let mut backend = GhosttyTerminalBackend::new(PtySize::new(12, 4), 0);
+        backend.ingest_bytes(
+            "a\x1b[1;31mb漢e\u{301}\x1b[0m\x1b]8;;https://e.example\x1b\\L\x1b]8;;\x1b\\\r\n\
+             \x1b[44m\x1b[K\r\n\x1b[48;2;1;2;3m\x1b[K\x1b[0m👍"
+                .as_bytes(),
+        );
+        let mut checked = 0;
+        for y in 0..4 {
+            for x in 0..12 {
+                let point = sys::GhosttyPoint {
+                    tag: sys::GhosttyPointTag::GHOSTTY_POINT_TAG_ACTIVE,
+                    value: sys::GhosttyPointValue {
+                        coordinate: sys::GhosttyPointCoordinate { x, y },
+                    },
+                };
+                let mut grid_ref = sys::GhosttyGridRef {
+                    size: size_of::<sys::GhosttyGridRef>(),
+                    ..Default::default()
+                };
+                // SAFETY: each output type is the one documented for its data,
+                // and the grid ref is read before any other terminal call.
+                unsafe {
+                    check(sys::ghostty_terminal_grid_ref(
+                        backend.terminal,
+                        point,
+                        &mut grid_ref,
+                    ));
+                    let mut raw: sys::GhosttyCell = 0;
+                    check(sys::ghostty_grid_ref_cell(&grid_ref, &mut raw));
+                    let decoded = RawCell::decode(raw);
+                    let at = format!("cell {x},{y}");
+                    assert_eq!(
+                        decoded.wide,
+                        cell_get::<sys::GhosttyCellWide::Type>(raw, Data::GHOSTTY_CELL_DATA_WIDE),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        decoded.content,
+                        cell_get::<sys::GhosttyCellContentTag::Type>(
+                            raw,
+                            Data::GHOSTTY_CELL_DATA_CONTENT_TAG
+                        ),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        decoded.has_text,
+                        cell_get::<bool>(raw, Data::GHOSTTY_CELL_DATA_HAS_TEXT),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        decoded.has_styling,
+                        cell_get::<bool>(raw, Data::GHOSTTY_CELL_DATA_HAS_STYLING),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        decoded.has_link,
+                        cell_get::<bool>(raw, Data::GHOSTTY_CELL_DATA_HAS_HYPERLINK),
+                        "{at}"
+                    );
+                    assert_eq!(
+                        decoded.style_id,
+                        cell_get::<sys::GhosttyStyleId>(raw, Data::GHOSTTY_CELL_DATA_STYLE_ID),
+                        "{at}"
+                    );
+                    if decoded.has_text {
+                        assert_eq!(
+                            decoded.codepoint,
+                            cell_get::<u32>(raw, Data::GHOSTTY_CELL_DATA_CODEPOINT),
+                            "{at}"
+                        );
+                    }
+                    use sys::GhosttyCellContentTag as Content;
+                    let erased = match decoded.content {
+                        Content::GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => Some(TermColor::Indexed(
+                            cell_get(raw, Data::GHOSTTY_CELL_DATA_COLOR_PALETTE),
+                        )),
+                        Content::GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+                            let rgb: sys::GhosttyColorRgb =
+                                cell_get(raw, Data::GHOSTTY_CELL_DATA_COLOR_RGB);
+                            Some(TermColor::Rgb {
+                                r: rgb.r,
+                                g: rgb.g,
+                                b: rgb.b,
+                            })
+                        }
+                        _ => None,
+                    };
+                    assert_eq!(decoded.erased_background(), erased, "{at}");
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 48);
+    }
 }

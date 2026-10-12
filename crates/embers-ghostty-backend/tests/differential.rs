@@ -7,7 +7,8 @@
 //! they cannot avoid:
 //!
 //! - Overwriting half of a wide character, alacritty fills the half left over
-//!   with the pen, Ghostty with a blank.
+//!   with the pen; Ghostty blanks it, in the current background when it was
+//!   the right half that was overwritten.
 //! - Erasing from the right half of a wide character, Ghostty erases the
 //!   whole character in the erase's background; alacritty erases from the
 //!   right half on.

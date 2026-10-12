@@ -257,3 +257,26 @@ fn scrollback_keeps_about_the_lines_asked_for() {
     let total = backend.metadata().total_lines;
     assert!((2_400..3_600).contains(&total), "{total}");
 }
+
+#[test]
+fn scrollback_slices_span_viewports_and_leave_the_screen_as_it_was() {
+    let mut backend = backend(8, 5);
+    let numbers: Vec<String> = (0..20).map(|line| format!("line {line}")).collect();
+    backend.ingest_bytes(numbers.join("\r\n").as_bytes());
+    let before = text(&backend);
+
+    let slice_text = |start, count| -> Vec<String> {
+        backend
+            .capture_scrollback_slice(start, count)
+            .lines
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
+    };
+    assert_eq!(slice_text(3, 9), numbers[3..12]);
+    assert_eq!(slice_text(17, 10), numbers[17..20]);
+    assert_eq!(backend.capture_scrollback(), numbers);
+
+    assert_eq!(text(&backend), before);
+    assert_eq!(backend.metadata().viewport_top_line, 15);
+}
