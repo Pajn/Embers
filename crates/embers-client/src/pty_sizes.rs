@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use embers_core::{BufferId, PtySize};
+use embers_core::{BufferId, CellSize, PtySize};
 use embers_protocol::{BufferRecordKind, BufferRecordState};
 
 use crate::presentation::PresentationModel;
@@ -16,6 +16,10 @@ use crate::state::ClientState;
 /// terminal resize) or after local user input, but never merely because another
 /// client resized it. That keeps two attached clients from fighting over a
 /// shared PTY on every redraw, and needs no extra server state.
+///
+/// The size includes pixels when the client knows its terminal's cell size, so
+/// a pane's PTY reports the host terminal's cell size to programs that size
+/// images by it.
 ///
 /// Hidden and detached buffers are not in the presentation, so they keep the
 /// last size they were given.
@@ -61,11 +65,13 @@ impl PtySizeSync {
         }
     }
 
-    /// The resizes to request for the leaves of `presentation`.
+    /// The resizes to request for the leaves of `presentation`, drawn on a
+    /// terminal whose cells are `cell` pixels.
     pub(crate) fn plan(
         &mut self,
         state: &ClientState,
         presentation: &PresentationModel,
+        cell: Option<CellSize>,
     ) -> Vec<(BufferId, PtySize)> {
         self.wanted
             .retain(|buffer_id, _| state.buffers.contains_key(buffer_id));
@@ -77,7 +83,11 @@ impl PtySizeSync {
             if buffer.kind != BufferRecordKind::Pty || buffer.state != BufferRecordState::Running {
                 return None;
             }
-            Some((leaf.buffer_id, leaf.pty_size()?, buffer.pty_size))
+            Some((
+                leaf.buffer_id,
+                leaf.pty_size()?.with_cell_size(cell),
+                buffer.pty_size,
+            ))
         });
         self.plan_targets(targets, Instant::now())
     }
@@ -95,7 +105,7 @@ impl PtySizeSync {
         for (buffer_id, wanted, current) in targets {
             let mut retry = false;
             if let Some(failure) = self.failed.get(&buffer_id) {
-                if !same_cells(failure.server_size, current) {
+                if failure.server_size != current {
                     // Another client resized the buffer since; its size stands.
                     self.failed.remove(&buffer_id);
                 } else if now.duration_since(failure.planned_at) < RETRY_INTERVAL {
@@ -108,8 +118,9 @@ impl PtySizeSync {
                 }
             }
             let changed = match self.wanted.insert(buffer_id, wanted) {
-                Some(previous) if !reclaim && !retry => !same_cells(previous, wanted),
-                _ => !same_cells(current, wanted),
+                Some(previous) if !reclaim && !retry => previous != wanted,
+                Some(_) => !matches_server(current, wanted),
+                None => current != wanted,
             };
             if changed {
                 self.planned.insert(
@@ -126,8 +137,16 @@ impl PtySizeSync {
     }
 }
 
-fn same_cells(left: PtySize, right: PtySize) -> bool {
-    left.cols == right.cols && left.rows == right.rows
+/// Whether the server's size for a buffer already is `wanted`. A size without
+/// pixels only has to match in cells: a server that predates pixel sizes
+/// always reports none, and must not be resized on every keystroke. A buffer
+/// first drawn without them still gets this client's, as the first sync
+/// compares whole sizes.
+fn matches_server(current: PtySize, wanted: PtySize) -> bool {
+    if current.cell_size().is_none() {
+        return current.cols == wanted.cols && current.rows == wanted.rows;
+    }
+    current == wanted
 }
 
 #[cfg(test)]
@@ -165,6 +184,59 @@ mod tests {
                 [(BUFFER, PtySize::new(100, 30), PtySize::new(80, 24))]
             ),
             vec![(BUFFER, PtySize::new(100, 30))]
+        );
+    }
+
+    fn with_cells(size: PtySize, width: u16, height: u16) -> PtySize {
+        size.with_cell_size(Some(embers_core::CellSize { width, height }))
+    }
+
+    #[test]
+    fn a_pixel_size_is_sent_with_the_cells() {
+        let mut sync = PtySizeSync::default();
+        let cells = PtySize::new(80, 24);
+        let wanted = with_cells(cells, 9, 18);
+        assert_eq!(
+            wanted,
+            PtySize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 720,
+                pixel_height: 432,
+            }
+        );
+        // The server has the cells but no pixel size, as for a pane a
+        // command line created.
+        assert_eq!(
+            plan(&mut sync, [(BUFFER, wanted, cells)]),
+            vec![(BUFFER, wanted)]
+        );
+        assert_eq!(plan(&mut sync, [(BUFFER, wanted, wanted)]), vec![]);
+
+        // The host terminal's font changes: same cells, new pixels.
+        let bigger = with_cells(cells, 10, 20);
+        assert_eq!(
+            plan(&mut sync, [(BUFFER, bigger, wanted)]),
+            vec![(BUFFER, bigger)]
+        );
+    }
+
+    #[test]
+    fn a_server_without_pixel_sizes_is_not_resized_on_every_keystroke() {
+        let mut sync = PtySizeSync::default();
+        let cells = PtySize::new(80, 24);
+        let wanted = with_cells(cells, 9, 18);
+        // A server that predates pixel sizes reports none, even after this
+        // client sent them.
+        assert_eq!(plan(&mut sync, [(BUFFER, wanted, cells)]).len(), 1);
+        sync.note_user_activity();
+        assert_eq!(plan(&mut sync, [(BUFFER, wanted, cells)]), vec![]);
+        // Activity still reclaims a size another client set with pixels.
+        sync.note_user_activity();
+        let other = with_cells(cells, 10, 20);
+        assert_eq!(
+            plan(&mut sync, [(BUFFER, wanted, other)]),
+            vec![(BUFFER, wanted)]
         );
     }
 

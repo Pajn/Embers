@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-318d4659.js";
+            window.path_to_searchindex_js = "searchindex-4b58d4c7.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -582,6 +582,10 @@ underlines take the text color.</li>
 <li><code>hyperlinks</code>: OSC 8 links. Without it links are plain text.</li>
 <li><code>passthrough</code>: sequences programs send for the terminal, such as
 images (see <code>set_allow_passthrough</code>). Without it they are dropped.</li>
+<li><code>kitty_graphics</code>: answers to kitty graphics queries. With it and
+passthrough on, a program’s replies to the queries it sends after
+one wait for the terminal’s answer, so programs that check for image
+support that way find it.</li>
 </ul>
 </div>
 

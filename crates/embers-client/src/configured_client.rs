@@ -8,13 +8,14 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardSelection, CursorPosition, CursorShape, FloatGeometry,
-    FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result, SessionId, Size,
+    ActivityState, BufferId, CellSize, ClipboardSelection, CursorPosition, CursorShape,
+    FloatGeometry, FloatingId, MuxError, NodeId, PassthroughWrite, Point, PtySize, Result,
+    SessionId, Size,
 };
 use embers_protocol::{
     BufferLocation, BufferLocationAttachment, BufferRecord, BufferRecordState, BufferRequest,
-    BufferResponse, ClientMessage, FloatingRequest, InputRequest, NodeRequest, PassthroughEvent,
-    ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
+    BufferResponse, ClientMessage, ClientRequest, FloatingRequest, InputRequest, NodeRequest,
+    PassthroughEvent, ServerEvent, ServerResponse, SessionRequest, buffer_ids_in_subtree,
 };
 
 use crate::RenderGrid;
@@ -150,6 +151,11 @@ pub struct ConfiguredClient<T> {
     reported_viewport: Option<(SessionId, Size)>,
     /// The base index last reported to the server, and for which session.
     reported_base_index: Option<(SessionId, Option<u32>)>,
+    /// What the server was last told about this client forwarding kitty
+    /// graphics queries (see [`ConfiguredClient::sync_host_graphics`]).
+    reported_host_graphics: Option<bool>,
+    /// The host terminal's cell size in pixels, when it reports one.
+    host_cell_size: Option<CellSize>,
     search_prompt: Option<SearchPrompt>,
     command_prompt: Option<CommandPrompt>,
     /// An open `confirm-before` question, shown in the status line.
@@ -205,6 +211,8 @@ where
             pty_sizes: PtySizeSync::default(),
             reported_viewport: None,
             reported_base_index: None,
+            reported_host_graphics: None,
+            host_cell_size: None,
             search_prompt: None,
             command_prompt: None,
             confirm: None,
@@ -379,6 +387,47 @@ where
                 .loaded_config()
                 .terminal_features,
         )
+    }
+
+    /// Record the host terminal's cell size in pixels, `None` when it does not
+    /// report one. Pane PTYs are given the pixel size of the cells they are
+    /// drawn in, so programs that size images by it see the host's.
+    pub fn set_host_cell_size(&mut self, cell: Option<CellSize>) {
+        self.host_cell_size = cell;
+    }
+
+    /// Tell the server whether this client forwards kitty graphics queries
+    /// from panes to a host terminal that answers them: passthrough is on and
+    /// the host answers graphics queries. While any client does, a pane's
+    /// replies to the queries it sends after a graphics query wait for the
+    /// host's answer, so programs that detect image support that way find it.
+    /// Only sent when it changes; the server assumes not until told.
+    pub async fn sync_host_graphics(&mut self) {
+        let enabled = self.passthrough_mode() != PassthroughMode::Off
+            && self.host_capabilities().kitty_graphics;
+        if self.reported_host_graphics.unwrap_or(false) == enabled {
+            return;
+        }
+        let result = self
+            .client
+            .request_message(ClientMessage::Client(ClientRequest::SetHostGraphics {
+                request_id: self.client.next_request_id(),
+                enabled,
+            }))
+            .await;
+        match result {
+            Ok(_) => self.reported_host_graphics = Some(enabled),
+            Err(error) => {
+                warn!("failed to tell the server about host graphics: {error}");
+                // A server that answered with an error, as one that predates
+                // the request does, would reject it on every frame; only the
+                // order of query replies depends on it. Otherwise a later
+                // frame tries again.
+                if matches!(error, MuxError::Wire(_)) {
+                    self.reported_host_graphics = Some(enabled);
+                }
+            }
+        }
     }
 
     /// Which panes may write to the host terminal through passthrough: the
@@ -2545,6 +2594,7 @@ where
                 self.root_tab_bar(),
                 placement,
             )
+            .map(|size| size.with_cell_size(self.host_cell_size))
         };
         match tree {
             TreeSpec::BufferCurrent => presentation
@@ -3488,7 +3538,10 @@ where
                     .set_view_drawn_rows(leaf.node_id, size.rows);
             }
         }
-        for (buffer_id, size) in self.pty_sizes.plan(self.client.state(), &presentation) {
+        for (buffer_id, size) in
+            self.pty_sizes
+                .plan(self.client.state(), &presentation, self.host_cell_size)
+        {
             let result = self
                 .client
                 .request_message(ClientMessage::Input(InputRequest::Resize {
@@ -3496,6 +3549,8 @@ where
                     buffer_id,
                     cols: size.cols,
                     rows: size.rows,
+                    pixel_width: size.pixel_width,
+                    pixel_height: size.pixel_height,
                 }))
                 .await;
             if let Err(error) = result {

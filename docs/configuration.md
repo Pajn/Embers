@@ -369,12 +369,36 @@ send their sequences unwrapped, as to a terminal of their own:
   any. tmux 3.4 and later draws sixel images into its own screen instead;
   Embers has no image store to do that. Wrapped sixel still goes through
   passthrough, and is erased by the next frame as described above.
-- **Detection.** A program that asks the terminal whether it supports kitty
-  graphics (`a=q`) and then sends a device attributes query (DA1) gets the DA1
-  answer from Embers first, before the host's answer to the graphics query
-  comes back, and usually concludes there is no image support. The late
-  answer then arrives in the pane as input (see Replies above). tmux behaves
-  the same way.
+
+### Detecting image support
+
+Programs such as yazi, chafa, timg and those built on ratatui-image find out
+whether the terminal shows kitty graphics by sending a graphics query
+(`ESC _ G i=<id>,a=q,... ESC \`) followed by queries every terminal answers,
+such as device attributes (DA1), the [cell size](#cell-size-in-pixels)
+(`CSI 16 t`) and a status report (`CSI 5 n`), and reading replies until the
+last one arrives. A terminal answers in order, so one that shows images has
+answered the graphics query by then.
+
+The graphics query goes to the host terminal through passthrough, while the
+pane answers the other queries itself. So that the answers still arrive in
+order, a pane holds its replies to the queries that follow a graphics query
+until the host's answer has reached the pane, and only when some attached
+client forwards graphics queries to a host that answers them: passthrough is
+on and the [host terminal](#the-host-terminal) has `kitty_graphics`.
+
+- **The host answers.** The program reads the host's answer, then the pane's
+  replies, as from a terminal of its own, and uses kitty graphics.
+- **No client forwards graphics queries** (passthrough is off, or the host
+  does not answer them). Nothing is held: the program gets the pane's replies
+  at once and no graphics answer, and decides there is no image support.
+- **The answer does not come**, for example because the pane is in a hidden
+  window and passthrough is `on` rather than `all`, or because another
+  client's host is the one that answers. The replies go out after half a
+  second, and the program decides there is no image support.
+
+Only queries that name their image (`i=` or `I=`) and do not ask to stay quiet
+(`q=1` or `q=2`) are waited for, since only those get an answer.
 
 ## Terminal capabilities
 
@@ -402,10 +426,23 @@ Programs that read capabilities only from terminfo still see plain
 `xterm-256color`. For those, set `TERM` in the buffer's environment to an entry
 that lists the capabilities and that is installed where the program runs.
 
+### Cell size in pixels
+
+Programs that size images to the text, such as image previewers, need the
+size of a cell in pixels. A client whose terminal reports its size in pixels
+(`TIOCGWINSZ`) gives each pane's PTY a pixel size worked out from the host
+terminal's cell size: `TIOCGWINSZ` in the pane reports the pane's text area in
+pixels, its columns and rows times the host's cell size, so a program divides
+it by the columns and rows to get the cell size. The pane answers the text area
+and cell size queries (`CSI 14 t`, `CSI 16 t`) from it. With several clients the pixel size goes with the cells,
+from the client that last sized the pane. Until a pane has a pixel size, it
+does not answer those two queries.
+
 ### The host terminal
 
 The terminal running the client is the host terminal. Underline styles,
-underline colors, OSC 8 hyperlinks and [passthrough](#passthrough) need
+underline colors, OSC 8 hyperlinks, [passthrough](#passthrough) and [answers to
+kitty graphics queries](#detecting-image-support) need
 sequences that not every host understands, and one that does not can draw them
 as garbage. So when the client attaches it finds out what the host supports
 and leaves out the rest: every underline becomes a plain one, underlines take
@@ -413,16 +450,18 @@ the text color, links become plain text and passthrough is dropped. Detection
 only decides whether passthrough is possible; it is still off until the
 config turns it on with `set_allow_passthrough`.
 
-To find out, the client writes three queries together with the sequences that
+To find out, the client writes four queries together with the sequences that
 set up the screen and enable the kitty keyboard protocol, and reads the
 replies before it draws anything:
 
 - **XTVERSION** (`CSI > 0 q`) for the host's name.
 - **XTGETTCAP** for `Smulx` and `Setulc`, the terminfo capabilities for
   underline styles and underline colors.
+- **A kitty graphics query** for a one-pixel image, the one programs send to
+  detect the protocol, with an image id of its own.
 - **DA1** (`CSI c`). Every terminal answers it, and terminals answer queries in
   order, so its reply means every other reply has arrived. Terminals that do
-  not know the first two queries ignore them.
+  not know the other queries ignore them.
 
 If no DA1 reply arrives within a second the client goes on without one. Keys
 typed while it waits are dropped. A reply to one of these queries that arrives
@@ -433,11 +472,15 @@ pane sent through passthrough and goes to that pane. Then:
 
 - A host that answered XTGETTCAP for `Smulx` or `Setulc` gets underline
   styles or underline colors.
+- A host that answered the graphics query, whether with `OK` or an error, has
+  `kitty_graphics`; one whose DA1 reply came without an answer does not.
 - A host Embers knows by name gets what it is known to support: Ghostty,
-  kitty, WezTerm, foot and Contour everything; iTerm2 hyperlinks and
-  passthrough; Alacritty underline styles, underline colors and hyperlinks.
-  The name comes from the XTVERSION reply, or without one from `TERM_PROGRAM`
-  or `TERM` (`xterm-ghostty`, `xterm-kitty`, `wezterm`, `foot`, `alacritty`).
+  kitty and WezTerm everything; foot and Contour everything but answers to
+  graphics queries; iTerm2 hyperlinks and passthrough; Alacritty underline
+  styles, underline colors and hyperlinks. The name comes from the XTVERSION
+  reply, or without one from `TERM_PROGRAM` or `TERM` (`xterm-ghostty`,
+  `xterm-kitty`, `wezterm`, `foot`, `alacritty`). The name only decides
+  `kitty_graphics` when no DA1 reply came.
 - Any other host gets the plain forms.
 
 There is no query for OSC 8, so hyperlinks depend on the host's name. When
@@ -448,8 +491,9 @@ capability on or off:
 set_terminal_features(#{ hyperlinks: true, passthrough: false });
 ```
 
-The names are `underline_styles`, `underline_color`, `hyperlinks` and
-`passthrough`. Capabilities the call does not name stay as detected.
+The names are `underline_styles`, `underline_color`, `hyperlinks`,
+`passthrough` and `kitty_graphics`. Capabilities the call does not name stay as
+detected.
 
 ### Window title
 

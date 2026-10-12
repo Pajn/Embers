@@ -1,11 +1,12 @@
 //! What the host terminal (the one running the client) supports beyond plain
 //! xterm sequences, learned when the client attaches.
 //!
-//! The client asks the terminal who it is (XTVERSION) and whether it has the
-//! terminfo capabilities for underline styles and colors (XTGETTCAP), followed
-//! by a device attributes query (DA1). Every terminal answers DA1 and answers
-//! queries in order, so the DA1 reply marks the end of the replies; terminals
-//! that do not know the first two queries just skip them. The answers, or the
+//! The client asks the terminal who it is (XTVERSION), whether it has the
+//! terminfo capabilities for underline styles and colors (XTGETTCAP) and
+//! whether it answers kitty graphics queries, followed by a device attributes
+//! query (DA1). Every terminal answers DA1 and answers queries in order, so the
+//! DA1 reply marks the end of the replies; terminals that do not know the
+//! other queries just skip them. The answers, or the
 //! environment when there are none, decide the [`HostCapabilities`], and the
 //! config can override each one (`set_terminal_features`). Replies that come
 //! after attaching stopped waiting are recognised while their query is still
@@ -27,6 +28,11 @@ pub struct HostCapabilities {
     pub hyperlinks: bool,
     /// Sequences programs in panes send for the host terminal, such as images.
     pub passthrough: bool,
+    /// Answers to kitty graphics queries (`ESC _ G ... a=q ... ESC \`) that
+    /// panes send through passthrough. With it, a pane's replies to the
+    /// queries it sends after one wait for the host's answer, so programs that
+    /// detect image support that way find it.
+    pub kitty_graphics: bool,
 }
 
 impl HostCapabilities {
@@ -35,6 +41,7 @@ impl HostCapabilities {
         underline_color: true,
         hyperlinks: true,
         passthrough: true,
+        kitty_graphics: true,
     };
 
     pub const NONE: Self = Self {
@@ -42,6 +49,7 @@ impl HostCapabilities {
         underline_color: false,
         hyperlinks: false,
         passthrough: false,
+        kitty_graphics: false,
     };
 
     /// These capabilities with the config's overrides applied.
@@ -51,6 +59,7 @@ impl HostCapabilities {
             underline_color: overrides.underline_color.unwrap_or(self.underline_color),
             hyperlinks: overrides.hyperlinks.unwrap_or(self.hyperlinks),
             passthrough: overrides.passthrough.unwrap_or(self.passthrough),
+            kitty_graphics: overrides.kitty_graphics.unwrap_or(self.kitty_graphics),
         }
     }
 }
@@ -71,15 +80,17 @@ pub struct TerminalFeatures {
     pub underline_color: Option<bool>,
     pub hyperlinks: Option<bool>,
     pub passthrough: Option<bool>,
+    pub kitty_graphics: Option<bool>,
 }
 
 impl TerminalFeatures {
     /// The names `set_terminal_features` accepts.
-    pub const NAMES: [&'static str; 4] = [
+    pub const NAMES: [&'static str; 5] = [
         "underline_styles",
         "underline_color",
         "hyperlinks",
         "passthrough",
+        "kitty_graphics",
     ];
 
     /// Set the feature called `name`; `false` when there is no such feature.
@@ -89,6 +100,7 @@ impl TerminalFeatures {
             "underline_color" => &mut self.underline_color,
             "hyperlinks" => &mut self.hyperlinks,
             "passthrough" => &mut self.passthrough,
+            "kitty_graphics" => &mut self.kitty_graphics,
             _ => return false,
         };
         *slot = Some(enabled);
@@ -97,8 +109,15 @@ impl TerminalFeatures {
 }
 
 /// What the client writes to the host terminal when it attaches: XTVERSION,
-/// XTGETTCAP for `Smulx` and `Setulc`, then DA1, whose reply comes last.
-pub const HOST_QUERIES: &str = "\x1b[>0q\x1bP+q536d756c78;536574756c63\x1b\\\x1b[c";
+/// XTGETTCAP for `Smulx` and `Setulc`, a kitty graphics query for a 1x1 image
+/// (the one programs send to detect the protocol, with
+/// [`GRAPHICS_QUERY_ID`]), then DA1, whose reply comes last.
+pub const HOST_QUERIES: &str = "\x1b[>0q\x1bP+q536d756c78;536574756c63\x1b\\\
+    \x1b_Gi=1162691154,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+
+/// The image id of the kitty graphics query in [`HOST_QUERIES`]: `EMBR` read
+/// as a number, an id programs are unlikely to use for their own queries.
+pub const GRAPHICS_QUERY_ID: u32 = 0x454d_4252;
 
 /// Longest reply to [`HOST_QUERIES`] worth reading; real ones are about 100
 /// bytes.
@@ -113,6 +132,9 @@ pub struct HostReplies {
     pub termcaps: BTreeSet<String>,
     /// Terminfo capabilities XTGETTCAP answered for, present or not.
     pub answered_termcaps: BTreeSet<String>,
+    /// Whether the kitty graphics query was answered, whether with `OK` or an
+    /// error: either way the host answers graphics queries.
+    pub kitty_graphics: bool,
     /// Whether the DA1 reply arrived, so every other reply had too.
     pub device_attributes: bool,
 }
@@ -135,6 +157,16 @@ impl HostReplies {
                         break;
                     };
                     replies.add_dcs(&bytes[body_start..body_start + length]);
+                    index = body_start + length + 2;
+                }
+                Some(b'_') => {
+                    let body_start = index + 2;
+                    let Some(length) = find(&bytes[body_start..], b"\x1b\\") else {
+                        break;
+                    };
+                    if is_graphics_query_reply(&bytes[body_start..body_start + length]) {
+                        replies.kitty_graphics = true;
+                    }
                     index = body_start + length + 2;
                 }
                 Some(b'[') => {
@@ -170,6 +202,20 @@ impl HostReplies {
                 .extend(termcap_reply_names(missing).into_iter().flatten());
         }
     }
+}
+
+/// Whether `body`, an APC string without its `ESC _` and `ESC \`, answers the
+/// kitty graphics query in [`HOST_QUERIES`]: `G`, then control data naming
+/// [`GRAPHICS_QUERY_ID`], then the message.
+fn is_graphics_query_reply(body: &[u8]) -> bool {
+    let Some(body) = body.strip_prefix(b"G") else {
+        return false;
+    };
+    let control = body.split(|&byte| byte == b';').next().unwrap_or(body);
+    let id = format!("i={GRAPHICS_QUERY_ID}");
+    control
+        .split(|&byte| byte == b',')
+        .any(|pair| pair == id.as_bytes())
 }
 
 /// The capability names in the entries of an XTGETTCAP reply
@@ -213,6 +259,8 @@ pub struct PendingAttachQueries {
     version: bool,
     /// The XTGETTCAP capabilities not answered for yet.
     termcaps: BTreeSet<String>,
+    /// The kitty graphics query.
+    kitty_graphics: bool,
     /// DA1.
     device_attributes: bool,
     /// When whatever is still outstanding stops being expected.
@@ -234,6 +282,7 @@ impl PendingAttachQueries {
                 .filter(|name| !replies.answered_termcaps.contains(**name))
                 .map(|name| (*name).to_owned())
                 .collect(),
+            kitty_graphics: !replies.kitty_graphics,
             device_attributes: true,
             until: Some(until),
         }
@@ -241,7 +290,7 @@ impl PendingAttachQueries {
 
     /// Whether no reply is expected any more.
     pub fn is_empty(&self) -> bool {
-        !self.version && self.termcaps.is_empty() && !self.device_attributes
+        !self.version && self.termcaps.is_empty() && !self.kitty_graphics && !self.device_attributes
     }
 
     /// Whether `reply`, one control sequence from the host terminal, answers
@@ -253,6 +302,12 @@ impl PendingAttachQueries {
         }
         if self.is_empty() {
             return false;
+        }
+        if let Some(body) = reply
+            .strip_prefix(b"\x1b_")
+            .and_then(|body| body.strip_suffix(b"\x1b\\"))
+        {
+            return is_graphics_query_reply(body) && std::mem::take(&mut self.kitty_graphics);
         }
         if let Some(body) = reply
             .strip_prefix(b"\x1bP")
@@ -314,8 +369,20 @@ const KNOWN_TERMINALS: &[(&str, HostCapabilities)] = &[
     ("ghostty", HostCapabilities::ALL),
     ("kitty", HostCapabilities::ALL),
     ("wezterm", HostCapabilities::ALL),
-    ("foot", HostCapabilities::ALL),
-    ("contour", HostCapabilities::ALL),
+    (
+        "foot",
+        HostCapabilities {
+            kitty_graphics: false,
+            ..HostCapabilities::ALL
+        },
+    ),
+    (
+        "contour",
+        HostCapabilities {
+            kitty_graphics: false,
+            ..HostCapabilities::ALL
+        },
+    ),
     (
         "iterm2",
         HostCapabilities {
@@ -323,6 +390,7 @@ const KNOWN_TERMINALS: &[(&str, HostCapabilities)] = &[
             underline_color: false,
             hyperlinks: true,
             passthrough: true,
+            kitty_graphics: false,
         },
     ),
     (
@@ -332,6 +400,7 @@ const KNOWN_TERMINALS: &[(&str, HostCapabilities)] = &[
             underline_color: true,
             hyperlinks: true,
             passthrough: false,
+            kitty_graphics: false,
         },
     ),
 ];
@@ -376,6 +445,12 @@ pub fn detect_host_capabilities(replies: &HostReplies, env: &HostEnvironment) ->
     HostCapabilities {
         underline_styles: known.underline_styles || replies.termcaps.contains("Smulx"),
         underline_color: known.underline_color || replies.termcaps.contains("Setulc"),
+        // The query settles it, unless the replies did not come in time.
+        kitty_graphics: if replies.device_attributes {
+            replies.kitty_graphics
+        } else {
+            known.kitty_graphics || replies.kitty_graphics
+        },
         ..known
     }
 }
@@ -427,10 +502,16 @@ mod tests {
 
     #[test]
     fn known_terminal_gets_everything_from_its_version_reply() {
-        let replies = HostReplies::parse(b"\x1bP>|kitty(0.35.2)\x1b\\\x1b[?62;c");
+        let replies =
+            HostReplies::parse(b"\x1bP>|kitty(0.35.2)\x1b\\\x1b_Gi=1162691154;OK\x1b\\\x1b[?62;c");
         // The version reply wins over a stale environment.
         let detected = detect_host_capabilities(&replies, &env("screen", Some("tmux")));
         assert_eq!(detected, HostCapabilities::ALL);
+    }
+
+    #[test]
+    fn the_graphics_query_uses_its_own_image_id() {
+        assert!(HOST_QUERIES.contains(&format!("\x1b_Gi={GRAPHICS_QUERY_ID},")));
     }
 
     #[test]
@@ -447,8 +528,39 @@ mod tests {
                 underline_color: true,
                 hyperlinks: false,
                 passthrough: false,
+                kitty_graphics: false,
             }
         );
+    }
+
+    /// The kitty graphics reply to [`HOST_QUERIES`].
+    const GRAPHICS_REPLY: &[u8] = b"\x1b_Gi=1162691154;OK\x1b\\";
+
+    #[test]
+    fn the_graphics_query_decides_kitty_graphics() {
+        // A host that answers the query, even with an error, has it.
+        for answer in [GRAPHICS_REPLY, b"\x1b_Gi=1162691154;ENOTSUPPORTED:no\x1b\\"] {
+            let mut bytes = b"\x1bP>|kitty(0.35.2)\x1b\\".to_vec();
+            bytes.extend_from_slice(answer);
+            bytes.extend_from_slice(b"\x1b[?62;c");
+            let replies = HostReplies::parse(&bytes);
+            assert!(replies.kitty_graphics);
+            assert!(detect_host_capabilities(&replies, &env("xterm-kitty", None)).kitty_graphics);
+        }
+
+        // A known name does not count once DA1 shows there was no answer; a
+        // reply for another image does not count either.
+        let replies =
+            HostReplies::parse(b"\x1bP>|ghostty 1.1.3\x1b\\\x1b_Gi=31;OK\x1b\\\x1b[?62;22c");
+        assert!(!replies.kitty_graphics);
+        let detected = detect_host_capabilities(&replies, &env("xterm-ghostty", None));
+        assert!(detected.passthrough);
+        assert!(!detected.kitty_graphics);
+
+        // Without DA1 the name decides.
+        let none = HostReplies::default();
+        assert!(detect_host_capabilities(&none, &env("xterm-ghostty", None)).kitty_graphics);
+        assert!(!detect_host_capabilities(&none, &env("foot", None)).kitty_graphics);
     }
 
     #[test]
@@ -522,7 +634,13 @@ mod tests {
         let replies = HostReplies::parse(b"\x1bP>|ghostty 1.1.3\x1b\\\x1b[?62;22c");
         let mut pending = PendingAttachQueries::after(&replies, now + Duration::from_secs(10));
         assert!(pending.is_empty());
-        for reply in [VERSION_REPLY, SMULX_REPLY, SETULC_REPLY, DA1_REPLY] {
+        for reply in [
+            VERSION_REPLY,
+            SMULX_REPLY,
+            SETULC_REPLY,
+            GRAPHICS_REPLY,
+            DA1_REPLY,
+        ] {
             assert!(!pending.take_reply(reply, now));
         }
     }
@@ -553,6 +671,8 @@ mod tests {
             assert!(!pending.take_reply(other, now));
         }
         assert!(pending.take_reply(SETULC_REPLY, now));
+        assert!(pending.take_reply(GRAPHICS_REPLY, now));
+        assert!(!pending.take_reply(GRAPHICS_REPLY, now));
         assert!(pending.take_reply(DA1_REPLY, now));
         assert!(pending.is_empty());
         assert!(!pending.take_reply(DA1_REPLY, now));
