@@ -1025,11 +1025,19 @@ impl AlacrittyTerminalBackend {
                 continue;
             }
 
-            let fg = map_color(cell.fg);
-            let bg = map_color(cell.bg);
-            let attrs = map_attrs(flags);
-            let underline_color = cell.underline_color().map_or(TermColor::Default, map_color);
-            let link = links.index_of(cell.hyperlink());
+            // What is left of a broken wide character keeps none of its style.
+            let (fg, bg, attrs, underline_color, link) = if glyph == CellGlyph::Blank {
+                let default = TermColor::Default;
+                (default, default, CellAttrs::empty(), default, 0)
+            } else {
+                (
+                    map_color(cell.fg),
+                    map_color(cell.bg),
+                    map_attrs(flags),
+                    cell.underline_color().map_or(TermColor::Default, map_color),
+                    links.index_of(cell.hyperlink()),
+                )
+            };
 
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
@@ -1406,9 +1414,10 @@ enum CellGlyph {
     /// Nothing: the cell is covered by the wide character before it, or
     /// holds the place of one wrapped to the next row.
     Covered,
-    /// A space in the cell's style: the cell is half of a wide character
-    /// whose other half was overwritten or erased. The emulator keeps the
-    /// half that is left, but a terminal shows neither, as xterm does.
+    /// A plain space: the cell is half of a wide character whose other half
+    /// was overwritten or erased. The emulator keeps the half that is left,
+    /// with its style, but a terminal shows neither half, and Ghostty clears
+    /// the half that is left to a blank cell.
     Blank,
 }
 

@@ -98,9 +98,10 @@ fn terminal() -> (Term<VoidListener>, ansi::Processor) {
 /// The screen as the user sees it: each row's cells up to the last one that
 /// shows anything.
 ///
-/// A hidden glyph shows as a blank in each column it covers. So does half a
-/// wide character whose other half was overwritten or erased: the emulator
-/// keeps that half, but a terminal shows neither, as xterm does.
+/// A hidden glyph shows as a blank in each column it covers. Half a wide
+/// character whose other half was overwritten or erased shows as a plain
+/// blank: the emulator keeps that half, with its style, but a terminal shows
+/// neither half, and Ghostty clears the half that is left to a blank cell.
 fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
     let grid = term.grid();
     let columns = grid.columns();
@@ -120,12 +121,20 @@ fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
                     link: cell.hyperlink().map(|link| link.uri().to_owned()),
                 };
                 let blank_flags = cell.flags - Flags::WIDE_CHAR;
+                let broken_half = || Shown {
+                    text: " ".to_owned(),
+                    fg: Shade::Default,
+                    bg: Shade::Default,
+                    underline_color: None,
+                    flags: Flags::empty(),
+                    link: None,
+                };
                 if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
                     continue;
                 }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     if column == 0 || !flags(column - 1).contains(Flags::WIDE_CHAR) {
-                        cells.push(shown(" ", blank_flags));
+                        cells.push(broken_half());
                     }
                     continue;
                 }
@@ -133,7 +142,7 @@ fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
                     && (column + 1 == columns
                         || !flags(column + 1).contains(Flags::WIDE_CHAR_SPACER))
                 {
-                    cells.push(shown(" ", blank_flags));
+                    cells.push(broken_half());
                     continue;
                 }
                 if cell.flags.contains(Flags::HIDDEN) {
