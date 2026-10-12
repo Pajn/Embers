@@ -30,7 +30,7 @@ The runtime keeper only remembers the activity of the latest output it read, and
 
 ## Hidden and detached buffers
 
-Hidden tabs, inactive panes, and detached buffers continue to ingest PTY output, update captures, and overwrite their stored activity state as new output arrives. Clients that attach to the buffer recover that state from the server snapshot, and automation can observe bell updates from the normal render-invalidated path. The client's `buffer_bell` event follows the stored state, so it fires for bells that flag a window and not for bells in a window a client shows. There is no event for activity of its own: clients and automation read it from the buffer record, which they refetch on `render_invalidated`, and from the session snapshot, which they refetch on `node_changed` when a visit or an attach clears flags.
+Hidden tabs, inactive panes, and detached buffers continue to ingest PTY output, update captures, and update their stored activity state as new output arrives. Ordinary output never downgrades a stored `Bell` to `Activity`: the bell stays until it is acknowledged. Clients that attach to the buffer recover that state from the server snapshot, and automation can observe bell updates from the normal render-invalidated path. The client's `buffer_bell` event follows the stored state, so it fires for bells that flag a window and not for bells in a window a client shows. There is no event for activity of its own: clients and automation read it from the buffer record, which they refetch on `render_invalidated`, and from the session snapshot, which they refetch on `node_changed` when a visit or an attach clears flags.
 
 ## Reset on focus
 
