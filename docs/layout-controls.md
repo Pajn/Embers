@@ -76,6 +76,32 @@ Colors are `"#RRGGBB"` or one of the sixteen ANSI names, `"black"` to
 terminal's color scheme. Without an active color the cells next to the focused
 pane take the other color. Popup frames are not affected.
 
+## Popup frames
+
+Popups (floating windows) are framed with rounded box-drawing lines, `╭─╮`,
+with the popup's title on the top edge. The focused popup's frame is bold, the
+others dim. Like tmux's `popup-border-lines` and `popup-border-style`, the
+theme can pick other lines and colors:
+
+```rhai
+theme.set_popup_border_lines("single");
+theme.set_popup_border_color("brightblack");
+theme.set_popup_active_border_color("magenta");
+```
+
+The lines are `"rounded"`, `"single"` (`┌─┐`), `"double"` (`╔═╗`), `"heavy"`
+(`┏━┓`), `"ascii"` (`+-+`) or `"none"`. With `"none"` the frame cells stay
+blank rather than giving the popup's panes the space: the title still has its
+row, and a popup's panes are the same size in every client, whatever each
+client's config says. Colors take the same values as the divider colors and
+also color the title.
+
+A popup can also be opened without a frame, like tmux's `display-popup -B`:
+`embers display-popup -B -- cmd`, or `border: false` in the options of
+`action.open_floating`. It has no frame and no title, and its panes fill the
+whole popup, less a title row each if `set_pane_titles` gives panes one (see
+[Pane titles](configuration.md#pane-titles)).
+
 ## Synchronize panes
 
 While `synchronize-panes` is on for a window (a root tab), input typed into

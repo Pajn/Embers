@@ -48,9 +48,9 @@ fn split_frames_report_drawn_lengths_and_minimums() {
         .iter()
         .find(|split| split.node_id == FLOATING_SPLIT_ID)
         .expect("floating split is projected");
-    // Panes in popups keep their title rows, so two stacked ones each need
-    // a title row and one content row.
-    assert_eq!(floating.min_lengths, vec![2, 2]);
+    // A framed popup's panes have no title rows, so two stacked ones each
+    // need one content row.
+    assert_eq!(floating.min_lengths, vec![1, 1]);
 }
 
 #[test]

@@ -1229,13 +1229,7 @@ where
     }
 
     fn renderer(&self) -> Renderer {
-        Renderer::new(
-            self.config
-                .active_script()
-                .loaded_config()
-                .theme
-                .pane_borders,
-        )
+        Renderer::from_theme(&self.config.active_script().loaded_config().theme)
     }
 
     /// The tab a left press at `point` selects in the tab bars, as
@@ -2230,7 +2224,10 @@ where
                         session_id,
                         presentation,
                         spec.tree,
-                        PanePlacement::Floating { geometry },
+                        PanePlacement::Floating {
+                            geometry,
+                            border: spec.border,
+                        },
                     )
                     .await?;
                 let result = self
@@ -2244,6 +2241,7 @@ where
                         title: spec.title,
                         focus: spec.focus,
                         close_on_empty: spec.close_on_empty,
+                        border: spec.border,
                     }))
                     .await;
                 rollback_created_buffer_on_error(
@@ -2410,6 +2408,7 @@ where
                 title,
                 focus,
                 close_on_empty,
+                border,
             } => {
                 self.client
                     .request_message(ClientMessage::Floating(FloatingRequest::Create {
@@ -2421,6 +2420,7 @@ where
                         title,
                         focus,
                         close_on_empty,
+                        border,
                     }))
                     .await?;
                 self.client.resync_all_sessions().await

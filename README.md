@@ -117,7 +117,7 @@ Useful subcommand groups include:
 - `pane`: `split-window`, `list-panes`, `select-pane` (`-t`, `-L/-R/-U/-D`, or `-l` for the last pane), `resize-pane` (`-L/-R/-U/-D [N]`, `-Z`, `--sizes`), `send-keys`, `capture-pane`, `kill-pane`
 - `buffer`: `buffer show`, `buffer history`, `buffer reveal`, `buffer pipe`
 - `node`: `node zoom`, `node swap`, `node break`, `node join-buffer`, `node move-before`, `node move-after`
-- `popup`: `display-popup`, `kill-popup`
+- `popup`: `display-popup` (`-B` for no frame, like tmux), `kill-popup`
 - `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
 - `server`: `kill-server` (stop the server and every program it runs; attached clients print
   `[server exited]` and exit)

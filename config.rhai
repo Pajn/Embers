@@ -307,6 +307,12 @@ theme.set_pane_border_color("brightblack");
 // dividers above tell them apart. set_pane_titles("top") would give each pane
 // one, like pane-border-status top.
 
+// popup-border-lines rounded, with the focused popup's frame in the accent
+// color and the others in Frappe's overlay 0.
+theme.set_popup_border_lines("rounded");
+theme.set_popup_active_border_color("#ca9ee6");
+theme.set_popup_border_color("#737994");
+
 // The last two components of a path: /home/me/src/app -> src/app.
 fn short_path(path) {
     if path == () {

@@ -687,31 +687,52 @@ fn split_panes_without_title_rows_keep_their_divider() {
 }
 
 #[test]
-fn popup_panes_keep_their_title_row_without_pane_titles() {
-    let state = demo_state();
-    let presentation = PresentationModel::project_with(
-        &state,
-        SESSION_ID,
-        Size {
-            width: 40,
-            height: 14,
-        },
-        TabBarPosition::Top,
-    )
-    .unwrap();
-
-    assert!(
-        presentation
-            .leaves
-            .iter()
-            .any(|leaf| leaf.floating_id.is_some())
-    );
-    for leaf in &presentation.leaves {
-        assert_eq!(
-            leaf.title_rect.is_some(),
-            leaf.floating_id.is_some(),
-            "{leaf:?}"
-        );
+fn framed_popups_have_no_title_rows_and_borderless_ones_follow_the_setting() {
+    let viewport = Size {
+        width: 40,
+        height: 14,
+    };
+    for border in [true, false] {
+        let mut state = demo_state();
+        state.floating.get_mut(&FLOATING_ID).unwrap().border = border;
+        for pane_titles in [PaneTitles::Off, PaneTitles::Top, PaneTitles::Bottom] {
+            let presentation =
+                PresentationModel::project_with(&state, SESSION_ID, viewport, pane_titles).unwrap();
+            let popup = &presentation.floating[0];
+            let popup_leaves = presentation
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.floating_id.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(popup_leaves.len(), 2);
+            for leaf in popup_leaves {
+                let context = format!("border={border} {pane_titles:?} {leaf:?}");
+                // The frame carries a framed popup's title, so its panes
+                // have no title row; a borderless popup's panes have one
+                // where tiled panes do.
+                let title_row = !border && pane_titles.shown();
+                assert_eq!(leaf.title_rect.is_some(), title_row, "{context}");
+                if let Some(title) = leaf.title_rect {
+                    let y = match pane_titles {
+                        PaneTitles::Top => leaf.rect.origin.y,
+                        _ => leaf.rect.origin.y + i32::from(leaf.rect.size.height) - 1,
+                    };
+                    assert_eq!(title.origin.y, y, "{context}");
+                }
+                // Everything stays inside the popup's content area.
+                assert!(popup.content_rect.contains(leaf.rect.origin), "{context}");
+            }
+            if !border && !pane_titles.shown() {
+                // The content fills the whole popup, as wisp's picker needs.
+                assert_eq!(popup.content_rect, popup.rect);
+                let top = presentation
+                    .leaves
+                    .iter()
+                    .find(|leaf| leaf.node_id == FLOATING_TOP_LEAF_ID)
+                    .unwrap();
+                assert_eq!(top.content_rect.origin, popup.rect.origin);
+            }
+        }
     }
 }
 

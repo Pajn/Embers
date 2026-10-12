@@ -366,8 +366,9 @@ focused pane and a marker for activity (`+`) or a bell (`!`).
 - `"top"` / `"bottom"`: each pane gives its top or bottom row to its
   title, so its program has one row fewer.
 
-Panes in popups keep their title row whatever the setting. The client
-reports whether title rows are shown to the server with the size it
+A framed popup shows its title on its frame, so its panes have no title
+row whatever the setting; panes in a borderless popup follow it. The
+client reports whether title rows are shown to the server with the size it
 draws the session at, so panes created with the `embers` CLI start at
 the size this client draws them.
 </div>

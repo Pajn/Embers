@@ -112,6 +112,7 @@ pub enum Action {
         title: Option<String>,
         focus: bool,
         close_on_empty: bool,
+        border: bool,
     },
     ZoomNode {
         node_id: Option<NodeId>,
@@ -274,6 +275,8 @@ pub struct FloatingSpec {
     pub title: Option<String>,
     pub focus: bool,
     pub close_on_empty: bool,
+    /// Frame the popup with its title (`border`, on by default).
+    pub border: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

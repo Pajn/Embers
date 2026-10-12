@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-54101c63.js";
+            window.path_to_searchindex_js = "searchindex-2b6930fb.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-22d094e2.js"></script>
@@ -582,8 +582,9 @@ the <code>theme.set_pane_border_color</code> colors, tell them apart.</li>
 <li><code>"top"</code> / <code>"bottom"</code>: each pane gives its top or bottom row to its
 title, so its program has one row fewer.</li>
 </ul>
-<p>Panes in popups keep their title row whatever the setting. The client
-reports whether title rows are shown to the server with the size it
+<p>A framed popup shows its title on its frame, so its panes have no title
+row whatever the setting; panes in a borderless popup follow it. The
+client reports whether title rows are shown to the server with the size it
 draws the session at, so panes created with the <code>embers</code> CLI start at
 the size this client draws them.</p>
 </div>
@@ -2600,6 +2601,7 @@ Move a buffer into a new floating window.
 <li><code>title</code> (Option&lt;String&gt;): window title (default: none)</li>
 <li><code>focus</code> (bool): whether to focus the window after creation (default: true)</li>
 <li><code>close_on_empty</code> (bool): whether to close the window when its buffer empties (default: true)</li>
+<li><code>border</code> (bool): frame the window and show its title; without a frame its content fills the window, like tmux’s <code>display-popup -B</code> (default: true)</li>
 </ul>
 </div>
 
@@ -2886,10 +2888,22 @@ Example: `action.open_buffer_history(12, "visible", "floating")`.
 <button group="open_floating" id="link-open_floating-Description" class="tablinks active" onclick="openTab(event, &#39;open_floating&#39;, &#39;Description&#39;)">
 Description
 </button>
+<button group="open_floating" id="link-open_floating-Example" class="tablinks" onclick="openTab(event, &#39;open_floating&#39;, &#39;Example&#39;)">
+Example
+</button>
 </div>
 
 <div group="open_floating" id="open_floating-Description" class="tabcontent" style="display: block;">
-Open a floating view around the provided tree.
+Open a floating view around the provided tree. Takes the options of
+`move_buffer_to_floating`; `border: false` opens it without a frame,
+its content filling the whole window, like tmux's `display-popup -B`.
+</div>
+
+<div group="open_floating" id="open_floating-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.open_floating(tree.buffer_spawn(["lazygit"]), #{
+    width: "90%", height: "90%", border: false
+})
+</code></pre>
 </div>
 
 </div>
@@ -4703,6 +4717,101 @@ scheme. Without it dividers are drawn dim.
 
 <div group="set_pane_border_color" id="set_pane_border_color-Example" class="tabcontent" style="display: none;">
 <pre><code class="language-rhai">theme.set_pane_border_color("brightblack");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_popup_active_border_color </h2>
+
+<pre><code class="language-rust ignore">fn set_popup_active_border_color(theme: ThemeApi, color: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_popup_active_border_color" id="link-set_popup_active_border_color-Description" class="tablinks active" onclick="openTab(event, &#39;set_popup_active_border_color&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_popup_active_border_color" id="link-set_popup_active_border_color-Example" class="tablinks" onclick="openTab(event, &#39;set_popup_active_border_color&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_popup_active_border_color" id="set_popup_active_border_color-Description" class="tabcontent" style="display: block;">
+Color the frame and title of the focused popup. Takes the same colors
+as `set_pane_border_color`. Without it the frame is drawn bold in the
+terminal's default color.
+</div>
+
+<div group="set_popup_active_border_color" id="set_popup_active_border_color-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">theme.set_popup_active_border_color("magenta");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_popup_border_color </h2>
+
+<pre><code class="language-rust ignore">fn set_popup_border_color(theme: ThemeApi, color: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_popup_border_color" id="link-set_popup_border_color-Description" class="tablinks active" onclick="openTab(event, &#39;set_popup_border_color&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_popup_border_color" id="link-set_popup_border_color-Example" class="tablinks" onclick="openTab(event, &#39;set_popup_border_color&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_popup_border_color" id="set_popup_border_color-Description" class="tabcontent" style="display: block;">
+Color the frames and titles of popups that do not have focus, like
+tmux's `popup-border-style fg=...`. Takes the same colors as
+`set_pane_border_color`. Without it they are drawn dim.
+</div>
+
+<div group="set_popup_border_color" id="set_popup_border_color-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">theme.set_popup_border_color("brightblack");
+</code></pre>
+</div>
+
+</div>
+
+</div>
+
+
+<div style="box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)">
+    
+<h2 class="func-name"> <code>fn</code> set_popup_border_lines </h2>
+
+<pre><code class="language-rust ignore">fn set_popup_border_lines(theme: ThemeApi, lines: String)</code></pre>
+<div>
+<div class="tab">
+<button group="set_popup_border_lines" id="link-set_popup_border_lines-Description" class="tablinks active" onclick="openTab(event, &#39;set_popup_border_lines&#39;, &#39;Description&#39;)">
+Description
+</button>
+<button group="set_popup_border_lines" id="link-set_popup_border_lines-Example" class="tablinks" onclick="openTab(event, &#39;set_popup_border_lines&#39;, &#39;Example&#39;)">
+Example
+</button>
+</div>
+
+<div group="set_popup_border_lines" id="set_popup_border_lines-Description" class="tabcontent" style="display: block;">
+Draw popup (floating window) frames with `"rounded"` (the default,
+`╭─╮`), `"single"` (`┌─┐`), `"double"` (`╔═╗`), `"heavy"` (`┏━┓`),
+`"ascii"` (`+-+`) or `"none"`, like tmux's `popup-border-lines`. With
+`"none"` the frame cells are left blank and the title stays on the top
+one: the popup's panes keep their size.
+</div>
+
+<div group="set_popup_border_lines" id="set_popup_border_lines-Example" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">theme.set_popup_border_lines("single");
 </code></pre>
 </div>
 
@@ -6657,6 +6766,7 @@ Move a buffer into a new floating window.
 <li><code>title</code> (Option&lt;String&gt;): window title (default: none)</li>
 <li><code>focus</code> (bool): whether to focus the window after creation (default: true)</li>
 <li><code>close_on_empty</code> (bool): whether to close the window when its buffer empties (default: true)</li>
+<li><code>border</code> (bool): frame the window and show its title; without a frame its content fills the window, like tmux’s <code>display-popup -B</code> (default: true)</li>
 </ul>
 </div>
 
@@ -6943,10 +7053,22 @@ Example: `action.open_buffer_history(12, "visible", "floating")`.
 <button group="open_floating" id="link-open_floating-Description-1" class="tablinks active" onclick="openTab(event, &#39;open_floating&#39;, &#39;Description&#39;)">
 Description
 </button>
+<button group="open_floating" id="link-open_floating-Example-1" class="tablinks" onclick="openTab(event, &#39;open_floating&#39;, &#39;Example&#39;)">
+Example
+</button>
 </div>
 
 <div group="open_floating" id="open_floating-Description-1" class="tabcontent" style="display: block;">
-Open a floating view around the provided tree.
+Open a floating view around the provided tree. Takes the options of
+`move_buffer_to_floating`; `border: false` opens it without a frame,
+its content filling the whole window, like tmux's `display-popup -B`.
+</div>
+
+<div group="open_floating" id="open_floating-Example-1" class="tabcontent" style="display: none;">
+<pre><code class="language-rhai">action.open_floating(tree.buffer_spawn(["lazygit"]), #{
+    width: "90%", height: "90%", border: false
+})
+</code></pre>
 </div>
 
 </div>

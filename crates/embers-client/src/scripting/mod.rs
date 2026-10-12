@@ -23,6 +23,6 @@ pub use model::{
 };
 pub use types::{
     BarSegment, BarSpec, BarTarget, DetachOnDestroy, LoadedConfig, ModeHooks, MouseSettings,
-    PaletteError, PaneBorderColors, PassthroughMode, RgbColor, ScriptFunctionRef, StyleSpec,
-    ThemeSpec,
+    PaletteError, PaneBorderColors, PassthroughMode, PopupBorderLines, PopupBorders, RgbColor,
+    ScriptFunctionRef, StyleSpec, ThemeSpec,
 };

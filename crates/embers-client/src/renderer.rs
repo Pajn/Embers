@@ -5,10 +5,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::grid::{
-    BorderStyle, CellStyle, GridCursor, RenderGrid, UnderlineStyle, replace_controls,
+    BorderStyle, CellStyle, GridCursor, RenderGrid, TerminalColor, UnderlineStyle, replace_controls,
 };
 use crate::presentation::{DividerFrame, FloatingFrame, LeafFrame, PresentationModel, TabsFrame};
-use crate::scripting::{BarSegment, BarSpec, BarTarget, PaneBorderColors};
+use crate::scripting::{
+    BarSegment, BarSpec, BarTarget, PaneBorderColors, PopupBorderLines, PopupBorders, ThemeSpec,
+};
 use crate::state::{ClientState, SelectionKind, SelectionPoint, SelectionState};
 
 /// The most columns the session name takes in the default root tab bar.
@@ -18,11 +20,24 @@ const SESSION_LABEL_WIDTH: u16 = 10;
 pub struct Renderer {
     /// Divider colors from the theme.
     pub pane_borders: PaneBorderColors,
+    /// Popup frame lines and colors from the theme.
+    pub popup_borders: PopupBorders,
 }
 
 impl Renderer {
     pub fn new(pane_borders: PaneBorderColors) -> Self {
-        Self { pane_borders }
+        Self {
+            pane_borders,
+            ..Self::default()
+        }
+    }
+
+    /// A renderer drawing borders as `theme` says.
+    pub fn from_theme(theme: &ThemeSpec) -> Self {
+        Self {
+            pane_borders: theme.pane_borders,
+            popup_borders: theme.popup_borders,
+        }
     }
 }
 
@@ -430,16 +445,27 @@ impl Renderer {
         for row in 0..floating.rect.size.height {
             grid.put_str(x, y + row, &blank_line);
         }
+        if !floating.border {
+            return;
+        }
 
-        let border = if floating.focused {
-            BorderStyle::FOCUSED
+        let border = match self.popup_borders.lines {
+            PopupBorderLines::Rounded => BorderStyle::ROUNDED,
+            PopupBorderLines::Single => BorderStyle::SINGLE,
+            PopupBorderLines::Double => BorderStyle::DOUBLE,
+            PopupBorderLines::Heavy => BorderStyle::HEAVY,
+            PopupBorderLines::Ascii => BorderStyle::ASCII,
+            PopupBorderLines::None => BorderStyle::BLANK,
+        };
+        let color = if floating.focused {
+            self.popup_borders.active
         } else {
-            BorderStyle::ASCII
+            self.popup_borders.inactive
         };
         grid.draw_box_styled(
             floating.rect,
             border,
-            floating_border_style(floating.focused),
+            floating_border_style(floating.focused, color),
         );
 
         if let Some(title) = &floating.title {
@@ -458,7 +484,7 @@ impl Renderer {
                     clamp_i32_to_u16(title_rect.origin.x),
                     clamp_i32_to_u16(title_rect.origin.y),
                     &truncate(title, title_rect.size.width),
-                    floating_title_style(floating.focused),
+                    floating_title_style(floating.focused, color),
                 );
             }
         }
@@ -889,25 +915,27 @@ fn divider_style() -> CellStyle {
     }
 }
 
-fn floating_border_style(focused: bool) -> CellStyle {
-    if focused {
-        CellStyle::default().with_bold().with_reverse()
-    } else {
-        CellStyle {
+/// A popup frame in the theme's color for it, else bold when focused and dim
+/// when not.
+fn floating_border_style(focused: bool, color: Option<TerminalColor>) -> CellStyle {
+    match color {
+        Some(color) => CellStyle {
+            fg: Some(color),
+            ..CellStyle::default()
+        },
+        None if focused => CellStyle::default().with_bold(),
+        None => CellStyle {
             dim: true,
             ..CellStyle::default()
-        }
+        },
     }
 }
 
-fn floating_title_style(focused: bool) -> CellStyle {
-    if focused {
-        CellStyle::default().with_bold()
-    } else {
-        CellStyle {
-            dim: true,
-            ..CellStyle::default()
-        }
+/// A popup title: like its frame, and bold when focused.
+fn floating_title_style(focused: bool, color: Option<TerminalColor>) -> CellStyle {
+    CellStyle {
+        bold: focused,
+        ..floating_border_style(focused, color)
     }
 }
 

@@ -39,6 +39,23 @@ fn example_config_loads_with_a_c_a_leader_and_settings() {
             inactive: Some(TerminalColor::Indexed(8)),
         }
     );
+    // Rounded popup frames in the Frappe accent and overlay colors.
+    assert_eq!(
+        loaded.theme.popup_borders,
+        embers_client::PopupBorders {
+            lines: embers_client::PopupBorderLines::Rounded,
+            active: Some(TerminalColor::Rgb(embers_client::Color {
+                red: 0xca,
+                green: 0x9e,
+                blue: 0xe6,
+            })),
+            inactive: Some(TerminalColor::Rgb(embers_client::Color {
+                red: 0x73,
+                green: 0x79,
+                blue: 0x94,
+            })),
+        }
+    );
 }
 
 #[test]
@@ -239,6 +256,7 @@ fn example_config_popups_cover_ninety_percent_in_the_pane_directory() {
                     title: Some(title.to_owned()),
                     focus: true,
                     close_on_empty: true,
+                    border: true,
                 },
             }],
             "{name}"
