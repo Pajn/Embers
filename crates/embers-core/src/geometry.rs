@@ -17,6 +17,42 @@ impl PtySize {
             pixel_height: 0,
         }
     }
+
+    /// The size of one cell in pixels, `None` while the pixel size is
+    /// unknown (zero).
+    pub fn cell_size(self) -> Option<CellSize> {
+        CellSize::of_text_area(self.cols, self.rows, self.pixel_width, self.pixel_height)
+    }
+
+    /// These cells, with the pixel size `cell` gives them; unknown (zero)
+    /// without one.
+    pub fn with_cell_size(self, cell: Option<CellSize>) -> Self {
+        let cell = cell.unwrap_or_default();
+        Self {
+            pixel_width: self.cols.saturating_mul(cell.width),
+            pixel_height: self.rows.saturating_mul(cell.height),
+            ..self
+        }
+    }
+}
+
+/// The size of one terminal cell in pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellSize {
+    pub width: u16,
+    pub height: u16,
+}
+
+impl CellSize {
+    /// The cell size of a terminal whose `cols` by `rows` text area is
+    /// `pixel_width` by `pixel_height` pixels, as `TIOCGWINSZ` reports it.
+    /// `None` when any of them is zero, as on a terminal that does not report
+    /// its pixel size.
+    pub fn of_text_area(cols: u16, rows: u16, pixel_width: u16, pixel_height: u16) -> Option<Self> {
+        let width = pixel_width.checked_div(cols)?;
+        let height = pixel_height.checked_div(rows)?;
+        (width > 0 && height > 0).then_some(Self { width, height })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
