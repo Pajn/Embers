@@ -80,8 +80,9 @@ fn popup_options(title) {
     #{ title: title, width: "90%", height: "90%" }
 }
 
-// The session's windows are the tabs of its root node; with one window the
-// root is not tabbed.
+// The session's windows are the tabs of its root node, even when it has one.
+// A server from before that may still have a one-window session whose root
+// is the window itself; there is then no other window to go to.
 fn window_tabs(ctx) {
     let session = ctx.current_session();
     if session == () {

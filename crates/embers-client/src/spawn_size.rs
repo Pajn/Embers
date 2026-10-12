@@ -4,7 +4,7 @@ use embers_core::{
 };
 use embers_protocol::{
     BufferRecord, BufferRecordKind, BufferRecordState, BufferViewRecord, FloatingRecord,
-    NodeRecord, NodeRecordKind, SplitRecord, TabRecord, TabsRecord,
+    NodeRecord, NodeRecordKind, SplitRecord, TabRecord,
 };
 
 use crate::presentation::{LayoutOptions, PaneTitles, PresentationModel, RootTabBar};
@@ -105,7 +105,7 @@ pub fn spawn_pty_size_with(
             NEW_LEAF
         }
         PanePlacement::RootTab => {
-            let tabs_node_id = root_tabs(&mut layout, session_id)?;
+            let tabs_node_id = root_tabs(&layout, session_id)?;
             add_active_tab(&mut layout, tabs_node_id)?;
             NEW_LEAF
         }
@@ -245,36 +245,10 @@ fn split_leaf(
     Some(())
 }
 
-/// The session's root tabs container, wrapping the root in one first when it
-/// is not, as the server does before adding a root tab.
-fn root_tabs(layout: &mut ClientState, session_id: SessionId) -> Option<NodeId> {
+/// The session's root tabs container, which holds its windows.
+fn root_tabs(layout: &ClientState, session_id: SessionId) -> Option<NodeId> {
     let root_id = layout.sessions.get(&session_id)?.root_node_id;
-    if layout.nodes.get(&root_id)?.kind == NodeRecordKind::Tabs {
-        return Some(root_id);
-    }
-    layout.nodes.insert(
-        NEW_CONTAINER,
-        NodeRecord {
-            id: NEW_CONTAINER,
-            session_id,
-            parent_id: None,
-            kind: NodeRecordKind::Tabs,
-            buffer_view: None,
-            split: None,
-            tabs: Some(TabsRecord {
-                active: 0,
-                tabs: vec![TabRecord {
-                    title: String::new(),
-                    child_id: root_id,
-                    synchronize_panes: false,
-                }],
-            }),
-            focus_leaf_id: None,
-        },
-    );
-    set_parent(layout, root_id, NEW_CONTAINER);
-    layout.sessions.get_mut(&session_id)?.root_node_id = NEW_CONTAINER;
-    Some(NEW_CONTAINER)
+    (layout.nodes.get(&root_id)?.kind == NodeRecordKind::Tabs).then_some(root_id)
 }
 
 /// Adds the new leaf as the active tab of `tabs_node_id`. Where the tab goes

@@ -29,8 +29,8 @@ use embers_protocol::{
 
 use crate::{
     CliConnection, ResolvedPane, ResolvedWindow, expect_buffer_location, protocol_tab,
-    resolve_single_window_index, resolve_window_index, resolved_pane, root_tabs, visible_leaf_ids,
-    window_active_pane, window_containing, window_title,
+    resolve_window_index, resolved_pane, root_tabs, visible_leaf_ids, window_active_pane,
+    window_containing,
 };
 use embers_core::new_request_id;
 
@@ -594,26 +594,7 @@ fn window_in(
     base_index: Option<u32>,
     current: Option<(u32, NodeId)>,
 ) -> Result<(u32, NodeId)> {
-    let Some((_, tabs)) = root_tabs(snapshot)? else {
-        // A session without root tabs is one window.
-        let root = snapshot.session.root_node_id;
-        let found = match spec {
-            WindowSpec::Current
-            | WindowSpec::Start
-            | WindowSpec::End
-            | WindowSpec::Next(_)
-            | WindowSpec::Previous(_) => true,
-            WindowSpec::Id(node_id) => *node_id == root,
-            WindowSpec::Exact(name) => *name == window_title(snapshot, root)?,
-            WindowSpec::Name(name) => {
-                resolve_single_window_index(&window_title(snapshot, root)?, Some(name), base_index)
-                    .is_ok()
-            }
-        };
-        return found
-            .then_some((0, root))
-            .ok_or_else(|| window_not_found(spec));
-    };
+    let (_, tabs) = root_tabs(snapshot)?;
     let count = tabs.tabs.len();
     let current_index = current.map_or(tabs.active, |(index, _)| index);
     let relative = |forward: bool, offset: u32| -> Option<u32> {

@@ -76,13 +76,13 @@ pub fn window_position(
     window_id: NodeId,
 ) -> Option<usize> {
     let session = state.sessions.get(&session_id)?;
-    match root_tabs(state, session.root_node_id) {
-        Some(tabs) => tabs.tabs.iter().position(|tab| tab.child_id == window_id),
-        None => (session.root_node_id == window_id).then_some(0),
-    }
+    root_tabs(state, session.root_node_id)?
+        .tabs
+        .iter()
+        .position(|tab| tab.child_id == window_id)
 }
 
-/// The session's windows: its root node's tabs, when the root is tabs.
+/// The session's windows: its root node's tabs.
 fn root_tabs(state: &ClientState, root_id: NodeId) -> Option<&TabsRecord> {
     state.nodes.get(&root_id).and_then(|root| {
         root.tabs
@@ -442,18 +442,7 @@ fn build_tree(
                         )
                     })
                     .collect(),
-                // A session whose root is not tabs is one window, named
-                // after its pane as `list-windows` names it.
-                None => vec![window_node(
-                    state,
-                    session.id,
-                    0,
-                    &untabbed_window_title(state, session.root_node_id, session.focused_leaf_id),
-                    session.root_node_id,
-                    is_current_session,
-                    session.focused_leaf_id,
-                    base_index,
-                )],
+                None => Vec::new(),
             };
             let count = windows.len();
             TreeNode {
@@ -518,23 +507,6 @@ fn window_node(
         },
         children: panes,
     }
-}
-
-fn untabbed_window_title(
-    state: &ClientState,
-    root_id: NodeId,
-    focused_leaf: Option<NodeId>,
-) -> String {
-    let mut leaves = Vec::new();
-    collect_leaves(state, root_id, &mut leaves);
-    focused_leaf
-        .filter(|leaf| leaves.contains(leaf))
-        .or_else(|| leaves.first().copied())
-        .and_then(|leaf| state.nodes.get(&leaf))
-        .and_then(|node| node.buffer_view.as_ref())
-        .and_then(|view| state.buffers.get(&view.buffer_id))
-        .map(|buffer| buffer.title.clone())
-        .unwrap_or_default()
 }
 
 /// The panes under `node_id`, in layout order, including those in hidden
