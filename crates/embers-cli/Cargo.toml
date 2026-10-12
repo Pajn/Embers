@@ -41,10 +41,12 @@ tracing.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+alacritty_terminal.workspace = true
 assert_cmd.workspace = true
 embers-test-support.workspace = true
 filetime = "0.2"
 predicates.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 
 [[test]]
