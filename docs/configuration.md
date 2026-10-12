@@ -412,10 +412,11 @@ that lists the capabilities and that is installed where the program runs.
 
 Programs that size images to the text, such as image previewers, need the
 size of a cell in pixels. A client whose terminal reports its size in pixels
-(`TIOCGWINSZ`) gives each pane's PTY the pixel size of the cells it draws the
-pane in, so `TIOCGWINSZ` in the pane reports the host terminal's cell size,
-and the pane answers the text area and cell size queries (`CSI 14 t`,
-`CSI 16 t`) from it. With several clients the pixel size goes with the cells,
+(`TIOCGWINSZ`) gives each pane's PTY a pixel size worked out from the host
+terminal's cell size: `TIOCGWINSZ` in the pane reports the pane's text area in
+pixels, its columns and rows times the host's cell size, so a program divides
+it by the columns and rows to get the cell size. The pane answers the text area
+and cell size queries (`CSI 14 t`, `CSI 16 t`) from it. With several clients the pixel size goes with the cells,
 from the client that last sized the pane. Until a pane has a pixel size, it
 does not answer those two queries.
 
