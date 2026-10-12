@@ -154,6 +154,7 @@ impl Harness {
                     request_id,
                     client_id: None,
                     session_id,
+                    node_id: None,
                 })
             })
             .await;

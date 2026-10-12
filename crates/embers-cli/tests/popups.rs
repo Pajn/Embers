@@ -16,6 +16,7 @@ async fn popup_commands_round_trip_through_cli() {
         &server,
         [
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--title",
@@ -93,7 +94,7 @@ async fn display_popup_without_a_border_gives_the_command_the_whole_popup() {
             (Some("--no-border"), false, borderless),
         ] {
             let context = format!("{flag:?} pane_titles={pane_titles}");
-            let mut args = vec!["display-popup", "-t", "alpha"];
+            let mut args = vec!["display-popup", "--no-wait", "-t", "alpha"];
             args.extend(flag);
             args.extend(geometry);
             args.extend(["--", "/bin/sh"]);

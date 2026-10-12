@@ -1,4 +1,4 @@
-use embers_core::{MuxError, Result};
+use embers_core::{MuxError, NodeId, Result};
 use embers_protocol::{
     BufferHistoryScope, BufferLocation, BufferPipeRecord, BufferPipeState,
     BufferPipeStopReason as ProtocolBufferPipeStopReason, BufferRecord, BufferRecordKind,
@@ -131,7 +131,7 @@ pub fn buffer_location(
     })
 }
 
-pub fn node_record(node: &Node) -> NodeRecord {
+pub fn node_record(node: &Node, focus_leaf_id: Option<NodeId>) -> NodeRecord {
     match node {
         Node::BufferView(view) => NodeRecord {
             id: view.id,
@@ -147,6 +147,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
             }),
             split: None,
             tabs: None,
+            focus_leaf_id,
         },
         Node::Split(split) => NodeRecord {
             id: split.id,
@@ -160,6 +161,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
                 sizes: split.sizes.clone(),
             }),
             tabs: None,
+            focus_leaf_id,
         },
         Node::Tabs(tabs) => NodeRecord {
             id: tabs.id,
@@ -181,6 +183,7 @@ pub fn node_record(node: &Node) -> NodeRecord {
                     })
                     .collect(),
             }),
+            focus_leaf_id,
         },
     }
 }
@@ -207,7 +210,12 @@ pub fn session_snapshot(
     let nodes = state
         .session_node_ids(session_id)?
         .into_iter()
-        .map(|node_id| state.node(node_id).map(node_record))
+        .map(|node_id| {
+            Ok(node_record(
+                state.node(node_id)?,
+                state.resolve_focus_candidate(node_id)?,
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
     let buffers = state
         .session_buffer_ids(session_id)?

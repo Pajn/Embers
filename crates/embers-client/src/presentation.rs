@@ -429,7 +429,18 @@ impl PresentationModel {
     }
 
     pub fn focus_target(&self, direction: NavigationDirection) -> Option<NodeId> {
-        let focused = self.focused_leaf()?;
+        self.focus_target_from(self.focused_leaf()?.node_id, direction)
+    }
+
+    /// The pane focus moves to from `node_id` in `direction`: the nearest pane
+    /// drawn on that side of it, in the same popup or outside any. `None` when
+    /// the pane is not drawn or nothing is drawn on that side.
+    pub fn focus_target_from(
+        &self,
+        node_id: NodeId,
+        direction: NavigationDirection,
+    ) -> Option<NodeId> {
+        let focused = self.leaves.iter().find(|leaf| leaf.node_id == node_id)?;
         let focused_context = focused.floating_id;
         let focused_center = rect_center(focused.rect);
 
@@ -1192,6 +1203,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused) in [
@@ -1214,6 +1226,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1287,6 +1300,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused) in [
@@ -1309,6 +1323,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1390,6 +1405,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1481,6 +1497,7 @@ mod zoom_tests {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         state.nodes.insert(
@@ -1497,6 +1514,7 @@ mod zoom_tests {
                     sizes: vec![1, 1],
                 }),
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         for (node_id, buffer_id, focused, zoomed) in [
@@ -1519,6 +1537,7 @@ mod zoom_tests {
                     }),
                     split: None,
                     tabs: None,
+                    focus_leaf_id: None,
                 },
             );
             state.buffers.insert(
@@ -1638,6 +1657,7 @@ mod zoom_tests {
                         synchronize_panes: false,
                     }],
                 }),
+                focus_leaf_id: None,
             },
         );
         state.nodes.insert(
@@ -1656,6 +1676,7 @@ mod zoom_tests {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
         );
         state.buffers.insert(

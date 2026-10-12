@@ -892,10 +892,31 @@ fn decode_kitty_mods(value: u32) -> Option<Modifiers> {
     })
 }
 
+/// Rewrite xterm's modifyOtherKeys report, `CSI 27 ; mods ; code ~`, as the
+/// equivalent CSI-u report, `CSI code ; mods u`. Both carry the key's code
+/// point and a `1 + bitmask` modifier value; tmux reads either, and terminal
+/// configs written for it may send this one (e.g. for Ctrl+Tab).
+fn modify_other_keys_as_kitty(bytes: &[u8]) -> Option<Vec<u8>> {
+    let params = bytes.strip_prefix(b"\x1b[27;")?.strip_suffix(b"~")?;
+    let text = std::str::from_utf8(params).ok()?;
+    let (mods, code) = text.split_once(';')?;
+    if mods.is_empty()
+        || code.is_empty()
+        || !mods.bytes().all(|byte| byte.is_ascii_digit())
+        || !code.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("\x1b[{code};{mods}u").into_bytes())
+}
+
 /// Parse a CSI-u (`CSI code;mods u`) or modified-legacy (`CSI 1;mods A`,
 /// `CSI n;mods ~`) key report into a modifier-carrying key event. Unmodified
 /// plain sequences are handled by the exact matches in `parse_csi_event`.
 fn parse_extended_key(bytes: &[u8]) -> Option<ExtendedKey> {
+    if let Some(kitty) = modify_other_keys_as_kitty(bytes) {
+        return parse_extended_key(&kitty);
+    }
     // Work on bytes: a CSI parameter/final region is ASCII, and a malformed
     // sequence buffered up to the continuation timeout can carry an unterminated
     // multibyte character, where splitting a `&str` mid-char would panic.
@@ -1906,6 +1927,45 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    fn parses_xterm_modify_other_keys_reports() {
+        // xterm's modifyOtherKeys form, `CSI 27 ; mods ; code ~`, which tmux
+        // understands and some terminal configs send, e.g. for Ctrl+Tab.
+        with_pipe(b"\x1b[27;5;9~\x1b[27;6;9~\x1b[27;5;13~", |fd| {
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Key {
+                    code: KeyCode::Tab,
+                    mods: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::NONE
+                    },
+                }))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Key {
+                    code: KeyCode::Tab,
+                    mods: Modifiers {
+                        ctrl: true,
+                        shift: true,
+                        ..Modifiers::NONE
+                    },
+                }))
+            );
+            assert_eq!(
+                read_terminal_event(fd).unwrap(),
+                Some(TerminalEvent::Key(KeyEvent::Key {
+                    code: KeyCode::Enter,
+                    mods: Modifiers {
+                        ctrl: true,
+                        ..Modifiers::NONE
+                    },
+                }))
+            );
+        });
     }
 
     #[test]

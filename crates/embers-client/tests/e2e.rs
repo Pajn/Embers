@@ -663,6 +663,7 @@ async fn popup_close_preserves_underlying_buffer() {
         &server,
         &[
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--title",
@@ -3051,7 +3052,7 @@ async fn cli_created_panes_start_at_their_drawn_size() {
     // A popup loses its frame, which carries its title, and a borderless
     // one, without title rows, nothing.
     for (flag, expected) in [(None, (38, 10)), (Some("-B"), (40, 12))] {
-        let mut args = vec!["display-popup", "-t", "alpha"];
+        let mut args = vec!["display-popup", "--no-wait", "-t", "alpha"];
         args.extend(flag);
         args.extend([
             "--width",

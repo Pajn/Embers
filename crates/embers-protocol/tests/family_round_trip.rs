@@ -321,6 +321,11 @@ fn client_message_families_round_trip() {
             request_id: RequestId(211),
             session_id: SessionId(10),
         }),
+        ClientMessage::Node(NodeRequest::SelectPane {
+            request_id: RequestId(212),
+            session_id: SessionId(10),
+            node_id: NodeId(30),
+        }),
         ClientMessage::Node(NodeRequest::Close {
             request_id: RequestId(22),
             node_id: NodeId(33),
@@ -792,6 +797,7 @@ fn sample_snapshot() -> SessionSnapshot {
                     sizes: vec![70, 50],
                 }),
                 tabs: None,
+                focus_leaf_id: Some(NodeId(21)),
             },
             NodeRecord {
                 id: NodeId(21),
@@ -807,6 +813,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: Some(NodeId(21)),
             },
             NodeRecord {
                 id: NodeId(22),
@@ -830,6 +837,7 @@ fn sample_snapshot() -> SessionSnapshot {
                         },
                     ],
                 }),
+                focus_leaf_id: Some(NodeId(24)),
             },
             NodeRecord {
                 id: NodeId(23),
@@ -845,6 +853,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: None,
             },
             NodeRecord {
                 id: NodeId(24),
@@ -860,6 +869,7 @@ fn sample_snapshot() -> SessionSnapshot {
                 }),
                 split: None,
                 tabs: None,
+                focus_leaf_id: Some(NodeId(24)),
             },
         ],
         buffers: vec![

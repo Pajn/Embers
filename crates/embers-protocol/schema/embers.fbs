@@ -128,6 +128,7 @@ enum NodeOp : ubyte {
   MoveNodeBefore = 19,
   MoveNodeAfter = 20,
   FocusLast = 21,
+  SelectPane = 22,
 }
 
 enum FloatingOp : ubyte {
@@ -342,6 +343,8 @@ table ClientRequest {
   // DisplayMessage: the text to show and for how long (0 = client default).
   message:string;
   duration_ms:uint = 0;
+  // Switch: the window or pane of the session to show (0 = as it is).
+  node_id:ulong = 0;
 }
 
 table PingResponse {
@@ -444,6 +447,8 @@ table NodeRecord {
   buffer_view:BufferViewRecord;
   split:SplitRecord;
   tabs:TabsRecord;
+  // The pane that focusing this node lands on; 0 when it has none.
+  focus_leaf_id:ulong = 0;
 }
 
 table FloatingRecord {

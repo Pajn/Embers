@@ -733,10 +733,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for BufferOp {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_NODE_OP: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_NODE_OP: u8 = 21;
+pub const ENUM_MAX_NODE_OP: u8 = 22;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_NODE_OP: [NodeOp; 22] = [
+pub const ENUM_VALUES_NODE_OP: [NodeOp; 23] = [
   NodeOp::GetTree,
   NodeOp::Split,
   NodeOp::WrapInTabs,
@@ -759,6 +759,7 @@ pub const ENUM_VALUES_NODE_OP: [NodeOp; 22] = [
   NodeOp::MoveNodeBefore,
   NodeOp::MoveNodeAfter,
   NodeOp::FocusLast,
+  NodeOp::SelectPane,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -788,9 +789,10 @@ impl NodeOp {
   pub const MoveNodeBefore: Self = Self(19);
   pub const MoveNodeAfter: Self = Self(20);
   pub const FocusLast: Self = Self(21);
+  pub const SelectPane: Self = Self(22);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 21;
+  pub const ENUM_MAX: u8 = 22;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::GetTree,
     Self::Split,
@@ -814,6 +816,7 @@ impl NodeOp {
     Self::MoveNodeBefore,
     Self::MoveNodeAfter,
     Self::FocusLast,
+    Self::SelectPane,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -840,6 +843,7 @@ impl NodeOp {
       Self::MoveNodeBefore => Some("MoveNodeBefore"),
       Self::MoveNodeAfter => Some("MoveNodeAfter"),
       Self::FocusLast => Some("FocusLast"),
+      Self::SelectPane => Some("SelectPane"),
       _ => None,
     }
   }
@@ -4891,6 +4895,7 @@ impl<'a> ClientRequest<'a> {
   pub const VT_SESSION_ID: ::flatbuffers::VOffsetT = 8;
   pub const VT_MESSAGE: ::flatbuffers::VOffsetT = 10;
   pub const VT_DURATION_MS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_NODE_ID: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -4902,6 +4907,7 @@ impl<'a> ClientRequest<'a> {
     args: &'args ClientRequestArgs<'args>
   ) -> ::flatbuffers::WIPOffset<ClientRequest<'bldr>> {
     let mut builder = ClientRequestBuilder::new(_fbb);
+    builder.add_node_id(args.node_id);
     builder.add_session_id(args.session_id);
     builder.add_client_id(args.client_id);
     builder.add_duration_ms(args.duration_ms);
@@ -4946,6 +4952,13 @@ impl<'a> ClientRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u32>(ClientRequest::VT_DURATION_MS, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn node_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(ClientRequest::VT_NODE_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for ClientRequest<'_> {
@@ -4959,6 +4972,7 @@ impl ::flatbuffers::Verifiable for ClientRequest<'_> {
      .visit_field::<u64>("session_id", Self::VT_SESSION_ID, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("message", Self::VT_MESSAGE, false)?
      .visit_field::<u32>("duration_ms", Self::VT_DURATION_MS, false)?
+     .visit_field::<u64>("node_id", Self::VT_NODE_ID, false)?
      .finish();
     Ok(())
   }
@@ -4969,6 +4983,7 @@ pub struct ClientRequestArgs<'a> {
     pub session_id: u64,
     pub message: Option<::flatbuffers::WIPOffset<&'a str>>,
     pub duration_ms: u32,
+    pub node_id: u64,
 }
 impl<'a> Default for ClientRequestArgs<'a> {
   #[inline]
@@ -4979,6 +4994,7 @@ impl<'a> Default for ClientRequestArgs<'a> {
       session_id: 0,
       message: None,
       duration_ms: 0,
+      node_id: 0,
     }
   }
 }
@@ -5009,6 +5025,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ClientRequestBuilder<'a, 'b, 
     self.fbb_.push_slot::<u32>(ClientRequest::VT_DURATION_MS, duration_ms, 0);
   }
   #[inline]
+  pub fn add_node_id(&mut self, node_id: u64) {
+    self.fbb_.push_slot::<u64>(ClientRequest::VT_NODE_ID, node_id, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> ClientRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     ClientRequestBuilder {
@@ -5031,6 +5051,7 @@ impl ::core::fmt::Debug for ClientRequest<'_> {
       ds.field("session_id", &self.session_id());
       ds.field("message", &self.message());
       ds.field("duration_ms", &self.duration_ms());
+      ds.field("node_id", &self.node_id());
       ds.finish()
   }
 }
@@ -6900,6 +6921,7 @@ impl<'a> NodeRecord<'a> {
   pub const VT_BUFFER_VIEW: ::flatbuffers::VOffsetT = 12;
   pub const VT_SPLIT: ::flatbuffers::VOffsetT = 14;
   pub const VT_TABS: ::flatbuffers::VOffsetT = 16;
+  pub const VT_FOCUS_LEAF_ID: ::flatbuffers::VOffsetT = 18;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6911,6 +6933,7 @@ impl<'a> NodeRecord<'a> {
     args: &'args NodeRecordArgs<'args>
   ) -> ::flatbuffers::WIPOffset<NodeRecord<'bldr>> {
     let mut builder = NodeRecordBuilder::new(_fbb);
+    builder.add_focus_leaf_id(args.focus_leaf_id);
     builder.add_parent_id(args.parent_id);
     builder.add_session_id(args.session_id);
     builder.add_id(args.id);
@@ -6971,6 +6994,13 @@ impl<'a> NodeRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<TabsRecord>>(NodeRecord::VT_TABS, None)}
   }
+  #[inline]
+  pub fn focus_leaf_id(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(NodeRecord::VT_FOCUS_LEAF_ID, Some(0)).unwrap()}
+  }
 }
 
 impl ::flatbuffers::Verifiable for NodeRecord<'_> {
@@ -6986,6 +7016,7 @@ impl ::flatbuffers::Verifiable for NodeRecord<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<BufferViewRecord>>("buffer_view", Self::VT_BUFFER_VIEW, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<SplitRecord>>("split", Self::VT_SPLIT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<TabsRecord>>("tabs", Self::VT_TABS, false)?
+     .visit_field::<u64>("focus_leaf_id", Self::VT_FOCUS_LEAF_ID, false)?
      .finish();
     Ok(())
   }
@@ -6998,6 +7029,7 @@ pub struct NodeRecordArgs<'a> {
     pub buffer_view: Option<::flatbuffers::WIPOffset<BufferViewRecord<'a>>>,
     pub split: Option<::flatbuffers::WIPOffset<SplitRecord<'a>>>,
     pub tabs: Option<::flatbuffers::WIPOffset<TabsRecord<'a>>>,
+    pub focus_leaf_id: u64,
 }
 impl<'a> Default for NodeRecordArgs<'a> {
   #[inline]
@@ -7010,6 +7042,7 @@ impl<'a> Default for NodeRecordArgs<'a> {
       buffer_view: None,
       split: None,
       tabs: None,
+      focus_leaf_id: 0,
     }
   }
 }
@@ -7048,6 +7081,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> NodeRecordBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<TabsRecord>>(NodeRecord::VT_TABS, tabs);
   }
   #[inline]
+  pub fn add_focus_leaf_id(&mut self, focus_leaf_id: u64) {
+    self.fbb_.push_slot::<u64>(NodeRecord::VT_FOCUS_LEAF_ID, focus_leaf_id, 0);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> NodeRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     NodeRecordBuilder {
@@ -7072,6 +7109,7 @@ impl ::core::fmt::Debug for NodeRecord<'_> {
       ds.field("buffer_view", &self.buffer_view());
       ds.field("split", &self.split());
       ds.field("tabs", &self.tabs());
+      ds.field("focus_leaf_id", &self.focus_leaf_id());
       ds.finish()
   }
 }
