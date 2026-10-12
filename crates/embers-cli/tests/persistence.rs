@@ -276,9 +276,27 @@ async fn killed_panes_whose_keepers_are_gone_stay_gone() {
         &socket_path,
         &["new-window", "-t", "other", "--", "/bin/sh"],
     );
-    wait_until("the three panes to be saved running", || {
-        fs::read_to_string(&workspace_path)
-            .is_ok_and(|contents| contents.matches("\"running\"").count() >= 3)
+    // A new window's buffer is created before it is placed, and a save can
+    // land in between; wait for the save that has every pane in its window.
+    let buffer_ids = cli(&socket_path, &["list-buffers"])
+        .lines()
+        .map(|line| {
+            BufferId(
+                line.split('\t')
+                    .next()
+                    .expect("buffer id")
+                    .parse()
+                    .expect("numeric buffer id"),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(buffer_ids.len(), 3, "one buffer per pane");
+    wait_until("every pane to be saved running in its window", || {
+        buffer_ids.iter().all(|&buffer_id| {
+            saved_buffer(&workspace_path, buffer_id).is_some_and(|buffer| {
+                buffer["state"]["kind"] == "running" && buffer["attachment"]["kind"] == "attached"
+            })
+        })
     })
     .await;
     server.kill();
