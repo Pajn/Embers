@@ -24,7 +24,7 @@ Today it is intentionally minimal:
 
 - input routing is passthrough
 - output routing first takes tmux passthrough sequences (`ESC P tmux; ... ESC \`) and unwrapped kitty graphics commands (`ESC _ G ... ESC \`) out of the stream (see below); the backend never sees them
-- the remaining bytes go directly to the backend, with two side scanners: one sniffs OSC 7 working-directory reports, and one picks out the DCS queries alacritty leaves unanswered (DECRQSS and XTGETTCAP). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
+- the remaining bytes go directly to the backend, with side scanners: one sniffs OSC 7 working-directory reports, and the others pick out the queries alacritty leaves unanswered (DECRQSS, XTGETTCAP and the cell size query `CSI 16 t`). Output is split after each such query and the backend answers it through `TerminalBackend::answer_query`, so the reply reflects the state at that byte and is queued in order with the emulator's own replies. See [Terminal capabilities](configuration.md#terminal-capabilities).
 
 The seam is also where further special-case interception, or metadata extraction that must happen before backend ingestion, belongs.
 
@@ -67,6 +67,20 @@ The keeper queues the writes in order, numbered, under the surface lock the read
 
 The server forwards each batch through one task per buffer runtime rather than a task per call, so writes reach clients in the order the program sent them. It targets the same clients as a clipboard write, splits the batch into `PassthroughEvent`s of at most 6 MiB to stay under the 8 MiB frame cap, and sends them best effort: a client too slow to take one misses it but stays attached. What a client does with them is in the [render-source contract](render-source-contract.md#passthrough-sequences).
 
+## Replies behind graphics queries
+
+A program that detects kitty graphics sends a graphics query and then queries the emulator answers, and reads until the last answer; see [Detecting image support](configuration.md#detecting-image-support). The graphics query travels keeper, server, client, host and back as client input, while the emulator's replies are written to the PTY as soon as the read loop has ingested the output. So the keeper keeps them in order itself (`ReplyHold` in `crates/embers-server/src/reply_hold.rs`):
+
+- `RawByteRouter::route_output_with` hands the keeper each sequence for the host as it is taken out, with the backend as it is at that byte. The keeper first drains the replies to what came before (`TerminalBackend::take_replies`) and passes them on, then, for each answered graphics query in the sequence (`a=q`, an `i=` or `I=`, not quiet), records it as pending with a deadline of 500 ms. Replies the emulator produces while a query is pending are held, in order.
+- Input written to the PTY (`KeeperRequest::Write`) is scanned for graphics replies. One that names a pending query clears it; once none is pending the held replies are queued for the writer thread right after that input, so the program reads the host's answer first.
+- A thread per keeper waits on a condition variable for the deadline and lets the held replies go if no answer came. Turning holding off, or the server disconnecting, lets them go at once. Held replies are capped at 64 KiB; past that they all go.
+
+Holding only happens while the server says some client forwards graphics queries to a host that answers them (`KeeperRequest::SetHostGraphics`). Each client tells the server whether it does with `ClientRequest::SetHostGraphics` (passthrough on and a host with `kitty_graphics`); the server tells every keeper when the answer for the whole server changes, and each new keeper when it is on. It is not worked out per pane, so a pane that no such client shows waits out the deadline. Without it the emulator answers at once, which tells the program there is no graphics support. A keeper that predates the request rejects it and never holds; a server that predates it never sends it.
+
+## Pixel size
+
+`PtySize` carries the text area in pixels with the cells. A client that knows its terminal's cell size (`TIOCGWINSZ`) sends it with each resize (`InputRequest::Resize`) and with the size of the panes it creates; the server keeps it on the buffer record, applies it to the PTY, so `TIOCGWINSZ` in the pane reports it, and hands it to the backend, which answers the text area (`CSI 14 t`) and cell size (`CSI 16 t`) queries from it. A pixel size of zero means unknown: the backend then answers neither.
+
 ## Metadata outside the backend
 
 The server still owns buffer-level metadata records:
@@ -94,3 +108,4 @@ In practice, Embers currently inherits alternate-screen capture semantics from t
 - Raw routing + backend trait: `crates/embers-server/src/terminal_backend.rs`
 - Keeper-owned surface: `crates/embers-server/src/buffer_runtime.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
+- Replies held behind kitty graphics queries: `crates/embers-server/src/reply_hold.rs`

@@ -12,7 +12,7 @@ use embers_client::{
     MouseModifiers, MuxClient, PanePlacement, PendingAttachQueries, RenderGrid, SocketTransport,
     detect_host_capabilities, spawn_pty_size_with,
 };
-use embers_core::{CursorShape, MuxError, PtySize, Result, SessionId, Size};
+use embers_core::{CellSize, CursorShape, MuxError, PtySize, Result, SessionId, Size};
 use embers_protocol::{BufferRequest, ClientMessage, ServerEvent, ServerResponse, SessionRequest};
 use tokio::sync::mpsc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -100,6 +100,7 @@ async fn run_attached(
     let _config_thread = spawn_config_thread(watched_config_path, input_tx)?;
 
     let mut terminal_size = terminal.size()?;
+    let mut cell_size = host_cell_size(io::stdout().as_raw_fd());
     let mut dirty = true;
     loop {
         if dirty {
@@ -120,9 +121,14 @@ async fn run_attached(
             if let Some(active_session_id) = session_id {
                 // Every layout, session or outer-terminal size change marks the
                 // frame dirty, so this keeps each pane's PTY at its drawn size.
+                // A font change, which changes the cell size, does too.
+                cell_size = host_cell_size(io::stdout().as_raw_fd());
+                configured.set_host_cell_size(cell_size);
                 configured
                     .sync_pty_sizes(active_session_id, viewport)
                     .await?;
+                // Config reloads mark the frame dirty as well.
+                configured.sync_host_graphics().await;
                 let grid = configured
                     .render_session(active_session_id, viewport)
                     .await?;
@@ -240,8 +246,10 @@ async fn run_attached(
         }
 
         let next_size = terminal.size()?;
-        if next_size != terminal_size {
+        let next_cell_size = host_cell_size(io::stdout().as_raw_fd());
+        if next_size != terminal_size || next_cell_size != cell_size {
             terminal_size = next_size;
+            cell_size = next_cell_size;
             dirty = true;
             continue;
         }
@@ -481,6 +489,7 @@ async fn ensure_root_window(
             PanePlacement::RootTab,
         )
     });
+    let size = size.map(|size| size.with_cell_size(host_cell_size(io::stdout().as_raw_fd())));
     let buffer_id = create_buffer(client, &command, &title, size, session_id).await?;
     let response = client
         .request_message(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -1475,6 +1484,23 @@ fn terminal_size(fd: libc::c_int) -> Result<Size> {
         winsize.ws_row
     };
     Ok(Size { width, height })
+}
+
+/// The cell size in pixels of the terminal on `fd`, from the pixel size
+/// `TIOCGWINSZ` reports; `None` when it reports none.
+fn host_cell_size(fd: libc::c_int) -> Option<CellSize> {
+    // SAFETY: winsize is POD and zero initialization is valid.
+    let mut winsize = unsafe { std::mem::zeroed::<libc::winsize>() };
+    // SAFETY: ioctl writes to winsize when fd references a terminal.
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) } == -1 {
+        return None;
+    }
+    CellSize::of_text_area(
+        winsize.ws_col,
+        winsize.ws_row,
+        winsize.ws_xpixel,
+        winsize.ws_ypixel,
+    )
 }
 
 fn fit_width(text: &str, width: u16) -> String {

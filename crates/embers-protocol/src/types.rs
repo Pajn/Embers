@@ -632,6 +632,10 @@ pub enum InputRequest {
         buffer_id: BufferId,
         cols: u16,
         rows: u16,
+        /// The text area in pixels, 0 when the client does not know its
+        /// terminal's cell size.
+        pixel_width: u16,
+        pixel_height: u16,
     },
 }
 
@@ -687,6 +691,14 @@ pub enum ClientRequest {
         message: String,
         duration_ms: u32,
     },
+    /// Whether the sending client forwards kitty graphics queries from panes
+    /// to a host terminal that answers them. While any client does, a pane's
+    /// replies to the queries it sends after a kitty graphics query wait for
+    /// the host's answer, so they arrive in the order the program asked.
+    SetHostGraphics {
+        request_id: RequestId,
+        enabled: bool,
+    },
 }
 
 impl ClientRequest {
@@ -696,7 +708,8 @@ impl ClientRequest {
             | Self::Get { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Switch { request_id, .. }
-            | Self::DisplayMessage { request_id, .. } => *request_id,
+            | Self::DisplayMessage { request_id, .. }
+            | Self::SetHostGraphics { request_id, .. } => *request_id,
         }
     }
 }

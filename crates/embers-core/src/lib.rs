@@ -13,7 +13,7 @@ pub use diagnostics::{
     init_tracing, new_request_id, request_span,
 };
 pub use error::{ErrorCode, MuxError, Result, WireError};
-pub use geometry::{FloatGeometry, Point, PtySize, Rect, Size, SplitDirection};
+pub use geometry::{CellSize, FloatGeometry, Point, PtySize, Rect, Size, SplitDirection};
 pub use ids::{BufferId, ClientId, FloatingId, IdAllocator, NodeId, RequestId, SessionId};
 pub use metadata::{ActivityState, EntityMetadata, Timestamp};
 pub use passthrough::{MAX_PASSTHROUGH_BYTES, PassthroughWrite};

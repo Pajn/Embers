@@ -2,12 +2,12 @@ use embers_client::{
     LayoutOptions, PanePlacement, PaneTitles, PresentationModel, RootTabBar, TabBarPosition,
     spawn_pty_size, spawn_pty_size_with,
 };
-use embers_core::{FloatGeometry, NodeId, PtySize, Size, SplitDirection};
+use embers_core::{BufferId, FloatGeometry, NodeId, PtySize, Size, SplitDirection};
 
 use crate::support::{
-    FLOATING_TOP_LEAF_ID, FOCUSED_LEAF_ID, NESTED_TABS_ID, ROOT_SPLIT_LEFT_LEAF_ID,
-    ROOT_SPLIT_RIGHT_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state,
-    root_split_state,
+    FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, NESTED_TABS_ID,
+    ROOT_SPLIT_LEFT_LEAF_ID, ROOT_SPLIT_RIGHT_LEAF_ID, ROOT_TABS_ID, SESSION_ID, demo_state,
+    root_buffer_state, root_split_state,
 };
 
 const VIEWPORT: Size = Size {
@@ -403,5 +403,76 @@ fn top_title_rows_with_the_root_tab_bar_at_the_bottom_take_a_row_from_new_window
             PanePlacement::RootTab,
         ),
         Some(PtySize::new(41, 19))
+    );
+}
+
+#[test]
+fn new_panes_take_the_cell_size_a_client_gave_the_sessions_panes() {
+    let mut state = demo_state();
+    // No pane has a pixel size yet: neither has the new one.
+    assert_eq!(
+        spawn_pty_size(
+            &state,
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::RootTab
+        ),
+        Some(PtySize::new(41, 20))
+    );
+
+    // A hidden pane kept the cell size of an older client: it is used only
+    // while no other pane has one.
+    state
+        .buffers
+        .get_mut(&BufferId(1))
+        .expect("hidden buffer")
+        .pty_size = PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 800,
+        pixel_height: 528,
+    };
+    assert_eq!(
+        spawn_pty_size(
+            &state,
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::RootTab
+        ),
+        Some(PtySize {
+            cols: 41,
+            rows: 20,
+            pixel_width: 410,
+            pixel_height: 440,
+        })
+    );
+
+    // The focused pane's cell size wins over it.
+    state
+        .buffers
+        .get_mut(&FOCUSED_BUFFER_ID)
+        .expect("focused buffer")
+        .pty_size = PtySize {
+        cols: 80,
+        rows: 24,
+        pixel_width: 720,
+        pixel_height: 480,
+    };
+    assert_eq!(
+        spawn_pty_size(
+            &state,
+            SESSION_ID,
+            VIEWPORT,
+            PaneTitles::Off,
+            PanePlacement::RootTab
+        ),
+        Some(PtySize {
+            cols: 41,
+            rows: 20,
+            pixel_width: 369,
+            pixel_height: 400,
+        })
     );
 }
