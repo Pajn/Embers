@@ -1911,6 +1911,49 @@ impl ServerState {
         Ok(())
     }
 
+    /// Make `leaf_id` the active pane of its window, like tmux `select-pane`.
+    /// In the session's current window, or in a popup, that is focusing it.
+    /// In another window the session's focus and current window stay as they
+    /// are; the pane becomes the one the window focuses when it is selected.
+    pub fn select_pane(&mut self, session_id: SessionId, leaf_id: NodeId) -> Result<()> {
+        self.ensure_leaf_belongs_to(leaf_id, session_id)?;
+        self.ensure_leaf_is_focusable(session_id, leaf_id)?;
+        let root = self.session(session_id)?.root_node;
+        let window = match self.window_of_leaf(session_id, leaf_id)? {
+            Some(window) if window != root && !self.is_node_visible_from(root, window)? => window,
+            _ => return self.focus_leaf(session_id, leaf_id),
+        };
+        let mut child = leaf_id;
+        while child != window {
+            let parent = self.node_parent(child)?.ok_or_else(|| {
+                MuxError::conflict(format!("leaf {leaf_id} is not inside window {window}"))
+            })?;
+            match self.node_mut(parent)? {
+                Node::Split(split) => split.last_focused_descendant = Some(leaf_id),
+                Node::Tabs(tabs) => {
+                    tabs.last_focused_descendant = Some(leaf_id);
+                    if let Some(index) = tabs.tabs.iter().position(|tab| tab.child == child) {
+                        tabs.active = index;
+                    }
+                }
+                Node::BufferView(_) => {}
+            }
+            child = parent;
+        }
+        Ok(())
+    }
+
+    /// Show `node_id`, a pane or window of the session, like tmux
+    /// `switch-client -t` with a pane or window: focus the pane, or the pane
+    /// the window focuses when selected, which makes its window current.
+    pub fn show_node(&mut self, session_id: SessionId, node_id: NodeId) -> Result<()> {
+        self.ensure_node_belongs_to(node_id, session_id)?;
+        let leaf_id = self.resolve_focus_candidate(node_id)?.ok_or_else(|| {
+            MuxError::invalid_input(format!("node {node_id} has no focusable leaf"))
+        })?;
+        self.focus_leaf(session_id, leaf_id)
+    }
+
     /// The pane focused before the current one in the focused pane's window,
     /// like tmux's last pane: the newest pane in the session's focus history
     /// that still exists and is in that window. `None` when the focus is in
@@ -2318,7 +2361,9 @@ impl ServerState {
         self.resolve_focus_candidate(floating.root_node)
     }
 
-    fn resolve_focus_candidate(&self, node_id: NodeId) -> Result<Option<NodeId>> {
+    /// The pane focusing `node_id` lands on: the node itself for a pane,
+    /// else the pane it last focused, if still visible, or its first one.
+    pub fn resolve_focus_candidate(&self, node_id: NodeId) -> Result<Option<NodeId>> {
         match self.node(node_id)? {
             Node::BufferView(_) => Ok(Some(node_id)),
             Node::Split(split) => {

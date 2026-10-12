@@ -14,6 +14,7 @@ async fn popup_commands_round_trip_through_cli() {
         &server,
         [
             "display-popup",
+            "--no-wait",
             "-t",
             "alpha",
             "--title",

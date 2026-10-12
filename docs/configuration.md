@@ -40,7 +40,9 @@ commands (`send-keys`, `capture-pane`, `buffer set-option`, `split-window`,
 `kill-pane`, ...) act on that pane, window commands on its window, session
 commands on its session and `kill-popup` on the popup it is in. A buffer that
 is not shown in any pane still takes buffer commands such as `send-keys`,
-`capture-pane` and `buffer set-option`.
+`capture-pane` and `buffer set-option`. `-t %$EMBERS_BUFFER` names the pane
+explicitly, as `-t $TMUX_PANE` does in tmux, and `switch-client` without `-c`
+acts on the client showing the pane's session.
 
 ### Set for `run_shell`
 
@@ -50,7 +52,7 @@ client's environment, with these added:
 | Variable | Value |
 | --- | --- |
 | `EMBERS_SOCKET` | The socket of the server the client is attached to. |
-| `EMBERS_CLIENT` | The id of the client the binding was pressed in, as `embers list-clients` prints it. A tool can use it to act on that client's session, for example to open a popup there, rather than on its own unattached connection. |
+| `EMBERS_CLIENT` | The id of the client the binding was pressed in, as `embers list-clients` prints it. A tool can use it to act on that client's session, for example to open a popup there, rather than on its own unattached connection; `switch-client` and `detach-client` without `-c` act on it. |
 | `EMBERS_BUFFER` | The id of the buffer in that client's focused pane, so `embers` commands without `-t` act on the focused pane as they do when run inside it. |
 | `EMBERS_BASE_INDEX` | The client's window base index, when set. |
 
@@ -136,7 +138,8 @@ The tracing filter is resolved from the first of these that is set, highest
 precedence first:
 
 1. `--log <FILTER>` (alias `--log-level`)
-2. `-v` (`debug`) or `-vv` (`trace`)
+2. `-v` (`debug`) or `-vv` (`trace`), before the command (`embers -v attach`);
+   `--verbose` may also follow it
 3. `EMBERS_LOG`
 4. `RUST_LOG`
 5. `info` (default)
