@@ -486,6 +486,7 @@ fn foreign_session_zoom_targets_are_ignored() {
             }),
             split: None,
             tabs: None,
+            focus_leaf_id: None,
         },
     );
     state.buffers.insert(

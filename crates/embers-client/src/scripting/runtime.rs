@@ -1336,8 +1336,9 @@ mod documented_action_api {
     /// Show a message in the status line for a few seconds, like tmux
     /// `display-message`. The text may use the format variables `#S` (session),
     /// `#I` (window number), `#W` (window name), `#D` (pane id), `#T` (pane
-    /// title), `#{pane_current_path}` and `#{pane_current_command}`, expanded
-    /// for the focused pane; `##` is a literal `#`.
+    /// title), `#{pane_current_path}`, `#{pane_current_command}` and
+    /// `#{@name}` (the pane's buffer option `name`), expanded for the focused
+    /// pane; `##` is a literal `#`.
     ///
     /// # Example
     ///

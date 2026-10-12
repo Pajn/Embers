@@ -93,6 +93,7 @@ where
                 request_id: self.next_request_id(),
                 client_id: None,
                 session_id,
+                node_id: None,
             }))
             .await?
         {

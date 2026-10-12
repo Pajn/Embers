@@ -395,6 +395,11 @@ fn validate_node_request(req: &NodeRequest) -> Result<(), ProtocolError> {
             session_id,
             node_id,
             ..
+        }
+        | NodeRequest::SelectPane {
+            session_id,
+            node_id,
+            ..
         } => {
             validate_required_session_id(*session_id, "node_request.session_id")?;
             validate_required_node_id(*node_id, "node_request.node_id")
@@ -442,8 +447,16 @@ fn validate_client_request(req: &ClientRequest) -> Result<(), ProtocolError> {
         ClientRequest::List { .. } | ClientRequest::Get { .. } | ClientRequest::Detach { .. } => {
             Ok(())
         }
-        ClientRequest::Switch { session_id, .. } => {
-            validate_required_session_id(*session_id, "client_request.session_id")
+        ClientRequest::Switch {
+            session_id,
+            node_id,
+            ..
+        } => {
+            validate_required_session_id(*session_id, "client_request.session_id")?;
+            if let Some(node_id) = node_id {
+                validate_required_node_id(*node_id, "client_request.node_id")?;
+            }
+            Ok(())
         }
         ClientRequest::DisplayMessage {
             client_id,
@@ -984,6 +997,10 @@ fn encode_client_request<'a>(
         } => (Some(builder.create_string(message)), *duration_ms),
         _ => (None, 0),
     };
+    let node_id = match req {
+        ClientRequest::Switch { node_id, .. } => node_id.map_or(0, u64::from),
+        _ => 0,
+    };
 
     let client_req = fb::ClientRequest::create(
         builder,
@@ -993,6 +1010,7 @@ fn encode_client_request<'a>(
             session_id,
             message,
             duration_ms,
+            node_id,
         },
     );
 
@@ -1730,6 +1748,7 @@ fn validate_node_record(record: &NodeRecord) -> Result<(), ProtocolError> {
     validate_required_node_id(record.id, "node_record.id")?;
     validate_required_session_id(record.session_id, "node_record.session_id")?;
     validate_optional_node_id(record.parent_id, "node_record.parent_id")?;
+    validate_optional_node_id(record.focus_leaf_id, "node_record.focus_leaf_id")?;
     if let Some(buffer_view) = &record.buffer_view {
         validate_required_buffer_id(buffer_view.buffer_id, "node_record.buffer_view.buffer_id")?;
     }
@@ -2293,6 +2312,34 @@ fn encode_node_request<'a>(
             ..
         } => (
             fb::NodeOp::Focus,
+            (*session_id).into(),
+            (*node_id).into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            0,
+            0,
+            fb::SplitDirectionWire::Horizontal,
+            fb::NodeBreakDestinationWire::Tab,
+            fb::NodeJoinPlacementWire::Left,
+            None,
+            None,
+            None,
+            false,
+            0,
+            0,
+            0,
+        ),
+        NodeRequest::SelectPane {
+            session_id,
+            node_id,
+            ..
+        } => (
+            fb::NodeOp::SelectPane,
             (*session_id).into(),
             (*node_id).into(),
             0,
@@ -3818,6 +3865,7 @@ fn encode_node_record<'a>(
             buffer_view,
             split,
             tabs,
+            focus_leaf_id: record.focus_leaf_id.map(|id| id.into()).unwrap_or(0),
         },
     )
 }
@@ -4347,6 +4395,14 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     )?,
                     node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
                 },
+                fb::NodeOp::SelectPane => NodeRequest::SelectPane {
+                    request_id,
+                    session_id: decode_required_session_id(
+                        req.session_id(),
+                        "node_request.session_id",
+                    )?,
+                    node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
+                },
                 fb::NodeOp::Close => NodeRequest::Close {
                     request_id,
                     node_id: decode_required_node_id(req.node_id(), "node_request.node_id")?,
@@ -4563,6 +4619,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                             req.session_id(),
                             "client_request.session_id",
                         )?,
+                        node_id: (req.node_id() != 0).then(|| NodeId(req.node_id())),
                     }
                 }
                 fb::ClientOp::DisplayMessage => {
@@ -5302,6 +5359,11 @@ fn decode_node_record(record: fb::NodeRecord) -> Result<NodeRecord, ProtocolErro
         buffer_view,
         split,
         tabs,
+        focus_leaf_id: if record.focus_leaf_id() == 0 {
+            None
+        } else {
+            Some(NodeId(record.focus_leaf_id()))
+        },
     })
 }
 
@@ -5809,6 +5871,7 @@ mod tests {
             request_id: RequestId(11),
             client_id: Some(NonZeroU64::new(42).expect("non-zero client id")),
             session_id: SessionId(99),
+            node_id: Some(NodeId(7)),
         });
 
         let encoded = encode_client_message(&original).expect("encode should succeed");
@@ -6634,6 +6697,7 @@ mod tests {
             request_id: RequestId(1),
             client_id: None,
             session_id: SessionId(0),
+            node_id: None,
         }))
         .expect_err("zero switch session id should be rejected");
 
