@@ -131,7 +131,8 @@ Useful subcommand groups include:
 - `popup`: `display-popup` (`-B` for no frame, like tmux), `kill-popup`
 - `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
 - `server`: `kill-server` (stop the server and every program it runs; attached clients print
-  `[server exited]` and exit)
+  `[server exited]` and exit), `proxy` (connect standard input and output to the server, as in
+  `ssh HOST embers proxy`; see [`docs/commands.md`](docs/commands.md#proxy))
 
 As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
 programs they show; pass `--detach` to keep them running as detached buffers

@@ -364,6 +364,28 @@ bind("normal", "<leader>x", action.confirm("kill-pane #D? (y/n)", action.run_com
 bind("normal", "<leader>&", action.confirm("kill-window #W? (y/n)", action.run_command("kill-window")));
 ```
 
+## proxy
+
+`embers proxy` connects its standard input and output to the server, starting
+the server if it is not running, so a program that speaks the Embers protocol
+can reach the server through a pipe instead of the socket. Over SSH, this
+reaches the server on another machine:
+
+```sh
+ssh devbox embers proxy
+```
+
+The proxy passes bytes through without reading them, so the client at the
+other end does the version check as it would on the socket: a client and a
+server built from releases that speak different protocol versions refuse each
+other, with an error naming both releases. The proxy exits once the server
+closes the connection, which it does when the client's side of the pipe ends.
+
+`--socket` and `EMBERS_SOCKET` choose the server as for any other command. SSH
+runs the command without a login shell, so `embers` must be on the `PATH` that
+non-interactive SSH sessions get on the remote machine, or the command must
+name its path.
+
 ## tmux compatibility
 
 The commands a script or tool typically sends to tmux take tmux's flags and

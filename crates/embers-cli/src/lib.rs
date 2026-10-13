@@ -5,6 +5,7 @@ mod formats;
 mod interactive;
 mod options;
 mod popup;
+mod proxy;
 mod sessions;
 mod target;
 
@@ -162,6 +163,10 @@ pub enum Command {
         #[arg(default_value = "phase0")]
         payload: String,
     },
+    /// Connect standard input and output to the server, starting it if it is
+    /// not running, for a client that reaches the server through a pipe:
+    /// `ssh HOST embers proxy` connects to the server on HOST.
+    Proxy,
     /// Stop the server and end every program it runs. Unlike stopping the
     /// server with a signal, nothing is left for a restarted server to
     /// reattach to or restore.
@@ -819,7 +824,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         Command::Attach { .. }
         | Command::Serve
         | Command::RuntimeKeeper { .. }
-        | Command::Automation { .. } => Err(MuxError::invalid_input(
+        | Command::Automation { .. }
+        | Command::Proxy => Err(MuxError::invalid_input(
             "interactive commands must be dispatched through run()",
         )),
         Command::Ping { payload } => {
@@ -2280,6 +2286,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                     ensure_server_process(&socket, &log_filter).await?;
                     automation::run(socket, target, all_sessions).await
                 }
+                Some(Command::Proxy) => {
+                    ensure_server_process(&socket, &log_filter).await?;
+                    proxy::run(&socket).await
+                }
                 Some(Command::Serve) => run_server(socket, &log_filter).await,
                 Some(Command::KillServer) => kill_server(&socket).await,
                 Some(command) => {
@@ -2757,6 +2767,7 @@ fn interactive_command_name(command: &Command) -> Option<&'static str> {
         Command::Serve => Some("__serve"),
         Command::RuntimeKeeper { .. } => Some("__runtime-keeper"),
         Command::Automation { .. } => Some("automation"),
+        Command::Proxy => Some("proxy"),
         _ => None,
     }
 }

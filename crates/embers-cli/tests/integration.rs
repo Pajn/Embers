@@ -11,6 +11,7 @@ mod panes;
 mod persistence;
 mod ping;
 mod popups;
+mod proxy;
 mod sessions;
 mod support;
 mod targets;
