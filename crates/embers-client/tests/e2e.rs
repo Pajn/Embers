@@ -1390,8 +1390,11 @@ async fn osc8_hyperlink_reaches_client_ansi_lines() {
     )
     .await;
 
+    // Panes on alacritty keep the link's id; libghostty does not report ids,
+    // so panes on Ghostty, the default, carry only the URI.
     assert!(
-        ansi.contains("\x1b]8;id=doc;https://example.com/doc\x1b\\DOCLINK\x1b]8;;\x1b\\ after"),
+        ansi.contains("\x1b]8;id=doc;https://example.com/doc\x1b\\DOCLINK\x1b]8;;\x1b\\ after")
+            || ansi.contains("\x1b]8;;https://example.com/doc\x1b\\DOCLINK\x1b]8;;\x1b\\ after"),
         "expected an OSC 8 span around the link text in client output:\n{ansi:?}"
     );
     assert!(plain.contains("DOCLINK after"));

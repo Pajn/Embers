@@ -2,7 +2,7 @@
 //! emulators differ: random output, then the first cell, cursor or mode they
 //! show differently.
 //!
-//! Run on demand (`cargo test -- --ignored`), since the emulators do differ.
+//! Run on demand (`cargo test -p embers-ghostty-backend --test differential -- --ignored`), since the emulators do differ.
 //! The steps below steer around some of the differences found so far. Those
 //! they cannot avoid:
 //!

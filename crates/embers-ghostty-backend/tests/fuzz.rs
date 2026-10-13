@@ -4,14 +4,14 @@
 //! shows: the snapshot and the whole scrollback are the same before and after
 //! every pass.
 //!
-//! Run on demand: `cargo test --test fuzz -- --ignored`. `FUZZ_CASES` sets
-//! how many cases run (default 32).
+//! Run on demand: `cargo test -p embers-ghostty-backend --test fuzz --
+//! --ignored`. `FUZZ_CASES` sets how many cases run (default 32).
 //!
 //! Test builds compile libghostty with Zig's safety checks. A bug inside
 //! libghostty stops the process before proptest can report the case, so each
 //! case is first written to `fuzz-last-case.json` in Cargo's test scratch
 //! directory, or to `FUZZ_LAST_CASE`. Replay one with `FUZZ_REPLAY=<file>
-//! cargo test --test fuzz replay`.
+//! cargo test -p embers-ghostty-backend --test fuzz replay`.
 
 use std::path::PathBuf;
 

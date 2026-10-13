@@ -30,12 +30,13 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Rust `1.92` or newer
 - `flatc` from FlatBuffers `25.12.19` when changing the protocol schema
 - `mdbook` when regenerating the config API docs
-- Zig `0.16.0` when building `crates/embers-ghostty-sys`, the bindings to Ghostty's terminal
-  emulation library, or `crates/embers-ghostty-backend`, a terminal backend on it to try beside
-  the alacritty one; and `bindgen` `0.72.1` (`bindgen-cli`) when regenerating the bindings with
-  `cargo gen-ghostty`. Both crates are outside the workspace, so the rest builds without either.
+- Zig `0.16.0`, and git and network access for the first build, to build libghostty-vt, Ghostty's
+  terminal emulation, which panes run on. Building `embers-cli` with `--no-default-features` leaves
+  it out, and panes run on alacritty's emulation instead.
+- `bindgen` `0.72.1` (`bindgen-cli`) when regenerating the libghostty-vt bindings with
+  `cargo gen-ghostty`
 
-Building needs only Cargo: the Rust code generated from the protocol schema
+Apart from Zig, building needs only Cargo: the Rust code generated from the protocol schema
 (`crates/embers-protocol/schema/embers.fbs`) is checked in. After changing the schema, regenerate it
 with `flatc` on `PATH` and commit the result:
 
@@ -70,6 +71,12 @@ You can also install and run the binary directly:
 ```sh
 cargo install --path crates/embers-cli
 embers
+```
+
+Without Zig, build it with panes emulated by alacritty instead of Ghostty:
+
+```sh
+cargo install --path crates/embers-cli --no-default-features
 ```
 
 ## CLI Usage
@@ -247,14 +254,6 @@ The CI workflow also runs an ignored PTY smoke test:
 cargo test -p embers-test-support pty_round_trips_input -- --ignored
 ```
 
-To try panes emulated by Ghostty's libghostty-vt instead of alacritty, run `embers-ghostty`. It is
-Embers with the other emulator, on a server of its own (`embers-ghostty.sock`), so it neither joins
-nor disturbs a running `embers`:
-
-```sh
-cargo run --manifest-path crates/embers-ghostty-backend/Cargo.toml --bin embers-ghostty
-```
-
 ## Workspace Layout
 
 - [`crates/embers-core`](crates/embers-core): shared IDs, geometry, snapshots, diagnostics, and error types
@@ -263,9 +262,9 @@ cargo run --manifest-path crates/embers-ghostty-backend/Cargo.toml --bin embers-
 - [`crates/embers-client`](crates/embers-client): client state, rendering, input handling, configuration, scripting, and docs generation
 - [`crates/embers-cli`](crates/embers-cli): `embers` binary, interactive terminal UI, and CLI command implementations
 - [`crates/embers-test-support`](crates/embers-test-support): shared test harnesses for server, protocol, PTY, and CLI tests
-- [`crates/embers-ghostty-sys`](crates/embers-ghostty-sys): bindings to libghostty-vt, built from a pinned Ghostty commit (outside the workspace; needs Zig)
+- [`crates/embers-ghostty-sys`](crates/embers-ghostty-sys): bindings to libghostty-vt, built from a pinned Ghostty commit with Zig
 - [`crates/embers-ghostty-gen`](crates/embers-ghostty-gen): regenerates those bindings (`cargo gen-ghostty`)
-- [`crates/embers-ghostty-backend`](crates/embers-ghostty-backend): a terminal backend on libghostty-vt and the `embers-ghostty` binary that uses it (outside the workspace; needs Zig)
+- [`crates/embers-ghostty-backend`](crates/embers-ghostty-backend): the terminal backend on libghostty-vt that panes run on, unless `embers-cli` is built without its `ghostty` feature
 
 ## Architecture Notes
 

@@ -1,5 +1,5 @@
 //! How long a snapshot takes in each backend, on a full screen of styled
-//! text. Run on demand: `cargo test --release --test speed -- --ignored
+//! text. Run on demand: `cargo test -p embers-ghostty-backend --release --test speed -- --ignored
 //! --nocapture`.
 
 use std::time::Instant;

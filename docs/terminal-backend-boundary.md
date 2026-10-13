@@ -57,7 +57,7 @@ Backends must be able to:
 
 Keepers emulate with `AlacrittyTerminalBackend` unless the binary chose another with `set_terminal_backend`, a factory from the pane's size and scrollback ceiling to a `Box<dyn TerminalBackend>`. A keeper is a process of its own, started from the server's executable (or `EMBERS_RUNTIME_KEEPER_BIN`), so a binary that chooses sets the factory first thing in `main`, whatever it runs as.
 
-`embers-ghostty`, in the unpublished `crates/embers-ghostty-backend`, is the one that does: Embers with `GhosttyTerminalBackend`, on libghostty-vt, to try beside alacritty. It names itself as the keeper executable and defaults to its own socket, `embers-ghostty.sock` beside Embers' own, so its sessions and saved layout are its own. libghostty answers DECRQSS and the capabilities it knows itself; for those queries the Ghostty backend's `answer_query` adds only what libghostty left unanswered, so a program never gets two replies.
+`embers-cli` chooses `GhosttyTerminalBackend`, in `crates/embers-ghostty-backend`, on libghostty-vt, with its `ghostty` feature, which is on by default; built without it, panes run on alacritty. Only keepers emulate, so it sets the factory when it runs as one. libghostty answers DECRQSS and the capabilities it knows itself; for those queries the Ghostty backend's `answer_query` adds only what libghostty left unanswered, so a program never gets two replies.
 
 ## Compaction when idle
 
@@ -116,7 +116,7 @@ In practice, Embers currently inherits alternate-screen capture semantics from t
 ## Code anchors
 
 - Raw routing + backend trait + backend choice: `crates/embers-server/src/terminal_backend.rs`
-- Ghostty backend and `embers-ghostty`: `crates/embers-ghostty-backend`
+- Ghostty backend: `crates/embers-ghostty-backend`, on libghostty-vt from `crates/embers-ghostty-sys`
 - Keeper-owned surface: `crates/embers-server/src/buffer_runtime.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
 - Replies held behind kitty graphics queries: `crates/embers-server/src/reply_hold.rs`

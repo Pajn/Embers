@@ -5,7 +5,7 @@
 //! ```sh
 //! for backend in alacritty ghostty ghostty-compressed; do
 //!   for content in empty plain styled alternate; do
-//!     MEMORY_CASE=$backend:$content cargo test --release --test memory -- --ignored --nocapture
+//!     MEMORY_CASE=$backend:$content cargo test -p embers-ghostty-backend --release --test memory -- --ignored --nocapture
 //!   done
 //! done
 //! ```

@@ -17,8 +17,8 @@ pub const RUNTIME_KEEPER_BIN_ENV_VAR: &str = "EMBERS_RUNTIME_KEEPER_BIN";
 pub const BUFFER_ENV_VAR: &str = "EMBERS_BUFFER";
 
 /// `TERM` advertised to buffer child processes. Embers ships no terminfo of its
-/// own; alacritty's emulation is closest to xterm and `xterm-256color` exists
-/// everywhere. A user-supplied `TERM` in the buffer spawn env still overrides
+/// own; its emulators, Ghostty's and alacritty's, follow xterm, and
+/// `xterm-256color` exists everywhere. A user-supplied `TERM` in the buffer spawn env still overrides
 /// this (hints are merged after the base env). The entry lacks `Smulx`,
 /// `Setulc` and `Ms`; programs that probe the terminal (DECRQSS, XTGETTCAP)
 /// learn them from the keeper's answers instead (see `RawByteRouter`).
@@ -26,7 +26,7 @@ pub const TERM_ENV_VAR: &str = "TERM";
 /// Default `TERM` value injected into buffer children.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 /// `COLORTERM` advertised to buffer child processes. Truthful at the parser
-/// level: alacritty accepts 24-bit SGR sequences.
+/// level: both emulators accept 24-bit SGR sequences.
 pub const COLORTERM_ENV_VAR: &str = "COLORTERM";
 /// Default `COLORTERM` value injected into buffer children.
 pub const DEFAULT_COLORTERM: &str = "truecolor";

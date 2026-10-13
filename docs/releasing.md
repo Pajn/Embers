@@ -27,11 +27,15 @@ through `rust-lang/crates-io-auth-action`, pinned to a commit. No crates.io API 
 the repository.
 
 Each published crate (`embers-core`, `embers-protocol`, `embers-server`, `embers-test-support`,
-`embers-client`, `embers-cli`) needs a trusted publisher configured once in its settings on
-crates.io, with:
+`embers-client`, `embers-ghostty-sys`, `embers-ghostty-backend`, `embers-cli`) needs a trusted
+publisher configured once in its settings on crates.io, with:
 
 - repository owner and name: this repository
 - workflow filename: `release.yml`
 - environment: `crates.io`
 
 A new crate has to be published once by hand before a trusted publisher can be added to it.
+
+Publishing builds each crate, and the release binaries are built natively on each target, since
+`embers-ghostty-sys` builds libghostty-vt with Zig and does not cross-compile; the workflow installs
+the Zig version `ZIG_VERSION` names.

@@ -5,6 +5,10 @@ on:
     tags:
       - "v[0-9]*"
 
+env:
+  # Keep in step with ZIG_VERSION in crates/embers-ghostty-sys/ghostty_source.rs.
+  ZIG_VERSION: 0.16.0
+
 jobs:
   validate:
     name: Validate release
@@ -15,6 +19,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          # A restored cache could carry artifacts into what is published.
+          use-cache: false
       - name: Verify tag matches workspace version
         run: |
           set -euo pipefail
@@ -57,6 +66,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Publishing builds each crate, and embers-ghostty-sys builds
+      # libghostty-vt with Zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          # A restored cache could carry artifacts into what is published.
+          use-cache: false
       - name: Authenticate with crates.io
         id: crates-io-auth
         # Pinned: this step can mint publish tokens. v1.0.5
@@ -74,6 +90,8 @@ jobs:
             embers-server
             embers-test-support
             embers-client
+            embers-ghostty-sys
+            embers-ghostty-backend
             embers-cli
           )
 
@@ -147,6 +165,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          # A restored cache could carry artifacts into what is published.
+          use-cache: false
       - name: Build binaries
         run: |
           cargo build --locked --release \

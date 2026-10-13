@@ -23,10 +23,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Lint without Ghostty
+        run: cargo clippy -p embers-cli --no-default-features --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -38,6 +43,9 @@ jobs:
           sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Install mdBook
         run: cargo install mdbook --version 0.5.2 --locked
       - name: Run unit and integration tests
@@ -72,17 +80,13 @@ jobs:
       - name: Run ignored PTY smoke test
         run: cargo test -p embers-test-support pty_round_trips_input -- --ignored
 
-  # The Ghostty crates are outside the workspace, since building them needs Zig.
-  ghostty:
+  # The libghostty-vt bindings are generated from the pinned Ghostty commit's
+  # headers and checked in.
+  ghostty-bindings:
     runs-on: ubuntu-latest
-    env:
-      # Shared, so libghostty-vt is built once for both crates.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: mlugg/setup-zig@v2
         with:
@@ -99,18 +103,3 @@ jobs:
             git diff --stat -- crates/embers-ghostty-sys/src/bindings.rs
             exit 1
           fi
-      - name: Check formatting
-        run: |
-          for crate in embers-ghostty-sys embers-ghostty-backend; do
-            cargo fmt --manifest-path "crates/${crate}/Cargo.toml" -- --check
-          done
-      - name: Lint
-        run: |
-          for crate in embers-ghostty-sys embers-ghostty-backend; do
-            cargo clippy --locked --manifest-path "crates/${crate}/Cargo.toml" --all-targets -- -D warnings
-          done
-      - name: Test
-        run: |
-          for crate in embers-ghostty-sys embers-ghostty-backend; do
-            cargo test --locked --manifest-path "crates/${crate}/Cargo.toml"
-          done

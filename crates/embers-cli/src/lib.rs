@@ -2195,6 +2195,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
     }
 }
 
+/// Panes emulated by Ghostty's libghostty-vt, which the `ghostty` feature
+/// (on by default) builds in; without it they are emulated by alacritty.
+#[cfg(feature = "ghostty")]
+fn ghostty_backend(
+    size: embers_core::PtySize,
+    max_scrollback_lines: usize,
+) -> Box<dyn embers_server::TerminalBackend> {
+    Box::new(embers_ghostty_backend::GhosttyTerminalBackend::new(
+        size,
+        max_scrollback_lines,
+    ))
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     let log_filter = cli.log_filter();
     let base_index = cli.base_index();
@@ -2215,18 +2228,23 @@ pub async fn run(cli: Cli) -> Result<()> {
             cwd,
             env,
             command,
-        }) => embers_server::run_runtime_keeper(embers_server::RuntimeKeeperCli {
-            socket_path: keeper_socket,
-            command,
-            cwd,
-            env: env.into_iter().collect(),
-            size: embers_core::PtySize {
-                cols,
-                rows,
-                pixel_width,
-                pixel_height,
-            },
-        }),
+        }) => {
+            // The keeper is the only process that emulates a pane.
+            #[cfg(feature = "ghostty")]
+            embers_server::set_terminal_backend(ghostty_backend);
+            embers_server::run_runtime_keeper(embers_server::RuntimeKeeperCli {
+                socket_path: keeper_socket,
+                command,
+                cwd,
+                env: env.into_iter().collect(),
+                size: embers_core::PtySize {
+                    cols,
+                    rows,
+                    pixel_width,
+                    pixel_height,
+                },
+            })
+        }
         command => {
             let socket = resolve_socket_path(socket.as_deref());
             validate_runtime_socket_parent(&socket)?;

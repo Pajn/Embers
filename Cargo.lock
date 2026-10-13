@@ -574,6 +574,7 @@ dependencies = [
  "clap",
  "embers-client",
  "embers-core",
+ "embers-ghostty-backend",
  "embers-protocol",
  "embers-server",
  "embers-test-support",
@@ -627,7 +628,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "embers-ghostty-backend"
+version = "0.3.3"
+dependencies = [
+ "embers-client",
+ "embers-core",
+ "embers-ghostty-sys",
+ "embers-server",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "embers-ghostty-gen"
+version = "0.3.3"
+
+[[package]]
+name = "embers-ghostty-sys"
 version = "0.3.3"
 
 [[package]]

@@ -1,5 +1,6 @@
-//! A [`TerminalBackend`] on libghostty-vt, Ghostty's terminal emulation, to
-//! try beside [`embers_server::AlacrittyTerminalBackend`].
+//! A [`TerminalBackend`] on libghostty-vt, Ghostty's terminal emulation, which
+//! Embers runs panes on unless built without its `ghostty` feature, when
+//! they run on [`embers_server::AlacrittyTerminalBackend`].
 //!
 //! It follows the alacritty backend wherever Embers has a choice: the same
 //! snapshot lines (trailing blanks trimmed, cells that show without a glyph
