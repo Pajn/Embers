@@ -28,14 +28,30 @@ the repository.
 
 Each published crate (`embers-core`, `embers-protocol`, `embers-server`, `embers-test-support`,
 `embers-client`, `embers-ghostty-sys`, `embers-ghostty-backend`, `embers-cli`) needs a trusted
-publisher configured once in its settings on crates.io, with:
+publisher on crates.io, with:
 
 - repository owner and name: this repository
 - workflow filename: `release.yml`
 - environment: `crates.io`
 
-A new crate has to be published once by hand before a trusted publisher can be added to it.
+`scripts/setup-crates-io.sh` sets this up for every workspace crate that isn't marked
+`publish = false`. A trusted publisher can only be added to a crate that already exists, so for a
+crate that isn't on crates.io yet the script first publishes a placeholder `0.0.0` and yanks it.
+It then adds the trusted publisher and sets the crate to accept trusted publishing only. Crates
+that are already set up are skipped. By default it only reads from crates.io and prints what it
+would change; `--execute` makes the changes:
 
-Publishing builds each crate, and the release binaries are built natively on each target, since
-`embers-ghostty-sys` builds libghostty-vt with Zig and does not cross-compile; the workflow installs
-the Zig version `ZIG_VERSION` names.
+```sh
+scripts/setup-crates-io.sh            # dry run
+scripts/setup-crates-io.sh --execute
+```
+
+It needs `cargo`, `curl` and `jq`, and a crates.io API token from an owner of the crates, with the
+`publish-new`, `yank` and `trusted-publishing` scopes for the workspace crates. It uses
+`CARGO_REGISTRY_TOKEN` if that is set, and otherwise the token saved by `cargo login`.
+
+### Adding a crate
+
+1. Add the crate to the `crates` list in the `publish-crates` job of
+   `.github/workflows/release.yml`, after the crates it depends on.
+2. Run `scripts/setup-crates-io.sh --execute` before the next release is tagged.
