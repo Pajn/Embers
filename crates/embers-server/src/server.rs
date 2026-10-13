@@ -1940,8 +1940,15 @@ impl Runtime {
                 request_id,
                 buffer_id,
             } => {
-                if let Err(error) = self.state.lock().await.buffer(buffer_id) {
-                    return (mux_error_response(Some(request_id), error), Vec::new());
+                match self.state.lock().await.buffers.get_mut(&buffer_id) {
+                    Some(buffer) => {
+                        buffer.watched = true;
+                        buffer.ever_attached = true;
+                    }
+                    None => {
+                        let error = MuxError::not_found(format!("unknown buffer {buffer_id}"));
+                        return (mux_error_response(Some(request_id), error), Vec::new());
+                    }
                 }
                 if let Some(client) = self.clients.lock().await.get_mut(&connection_id) {
                     client.watched_buffers.insert(buffer_id);
@@ -1955,7 +1962,9 @@ impl Runtime {
                 if let Some(client) = self.clients.lock().await.get_mut(&connection_id) {
                     client.watched_buffers.remove(&buffer_id);
                 }
-                (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+                let mut events = Vec::new();
+                self.sync_watched_buffers([buffer_id], &mut events).await;
+                (ServerResponse::Ok(OkResponse { request_id }), events)
             }
             BufferRequest::Inspect {
                 request_id,
@@ -4773,12 +4782,46 @@ impl Runtime {
     }
 
     async fn cleanup_connection(&self, connection_id: u64) {
-        self.clients.lock().await.remove(&connection_id);
+        let client = self.clients.lock().await.remove(&connection_id);
         self.subscriptions
             .lock()
             .await
             .retain(|_, subscription| subscription.connection_id != connection_id);
         self.sync_host_graphics().await;
+        if let Some(client) = client
+            && !client.watched_buffers.is_empty()
+        {
+            let mut events = Vec::new();
+            self.sync_watched_buffers(client.watched_buffers, &mut events)
+                .await;
+            let retired_session_ids = closed_session_ids(&events);
+            self.broadcast(events, &retired_session_ids).await;
+        }
+    }
+
+    /// Mark `buffer_ids` watched or not by whether a client still watches
+    /// them, and clean up the exited ones nothing watches any more.
+    async fn sync_watched_buffers(
+        &self,
+        buffer_ids: impl IntoIterator<Item = BufferId>,
+        events: &mut Vec<ServerEvent>,
+    ) {
+        let watched: BTreeSet<BufferId> = self
+            .clients
+            .lock()
+            .await
+            .values()
+            .flat_map(|client| client.watched_buffers.iter().copied())
+            .collect();
+        {
+            let mut state = self.state.lock().await;
+            for buffer_id in buffer_ids {
+                if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
+                    buffer.watched = watched.contains(&buffer_id);
+                }
+            }
+        }
+        self.dispose_exited_buffers(events).await;
     }
 
     /// Tell every keeper whether any client now forwards kitty graphics

@@ -512,7 +512,7 @@ impl ServerState {
     /// - a detached exited buffer has its record removed, unless it has never
     ///   been attached: buffers are created detached and attached by a later
     ///   request, and one whose command exits in between is kept until it is
-    ///   shown
+    ///   shown; or unless it is [watched](Buffer::watched), until it is not
     /// - a helper buffer (a history view) whose view closed has its record
     ///   removed: it only exists to be shown
     ///
@@ -544,12 +544,12 @@ impl ServerState {
                 (
                     buffer.id,
                     buffer.attachment.clone(),
-                    buffer.ever_attached,
+                    buffer.ever_attached && !buffer.watched,
                     buffer.remains_on_exit(self.remain_on_exit),
                 )
             })
             .collect::<Vec<_>>();
-        for (buffer_id, attachment, ever_attached, remains_on_exit) in exited {
+        for (buffer_id, attachment, done_with, remains_on_exit) in exited {
             match attachment {
                 BufferAttachment::Attached(_) if remains_on_exit => continue,
                 BufferAttachment::Attached(view_id) => {
@@ -561,7 +561,7 @@ impl ServerState {
                     }
                     disposed.changed_sessions.insert(session_id);
                 }
-                BufferAttachment::Detached if !ever_attached => continue,
+                BufferAttachment::Detached if !done_with => continue,
                 BufferAttachment::Detached => {}
             }
             if self.remove_buffer(buffer_id).is_ok() {

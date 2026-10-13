@@ -313,7 +313,27 @@ async fn kill_server_ends_remote_programs_too() {
         ))
         .await;
 
-    wait_for_state(&mut remote_connection, remote_id, BufferRecordState::Exited).await;
+    // The program ends on the host, whose buffer then goes too, since
+    // nothing watches it any more.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = remote_connection
+            .request(&ClientMessage::Buffer(BufferRequest::Get {
+                request_id: new_request_id(),
+                buffer_id: remote_id,
+            }))
+            .await
+            .expect("get buffer");
+        match response {
+            ServerResponse::Buffer(response)
+                if response.buffer.state != BufferRecordState::Exited =>
+            {
+                assert!(Instant::now() < deadline, "the remote program kept running");
+                sleep(Duration::from_millis(50)).await;
+            }
+            _ => break,
+        }
+    }
 
     let _ = local.shutdown().await;
     remote.shutdown().await.expect("shutdown remote server");
@@ -764,6 +784,50 @@ async fn options_a_remote_program_sets_reach_the_local_record() {
         );
         sleep(Duration::from_millis(50)).await;
     }
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exited_remote_program_leaves_nothing_behind_on_its_host() {
+    let (remote, local) = start_servers().await;
+    let mut remote_connection = connect(&remote).await;
+    cli(&local, &["new-session", "-d", "-s", "work"]);
+    cli(
+        &local,
+        &[
+            "new-window",
+            "-t",
+            "work",
+            "--host",
+            HOST,
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 0.3",
+        ],
+    );
+    assert_eq!(detached_buffers(&mut remote_connection).await.len(), 1);
+
+    // The pane here closes once the program exits, and the host's buffer goes
+    // with it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let on_host = detached_buffers(&mut remote_connection).await;
+        if on_host.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "left on the host: {on_host:?}");
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        cli(
+            &local,
+            &["list-windows", "-t", "work", "-F", "#{window_index}"]
+        ),
+        "0"
+    );
 
     local.shutdown().await.expect("shutdown local server");
     remote.shutdown().await.expect("shutdown remote server");

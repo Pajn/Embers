@@ -203,8 +203,19 @@ impl HostConnection {
         })
     }
 
+    /// Stop passing on what the host reports about `buffer_id`, and tell the
+    /// host, which then removes the buffer once its program has exited.
     fn unwatch(&self, buffer_id: BufferId) {
         let _ = self.commands.try_send(HostCommand::Unwatch { buffer_id });
+        let connection = self.clone();
+        tokio::spawn(async move {
+            let _ = connection
+                .request(ClientMessage::Buffer(BufferRequest::Unwatch {
+                    request_id: new_request_id(),
+                    buffer_id,
+                }))
+                .await;
+        });
     }
 
     fn lost(&self) -> MuxError {
@@ -574,8 +585,9 @@ impl RemoteRuntimeHandle {
         self.pipe_status(response)
     }
 
-    /// Stop passing on the host's reports about this buffer. The buffer keeps
-    /// running on the host until it is killed.
+    /// Stop passing on the host's reports about this buffer, which the server
+    /// here is done with. A program still running keeps running on the host
+    /// until it is killed; an exited one's buffer is removed there.
     pub async fn join_threads(&self) -> Result<()> {
         if let Some(pump) = lock(&self.inner.pump).take() {
             pump.abort();

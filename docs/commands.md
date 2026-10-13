@@ -446,8 +446,12 @@ older one the pane works without them.
 Options set from inside a remote pane, such as the `is-vim` option Neovim
 sets for smart navigation, are set on HOST's server, and the pane here takes
 up each change. Options set here stay as they are unless HOST changes the same
-one. An exited remote program's buffer stays in HOST's server's buffer list
-until that server restarts.
+one.
+
+HOST's server keeps a remote pane's buffer while this server shows it, and
+removes it once the program has exited and this server is done with it, so
+nothing is left behind there. A program that exits while this server is not
+running is found exited when it starts again, without its exit status.
 
 ## tmux compatibility
 

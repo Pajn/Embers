@@ -114,6 +114,12 @@ pub struct Buffer {
     /// before it was reported. Not persisted: each runtime counts from its
     /// own start, and attaching one sets this from its status.
     pub runtime_bell_sequence: u64,
+    /// Whether some connection watches the buffer (`BufferRequest::Watch`),
+    /// as another server does for a buffer it shows in a pane of its own.
+    /// Watching counts as being shown: an exited detached buffer stays while
+    /// it is watched, so the watcher can read its exit, and goes once nothing
+    /// watches it. Not persisted: connections do not outlive the server.
+    pub watched: bool,
 }
 
 /// Buffer option that keeps an exited buffer in its view instead of closing
@@ -179,6 +185,7 @@ impl Buffer {
             created_at: Timestamp::now(),
             ever_attached: false,
             runtime_bell_sequence: 0,
+            watched: false,
         }
     }
 
@@ -230,11 +237,12 @@ impl fmt::Debug for Buffer {
             .field("created_at", &self.created_at)
             .field("ever_attached", &self.ever_attached)
             .field("runtime_bell_sequence", &self.runtime_bell_sequence)
+            .field("watched", &self.watched)
             .finish()
     }
 }
 
-// `ever_attached` and `runtime_bell_sequence` are left out: they are
+// `ever_attached`, `runtime_bell_sequence` and `watched` are left out: they are
 // bookkeeping that is not persisted, so a saved and restored buffer still
 // compares equal to the original.
 impl PartialEq for Buffer {
