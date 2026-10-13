@@ -713,3 +713,58 @@ async fn concurrent_requests_to_one_host_each_get_their_own_answer() {
     local.shutdown().await.expect("shutdown local server");
     remote.shutdown().await.expect("shutdown remote server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn options_a_remote_program_sets_reach_the_local_record() {
+    let (remote, local) = start_servers().await;
+    let mut connection = connect(&local).await;
+    let embers = cargo_bin_path("embers").display().to_string();
+    // As Neovim does in its own pane: `embers` in the pane talks to the
+    // host's server, whose buffer the pane is there.
+    let script = format!(
+        "read _; '{embers}' buffer set-option is-vim 1; read _; '{embers}' buffer set-option --unset is-vim; sleep 30"
+    );
+    let buffer = create_buffer(&mut connection, &["/bin/sh", "-c", &script], Some(HOST)).await;
+    connection
+        .request(&ClientMessage::Buffer(BufferRequest::SetUserOption {
+            request_id: new_request_id(),
+            buffer_id: buffer.id,
+            key: "@set-here".to_owned(),
+            value: Some("yes".to_owned()),
+        }))
+        .await
+        .expect("set local option");
+
+    send(&mut connection, buffer.id, "\n").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let options = get_buffer(&mut connection, buffer.id).await.user_options;
+        if options.get("is-vim").map(String::as_str) == Some("1") {
+            assert_eq!(options.get("@set-here").map(String::as_str), Some("yes"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "is-vim never arrived: {options:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    send(&mut connection, buffer.id, "\n").await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let options = get_buffer(&mut connection, buffer.id).await.user_options;
+        if !options.contains_key("is-vim") {
+            assert_eq!(options.get("@set-here").map(String::as_str), Some("yes"));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "is-vim was never unset: {options:?}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}

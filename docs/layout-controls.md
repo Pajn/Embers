@@ -251,6 +251,9 @@ vim.api.nvim_create_autocmd({ "VimLeavePre", "VimSuspend" }, {
 Where the pane's environment does not reach Neovim, as on the far side of
 `ssh`, set the option from the local side instead: a wrapper that starts the
 remote editor can run `embers buffer set-option is-vim 1` before it and
-`embers buffer set-option --unset is-vim` after it.
+`embers buffer set-option --unset is-vim` after it. A pane that runs on
+another host (see [Remote buffers](commands.md#remote-buffers)) needs neither:
+there Neovim sets the option on its host's server, and the pane here takes
+it up.
 
 The full example lives in the repository's [`config.rhai`](../config.rhai).

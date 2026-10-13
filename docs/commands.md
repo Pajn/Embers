@@ -443,10 +443,11 @@ remote Neovim lands on this machine's clipboard. This needs HOST's embers to
 be a release that passes them on to the server showing its buffers; with an
 older one the pane works without them.
 
-The `is-vim` option Neovim sets from inside a remote pane lands on HOST's
-server, though smart navigation still tells Neovim by the pane's foreground
-command. An exited remote program's buffer stays in HOST's server's buffer
-list until that server restarts.
+Options set from inside a remote pane, such as the `is-vim` option Neovim
+sets for smart navigation, are set on HOST's server, and the pane here takes
+up each change. Options set here stay as they are unless HOST changes the same
+one. An exited remote program's buffer stays in HOST's server's buffer list
+until that server restarts.
 
 ## tmux compatibility
 

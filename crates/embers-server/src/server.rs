@@ -4001,6 +4001,22 @@ impl Runtime {
                         render_invalidated = true;
                     }
                 }
+                // Options are saved, and clients read them (`is-vim` for
+                // smart navigation), so a change is both.
+                if sequence_current && let Some(options) = update.user_options {
+                    for (key, value) in options {
+                        let changed = match value {
+                            Some(value) => {
+                                buffer.user_options.insert(key, value.clone()) != Some(value)
+                            }
+                            None => buffer.user_options.remove(&key).is_some(),
+                        };
+                        if changed {
+                            render_invalidated = true;
+                            workspace_changed = true;
+                        }
+                    }
+                }
             }
             let pipe_event = match state.buffer(buffer_id) {
                 Ok(buffer) if buffer.pipe != previous_pipe => {
@@ -4490,6 +4506,7 @@ impl Runtime {
                 cwd: Some(status.cwd.clone()),
                 foreground_command: Some(status.foreground_command.clone()),
                 bell_sequence: status.bell_sequence,
+                user_options: None,
             },
         )
         .await;
@@ -5870,6 +5887,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: bells,
+                    user_options: None,
                 },
             )
         };
@@ -6014,6 +6032,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
         };
@@ -6128,6 +6147,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6155,6 +6175,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6223,6 +6244,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6285,6 +6307,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6341,6 +6364,7 @@ mod tests {
                     cwd: None,
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6378,6 +6402,7 @@ mod tests {
             cwd: None,
             foreground_command: None,
             bell_sequence,
+            user_options: None,
         };
         let activity = || async {
             runtime
@@ -6451,6 +6476,7 @@ mod tests {
                     cwd: None,
                     foreground_command: Some(Some(vec!["nvim".to_owned()])),
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6510,6 +6536,7 @@ mod tests {
                     cwd: Some(None),
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;
@@ -6535,6 +6562,7 @@ mod tests {
                     cwd: Some(Some(PathBuf::from("/tmp/work"))),
                     foreground_command: None,
                     bell_sequence: 0,
+                    user_options: None,
                 },
             )
             .await;

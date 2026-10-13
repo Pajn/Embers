@@ -85,6 +85,12 @@ pub struct BufferRuntimeUpdate {
     /// the buffer `Bell` whenever this advances, so a bell is not lost when
     /// later output replaced `activity` before it was reported.
     pub bell_sequence: u64,
+    /// Buffer options the runtime's side set (`Some`) or unset (`None`) since
+    /// the last update, such as `is-vim` set by Neovim in a buffer on another
+    /// host, whose `embers` commands reach that host's server. Options set
+    /// here are not touched unless the runtime's side changes the same one.
+    /// A keeper never reports any.
+    pub user_options: Option<BTreeMap<String, Option<String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -2213,6 +2219,7 @@ fn notify_pipe_removed(
             cwd: None,
             foreground_command: None,
             bell_sequence: last.bell_sequence,
+            user_options: None,
         },
     );
     last.pipe = None;
@@ -2246,6 +2253,7 @@ pub(crate) fn status_update_delta(
         foreground_command: (status.foreground_command != last.foreground_command)
             .then(|| status.foreground_command.clone()),
         bell_sequence: status.bell_sequence,
+        user_options: None,
     })
 }
 

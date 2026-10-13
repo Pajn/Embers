@@ -18,7 +18,8 @@ use tracing::debug;
 use crate::Upstream;
 use crate::buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
-    BufferRuntimeStatus, RuntimeScrollbackSlice, RuntimeSnapshot, status_update_delta,
+    BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeScrollbackSlice, RuntimeSnapshot,
+    status_update_delta,
 };
 use crate::config::REMOTE_HOST_PLACEHOLDER;
 
@@ -330,6 +331,9 @@ struct RemoteInner {
     /// The status as last read from the host, which the server reads on every
     /// capture, so it costs no round trip.
     status: StdMutex<BufferRuntimeStatus>,
+    /// The buffer's options on the host as last read. Starts empty, so the
+    /// first read passes on what the host has.
+    options: StdMutex<BTreeMap<String, String>>,
     pump: StdMutex<Option<JoinHandle<()>>>,
 }
 
@@ -399,6 +403,7 @@ impl RemoteRuntimeHandle {
             remote_id: record.id,
             connection,
             status: StdMutex::new(status_from_record(&record)),
+            options: StdMutex::new(BTreeMap::new()),
             pump: StdMutex::new(None),
         });
         let pump = tokio::spawn(pump_changes(inner.clone(), watched, callbacks));
@@ -650,9 +655,10 @@ async fn pump_changes(
             }
         };
         let status = status_from_record(&record);
+        let options = options_delta(&mut lock(&inner.options), &record.user_options);
         let update = {
             let mut last = lock(&inner.status);
-            let update = status_update_delta(&status, &last).map(|mut update| {
+            let mut update = status_update_delta(&status, &last).map(|mut update| {
                 // Whether output counts as activity here is for this server
                 // to decide by who is looking, as for a local buffer.
                 if update.sequence > last.sequence {
@@ -660,6 +666,20 @@ async fn pump_changes(
                 }
                 update
             });
+            if let Some(options) = options {
+                update
+                    .get_or_insert(BufferRuntimeUpdate {
+                        sequence: status.sequence,
+                        activity: ActivityState::Idle,
+                        title: None,
+                        pipe: None,
+                        cwd: None,
+                        foreground_command: None,
+                        bell_sequence: status.bell_sequence,
+                        user_options: None,
+                    })
+                    .user_options = Some(options);
+            }
             *last = status.clone();
             update
         };
@@ -671,6 +691,27 @@ async fn pump_changes(
             return;
         }
     }
+}
+
+/// The options that changed between `last` and `current`, set (`Some`) or
+/// unset (`None`), or `None` when none did; `last` becomes `current`.
+fn options_delta(
+    last: &mut BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+) -> Option<BTreeMap<String, Option<String>>> {
+    let mut delta = BTreeMap::new();
+    for (key, value) in current {
+        if last.get(key) != Some(value) {
+            delta.insert(key.clone(), Some(value.clone()));
+        }
+    }
+    for key in last.keys() {
+        if !current.contains_key(key) {
+            delta.insert(key.clone(), None);
+        }
+    }
+    *last = current.clone();
+    (!delta.is_empty()).then_some(delta)
 }
 
 async fn get_record(connection: &HostConnection, remote_id: BufferId) -> Result<BufferRecord> {
@@ -737,7 +778,27 @@ fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_host;
+    use std::collections::BTreeMap;
+
+    use super::{options_delta, validate_host};
+
+    #[test]
+    fn option_changes_on_the_host_are_reported_once() {
+        let mut last = BTreeMap::new();
+        let current = BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]);
+        assert_eq!(
+            options_delta(&mut last, &current),
+            Some(BTreeMap::from([(
+                "is-vim".to_owned(),
+                Some("1".to_owned())
+            )]))
+        );
+        assert_eq!(options_delta(&mut last, &current), None);
+        assert_eq!(
+            options_delta(&mut last, &BTreeMap::new()),
+            Some(BTreeMap::from([("is-vim".to_owned(), None)]))
+        );
+    }
 
     #[test]
     fn hosts_that_ssh_would_read_as_options_or_split_are_refused() {
