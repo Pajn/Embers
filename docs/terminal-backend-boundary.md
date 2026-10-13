@@ -59,6 +59,10 @@ Keepers emulate with `AlacrittyTerminalBackend` unless the binary chose another 
 
 `embers-ghostty`, in the unpublished `crates/embers-ghostty-backend`, is the one that does: Embers with `GhosttyTerminalBackend`, on libghostty-vt, to try beside alacritty. It names itself as the keeper executable and defaults to its own socket, `embers-ghostty.sock` beside Embers' own, so its sessions and saved layout are its own. libghostty answers DECRQSS and the capabilities it knows itself; for those queries the Ghostty backend's `answer_query` adds only what libghostty left unanswered, so a program never gets two replies.
 
+## Compaction when idle
+
+A backend can shrink what it holds in memory in bounded steps (`TerminalBackend::compact_step`); the Ghostty backend compresses scrollback pages, which cuts a pane with full scrollback from about 16 MiB to under 1 MiB. Steps never run on the output path. The keeper counts output, resizes and reads of the scrollback as activity, and a thread of its own runs the steps once five seconds pass without any, taking the surface lock for one step at a time so output and requests get in between. Activity stops the run, which starts over when the pane is quiet again. Alacritty's backend has nothing to compact.
+
 ## Clipboard writes
 
 The emulator runs with OSC 52 set to copy-only: stores raise a clipboard event and queries are dropped without a reply. `take_events` drains the latest store with the activity state and query replies. The keeper keeps only the most recent write, numbered, and reports the number in its status reply; when the number advances the server's status poller fetches the write with a separate `Clipboard` request, so status polls stay small and keepers that predate clipboard forwarding are never asked. The server then sends a `ClipboardEvent` straight to the clients whose current session contains the buffer, rather than broadcasting it, and each client re-emits it to its host terminal as OSC 52 unless `set_clipboard(false)` is configured. See [Clipboard (OSC 52)](configuration.md#clipboard-osc-52).
@@ -116,3 +120,4 @@ In practice, Embers currently inherits alternate-screen capture semantics from t
 - Keeper-owned surface: `crates/embers-server/src/buffer_runtime.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
 - Replies held behind kitty graphics queries: `crates/embers-server/src/reply_hold.rs`
+- Compaction when idle: `crates/embers-server/src/idle_compaction.rs`

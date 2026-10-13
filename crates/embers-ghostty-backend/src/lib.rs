@@ -731,6 +731,10 @@ impl TerminalBackend for GhosttyTerminalBackend {
         std::mem::take(&mut self.events().replies)
     }
 
+    fn compact_step(&mut self) -> bool {
+        self.compress_scrollback_step()
+    }
+
     fn take_damage(&mut self) -> BackendDamage {
         if std::mem::take(&mut self.dirty) {
             BackendDamage::Full

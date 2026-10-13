@@ -32,6 +32,7 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
+use crate::idle_compaction::{COMPACTION_IDLE, IdleCompaction};
 use crate::reply_hold::ReplyHold;
 use crate::{BackendEvents, RawByteRouter, TerminalBackend};
 
@@ -451,6 +452,9 @@ struct KeeperRuntime {
     /// read the child's exit may have crashed before saving it, so the keeper
     /// must stay reachable for the next one to reattach and read it again.
     exit_recorded: AtomicBool,
+    /// When to compact the backend: output, resizes and reads of the
+    /// scrollback are activity, after which the backend compacts once quiet.
+    compaction: IdleCompaction,
     pid: Option<u32>,
 }
 
@@ -1448,6 +1452,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         exit_recorded: AtomicBool::new(false),
+        compaction: IdleCompaction::default(),
         pid,
     });
 
@@ -1460,6 +1465,11 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     let _reply_hold = thread::Builder::new()
         .name(format!("keeper-reply-hold-{}", cli.socket_path.display()))
         .spawn(move || keeper_reply_hold_loop(hold_runtime))
+        .map_err(|error| MuxError::internal(error.to_string()))?;
+    let compaction_runtime = runtime.clone();
+    let _compaction = thread::Builder::new()
+        .name(format!("keeper-compaction-{}", cli.socket_path.display()))
+        .spawn(move || keeper_compaction_loop(compaction_runtime))
         .map_err(|error| MuxError::internal(error.to_string()))?;
     let wait_runtime = runtime.clone();
     let wait_join = thread::Builder::new()
@@ -1787,6 +1797,7 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?
             .resize(size);
+        self.compaction.note_activity();
         Ok(())
     }
 
@@ -1795,6 +1806,8 @@ impl KeeperRuntime {
             .surface
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?;
+        // Reading the whole scrollback restores what compaction compressed.
+        self.compaction.note_activity();
         Ok(KeeperSnapshot {
             sequence: self.sequence.load(Ordering::Relaxed),
             size: surface.size,
@@ -1817,6 +1830,7 @@ impl KeeperRuntime {
             .surface
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?;
+        self.compaction.note_activity();
         Ok(surface.capture_scrollback_slice(start_line, line_count))
     }
 
@@ -1931,6 +1945,7 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     runtime.bell_sequence.fetch_add(1, Ordering::Relaxed);
                 }
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
+                runtime.compaction.note_activity();
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
                 }
@@ -1987,6 +2002,17 @@ fn keeper_reply_hold_loop(runtime: Arc<KeeperRuntime>) {
         };
         surface = next;
     }
+}
+
+/// Compact the backend each time the pane goes quiet (see
+/// `crate::idle_compaction`).
+fn keeper_compaction_loop(runtime: Arc<KeeperRuntime>) {
+    runtime.compaction.run(COMPACTION_IDLE, || {
+        runtime
+            .surface
+            .lock()
+            .is_ok_and(|mut surface| surface.backend.compact_step())
+    });
 }
 
 /// Own the PTY-master writer and serialize every write submitted through the

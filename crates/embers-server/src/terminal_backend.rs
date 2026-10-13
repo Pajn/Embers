@@ -94,6 +94,13 @@ pub trait TerminalBackend: Send {
     fn answer_query(&mut self, query: &TerminalQuery);
     /// Where the cursor is on the screen, whether or not it is shown.
     fn cursor_position(&self) -> CursorPosition;
+    /// One bounded step of shrinking what the backend holds in memory, which
+    /// the keeper runs once the pane has gone quiet. Whether more steps are
+    /// left. Nothing a snapshot shows may change. By default there is nothing
+    /// to do.
+    fn compact_step(&mut self) -> bool {
+        false
+    }
 }
 
 /// Makes the backend a buffer's keeper emulates its pane with, from the pane's

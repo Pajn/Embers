@@ -4,6 +4,7 @@ pub mod state;
 mod buffer_runtime;
 mod config;
 mod environment;
+mod idle_compaction;
 mod persist;
 mod protocol;
 mod reply_hold;

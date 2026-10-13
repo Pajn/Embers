@@ -292,3 +292,31 @@ fn scrollback_slices_span_viewports_and_leave_the_screen_as_it_was() {
     assert_eq!(text(&backend), before);
     assert_eq!(backend.metadata().viewport_top_line, 15);
 }
+
+#[test]
+fn compacting_compresses_scrollback_and_keeps_what_it_shows() {
+    let mut backend = GhosttyTerminalBackend::new(PtySize::new(80, 24), 10_000);
+    for line in 0..10_000 {
+        backend.ingest_bytes(format!("\x1b[3{}mline {line} of output\r\n", line % 8).as_bytes());
+    }
+    let screen = text(&backend);
+    let scrollback = backend.capture_scrollback();
+    let before = backend.memory_usage();
+
+    let mut steps = 1;
+    while backend.compact_step() {
+        steps += 1;
+        assert!(steps < 100_000, "compaction never finished");
+    }
+
+    let after = backend.memory_usage();
+    if before.compression_supported {
+        assert!(after.compressed_pages > 0, "{after:?}");
+        assert!(
+            after.resident_bytes < before.resident_bytes / 4,
+            "{before:?} {after:?}"
+        );
+    }
+    assert_eq!(text(&backend), screen);
+    assert_eq!(backend.capture_scrollback(), scrollback);
+}
