@@ -13,6 +13,7 @@ enum MessageKind : ubyte {
   ClientRequest = 9,
   // Carries no table: the envelope's request_id is the whole request.
   KillServerRequest = 10,
+  HelloRequest = 11,
 
   PingResponse = 20,
   OkResponse = 21,
@@ -32,6 +33,7 @@ enum MessageKind : ubyte {
   BufferLocationResponse = 35,
   BufferWithLocationResponse = 36,
   EnvironmentResponse = 37,
+  HelloResponse = 38,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -234,6 +236,14 @@ table PingRequest {
   payload:string;
 }
 
+// The first request a client sends: the protocol version it speaks and the
+// release it was built from, so a server from another release is refused with
+// an error naming both instead of misreading its messages.
+table HelloRequest {
+  protocol_version:uint;
+  software_version:string;
+}
+
 table SessionRequest {
   op:SessionOp = Create (id: 0);
   session_id:ulong = 0 (id: 1);
@@ -359,6 +369,11 @@ table ClientRequest {
 
 table PingResponse {
   payload:string;
+}
+
+table HelloResponse {
+  protocol_version:uint;
+  software_version:string;
 }
 
 table OkResponse {}
@@ -784,6 +799,8 @@ table Envelope {
   environment_response:EnvironmentResponse (id: 40);
   display_message_event:DisplayMessageEvent (id: 41);
   passthrough_event:PassthroughEvent (id: 42);
+  hello_request:HelloRequest (id: 43);
+  hello_response:HelloResponse (id: 44);
 }
 
 root_type Envelope;

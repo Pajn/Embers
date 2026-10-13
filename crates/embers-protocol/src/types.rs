@@ -25,6 +25,24 @@ pub struct PingResponse {
     pub payload: String,
 }
 
+/// The versions a client sends first, before any other request (see
+/// [`crate::PROTOCOL_VERSION`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloRequest {
+    pub request_id: RequestId,
+    pub protocol_version: u32,
+    /// The release the client was built from, for error messages.
+    pub software_version: String,
+}
+
+/// The server's answer to a [`HelloRequest`]: its own versions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloResponse {
+    pub request_id: RequestId,
+    pub protocol_version: u32,
+    pub software_version: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRequest {
     Create {
@@ -720,6 +738,7 @@ impl ClientRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
+    Hello(HelloRequest),
     Ping(PingRequest),
     Session(SessionRequest),
     Buffer(BufferRequest),
@@ -735,6 +754,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     pub fn request_id(&self) -> RequestId {
         match self {
+            Self::Hello(request) => request.request_id,
             Self::Ping(request) => request.request_id,
             Self::KillServer(request) => request.request_id,
             Self::Session(request) => request.request_id(),
@@ -1185,6 +1205,7 @@ pub struct ScrollbackSliceResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerResponse {
+    Hello(HelloResponse),
     Pong(PingResponse),
     Ok(OkResponse),
     Error(ErrorResponse),
@@ -1208,6 +1229,7 @@ pub enum ServerResponse {
 impl ServerResponse {
     pub fn request_id(&self) -> Option<RequestId> {
         match self {
+            Self::Hello(response) => Some(response.request_id),
             Self::Pong(response) => Some(response.request_id),
             Self::Ok(response) => Some(response.request_id),
             Self::Error(response) => response.request_id,

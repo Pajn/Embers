@@ -17,13 +17,13 @@ use embers_protocol::{
     BufferRequest, BufferResponse, BufferWithLocationResponse, BuffersResponse, ClientChangedEvent,
     ClientMessage, ClientRecord, ClientRequest, ClientResponse, ClientsResponse, ClipboardEvent,
     DisplayMessageEvent, EnvironmentResponse, ErrorResponse, FloatingChangedEvent, FloatingRequest,
-    FloatingResponse, FocusChangedEvent, FrameType, InputRequest, NodeChangedEvent, OkResponse,
-    PassthroughEvent, PingResponse, ProtocolError, RawFrame, RenderInvalidatedEvent,
-    ScrollbackSliceResponse, ServerEnvelope, ServerEvent, ServerResponse, SessionClosedEvent,
-    SessionCreatedEvent, SessionRenamedEvent, SessionRequest, SessionSnapshotResponse,
-    SessionsResponse, SnapshotResponse, SubscriptionAckResponse, SynchronizePanesMode,
-    VisibleSnapshotResponse, decode_client_message, encode_server_envelope, read_frame,
-    write_frame_no_flush,
+    FloatingResponse, FocusChangedEvent, FrameType, HelloResponse, InputRequest, NodeChangedEvent,
+    OkResponse, PROTOCOL_VERSION, PassthroughEvent, PingResponse, ProtocolError, RawFrame,
+    RenderInvalidatedEvent, SOFTWARE_VERSION, ScrollbackSliceResponse, ServerEnvelope, ServerEvent,
+    ServerResponse, SessionClosedEvent, SessionCreatedEvent, SessionRenamedEvent, SessionRequest,
+    SessionSnapshotResponse, SessionsResponse, SnapshotResponse, SubscriptionAckResponse,
+    SynchronizePanesMode, VisibleSnapshotResponse, decode_client_message, encode_server_envelope,
+    read_frame, write_frame_no_flush,
 };
 use tokio::net::UnixListener;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -1070,6 +1070,17 @@ impl Runtime {
         Option<oneshot::Sender<()>>,
     ) {
         match request {
+            // Answered whatever the client speaks: the client decides whether
+            // it can work with this server, and says why if not.
+            ClientMessage::Hello(request) => (
+                ServerResponse::Hello(HelloResponse {
+                    request_id: request.request_id,
+                    protocol_version: PROTOCOL_VERSION,
+                    software_version: SOFTWARE_VERSION.to_owned(),
+                }),
+                Vec::new(),
+                None,
+            ),
             ClientMessage::Ping(request) => (
                 ServerResponse::Pong(PingResponse {
                     request_id: request.request_id,

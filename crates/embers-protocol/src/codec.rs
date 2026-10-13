@@ -41,6 +41,21 @@ pub enum ProtocolError {
     },
     #[error("reader task exited unexpectedly")]
     ReaderTaskExited,
+    #[error(
+        "the server runs embers {server_version} (protocol {server_protocol}), \
+         which this client, embers {client_version} (protocol {client_protocol}), cannot talk to"
+    )]
+    IncompatibleServer {
+        client_version: String,
+        client_protocol: u32,
+        server_version: String,
+        server_protocol: u32,
+    },
+    #[error(
+        "the server runs an embers release older than this client's ({client_version}), \
+         from before the version check, and cannot be talked to"
+    )]
+    ServerPredatesHandshake { client_version: String },
 }
 
 fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ProtocolError> {
@@ -936,6 +951,7 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
     let mut builder = FlatBufferBuilder::new();
 
     let envelope = match message {
+        ClientMessage::Hello(req) => encode_hello_request(&mut builder, req),
         ClientMessage::Ping(req) => encode_ping_request(&mut builder, req),
         ClientMessage::Session(req) => encode_session_request(&mut builder, req)?,
         ClientMessage::Buffer(req) => encode_buffer_request(&mut builder, req)?,
@@ -957,6 +973,29 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
 
     builder.finish(envelope, Some("EMBR"));
     Ok(builder.finished_data().to_vec())
+}
+
+fn encode_hello_request<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    req: &HelloRequest,
+) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+    let software_version = builder.create_string(&req.software_version);
+    let hello_request = fb::HelloRequest::create(
+        builder,
+        &fb::HelloRequestArgs {
+            protocol_version: req.protocol_version,
+            software_version: Some(software_version),
+        },
+    );
+    fb::Envelope::create(
+        builder,
+        &fb::EnvelopeArgs {
+            request_id: req.request_id.into(),
+            kind: fb::MessageKind::HelloRequest,
+            hello_request: Some(hello_request),
+            ..Default::default()
+        },
+    )
 }
 
 fn encode_ping_request<'a>(
@@ -1835,7 +1874,10 @@ fn validate_session_snapshot(snapshot: &SessionSnapshot) -> Result<(), ProtocolE
 
 fn validate_server_response(response: &ServerResponse) -> Result<(), ProtocolError> {
     match response {
-        ServerResponse::Pong(_) | ServerResponse::Ok(_) | ServerResponse::Error(_) => Ok(()),
+        ServerResponse::Hello(_)
+        | ServerResponse::Pong(_)
+        | ServerResponse::Ok(_)
+        | ServerResponse::Error(_) => Ok(()),
         ServerResponse::Sessions(response) => {
             for session in &response.sessions {
                 validate_session_record(session)?;
@@ -2995,6 +3037,25 @@ fn encode_server_response<'a>(
     response: &ServerResponse,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
     match response {
+        ServerResponse::Hello(r) => {
+            let software_version = builder.create_string(&r.software_version);
+            let hello = fb::HelloResponse::create(
+                builder,
+                &fb::HelloResponseArgs {
+                    protocol_version: r.protocol_version,
+                    software_version: Some(software_version),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::HelloResponse,
+                    hello_response: Some(hello),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::Pong(r) => {
             let payload = builder.create_string(&r.payload);
             let pong = fb::PingResponse::create(
@@ -4028,6 +4089,16 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
     let request_id = RequestId(envelope.request_id());
 
     match envelope.kind() {
+        fb::MessageKind::HelloRequest => {
+            let req = required(envelope.hello_request(), "hello_request")?;
+            let software_version =
+                required(req.software_version(), "hello_request.software_version")?;
+            Ok(ClientMessage::Hello(HelloRequest {
+                request_id,
+                protocol_version: req.protocol_version(),
+                software_version: software_version.to_owned(),
+            }))
+        }
         fb::MessageKind::PingRequest => {
             let req = required(envelope.ping_request(), "ping_request")?;
             let payload = required(req.payload(), "ping_request.payload")?;
@@ -4735,6 +4806,18 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
     let envelope = fb::root_as_envelope(bytes)?;
 
     match envelope.kind() {
+        fb::MessageKind::HelloResponse => {
+            let resp = required(envelope.hello_response(), "hello_response")?;
+            let software_version =
+                required(resp.software_version(), "hello_response.software_version")?;
+            Ok(ServerEnvelope::Response(ServerResponse::Hello(
+                HelloResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    protocol_version: resp.protocol_version(),
+                    software_version: software_version.to_owned(),
+                },
+            )))
+        }
         fb::MessageKind::PingResponse => {
             let resp = required(envelope.ping_response(), "ping_response")?;
             let payload = required(resp.payload(), "ping_response.payload")?;
