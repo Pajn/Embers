@@ -1,8 +1,9 @@
+use std::fmt;
 use std::path::Path;
 
 use embers_core::RequestId;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -13,9 +14,11 @@ use crate::{PROTOCOL_VERSION, SOFTWARE_VERSION};
 
 type ReaderItem = Result<Option<ServerEnvelope>, ProtocolError>;
 
-#[derive(Debug)]
+/// A connection to a server: over its socket ([`Self::connect`]), or over any
+/// byte stream to it, such as the pipes of `embers proxy` run over SSH
+/// ([`Self::from_split`]).
 pub struct ProtocolClient {
-    writer: OwnedWriteHalf,
+    writer: Box<dyn AsyncWrite + Send + Unpin>,
     reader_rx: mpsc::Receiver<ReaderItem>,
     reader_reached_eof: bool,
     reader_abort_handle: AbortHandle,
@@ -65,6 +68,17 @@ impl ProtocolClient {
 
     fn from_stream(stream: UnixStream) -> Self {
         let (reader, writer) = stream.into_split();
+        Self::from_split(reader, writer)
+    }
+
+    /// A client reading the server's frames from `reader` and writing its own
+    /// to `writer`. Unlike [`Self::connect`] it does not check the server's
+    /// version; call [`Self::handshake`] before any other request.
+    pub fn from_split<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
         let (reader_tx, reader_rx) = mpsc::channel(Self::READER_CHANNEL_CAPACITY);
         let reader_task = tokio::spawn(async move {
             Self::run_reader(reader, reader_tx).await;
@@ -72,14 +86,17 @@ impl ProtocolClient {
         let reader_abort_handle = reader_task.abort_handle();
 
         Self {
-            writer,
+            writer: Box::new(writer),
             reader_rx,
             reader_reached_eof: false,
             reader_abort_handle,
         }
     }
 
-    async fn run_reader(mut reader: OwnedReadHalf, reader_tx: mpsc::Sender<ReaderItem>) {
+    async fn run_reader<R>(mut reader: R, reader_tx: mpsc::Sender<ReaderItem>)
+    where
+        R: AsyncRead + Unpin,
+    {
         loop {
             let next = match read_frame(&mut reader).await {
                 Ok(Some(frame)) => Self::decode_frame(frame).map(Some),
@@ -178,6 +195,15 @@ impl ProtocolClient {
                 }
             }
         }
+    }
+}
+
+impl fmt::Debug for ProtocolClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProtocolClient")
+            .field("reader_reached_eof", &self.reader_reached_eof)
+            .finish_non_exhaustive()
     }
 }
 

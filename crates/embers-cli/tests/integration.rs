@@ -16,5 +16,6 @@ mod sessions;
 mod support;
 mod targets;
 mod tmux_compat;
+mod upstream;
 mod window_numbering;
 mod windows;

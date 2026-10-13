@@ -12,6 +12,7 @@ mod restore;
 mod runtime_dir;
 mod server;
 mod terminal_backend;
+mod upstream;
 
 pub use buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
@@ -36,3 +37,4 @@ pub use terminal_backend::{
     BackendScrollbackSlice, RawByteRouter, TerminalBackend, TerminalBackendFactory, TerminalQuery,
     set_terminal_backend, sgr_report, termcap_reply,
 };
+pub use upstream::Upstream;
