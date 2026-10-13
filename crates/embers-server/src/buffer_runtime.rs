@@ -158,6 +158,10 @@ pub struct BufferRuntimeCallbacks {
     /// passthrough), in the order it sent them. Called once per poll with
     /// every write the poll fetched.
     pub on_passthrough: Arc<dyn Fn(BufferId, Vec<PassthroughWrite>) + Send + Sync>,
+    /// The runtime can no longer be reached, though its program may still
+    /// run: a buffer on another host whose connection was lost. A keeper's
+    /// runtime never reports this.
+    pub on_lost: Arc<dyn Fn(BufferId) + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -234,9 +238,9 @@ enum KeeperResponse {
     Status(KeeperStatus),
     Clipboard(Option<KeeperClipboard>),
     Passthrough(Vec<KeeperPassthrough>),
-    Snapshot(KeeperSnapshot),
+    Snapshot(RuntimeSnapshot),
     VisibleSnapshot(TerminalSnapshot),
-    ScrollbackSlice(KeeperScrollbackSlice),
+    ScrollbackSlice(RuntimeScrollbackSlice),
     PipeStatus(BufferRuntimePipeStatus),
     Ok,
     /// `conflict` marks a conflict with the runtime's state (e.g. its child
@@ -376,7 +380,7 @@ mod base64_bytes {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct KeeperSnapshot {
+pub struct RuntimeSnapshot {
     pub sequence: u64,
     pub size: PtySize,
     pub lines: Vec<String>,
@@ -441,7 +445,7 @@ fn fit_slice_payload(
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct KeeperScrollbackSlice {
+pub struct RuntimeScrollbackSlice {
     pub start_line: u64,
     pub total_lines: u64,
     pub lines: Vec<String>,
@@ -462,7 +466,31 @@ pub struct KeeperScrollbackSlice {
     pub cells: Vec<Vec<CellSpan>>,
 }
 
-impl KeeperScrollbackSlice {
+impl RuntimeScrollbackSlice {
+    /// A slice of `lines` starting at `start_line`, as a server sends them,
+    /// split into the parallel fields.
+    pub(crate) fn from_snapshot_lines(
+        start_line: u64,
+        total_lines: u64,
+        lines: Vec<SnapshotLine>,
+    ) -> Self {
+        let mut slice = Self {
+            start_line,
+            total_lines,
+            lines: Vec::with_capacity(lines.len()),
+            styles: Vec::with_capacity(lines.len()),
+            links: Vec::with_capacity(lines.len()),
+            cells: Vec::with_capacity(lines.len()),
+        };
+        for line in lines {
+            slice.lines.push(line.text);
+            slice.styles.push(line.runs);
+            slice.links.push(line.links);
+            slice.cells.push(line.cell_spans);
+        }
+        slice
+    }
+
     /// Zip `lines`, `styles`, `links` and `cells` back into styled snapshot
     /// lines. A missing or short `styles`/`links`/`cells` entry yields a
     /// plain, link-free or text-laid-out line, so old keepers degrade to text.
@@ -658,7 +686,7 @@ impl KeeperRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
-    pub async fn capture_snapshot(&self, cwd: Option<PathBuf>) -> Result<KeeperSnapshot> {
+    pub async fn capture_snapshot(&self, cwd: Option<PathBuf>) -> Result<RuntimeSnapshot> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = inner
@@ -688,7 +716,7 @@ impl KeeperRuntimeHandle {
         &self,
         start_line: u64,
         line_count: u32,
-    ) -> Result<KeeperScrollbackSlice> {
+    ) -> Result<RuntimeScrollbackSlice> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let mut connection = inner
@@ -960,7 +988,7 @@ impl KeeperConnection {
         }
     }
 
-    fn snapshot(&mut self, cwd: Option<PathBuf>) -> Result<KeeperSnapshot> {
+    fn snapshot(&mut self, cwd: Option<PathBuf>) -> Result<RuntimeSnapshot> {
         match self.request(KeeperRequest::Snapshot { cwd })? {
             KeeperResponse::Snapshot(snapshot) => Ok(snapshot),
             other => Err(MuxError::protocol(format!(
@@ -984,7 +1012,7 @@ impl KeeperConnection {
         &mut self,
         start_line: u64,
         line_count: u32,
-    ) -> Result<KeeperScrollbackSlice> {
+    ) -> Result<RuntimeScrollbackSlice> {
         match self.request(KeeperRequest::ScrollbackSlice {
             start_line,
             line_count,
@@ -1140,7 +1168,7 @@ impl KeeperSurface {
         self.backend.visible_snapshot(sequence, self.size, cwd)
     }
 
-    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> KeeperScrollbackSlice {
+    fn capture_scrollback_slice(&self, start_line: u64, line_count: u32) -> RuntimeScrollbackSlice {
         let slice = self
             .backend
             .capture_scrollback_slice(start_line, line_count);
@@ -1157,7 +1185,7 @@ impl KeeperSurface {
 
         fit_slice_payload(&mut styles, &mut links, &mut cells);
 
-        KeeperScrollbackSlice {
+        RuntimeScrollbackSlice {
             start_line: slice.start_line,
             total_lines: slice.total_lines,
             lines,
@@ -1833,14 +1861,14 @@ impl KeeperRuntime {
         Ok(())
     }
 
-    fn snapshot(&self, cwd: Option<PathBuf>) -> Result<KeeperSnapshot> {
+    fn snapshot(&self, cwd: Option<PathBuf>) -> Result<RuntimeSnapshot> {
         let surface = self
             .surface
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?;
         // Reading the whole scrollback restores what compaction compressed.
         self.compaction.note_activity();
-        Ok(KeeperSnapshot {
+        Ok(RuntimeSnapshot {
             sequence: self.sequence.load(Ordering::Relaxed),
             size: surface.size,
             lines: surface.capture_lines(),
@@ -1857,7 +1885,7 @@ impl KeeperRuntime {
         Ok(surface.capture_visible_snapshot(self.sequence.load(Ordering::Relaxed), cwd))
     }
 
-    fn scrollback_slice(&self, start_line: u64, line_count: u32) -> Result<KeeperScrollbackSlice> {
+    fn scrollback_slice(&self, start_line: u64, line_count: u32) -> Result<RuntimeScrollbackSlice> {
         let surface = self
             .surface
             .lock()
@@ -2195,7 +2223,7 @@ fn notify_pipe_removed(
 /// changed. Only the fields that actually changed are populated, so a cwd-only
 /// change — which does not advance `sequence` — is still emitted and
 /// distinguishable from no change.
-fn status_update_delta(
+pub(crate) fn status_update_delta(
     status: &BufferRuntimeStatus,
     last: &BufferRuntimeStatus,
 ) -> Option<BufferRuntimeUpdate> {
@@ -3038,7 +3066,7 @@ mod tests {
 
         let slice = surface.capture_scrollback_slice(0, 1);
         let json = serde_json::to_string(&slice).expect("serialize slice");
-        let decoded: super::KeeperScrollbackSlice =
+        let decoded: super::RuntimeScrollbackSlice =
             serde_json::from_str(&json).expect("deserialize slice");
         let lines = decoded.into_snapshot_lines();
 
@@ -3311,6 +3339,7 @@ mod tests {
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
                 on_passthrough: Arc::new(|_, _| {}),
+                on_lost: Arc::new(|_| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -3373,6 +3402,7 @@ mod tests {
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
                 on_passthrough: Arc::new(|_, _| {}),
+                on_lost: Arc::new(|_| {}),
             },
             BufferRuntimeStatus {
                 pid: None,

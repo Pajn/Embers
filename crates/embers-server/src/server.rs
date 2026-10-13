@@ -31,10 +31,10 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::config::{BUFFER_ENV_VAR, ResourceLimits, RestoreConfig};
+use crate::config::{BUFFER_ENV_VAR, DEFAULT_REMOTE_COMMAND, ResourceLimits, RestoreConfig};
 use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
-    IS_VIM_OPTION, Node,
+    IS_VIM_OPTION, Node, RemoteBuffer,
 };
 use crate::persist::{
     PersistedWorkspace, encode_persisted_workspace, load_workspace, same_saved_state,
@@ -43,6 +43,7 @@ use crate::persist::{
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
+use crate::remote::{RemoteHosts, validate_host};
 use crate::restore::{default_shell, plan_restore};
 use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::{
@@ -188,6 +189,7 @@ impl Server {
             self.config.limits.clone(),
         );
         runtime.restore = self.config.restore.clone();
+        runtime.remote_hosts = RemoteHosts::new(self.config.remote_command.clone());
         runtime.hold_saves_while =
             std::env::var_os(HOLD_WORKSPACE_SAVES_ENV_VAR).map(PathBuf::from);
         let runtime = Arc::new(runtime);
@@ -198,6 +200,14 @@ impl Server {
         // Record what the restore changed (reattached pids, restarted panes).
         runtime.mark_workspace_dirty();
         let workspace_saver = runtime.spawn_workspace_saver();
+        {
+            let runtime = runtime.clone();
+            let task = runtime.state_tasks.enter();
+            tokio::spawn(async move {
+                let _task = task;
+                runtime.reattach_remote_buffers().await;
+            });
+        }
         let listener = UnixListener::bind(&self.config.socket_path)?;
         set_socket_permissions(&self.config.socket_path)?;
         let shutdown_signal = runtime.shutdown.clone();
@@ -509,6 +519,8 @@ struct Runtime {
     kill_on_shutdown: AtomicBool,
     connection_tasks: TaskCounter,
     state_tasks: TaskCounter,
+    /// The connections to the hosts that run remote buffers.
+    remote_hosts: RemoteHosts,
 }
 
 #[derive(Clone, Default)]
@@ -609,6 +621,8 @@ impl Runtime {
             kill_on_shutdown: AtomicBool::new(false),
             connection_tasks: TaskCounter::default(),
             state_tasks: TaskCounter::default(),
+            // `Server::start` applies the configured command.
+            remote_hosts: RemoteHosts::new(DEFAULT_REMOTE_COMMAND.map(str::to_owned).to_vec()),
         }
     }
 }
@@ -817,6 +831,9 @@ impl Runtime {
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
         let clipboard_runtime = self.clone();
+        let lost_runtime = self.clone();
+        let lost_handle = output_handle.clone();
+        let lost_tasks = self.state_tasks.clone();
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
         let clipboard_tasks = self.state_tasks.clone();
@@ -868,6 +885,14 @@ impl Runtime {
                     debug!(%buffer_id, "dropping passthrough: forwarder stopped");
                 }
             }),
+            on_lost: Arc::new(move |buffer_id| {
+                let runtime = lost_runtime.clone();
+                let task = lost_tasks.enter();
+                std::mem::drop(lost_handle.spawn(async move {
+                    let _task = task;
+                    runtime.record_buffer_lost(buffer_id).await;
+                }));
+            }),
         }
     }
 
@@ -878,6 +903,16 @@ impl Runtime {
         };
 
         for buffer in buffers {
+            // A buffer on another host is taken up again once the server
+            // listens (see `reattach_remote_buffers`): reaching a host can
+            // take long, and must not hold up the start.
+            if buffer.remote.is_some() {
+                if !matches!(buffer.state, BufferState::Exited(_)) {
+                    let mut state = self.state.lock().await;
+                    let _ = state.mark_buffer_interrupted(buffer.id, None);
+                }
+                continue;
+            }
             let Some(socket_path) = buffer.runtime_socket_path().cloned() else {
                 if matches!(buffer.state, BufferState::Running(_) | BufferState::Created) {
                     let mut state = self.state.lock().await;
@@ -956,6 +991,81 @@ impl Runtime {
         Ok(())
     }
 
+    /// Take up again the interrupted buffers that run on other hosts, one task
+    /// per host. A buffer its host no longer has is gone, as if its program
+    /// exited; one whose host cannot be reached stays interrupted.
+    async fn reattach_remote_buffers(self: &Arc<Self>) {
+        let by_host = {
+            let state = self.state.lock().await;
+            let mut by_host = BTreeMap::<String, Vec<(BufferId, BufferId)>>::new();
+            for buffer in state.buffers.values() {
+                if let BufferState::Interrupted(_) = buffer.state
+                    && let Some(remote) = &buffer.remote
+                    && let Some(remote_id) = remote.buffer_id
+                {
+                    by_host
+                        .entry(remote.host.clone())
+                        .or_default()
+                        .push((buffer.id, remote_id));
+                }
+            }
+            by_host
+        };
+        let mut hosts = tokio::task::JoinSet::new();
+        for (host, buffers) in by_host {
+            let runtime = self.clone();
+            hosts.spawn(async move { runtime.reattach_host_buffers(&host, buffers).await });
+        }
+        while hosts.join_next().await.is_some() {}
+    }
+
+    async fn reattach_host_buffers(
+        self: &Arc<Self>,
+        host: &str,
+        buffers: Vec<(BufferId, BufferId)>,
+    ) {
+        let connection = match self.remote_hosts.connect(host).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                warn!(%host, %error, "could not reach host to take up its buffers again");
+                return;
+            }
+        };
+        for (buffer_id, remote_id) in buffers {
+            match BufferRuntimeHandle::attach_remote(
+                buffer_id,
+                connection.clone(),
+                remote_id,
+                self.buffer_runtime_callbacks(),
+            )
+            .await
+            {
+                Ok(runtime) => {
+                    if let Ok(status) = runtime.status().await {
+                        let mut state = self.state.lock().await;
+                        apply_runtime_status(&mut state, buffer_id, &status);
+                    }
+                    self.insert_buffer_runtime(buffer_id, runtime).await;
+                    self.mark_workspace_dirty();
+                    self.broadcast(
+                        vec![ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+                            buffer_id,
+                        })],
+                        &[],
+                    )
+                    .await;
+                    info!(%buffer_id, %host, "took up buffer on host again");
+                }
+                Err(error) if error.is_not_found() => {
+                    self.record_buffer_exit(buffer_id, None).await;
+                }
+                Err(error) => {
+                    warn!(%buffer_id, %host, %error, "could not take up buffer on host again");
+                }
+            }
+        }
+    }
+
     /// Start a fresh process for every PTY buffer left `Interrupted` that a
     /// pane shows: its keeper is gone, so it cannot be reattached. Restarts run
     /// concurrently so a large workspace does not hold up startup.
@@ -970,9 +1080,12 @@ impl Runtime {
             let (attached, detached): (Vec<_>, Vec<_>) = state
                 .buffers
                 .values()
+                // A buffer on another host is not this server's to restart:
+                // its program may still run there.
                 .filter(|buffer| {
                     matches!(buffer.state, BufferState::Interrupted(_))
                         && matches!(buffer.kind, BufferKind::Pty)
+                        && buffer.remote.is_none()
                 })
                 .map(|buffer| (buffer.id, buffer.attachment.clone()))
                 .partition(|(_, attachment)| matches!(attachment, BufferAttachment::Attached(_)));
@@ -1626,15 +1739,10 @@ impl Runtime {
                 session_id,
                 host,
             } => {
-                if host.is_some() {
-                    return (
-                        error_response(
-                            Some(request_id),
-                            ErrorCode::Unsupported,
-                            "this server cannot run buffers on other machines",
-                        ),
-                        Vec::new(),
-                    );
+                if let Some(host) = &host
+                    && let Err(error) = validate_host(host)
+                {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
                 }
                 if command.is_empty() {
                     return (
@@ -1670,8 +1778,14 @@ impl Runtime {
                     }
                     // The session's environment goes under the creator's own
                     // variables and is recorded with the buffer, so a restored
-                    // pane gets it again.
-                    let mut buffer_env = state.environment.for_new_buffer(session_id);
+                    // pane gets it again. It describes this machine, so a
+                    // buffer on another host gets the creator's variables
+                    // alone, under that host's own environment.
+                    let mut buffer_env = if host.is_some() {
+                        BTreeMap::new()
+                    } else {
+                        state.environment.for_new_buffer(session_id)
+                    };
                     buffer_env.extend(env);
                     let buffer_id = state.create_buffer_with_env(
                         title.unwrap_or_else(|| "buffer".to_owned()),
@@ -1679,6 +1793,14 @@ impl Runtime {
                         cwd.map(Into::into),
                         buffer_env,
                     );
+                    if let Some(host) = host
+                        && let Some(buffer) = state.buffers.get_mut(&buffer_id)
+                    {
+                        buffer.remote = Some(RemoteBuffer {
+                            host,
+                            buffer_id: None,
+                        });
+                    }
                     // Start the command at the size it will be drawn at, so it
                     // never sees the default size first.
                     if let Some(size) = size
@@ -2844,40 +2966,67 @@ impl Runtime {
             .await
     }
 
-    /// Start a keeper for `buffer_id` running `command` in `cwd`. The buffer
-    /// record takes them as its command and directory only once the keeper
-    /// runs, so a spawn that fails leaves the record as it was.
+    /// Start a runtime for `buffer_id` running `command` in `cwd`: a keeper,
+    /// or a buffer on the host the record names. The buffer record takes them
+    /// as its command and directory only once the runtime runs, so a spawn
+    /// that fails leaves the record as it was.
     async fn spawn_buffer_runtime_with(
         self: &Arc<Self>,
         buffer_id: BufferId,
         command: Vec<String>,
         cwd: Option<PathBuf>,
     ) -> Result<()> {
-        let (size, env_hints) = {
+        let (size, env_hints, title, host) = {
             let state = self.state.lock().await;
             let buffer = state.buffer(buffer_id)?;
-            (buffer.pty_size, buffer.env.clone())
+            (
+                buffer.pty_size,
+                buffer.env.clone(),
+                buffer.title.clone(),
+                buffer.remote.as_ref().map(|remote| remote.host.clone()),
+            )
         };
 
-        let mut buffer_env = self.buffer_env.clone();
-        for (key, value) in env_hints {
-            buffer_env.insert(key, OsString::from(value));
-        }
-        // The buffer's own id goes in last so no hint can name another buffer.
-        buffer_env.insert(
-            BUFFER_ENV_VAR.to_owned(),
-            OsString::from(buffer_id.to_string()),
-        );
-        let runtime = BufferRuntimeHandle::spawn_keeper(
-            buffer_id,
-            self.runtime_socket_path(buffer_id)?,
-            &command,
-            cwd.as_deref(),
-            &buffer_env,
-            size,
-            self.buffer_runtime_callbacks(),
-        )
-        .await?;
+        let runtime = match host {
+            // The host's server sets the program's own environment, its
+            // socket and buffer id included.
+            Some(host) => {
+                let connection = self.remote_hosts.connect(&host).await?;
+                BufferRuntimeHandle::spawn_remote(
+                    buffer_id,
+                    connection,
+                    Some(title),
+                    &command,
+                    cwd.as_deref(),
+                    env_hints,
+                    size,
+                    self.buffer_runtime_callbacks(),
+                )
+                .await?
+            }
+            None => {
+                let mut buffer_env = self.buffer_env.clone();
+                for (key, value) in env_hints {
+                    buffer_env.insert(key, OsString::from(value));
+                }
+                // The buffer's own id goes in last so no hint can name another
+                // buffer.
+                buffer_env.insert(
+                    BUFFER_ENV_VAR.to_owned(),
+                    OsString::from(buffer_id.to_string()),
+                );
+                BufferRuntimeHandle::spawn_keeper(
+                    buffer_id,
+                    self.runtime_socket_path(buffer_id)?,
+                    &command,
+                    cwd.as_deref(),
+                    &buffer_env,
+                    size,
+                    self.buffer_runtime_callbacks(),
+                )
+                .await?
+            }
+        };
         // The caller drops the buffer record on error, so stop the keeper too
         // rather than leave it running with nothing referring to it. The
         // record only refers to the keeper once it is marked running, so the
@@ -2917,6 +3066,12 @@ impl Runtime {
             if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                 buffer.command = command;
                 buffer.cwd = cwd;
+                if let Some((host, remote_id)) = runtime.remote() {
+                    buffer.remote = Some(RemoteBuffer {
+                        host: host.to_owned(),
+                        buffer_id: Some(remote_id),
+                    });
+                }
             }
             apply_runtime_status(&mut state, buffer_id, &status);
         }
@@ -3956,6 +4111,18 @@ impl Runtime {
                 );
             }
         }
+    }
+
+    /// The buffer's runtime can no longer be reached, though its program may
+    /// still run on its host: mark it interrupted, as a server shutting down
+    /// marks the buffers whose keepers it leaves.
+    async fn record_buffer_lost(&self, buffer_id: BufferId) {
+        self.buffer_shutdown_intents
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(buffer_id);
+        self.record_buffer_exit(buffer_id, None).await;
+        self.mark_workspace_dirty();
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {

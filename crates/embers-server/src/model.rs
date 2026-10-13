@@ -92,6 +92,8 @@ pub struct Buffer {
     /// its shell runs. Saved so a restore can decide whether to run it again.
     pub foreground_command: Option<Vec<String>>,
     runtime_socket_path: Option<PathBuf>,
+    /// Where the buffer runs when its program runs on another host.
+    pub remote: Option<RemoteBuffer>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
     pub pty_size: PtySize,
@@ -166,6 +168,7 @@ impl Buffer {
             user_options: BTreeMap::new(),
             foreground_command: None,
             runtime_socket_path: None,
+            remote: None,
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
             pty_size: PtySize::new(80, 24),
@@ -216,6 +219,7 @@ impl fmt::Debug for Buffer {
             .field("env", &self.env)
             .field("user_options", &self.user_options)
             .field("foreground_command", &self.foreground_command)
+            .field("remote", &self.remote)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
@@ -241,6 +245,7 @@ impl PartialEq for Buffer {
             && self.cwd == other.cwd
             && self.env == other.env
             && self.user_options == other.user_options
+            && self.remote == other.remote
             && self.state == other.state
             && self.attachment == other.attachment
             && self.pty_size == other.pty_size
@@ -253,6 +258,15 @@ impl PartialEq for Buffer {
 }
 
 impl Eq for Buffer {}
+
+/// A buffer whose program runs on another host, as a detached buffer of that
+/// host's embers server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteBuffer {
+    pub host: String,
+    /// The buffer's id on the host's server, once it runs there.
+    pub buffer_id: Option<BufferId>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunningBuffer {

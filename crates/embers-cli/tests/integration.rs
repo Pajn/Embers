@@ -12,6 +12,7 @@ mod persistence;
 mod ping;
 mod popups;
 mod proxy;
+mod remote;
 mod sessions;
 mod support;
 mod targets;

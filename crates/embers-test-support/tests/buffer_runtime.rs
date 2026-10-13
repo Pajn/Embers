@@ -925,7 +925,10 @@ async fn bell_is_reported_even_when_more_output_follows_before_a_poll() {
         sleep(Duration::from_millis(25)).await;
     }
     // The record counts the bell too, for a watcher that already saw `Bell`.
-    assert_eq!(get_buffer(&mut connection, buffer.id).await.bell_sequence, 1);
+    assert_eq!(
+        get_buffer(&mut connection, buffer.id).await.bell_sequence,
+        1
+    );
 
     server.shutdown().await.expect("shutdown server");
 }

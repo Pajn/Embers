@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
-    Session, SplitNode, TabEntry, TabsNode,
+    RemoteBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::state::ServerState;
 
@@ -77,6 +77,10 @@ pub struct PersistedBuffer {
     pub foreground_command: Option<Vec<String>>,
     #[serde(default)]
     pub runtime_socket_path: Option<PathBuf>,
+    /// Set for a buffer that runs on another host. A server from before
+    /// remote buffers skips it and finds no keeper for the buffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<PersistedRemoteBuffer>,
     pub state: PersistedBufferState,
     pub attachment: PersistedBufferAttachment,
     pub pty_size: PtySize,
@@ -92,6 +96,14 @@ pub struct PersistedBuffer {
     #[serde(default)]
     pub kind: PersistedBufferKind,
     pub created_at_ms: u64,
+}
+
+/// Where a buffer that runs on another host runs (see [`RemoteBuffer`]).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedRemoteBuffer {
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buffer_id: Option<u64>,
 }
 
 /// The `last_snapshot_seq` buffer field of format version 2, which earlier
@@ -472,6 +484,10 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         user_options: buffer.user_options.clone(),
         foreground_command: buffer.foreground_command.clone(),
         runtime_socket_path: buffer.runtime_socket_path().cloned(),
+        remote: buffer.remote.as_ref().map(|remote| PersistedRemoteBuffer {
+            host: remote.host.clone(),
+            buffer_id: remote.buffer_id.map(|id| id.0),
+        }),
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
         pty_size: buffer.pty_size,
@@ -493,6 +509,10 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
     restored.user_options = buffer.user_options;
     restored.foreground_command = buffer.foreground_command;
     restored.set_runtime_socket_path(buffer.runtime_socket_path);
+    restored.remote = buffer.remote.map(|remote| RemoteBuffer {
+        host: remote.host,
+        buffer_id: remote.buffer_id.map(BufferId),
+    });
     restored.state = restored_buffer_state(buffer.state)?;
     restored.attachment = restored_buffer_attachment(buffer.attachment);
     restored.pty_size = buffer.pty_size;
@@ -1094,6 +1114,34 @@ mod tests {
                 CURRENT_FORMAT_VERSION + 1
             )
         );
+    }
+
+    #[test]
+    fn remote_buffers_round_trip_through_persistence_and_others_save_nothing() {
+        let mut buffer = Buffer::new(
+            BufferId(7),
+            "remote",
+            vec!["sh".to_owned()],
+            None,
+            BTreeMap::new(),
+        );
+        let local = serde_json::to_value(persisted_buffer(&buffer)).expect("serialize");
+        assert!(local.get("remote").is_none(), "{local}");
+
+        buffer.remote = Some(RemoteBuffer {
+            host: "devbox".to_owned(),
+            buffer_id: Some(BufferId(3)),
+        });
+        let persisted = persisted_buffer(&buffer);
+        assert_eq!(
+            persisted.remote,
+            Some(PersistedRemoteBuffer {
+                host: "devbox".to_owned(),
+                buffer_id: Some(3),
+            })
+        );
+        let restored = restored_buffer(persisted).expect("restore");
+        assert_eq!(restored.remote, buffer.remote);
     }
 
     #[test]
