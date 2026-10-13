@@ -106,6 +106,28 @@ impl Upstream {
         }
     }
 
+    /// Send `message` without waiting for its response, which [`Self::recv`]
+    /// returns among the events, for a caller with several requests in
+    /// flight. The server answers a connection's requests in order.
+    pub async fn send(&mut self, message: &ClientMessage) -> Result<()> {
+        if let Err(error) = self.client.send(message).await {
+            return Err(self.failure(error).await);
+        }
+        Ok(())
+    }
+
+    /// The next response or event, or `None` once the connection closed.
+    /// Events [`Self::request`] kept come first.
+    pub async fn recv(&mut self) -> Result<Option<ServerEnvelope>> {
+        if let Some(event) = self.queued_events.pop_front() {
+            return Ok(Some(ServerEnvelope::Event(event)));
+        }
+        match self.client.recv().await {
+            Ok(envelope) => Ok(envelope),
+            Err(error) => Err(self.failure(error).await),
+        }
+    }
+
     /// The next event the server sent, or `None` once the connection closed.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>> {
         if let Some(event) = self.queued_events.pop_front() {

@@ -669,3 +669,47 @@ async fn clipboard_writes_and_passthrough_from_a_remote_pane_reach_its_clients()
     local.shutdown().await.expect("shutdown local server");
     remote.shutdown().await.expect("shutdown remote server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_requests_to_one_host_each_get_their_own_answer() {
+    let (remote, local) = start_servers().await;
+    let mut connection = connect(&local).await;
+    let mut buffers = Vec::new();
+    for marker in ["first-''buffer", "second-''buffer"] {
+        let script = format!("echo {marker}; sleep 30");
+        let buffer = create_buffer(&mut connection, &["/bin/sh", "-c", &script], Some(HOST)).await;
+        wait_for_output(&mut connection, buffer.id, &marker.replace("''", "")).await;
+        buffers.push((buffer.id, marker.replace("''", "")));
+    }
+
+    // Requests from several clients are in flight to the host at once.
+    let mut tasks = tokio::task::JoinSet::new();
+    for client in 0..4 {
+        let socket = local.socket_path().to_owned();
+        let buffers = buffers.clone();
+        tasks.spawn(async move {
+            let mut connection = TestConnection::connect(&socket).await.expect("connect");
+            for round in 0..10 {
+                let (buffer_id, marker) = &buffers[(client + round) % buffers.len()];
+                let capture = connection
+                    .capture_buffer(*buffer_id)
+                    .await
+                    .expect("capture");
+                assert!(
+                    capture
+                        .lines
+                        .iter()
+                        .any(|line| line.contains(marker.as_str())),
+                    "buffer {buffer_id} answered with {:?}",
+                    capture.lines
+                );
+            }
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.expect("client task");
+    }
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}

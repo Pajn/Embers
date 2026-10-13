@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    ActivityState, BufferId, ClipboardWrite, MuxError, PassthroughWrite, PtySize, Result,
-    TerminalModes, TerminalSnapshot, new_request_id,
+    ActivityState, BufferId, ClipboardWrite, MuxError, PassthroughWrite, PtySize, RequestId,
+    Result, TerminalModes, TerminalSnapshot, new_request_id,
 };
 use embers_protocol::{
     BufferPipeRecord, BufferPipeState, BufferPipeStopReason, BufferRecord, BufferRecordState,
-    BufferRequest, ClientMessage, ClientRequest, InputRequest, ServerEvent, ServerResponse,
-    SubscribeRequest,
+    BufferRequest, ClientMessage, ClientRequest, InputRequest, ServerEnvelope, ServerEvent,
+    ServerResponse, SubscribeRequest,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -211,24 +211,37 @@ impl HostConnection {
     }
 }
 
+/// Most requests a host connection has sent and not yet had answered. More
+/// wait for one to be answered: the server answers in order, and with no
+/// bound a burst could fill both pipes, each side waiting for the other to
+/// read.
+const MAX_REQUESTS_IN_FLIGHT: usize = 32;
+
 async fn serve_host(
     host: String,
     mut upstream: Upstream,
     mut commands: mpsc::Receiver<HostCommand>,
 ) {
     let mut watchers = HashMap::<BufferId, Watcher>::new();
+    // Requests sent and not yet answered, by id. Requests go out as they
+    // come rather than one round trip at a time, so a slow link costs one
+    // round trip for a burst of requests, not one each.
+    let mut in_flight = HashMap::<RequestId, oneshot::Sender<Result<ServerResponse>>>::new();
     loop {
         tokio::select! {
-            command = commands.recv() => match command {
+            command = commands.recv(), if in_flight.len() < MAX_REQUESTS_IN_FLIGHT => match command {
                 None => break,
                 Some(HostCommand::Request { message, reply }) => {
-                    let response = upstream.request(&message).await;
-                    // Errors are the connection failing; the server's own
-                    // refusals are responses.
-                    let failed = response.is_err();
-                    let _ = reply.send(response);
-                    if failed {
-                        break;
+                    let request_id = message.request_id();
+                    match upstream.send(&message).await {
+                        Ok(()) => {
+                            in_flight.insert(request_id, reply);
+                        }
+                        Err(error) => {
+                            debug!(%host, %error, "connection to host failed");
+                            let _ = reply.send(Err(error));
+                            break;
+                        }
                     }
                 }
                 Some(HostCommand::Watch { buffer_id, watcher }) => {
@@ -238,27 +251,20 @@ async fn serve_host(
                     watchers.remove(&buffer_id);
                 }
             },
-            event = upstream.next_event() => match event {
-                Ok(Some(ServerEvent::RenderInvalidated(event))) => {
-                    if let Some(watcher) = watchers.get(&event.buffer_id) {
-                        // Full means a report is already waiting.
-                        let _ = watcher.changes.try_send(());
-                    }
+            envelope = upstream.recv() => match envelope {
+                Ok(Some(ServerEnvelope::Response(response))) => {
+                    // A response without an id answers a request the server
+                    // could not read, so it cannot be told which.
+                    let Some(reply) = response
+                        .request_id()
+                        .and_then(|request_id| in_flight.remove(&request_id))
+                    else {
+                        debug!(%host, ?response, "host answered no request in flight");
+                        break;
+                    };
+                    let _ = reply.send(Ok(response));
                 }
-                Ok(Some(ServerEvent::Clipboard(event))) => {
-                    if let Some(watcher) = watchers.get(&event.buffer_id) {
-                        let _ = watcher.writes.send(HostWrite::Clipboard(ClipboardWrite {
-                            selection: event.selection,
-                            text: event.text,
-                        }));
-                    }
-                }
-                Ok(Some(ServerEvent::Passthrough(event))) => {
-                    if let Some(watcher) = watchers.get(&event.buffer_id) {
-                        let _ = watcher.writes.send(HostWrite::Passthrough(event.writes));
-                    }
-                }
-                Ok(Some(_)) => {}
+                Ok(Some(ServerEnvelope::Event(event))) => route_event(&watchers, event),
                 Ok(None) => break,
                 Err(error) => {
                     debug!(%host, %error, "connection to host failed");
@@ -268,9 +274,36 @@ async fn serve_host(
         }
     }
     debug!(%host, "connection to host closed");
-    // Dropping the watchers closes their channels, which tells each buffer
-    // the connection is gone; dropping the receiver makes the connection
-    // report itself closed.
+    // Dropping the replies in flight fails their requests, and dropping the
+    // watchers closes their channels, which tells each buffer the connection
+    // is gone; dropping the receiver makes the connection report itself
+    // closed.
+}
+
+/// Pass on what the host reports about a buffer to whoever watches it.
+fn route_event(watchers: &HashMap<BufferId, Watcher>, event: ServerEvent) {
+    match event {
+        ServerEvent::RenderInvalidated(event) => {
+            if let Some(watcher) = watchers.get(&event.buffer_id) {
+                // Full means a report is already waiting.
+                let _ = watcher.changes.try_send(());
+            }
+        }
+        ServerEvent::Clipboard(event) => {
+            if let Some(watcher) = watchers.get(&event.buffer_id) {
+                let _ = watcher.writes.send(HostWrite::Clipboard(ClipboardWrite {
+                    selection: event.selection,
+                    text: event.text,
+                }));
+            }
+        }
+        ServerEvent::Passthrough(event) => {
+            if let Some(watcher) = watchers.get(&event.buffer_id) {
+                let _ = watcher.writes.send(HostWrite::Passthrough(event.writes));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn expect_ok(host: &str, response: ServerResponse) -> Result<()> {
