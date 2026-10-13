@@ -8,6 +8,8 @@ use embers_protocol::{
 };
 use embers_server::{Server, ServerConfig};
 use embers_test_support::{TestConnection, TestServer, cargo_bin_path};
+
+use crate::support::{run_cli, stdout};
 use tokio::time::{Duration, Instant, sleep};
 
 const HOST: &str = "devbox";
@@ -408,6 +410,181 @@ async fn a_host_that_cannot_be_reached_is_reported() {
         .await
         .expect("request answered");
     assert!(matches!(response, ServerResponse::Error(_)), "{response:?}");
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}
+
+/// Run `embers` against `server` and return what it printed, trimmed.
+fn cli(server: &TestServer, args: &[&str]) -> String {
+    stdout(&run_cli(server, args)).trim().to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panes_created_from_a_remote_pane_run_on_its_host_unless_local() {
+    let (remote, local) = start_servers().await;
+    cli(&local, &["new-session", "-d", "-s", "work"]);
+    let remote_pane = cli(
+        &local,
+        &[
+            "new-window",
+            "-t",
+            "work",
+            "--host",
+            HOST,
+            "-P",
+            "-F",
+            "%#{buffer_id}",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(
+        cli(
+            &local,
+            &["display-message", "-p", "-t", &remote_pane, "#{pane_host}"]
+        ),
+        HOST
+    );
+    cli(
+        &local,
+        &[
+            "send-keys",
+            "-t",
+            &remote_pane,
+            "--enter",
+            "echo hi-from-''host",
+        ],
+    );
+    let mut connection = connect(&local).await;
+    let buffer_id = BufferId(remote_pane[1..].parse().expect("buffer id"));
+    wait_for_output(&mut connection, buffer_id, "hi-from-host").await;
+
+    let split = cli(
+        &local,
+        &[
+            "split-window",
+            "-t",
+            &remote_pane,
+            "-P",
+            "-F",
+            "#{pane_host}",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(split, HOST);
+    let split = cli(
+        &local,
+        &[
+            "split-window",
+            "-t",
+            &remote_pane,
+            "--local",
+            "-P",
+            "-F",
+            "[#{pane_host}]",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(split, "[]");
+    // A window from the session's first, local pane stays local.
+    let window = cli(
+        &local,
+        &[
+            "new-window",
+            "-t",
+            "work:0",
+            "-P",
+            "-F",
+            "[#{pane_host}]",
+            "--",
+            "/bin/sh",
+        ],
+    );
+    assert_eq!(window, "[]");
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_split_bound_to_a_key_runs_on_the_focused_panes_host() {
+    use embers_client::{
+        ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, KeyEvent, MuxClient,
+    };
+    use embers_core::Size;
+
+    let (remote, local) = start_servers().await;
+    cli(
+        &local,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "work",
+            "--host",
+            HOST,
+            "--",
+            "/bin/sh",
+        ],
+    );
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tempdir.path().join("config.rhai"),
+        r#"
+            fn split(ctx) { action.split_with("vertical", tree.buffer_spawn(["/bin/sh"])) }
+            define_action("split", split);
+            bind("normal", "1", "split");
+        "#,
+    )
+    .expect("write config");
+    let config = ConfigManager::load(
+        ConfigDiscoveryOptions::default().with_project_config_dir(tempdir.path()),
+    )
+    .expect("load config");
+    let client = MuxClient::connect(local.socket_path())
+        .await
+        .expect("client connects");
+    let mut configured = ConfiguredClient::new(client, config);
+    configured
+        .client_mut()
+        .resync_all_sessions()
+        .await
+        .expect("resync");
+    let session_id = configured
+        .client()
+        .state()
+        .sessions
+        .values()
+        .find(|session| session.name == "work")
+        .expect("session cached")
+        .id;
+
+    configured
+        .handle_key(
+            session_id,
+            Size {
+                width: 80,
+                height: 24,
+            },
+            KeyEvent::Char('1'),
+        )
+        .await
+        .expect("action runs");
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
+
+    let hosts = cli(
+        &local,
+        &["list-panes", "-t", "work", "-F", "[#{pane_host}]"],
+    );
+    assert_eq!(hosts, format!("[{HOST}]\n[{HOST}]"));
 
     local.shutdown().await.expect("shutdown local server");
     remote.shutdown().await.expect("shutdown remote server");

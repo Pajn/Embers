@@ -193,6 +193,26 @@ impl CliConnection {
         Ok(self.absolute_dir(expanded))
     }
 
+    /// `-c` for a pane on another host, expanded for `pane_id` (the pane the
+    /// new one is created from) like [`Self::spawn_cwd_for_pane`] but taken
+    /// as it is: a directory on this machine means nothing there. Without
+    /// `-c` the host's server chooses.
+    pub(crate) async fn remote_spawn_cwd(
+        &mut self,
+        cwd: Option<&str>,
+        snapshot: Option<&SessionSnapshot>,
+        pane_id: Option<NodeId>,
+    ) -> Result<Option<String>> {
+        let Some(cwd) = cwd else {
+            return Ok(None);
+        };
+        let expanded = match snapshot {
+            Some(snapshot) => self.expand_for_pane(snapshot, pane_id, cwd).await?,
+            None => expand_format(cwd, &FormatContext::default()),
+        };
+        Ok((!expanded.is_empty()).then_some(expanded))
+    }
+
     /// `dir` taken relative to the directory the command runs in; the
     /// default when it expanded to nothing.
     fn absolute_dir(&self, dir: String) -> Option<String> {

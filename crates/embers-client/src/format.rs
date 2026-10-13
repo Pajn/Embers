@@ -2,7 +2,8 @@
 //!
 //! `#S`, `#I`, `#W`, `#D` and `#T` (and their long `#{...}` names) expand to
 //! the session name, window number, window name, pane id and pane title;
-//! `#{pane_current_path}` and `#{pane_current_command}` have no short form.
+//! `#{pane_current_path}`, `#{pane_current_command}` and `#{pane_host}` have no
+//! short form.
 //! `##` is a literal `#`. An unknown `#{name}` expands to nothing, like tmux;
 //! any other `#` is kept as is. There are no conditionals or modifiers.
 //!
@@ -36,6 +37,9 @@ pub struct FormatContext {
     pub pane_title: String,
     pub pane_current_path: String,
     pub pane_current_command: String,
+    /// The host whose embers server runs the pane's program, empty for this
+    /// one.
+    pub pane_host: String,
     pub session_id: Option<SessionId>,
     /// The node a window shows: its root tab's child.
     pub window_id: Option<NodeId>,
@@ -138,6 +142,9 @@ impl FormatContext {
                 .and_then(|buffer| buffer.cwd.clone())
                 .unwrap_or_default(),
             pane_current_command,
+            pane_host: buffer
+                .and_then(|buffer| buffer.host.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -164,6 +171,7 @@ impl FormatContext {
             "pane_title" => self.pane_title.clone(),
             "pane_current_path" => self.pane_current_path.clone(),
             "pane_current_command" => self.pane_current_command.clone(),
+            "pane_host" => self.pane_host.clone(),
             "session_id" => self
                 .session_id
                 .map(|session_id| format!("${}", session_id.0))

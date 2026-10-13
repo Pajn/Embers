@@ -206,6 +206,7 @@ A small part of tmux's format language is supported:
 | `#T` | `#{pane_title}` | pane title |
 | | `#{pane_current_path}` | the pane's working directory |
 | | `#{pane_current_command}` | the program in the pane's foreground, or the one it started with when that is unknown |
+| | `#{pane_host}` | the host whose embers server runs the pane's program (see [Remote buffers](#remote-buffers)), or nothing for this machine |
 | | `#{session_id}` | session id, as `$N` (a target) |
 | | `#{session_windows}` | number of windows in the session |
 | | `#{session_attached}` | number of clients showing the session (CLI only) |
@@ -216,7 +217,7 @@ A small part of tmux's format language is supported:
 | | `#{buffer_id}` | the pane's buffer, the value of `EMBERS_BUFFER`; `-t %N` takes it |
 | | `#{pane_index}` | the pane's position in its window, from 0, as `-t :window.N` takes it |
 | | `#{pane_active}` | 1 for the session's focused pane, else 0 |
-| | `#{pane_pid}` | process id of the pane's program |
+| | `#{pane_pid}` | process id of the pane's program; nothing for a pane on another host |
 | | `#{pane_width}`, `#{pane_height}` | the pane's size in cells |
 | | `#{pane_dead}`, `#{pane_dead_status}` | 1 when the pane's program has exited (kept by `remain-on-exit`), and its exit status |
 | | `#{pane_at_left}`, `#{pane_at_right}`, `#{pane_at_top}`, `#{pane_at_bottom}` | 1 when no pane is drawn on that side, as `select-pane -L/-R/-U/-D` sees it (CLI only) |
@@ -385,6 +386,62 @@ closes the connection, which it does when the client's side of the pipe ends.
 runs the command without a login shell, so `embers` must be on the `PATH` that
 non-interactive SSH sessions get on the remote machine, or the command must
 name its path.
+
+## Remote buffers
+
+A pane's program can run on another machine. `--host HOST` on `new-window`,
+`split-window`, `display-popup` and `new-session` starts it on HOST's own
+embers server, as a detached buffer there, and shows it here like any other
+pane: it can be split, moved, zoomed, captured, searched in copy mode and
+sent keys, and several hosts can share one window.
+
+```sh
+embers new-window --host devbox -- htop
+embers split-window --host devbox -c /srv/app
+```
+
+A pane created from a pane on another host runs on that host too, so splitting
+a remote pane or opening a new window from it stays there, the way
+`#{pane_current_path}` follows the pane. `--local` runs the new pane on this
+machine instead. Splits and windows created by key bindings follow the focused
+pane the same way.
+
+The server reaches HOST by running `ssh HOST embers proxy` and speaking the
+protocol over it (see [proxy](#proxy)); all panes on one host share that
+connection. This needs:
+
+- SSH access to HOST that works without a prompt, since the server runs `ssh`
+  with no terminal to ask on;
+- `embers` on the `PATH` that non-interactive SSH sessions get on HOST;
+- an embers release on HOST that speaks the same protocol version.
+
+`EMBERS_REMOTE_COMMAND`, in the server's environment, replaces the command.
+It is split on whitespace, and `{host}` in it stands for the host, for
+example `EMBERS_REMOTE_COMMAND='ssh -p 2222 {host} /opt/embers/bin/embers proxy'`.
+
+What runs on HOST is HOST's:
+
+- `-c` names a directory on HOST, and is expanded for the pane the new one
+  is created from. Without `-c` HOST's server chooses the directory.
+- The program gets HOST's environment from HOST's server, so `EMBERS_SOCKET`
+  and `EMBERS_BUFFER` in it name that server and its buffer: `embers`
+  commands run inside the pane act on HOST's server. The session environment
+  set with `set-environment` stays on this machine.
+- `buffer pipe` commands run on HOST.
+
+If the connection drops, the host's panes show as interrupted while their
+programs keep running there. The server tries to reach the host again, after a
+second at first and then less often, up to every 30 seconds, and the panes come
+back with what they showed. A server that restarts takes its remote panes up
+again the same way; it never replaces one with a local shell. `kill-server`
+ends remote programs too. A server stopped any other way leaves them running
+on their hosts for the next server.
+
+Not yet passed on from remote panes: OSC 52 clipboard writes, and passthrough
+(images, notifications). The `is-vim` option Neovim sets from inside a remote
+pane lands on HOST's server, though smart navigation still tells Neovim by
+the pane's foreground command. An exited remote program's buffer stays in
+HOST's server's buffer list until that server restarts.
 
 ## tmux compatibility
 

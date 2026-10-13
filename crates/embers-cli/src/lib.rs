@@ -126,6 +126,40 @@ fn parse_base_index_arg(value: &str) -> std::result::Result<u32, String> {
     })
 }
 
+/// Where a new pane's program runs.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct SpawnHost {
+    /// Run the program on HOST's embers server, reached with the server's
+    /// remote command (`ssh HOST embers proxy` unless `EMBERS_REMOTE_COMMAND`
+    /// says otherwise). Defaults to the host of the pane the new one is
+    /// created from.
+    #[arg(long, value_name = "HOST", conflicts_with = "local")]
+    pub host: Option<String>,
+    /// Run the program on this machine, even when the pane the new one is
+    /// created from runs on another host.
+    #[arg(long)]
+    pub local: bool,
+}
+
+impl SpawnHost {
+    /// The host to run on: `--host`, none with `--local`, or else the host of
+    /// `pane_id`, the pane the new one is created from.
+    fn resolve(self, snapshot: &SessionSnapshot, pane_id: Option<NodeId>) -> Option<String> {
+        if self.local {
+            return None;
+        }
+        self.host.or_else(|| {
+            let pane_id = pane_id?;
+            snapshot
+                .buffers
+                .iter()
+                .find(|buffer| buffer.attachment_node_id == Some(pane_id))?
+                .host
+                .clone()
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Attach {
@@ -180,7 +214,7 @@ pub enum Command {
         /// The old form's session name.
         #[arg(
             value_name = "NAME",
-            conflicts_with_all = ["session_name", "attach_existing", "cwd", "window_name", "width", "height", "print", "format", "command"]
+            conflicts_with_all = ["session_name", "attach_existing", "cwd", "window_name", "width", "height", "print", "format", "command", "host"]
         )]
         name: Option<String>,
         /// Do not attach (or, from the command prompt, switch) to the session.
@@ -198,6 +232,10 @@ pub enum Command {
         /// `#{pane_current_path}`. Defaults to the current directory.
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        /// Run the first window's program on HOST's embers server (see
+        /// `new-window --host`).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Size to lay the session out at until a client shows it.
         #[arg(short = 'x', value_name = "COLUMNS")]
         width: Option<u16>,
@@ -319,6 +357,8 @@ pub enum Command {
         title: Option<String>,
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Keep the current window active.
         #[arg(short = 'd')]
         detached: bool,
@@ -385,6 +425,8 @@ pub enum Command {
         vertical: bool,
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Keep the split pane focused.
         #[arg(short = 'd')]
         detached: bool,
@@ -581,6 +623,8 @@ pub enum Command {
         /// directory.
         #[arg(short = 'd', short_alias = 'c', long = "cwd", value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Print information about the popup once it is shown (`-F`, default
         /// `#{popup_id}`).
         #[arg(short = 'P')]
@@ -873,6 +917,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             session_name,
             window_name,
             cwd,
+            host,
             width,
             height,
             print,
@@ -886,6 +931,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     name: session_name,
                     window_name,
                     cwd,
+                    host,
                     width,
                     height,
                     format: print.then(|| format.unwrap_or_else(|| "#{session_name}:".to_owned())),
@@ -1369,6 +1415,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             target,
             title,
             cwd,
+            spawn_host,
             detached,
             print,
             format,
@@ -1378,14 +1425,32 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let command = buffer_command(command);
             let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
             let snapshot = connection.session_snapshot(session.id).await?;
-            let cwd = connection
-                .spawn_cwd(cwd.as_deref(), Some(&snapshot))
-                .await?;
+            let source = snapshot.session.focused_leaf_id;
+            let host = spawn_host.resolve(&snapshot, source);
+            let cwd = match host {
+                Some(_) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&snapshot), source)
+                        .await?
+                }
+                None => {
+                    connection
+                        .spawn_cwd(cwd.as_deref(), Some(&snapshot))
+                        .await?
+                }
+            };
             let previous_window = current_root_window(&snapshot)?;
             let previous_focus = snapshot.session.focused_leaf_id;
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, cwd, size, session.id)
+                .create_buffer(
+                    Some(window_title.clone()),
+                    command,
+                    cwd,
+                    size,
+                    session.id,
+                    host,
+                )
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -1529,6 +1594,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             horizontal,
             vertical: _,
             cwd,
+            spawn_host,
             detached,
             print,
             format,
@@ -1544,9 +1610,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             } else {
                 SplitDirection::Vertical
             };
-            let cwd = connection
-                .spawn_cwd_for_pane(cwd.as_deref(), &pane.snapshot, pane.leaf_id)
-                .await?;
+            let host = spawn_host.resolve(&pane.snapshot, Some(pane.leaf_id));
+            let cwd = match host {
+                Some(_) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&pane.snapshot), Some(pane.leaf_id))
+                        .await?
+                }
+                None => {
+                    connection
+                        .spawn_cwd_for_pane(cwd.as_deref(), &pane.snapshot, pane.leaf_id)
+                        .await?
+                }
+            };
             let size = spawn_size(
                 &pane.snapshot,
                 PanePlacement::Split {
@@ -1561,6 +1637,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     cwd,
                     size,
                     pane.snapshot.session.id,
+                    host,
                 )
                 .await?;
             let response = connection
@@ -1921,6 +1998,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             height,
             close_on_exit,
             cwd,
+            spawn_host,
             print,
             format,
             no_wait,
@@ -1950,13 +2028,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 }
                 None => default_title(&command, "popup"),
             };
-            let cwd = match pane_id {
-                Some(pane_id) => {
+            let host = spawn_host.resolve(&snapshot, pane_id);
+            let cwd = match (&host, pane_id) {
+                (Some(_), _) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&snapshot), pane_id)
+                        .await?
+                }
+                (None, Some(pane_id)) => {
                     connection
                         .spawn_cwd_for_pane(cwd.as_deref(), &snapshot, pane_id)
                         .await?
                 }
-                None => {
+                (None, None) => {
                     connection
                         .spawn_cwd(cwd.as_deref(), Some(&snapshot))
                         .await?
@@ -1973,7 +2057,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let border = !no_border;
             let size = spawn_size(&snapshot, PanePlacement::Floating { geometry, border });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, cwd, size, session_id)
+                .create_buffer(
+                    Some(popup_title.clone()),
+                    command,
+                    cwd,
+                    size,
+                    session_id,
+                    host,
+                )
                 .await?;
             // Keep the buffer once its command exits, so a waiting CLI can
             // read the exit status; `-EE` keeps it after a failure.
@@ -2994,6 +3085,7 @@ impl CliConnection {
         cwd: Option<String>,
         size: Option<PtySize>,
         session_id: SessionId,
+        host: Option<String>,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -3004,7 +3096,7 @@ impl CliConnection {
                 env: Default::default(),
                 size,
                 session_id: Some(session_id),
-                host: None,
+                host,
             }))
             .await?
         {
