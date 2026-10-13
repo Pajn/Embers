@@ -20,7 +20,6 @@ use embers_ghostty_backend::GhosttyTerminalBackend;
 use embers_server::{RawByteRouter, TerminalBackend};
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum Op {
@@ -145,13 +144,9 @@ fn check_snapshot(snapshot: &TerminalSnapshot, size: PtySize, at: &str) {
 }
 
 fn check_line(line: &SnapshotLine, cols: u16, at: &str) {
-    // Columns as an emulator counts them, a codepoint at a time; a cell can
-    // hold several codepoints of no width.
-    let columns: usize = line
-        .text
-        .chars()
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum();
+    // Columns as the line's cells cover them: Ghostty clusters graphemes,
+    // so an emoji sequence is one cell however many codepoints it holds.
+    let columns = line.width();
     assert!(
         columns <= usize::from(cols.max(1)),
         "{at}: {columns} columns in {cols}: {line:?}"
