@@ -265,6 +265,33 @@ async fn losing_the_host_interrupts_its_buffers_rather_than_exiting_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffers_come_back_once_the_host_can_be_reached_again() {
+    let (remote, local) = start_servers().await;
+    let mut connection = connect(&local).await;
+    let buffer = create_buffer(&mut connection, &["/bin/sh"], Some(HOST)).await;
+    send(&mut connection, buffer.id, "echo before-''drop\n").await;
+    wait_for_output(&mut connection, buffer.id, "before-drop").await;
+
+    // The connection drops, as when the network goes away, while the
+    // program keeps running on the host.
+    let proxy = format!("{} proxy", remote.socket_path().display());
+    let killed = std::process::Command::new("pkill")
+        .args(["-f", &proxy])
+        .status()
+        .expect("run pkill");
+    assert!(killed.success(), "no proxy process to kill");
+    wait_for_state(&mut connection, buffer.id, BufferRecordState::Interrupted).await;
+
+    wait_for_state(&mut connection, buffer.id, BufferRecordState::Running).await;
+    wait_for_output(&mut connection, buffer.id, "before-drop").await;
+    send(&mut connection, buffer.id, "echo after-''drop\n").await;
+    wait_for_output(&mut connection, buffer.id, "after-drop").await;
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_server_ends_remote_programs_too() {
     let (remote, local) = start_servers().await;
     let mut connection = connect(&local).await;

@@ -88,6 +88,10 @@ const HOLD_WORKSPACE_SAVES_ENV_VAR: &str = "EMBERS_TEST_HOLD_WORKSPACE_SAVES";
 /// How long a restored shell gets to print its prompt before the command it
 /// should run again is typed into it anyway.
 const RESTORED_SHELL_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long the server waits before trying to reach a host it lost again,
+/// doubling after each failure up to [`RECONNECT_MAX_DELAY`].
+const RECONNECT_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Caps on runtime-settable pane user options. Each option is re-encoded into
 /// every `BufferRecord` (list/get responses and RenderInvalidated broadcasts),
@@ -203,9 +207,15 @@ impl Server {
         {
             let runtime = runtime.clone();
             let task = runtime.state_tasks.enter();
+            let mut stopping = runtime.shutdown.subscribe();
             tokio::spawn(async move {
                 let _task = task;
-                runtime.reattach_remote_buffers().await;
+                // Shutting down waits for this task, and a host may take long
+                // to answer.
+                tokio::select! {
+                    () = runtime.reattach_remote_buffers() => {}
+                    () = wait_for_shutdown(&mut stopping) => {}
+                }
             });
         }
         let listener = UnixListener::bind(&self.config.socket_path)?;
@@ -521,6 +531,8 @@ struct Runtime {
     state_tasks: TaskCounter,
     /// The connections to the hosts that run remote buffers.
     remote_hosts: RemoteHosts,
+    /// The hosts [`Runtime::reconnect_host`] is trying to reach again.
+    reconnecting_hosts: StdMutex<BTreeSet<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -623,6 +635,7 @@ impl Runtime {
             state_tasks: TaskCounter::default(),
             // `Server::start` applies the configured command.
             remote_hosts: RemoteHosts::new(DEFAULT_REMOTE_COMMAND.map(str::to_owned).to_vec()),
+            reconnecting_hosts: StdMutex::new(BTreeSet::new()),
         }
     }
 }
@@ -995,42 +1008,36 @@ impl Runtime {
     /// per host. A buffer its host no longer has is gone, as if its program
     /// exited; one whose host cannot be reached stays interrupted.
     async fn reattach_remote_buffers(self: &Arc<Self>) {
-        let by_host = {
-            let state = self.state.lock().await;
-            let mut by_host = BTreeMap::<String, Vec<(BufferId, BufferId)>>::new();
-            for buffer in state.buffers.values() {
-                if let BufferState::Interrupted(_) = buffer.state
-                    && let Some(remote) = &buffer.remote
-                    && let Some(remote_id) = remote.buffer_id
-                {
-                    by_host
-                        .entry(remote.host.clone())
-                        .or_default()
-                        .push((buffer.id, remote_id));
-                }
-            }
-            by_host
-        };
+        let by_host = self.interrupted_remote_buffers(None).await;
         let mut hosts = tokio::task::JoinSet::new();
         for (host, buffers) in by_host {
             let runtime = self.clone();
-            hosts.spawn(async move { runtime.reattach_host_buffers(&host, buffers).await });
+            hosts.spawn(async move {
+                if !runtime.reattach_host_buffers(&host, buffers).await {
+                    runtime.reconnect_host(host);
+                }
+            });
         }
         while hosts.join_next().await.is_some() {}
     }
 
+    /// Take up `buffers` on `host` again. Returns whether none is left
+    /// interrupted for a reason trying again could fix: the host could not be
+    /// reached, or taking a buffer up failed some other way than the host no
+    /// longer having it.
     async fn reattach_host_buffers(
         self: &Arc<Self>,
         host: &str,
         buffers: Vec<(BufferId, BufferId)>,
-    ) {
+    ) -> bool {
         let connection = match self.remote_hosts.connect(host).await {
             Ok(connection) => connection,
             Err(error) => {
                 warn!(%host, %error, "could not reach host to take up its buffers again");
-                return;
+                return false;
             }
         };
+        let mut done = true;
         for (buffer_id, remote_id) in buffers {
             match BufferRuntimeHandle::attach_remote(
                 buffer_id,
@@ -1061,9 +1068,11 @@ impl Runtime {
                 }
                 Err(error) => {
                     warn!(%buffer_id, %host, %error, "could not take up buffer on host again");
+                    done = false;
                 }
             }
         }
+        done
     }
 
     /// Start a fresh process for every PTY buffer left `Interrupted` that a
@@ -4115,14 +4124,113 @@ impl Runtime {
 
     /// The buffer's runtime can no longer be reached, though its program may
     /// still run on its host: mark it interrupted, as a server shutting down
-    /// marks the buffers whose keepers it leaves.
-    async fn record_buffer_lost(&self, buffer_id: BufferId) {
+    /// marks the buffers whose keepers it leaves, and try to reach the host
+    /// again.
+    async fn record_buffer_lost(self: &Arc<Self>, buffer_id: BufferId) {
         self.buffer_shutdown_intents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(buffer_id);
         self.record_buffer_exit(buffer_id, None).await;
         self.mark_workspace_dirty();
+        let host = self
+            .state
+            .lock()
+            .await
+            .buffers
+            .get(&buffer_id)
+            .and_then(|buffer| buffer.remote.as_ref())
+            .map(|remote| remote.host.clone());
+        if let Some(host) = host {
+            self.reconnect_host(host);
+        }
+    }
+
+    /// Keep trying to reach `host` again, waiting longer after each failure,
+    /// and take up its interrupted buffers once it answers. One attempt runs
+    /// per host at a time; it gives up once no buffer is waiting for the host
+    /// or the server shuts down.
+    fn reconnect_host(self: &Arc<Self>, host: String) {
+        if !self
+            .reconnecting_hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(host.clone())
+        {
+            return;
+        }
+        let runtime = self.clone();
+        let task = self.state_tasks.enter();
+        let mut stopping = self.shutdown.subscribe();
+        tokio::spawn(async move {
+            let _task = task;
+            tokio::select! {
+                () = runtime.reconnect_until_reached(&host) => {}
+                () = wait_for_shutdown(&mut stopping) => {}
+            }
+            runtime
+                .reconnecting_hosts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&host);
+            // A buffer lost after the last attempt found this task still
+            // running and left it to it. Buffers are marked interrupted before
+            // they ask for a reconnect, so this check sees any such buffer.
+            if !*stopping.borrow()
+                && !runtime
+                    .interrupted_remote_buffers(Some(&host))
+                    .await
+                    .is_empty()
+            {
+                runtime.reconnect_host(host);
+            }
+        });
+    }
+
+    async fn reconnect_until_reached(self: &Arc<Self>, host: &str) {
+        let mut delay = RECONNECT_FIRST_DELAY;
+        loop {
+            tokio::time::sleep(delay).await;
+            let buffers = self.interrupted_remote_buffers(Some(host)).await;
+            let Some(buffers) = buffers.get(host).cloned() else {
+                return;
+            };
+            match self.remote_hosts.connect(host).await {
+                // Buffers left interrupted are tried again with the rest.
+                Ok(_) => {
+                    if self.reattach_host_buffers(host, buffers).await {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    debug!(%host, %error, ?delay, "host still cannot be reached");
+                }
+            }
+            delay = (delay * 2).min(RECONNECT_MAX_DELAY);
+        }
+    }
+
+    /// The interrupted buffers on other hosts, on `host` alone if given, by
+    /// host, each with its id there.
+    async fn interrupted_remote_buffers(
+        &self,
+        host: Option<&str>,
+    ) -> BTreeMap<String, Vec<(BufferId, BufferId)>> {
+        let state = self.state.lock().await;
+        let mut by_host = BTreeMap::<String, Vec<(BufferId, BufferId)>>::new();
+        for buffer in state.buffers.values() {
+            if let BufferState::Interrupted(_) = buffer.state
+                && let Some(remote) = &buffer.remote
+                && let Some(remote_id) = remote.buffer_id
+                && host.is_none_or(|host| host == remote.host)
+            {
+                by_host
+                    .entry(remote.host.clone())
+                    .or_default()
+                    .push((buffer.id, remote_id));
+            }
+        }
+        by_host
     }
 
     async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
