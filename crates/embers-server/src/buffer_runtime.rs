@@ -130,7 +130,7 @@ pub struct BufferRuntimePipeStatus {
 }
 
 #[derive(Clone)]
-pub struct BufferRuntimeHandle {
+pub struct KeeperRuntimeHandle {
     inner: Arc<BufferRuntimeInner>,
 }
 
@@ -540,10 +540,10 @@ struct KeeperPipeWriterState {
     failed: bool,
 }
 
-impl std::fmt::Debug for BufferRuntimeHandle {
+impl std::fmt::Debug for KeeperRuntimeHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("BufferRuntimeHandle")
+            .debug_struct("KeeperRuntimeHandle")
             .field("buffer_id", &self.inner.buffer_id)
             .field("pid", &self.inner.pid)
             .field("socket_path", &self.inner.socket_path)
@@ -551,7 +551,7 @@ impl std::fmt::Debug for BufferRuntimeHandle {
     }
 }
 
-impl BufferRuntimeHandle {
+impl KeeperRuntimeHandle {
     pub async fn spawn(
         buffer_id: BufferId,
         socket_path: PathBuf,
@@ -639,10 +639,6 @@ impl BufferRuntimeHandle {
             .poller = Some(poller);
 
         Ok(Self { inner })
-    }
-
-    pub fn pid(&self) -> Option<u32> {
-        self.inner.pid
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -2854,11 +2850,12 @@ mod tests {
     use embers_core::{ActivityState, BufferId, MuxError};
 
     use super::{
-        BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
+        BufferRuntimeCallbacks, BufferRuntimeInner, BufferRuntimePipeStatus,
         BufferRuntimePipeStopReason, BufferRuntimeStatus, ESTIMATED_CELL_SPAN_JSON_BYTES,
         ESTIMATED_STYLED_RUN_JSON_BYTES, KEEPER_PIPE_WRITE_QUEUE_CAPACITY, KeeperConnection,
-        KeeperPipe, MAX_FRAME_SIZE, MAX_STYLE_PAYLOAD_BYTES, RuntimeThreads, fit_slice_payload,
-        read_message, spawn_status_poller, status_update_delta, wait_for_keeper_ready,
+        KeeperPipe, KeeperRuntimeHandle, MAX_FRAME_SIZE, MAX_STYLE_PAYLOAD_BYTES, RuntimeThreads,
+        fit_slice_payload, read_message, spawn_status_poller, status_update_delta,
+        wait_for_keeper_ready,
     };
 
     fn spans(count: usize) -> Vec<embers_core::CellSpan> {
@@ -3262,7 +3259,7 @@ mod tests {
     async fn start_pipe_rejects_empty_program_before_runtime_request() {
         let (stream, peer) = UnixStream::pair().expect("create socket pair");
         drop(peer);
-        let handle = BufferRuntimeHandle {
+        let handle = KeeperRuntimeHandle {
             inner: Arc::new(BufferRuntimeInner {
                 buffer_id: BufferId(1),
                 pid: None,

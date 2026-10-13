@@ -10,13 +10,14 @@ mod protocol;
 mod reply_hold;
 mod restore;
 mod runtime_dir;
+mod runtime_handle;
 mod server;
 mod terminal_backend;
 mod upstream;
 
 pub use buffer_runtime::{
-    BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
-    BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeKeeperCli,
+    BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
+    BufferRuntimeStatus, BufferRuntimeUpdate, KeeperRuntimeHandle, RuntimeKeeperCli,
     run_runtime_keeper,
 };
 pub use config::{
@@ -30,6 +31,7 @@ pub use model::{
     InterruptedBuffer, Node, REMAIN_ON_EXIT_OPTION, RemainOnExit, RunningBuffer, Session,
     SplitNode, TabEntry, TabsNode,
 };
+pub use runtime_handle::BufferRuntimeHandle;
 pub use server::{Server, ServerHandle};
 pub use state::ServerState;
 pub use terminal_backend::{

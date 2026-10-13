@@ -2857,7 +2857,7 @@ impl Runtime {
             BUFFER_ENV_VAR.to_owned(),
             OsString::from(buffer_id.to_string()),
         );
-        let runtime = BufferRuntimeHandle::spawn(
+        let runtime = BufferRuntimeHandle::spawn_keeper(
             buffer_id,
             self.runtime_socket_path(buffer_id)?,
             &command,
@@ -2901,7 +2901,7 @@ impl Runtime {
             }
             state.set_buffer_runtime_socket_path(
                 buffer_id,
-                Some(runtime.socket_path().to_path_buf()),
+                runtime.keeper_socket_path().map(Path::to_path_buf),
             )?;
             if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                 buffer.command = command;
@@ -2919,9 +2919,12 @@ impl Runtime {
         buffer_id: BufferId,
         socket_path: PathBuf,
     ) -> Result<(BufferRuntimeHandle, BufferRuntimeStatus)> {
-        let runtime =
-            BufferRuntimeHandle::attach(buffer_id, socket_path, self.buffer_runtime_callbacks())
-                .await?;
+        let runtime = BufferRuntimeHandle::attach_keeper(
+            buffer_id,
+            socket_path,
+            self.buffer_runtime_callbacks(),
+        )
+        .await?;
         let status = runtime.status().await?;
         Ok((runtime, status))
     }
