@@ -1662,6 +1662,12 @@ fn encode_buffer_request<'a>(
         } => *size,
         _ => PtySize::new(0, 0),
     };
+    let host = match req {
+        BufferRequest::Create {
+            host: Some(host), ..
+        } => Some(builder.create_string(host)),
+        _ => None,
+    };
     let buffer_req = fb::BufferRequest::create(
         builder,
         &fb::BufferRequestArgs {
@@ -1687,6 +1693,7 @@ fn encode_buffer_request<'a>(
             pty_rows: pty_size.rows,
             pty_pixel_width: pty_size.pixel_width,
             pty_pixel_height: pty_size.pixel_height,
+            host,
         },
     );
 
@@ -3844,6 +3851,7 @@ fn encode_buffer_record<'a>(
         .pipe
         .as_ref()
         .map(|pipe| encode_buffer_pipe_record(builder, pipe));
+    let host = record.host.as_ref().map(|host| builder.create_string(host));
 
     fb::BufferRecord::create(
         builder,
@@ -3878,6 +3886,8 @@ fn encode_buffer_record<'a>(
             user_option_keys: Some(user_option_keys),
             user_option_values: Some(user_option_values),
             foreground_command,
+            bell_sequence: record.bell_sequence,
+            host,
         },
     )
 }
@@ -4272,6 +4282,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         env,
                         size,
                         session_id: (req.session_id() != 0).then(|| SessionId(req.session_id())),
+                        host: req.host().map(str::to_owned),
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -5406,6 +5417,8 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         env,
         user_options,
         foreground_command,
+        bell_sequence: record.bell_sequence(),
+        host: record.host().map(str::to_owned),
     };
     record
         .validate()
@@ -5713,6 +5726,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         };
 
         let error = record
@@ -5753,6 +5768,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         };
 
         let error = record
@@ -6156,6 +6173,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6195,6 +6214,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6235,6 +6256,8 @@ mod tests {
                         env: Default::default(),
                         user_options: Default::default(),
                         foreground_command: None,
+                        bell_sequence: 0,
+                        host: None,
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -6265,6 +6288,8 @@ mod tests {
                         env: Default::default(),
                         user_options: Default::default(),
                         foreground_command: None,
+                        bell_sequence: 0,
+                        host: None,
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -6294,6 +6319,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6343,6 +6370,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -6387,6 +6416,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -6427,6 +6458,8 @@ mod tests {
                 env: Default::default(),
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -6464,6 +6497,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6491,6 +6526,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6533,6 +6570,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6560,6 +6599,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6662,6 +6703,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))

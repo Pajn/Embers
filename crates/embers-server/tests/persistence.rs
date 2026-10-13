@@ -139,6 +139,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -154,6 +155,7 @@ async fn clean_restart_restores_workspace_and_keeps_live_buffers_running() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -308,6 +310,7 @@ async fn clean_restart_stops_ephemeral_buffer_pipes() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -414,6 +417,7 @@ async fn long_server_socket_path_still_spawns_and_restores_keepers() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -512,6 +516,7 @@ async fn create_shell_buffer(
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -1070,6 +1075,7 @@ async fn exited_detached_buffers_are_not_kept_across_a_restart() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -1353,6 +1359,7 @@ async fn a_pane_spamming_its_title_does_not_spam_the_disk() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -1453,6 +1460,7 @@ async fn a_failed_restore_keeps_the_original_command() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await

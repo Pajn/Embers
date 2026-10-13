@@ -3004,6 +3004,7 @@ impl CliConnection {
                 env: Default::default(),
                 size,
                 session_id: Some(session_id),
+                host: None,
             }))
             .await?
         {
@@ -4209,6 +4210,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -4247,6 +4250,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -4292,6 +4297,8 @@ mod tests {
             pipe: None,
             user_options: Default::default(),
             foreground_command,
+            bell_sequence: 0,
+            host: None,
         };
         let location = BufferLocation::session(BufferId(10), SessionId(1), NodeId(6));
         let row = |details: &str, name: &str| {
@@ -4345,6 +4352,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );

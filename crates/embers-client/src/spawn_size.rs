@@ -190,6 +190,8 @@ fn add_new_leaf(layout: &mut ClientState, session_id: SessionId) {
             env: Default::default(),
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         },
     );
     layout.nodes.insert(

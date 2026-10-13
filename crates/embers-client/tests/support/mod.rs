@@ -412,6 +412,8 @@ fn buffer(
         pipe: None,
         user_options: Default::default(),
         foreground_command: None,
+        bell_sequence: 0,
+        host: None,
     }
 }
 

@@ -543,6 +543,7 @@ async fn create_buffer(
             env: Default::default(),
             size,
             session_id: Some(session_id),
+            host: None,
         }))
         .await?;
     match response {

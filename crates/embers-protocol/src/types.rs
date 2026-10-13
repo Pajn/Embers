@@ -174,6 +174,9 @@ pub enum BufferRequest {
         /// The session the buffer is created for. Its environment (see
         /// `SessionRequest::SetEnvironment`) is applied under `env`.
         session_id: Option<SessionId>,
+        /// The machine to run the buffer on, through its own embers server.
+        /// `None` runs it on this server.
+        host: Option<String>,
     },
     List {
         request_id: RequestId,
@@ -827,6 +830,10 @@ pub struct BufferRecord {
     /// is not the buffer's own process, for example a program its shell runs.
     /// `None` while the buffer's own process is in the foreground.
     pub foreground_command: Option<Vec<String>>,
+    /// Bells rung in the buffer since its program started.
+    pub bell_sequence: u64,
+    /// The machine whose embers server runs the buffer, `None` for this one.
+    pub host: Option<String>,
 }
 
 impl BufferRecord {
@@ -1434,6 +1441,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: BTreeMap::new(),
             foreground_command: foreground.map(owned),
+            bell_sequence: 0,
+            host: None,
         }
     }
 

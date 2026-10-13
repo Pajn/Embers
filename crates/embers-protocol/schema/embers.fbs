@@ -288,6 +288,9 @@ table BufferRequest {
   pty_rows:ushort = 0 (id: 19);
   pty_pixel_width:ushort = 0 (id: 20);
   pty_pixel_height:ushort = 0 (id: 21);
+  // Create: the machine whose embers server runs the buffer, reached through
+  // the server's remote command. Absent for a buffer run by this server.
+  host:string (id: 22);
 }
 
 table NodeRequest {
@@ -427,6 +430,12 @@ table BufferRecord {
   foreground_command:[string] (id: 24);
   pty_pixel_width:ushort = 0 (id: 25);
   pty_pixel_height:ushort = 0 (id: 26);
+  // Bells rung in the buffer since its program started, so a watcher can tell
+  // a new bell from other output once the buffer is already marked Bell.
+  bell_sequence:ulong = 0 (id: 27);
+  // The machine whose embers server runs the buffer; absent when it is this
+  // server.
+  host:string (id: 28);
 }
 
 table BufferPipeRecord {

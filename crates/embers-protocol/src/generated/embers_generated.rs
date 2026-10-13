@@ -3636,6 +3636,7 @@ impl<'a> BufferRequest<'a> {
   pub const VT_PTY_ROWS: ::flatbuffers::VOffsetT = 42;
   pub const VT_PTY_PIXEL_WIDTH: ::flatbuffers::VOffsetT = 44;
   pub const VT_PTY_PIXEL_HEIGHT: ::flatbuffers::VOffsetT = 46;
+  pub const VT_HOST: ::flatbuffers::VOffsetT = 48;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3651,6 +3652,7 @@ impl<'a> BufferRequest<'a> {
     builder.add_start_line(args.start_line);
     builder.add_session_id(args.session_id);
     builder.add_buffer_id(args.buffer_id);
+    if let Some(x) = args.host { builder.add_host(x); }
     if let Some(x) = args.user_option_value { builder.add_user_option_value(x); }
     if let Some(x) = args.user_option_key { builder.add_user_option_key(x); }
     if let Some(x) = args.env_values { builder.add_env_values(x); }
@@ -3827,6 +3829,13 @@ impl<'a> BufferRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u16>(BufferRequest::VT_PTY_PIXEL_HEIGHT, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BufferRequest::VT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BufferRequest<'_> {
@@ -3857,6 +3866,7 @@ impl ::flatbuffers::Verifiable for BufferRequest<'_> {
      .visit_field::<u16>("pty_rows", Self::VT_PTY_ROWS, false)?
      .visit_field::<u16>("pty_pixel_width", Self::VT_PTY_PIXEL_WIDTH, false)?
      .visit_field::<u16>("pty_pixel_height", Self::VT_PTY_PIXEL_HEIGHT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("host", Self::VT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -3884,6 +3894,7 @@ pub struct BufferRequestArgs<'a> {
     pub pty_rows: u16,
     pub pty_pixel_width: u16,
     pub pty_pixel_height: u16,
+    pub host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for BufferRequestArgs<'a> {
   #[inline]
@@ -3911,6 +3922,7 @@ impl<'a> Default for BufferRequestArgs<'a> {
       pty_rows: 0,
       pty_pixel_width: 0,
       pty_pixel_height: 0,
+      host: None,
     }
   }
 }
@@ -4009,6 +4021,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BufferRequestBuilder<'a, 'b, 
     self.fbb_.push_slot::<u16>(BufferRequest::VT_PTY_PIXEL_HEIGHT, pty_pixel_height, 0);
   }
   #[inline]
+  pub fn add_host(&mut self, host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BufferRequest::VT_HOST, host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BufferRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BufferRequestBuilder {
@@ -4048,6 +4064,7 @@ impl ::core::fmt::Debug for BufferRequest<'_> {
       ds.field("pty_rows", &self.pty_rows());
       ds.field("pty_pixel_width", &self.pty_pixel_width());
       ds.field("pty_pixel_height", &self.pty_pixel_height());
+      ds.field("host", &self.host());
       ds.finish()
   }
 }
@@ -6118,6 +6135,8 @@ impl<'a> BufferRecord<'a> {
   pub const VT_FOREGROUND_COMMAND: ::flatbuffers::VOffsetT = 52;
   pub const VT_PTY_PIXEL_WIDTH: ::flatbuffers::VOffsetT = 54;
   pub const VT_PTY_PIXEL_HEIGHT: ::flatbuffers::VOffsetT = 56;
+  pub const VT_BELL_SEQUENCE: ::flatbuffers::VOffsetT = 58;
+  pub const VT_HOST: ::flatbuffers::VOffsetT = 60;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -6129,10 +6148,12 @@ impl<'a> BufferRecord<'a> {
     args: &'args BufferRecordArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BufferRecord<'bldr>> {
     let mut builder = BufferRecordBuilder::new(_fbb);
+    builder.add_bell_sequence(args.bell_sequence);
     builder.add_helper_source_buffer_id(args.helper_source_buffer_id);
     builder.add_last_snapshot_seq(args.last_snapshot_seq);
     builder.add_attachment_node_id(args.attachment_node_id);
     builder.add_id(args.id);
+    if let Some(x) = args.host { builder.add_host(x); }
     if let Some(x) = args.foreground_command { builder.add_foreground_command(x); }
     if let Some(x) = args.user_option_values { builder.add_user_option_values(x); }
     if let Some(x) = args.user_option_keys { builder.add_user_option_keys(x); }
@@ -6349,6 +6370,20 @@ impl<'a> BufferRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u16>(BufferRecord::VT_PTY_PIXEL_HEIGHT, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn bell_sequence(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(BufferRecord::VT_BELL_SEQUENCE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BufferRecord::VT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BufferRecord<'_> {
@@ -6384,6 +6419,8 @@ impl ::flatbuffers::Verifiable for BufferRecord<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("foreground_command", Self::VT_FOREGROUND_COMMAND, false)?
      .visit_field::<u16>("pty_pixel_width", Self::VT_PTY_PIXEL_WIDTH, false)?
      .visit_field::<u16>("pty_pixel_height", Self::VT_PTY_PIXEL_HEIGHT, false)?
+     .visit_field::<u64>("bell_sequence", Self::VT_BELL_SEQUENCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("host", Self::VT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -6416,6 +6453,8 @@ pub struct BufferRecordArgs<'a> {
     pub foreground_command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
     pub pty_pixel_width: u16,
     pub pty_pixel_height: u16,
+    pub bell_sequence: u64,
+    pub host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for BufferRecordArgs<'a> {
   #[inline]
@@ -6448,6 +6487,8 @@ impl<'a> Default for BufferRecordArgs<'a> {
       foreground_command: None,
       pty_pixel_width: 0,
       pty_pixel_height: 0,
+      bell_sequence: 0,
+      host: None,
     }
   }
 }
@@ -6566,6 +6607,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BufferRecordBuilder<'a, 'b, A
     self.fbb_.push_slot::<u16>(BufferRecord::VT_PTY_PIXEL_HEIGHT, pty_pixel_height, 0);
   }
   #[inline]
+  pub fn add_bell_sequence(&mut self, bell_sequence: u64) {
+    self.fbb_.push_slot::<u64>(BufferRecord::VT_BELL_SEQUENCE, bell_sequence, 0);
+  }
+  #[inline]
+  pub fn add_host(&mut self, host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BufferRecord::VT_HOST, host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BufferRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BufferRecordBuilder {
@@ -6610,6 +6659,8 @@ impl ::core::fmt::Debug for BufferRecord<'_> {
       ds.field("foreground_command", &self.foreground_command());
       ds.field("pty_pixel_width", &self.pty_pixel_width());
       ds.field("pty_pixel_height", &self.pty_pixel_height());
+      ds.field("bell_sequence", &self.bell_sequence());
+      ds.field("host", &self.host());
       ds.finish()
   }
 }

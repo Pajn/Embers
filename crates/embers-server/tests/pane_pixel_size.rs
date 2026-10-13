@@ -56,6 +56,7 @@ async fn resize_carries_the_pixel_size_to_the_pane() {
             env: Default::default(),
             size: Some(PtySize::new(80, 24)),
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer")

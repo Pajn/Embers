@@ -38,6 +38,7 @@ async fn create_buffer_with_env(
                 .collect(),
             size: None,
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer request succeeds");
@@ -259,6 +260,7 @@ async fn create_request_size_is_the_size_the_command_starts_at() {
             env: Default::default(),
             size: Some(PtySize::new(97, 31)),
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer request succeeds");
@@ -922,6 +924,8 @@ async fn bell_is_reported_even_when_more_output_follows_before_a_poll() {
         );
         sleep(Duration::from_millis(25)).await;
     }
+    // The record counts the bell too, for a watcher that already saw `Bell`.
+    assert_eq!(get_buffer(&mut connection, buffer.id).await.bell_sequence, 1);
 
     server.shutdown().await.expect("shutdown server");
 }

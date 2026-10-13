@@ -1251,6 +1251,8 @@ mod zoom_tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             );
         }
@@ -1348,6 +1350,8 @@ mod zoom_tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             );
         }
@@ -1430,6 +1434,8 @@ mod zoom_tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             );
         }
@@ -1562,6 +1568,8 @@ mod zoom_tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             );
         }
@@ -1587,6 +1595,8 @@ mod zoom_tests {
                 env: Default::default(),
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
         );
         state.floating.insert(
@@ -1701,6 +1711,8 @@ mod zoom_tests {
                 env: Default::default(),
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
         );
 

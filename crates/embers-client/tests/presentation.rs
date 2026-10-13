@@ -513,6 +513,8 @@ fn foreign_session_zoom_targets_are_ignored() {
             pipe: None,
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         },
     );
 

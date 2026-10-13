@@ -2642,6 +2642,7 @@ where
                 env: spec.env,
                 size,
                 session_id: Some(session_id),
+                host: None,
             }))
             .await?;
 
@@ -6221,6 +6222,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location,
                 false,

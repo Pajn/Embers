@@ -1624,7 +1624,18 @@ impl Runtime {
                 env,
                 size,
                 session_id,
+                host,
             } => {
+                if host.is_some() {
+                    return (
+                        error_response(
+                            Some(request_id),
+                            ErrorCode::Unsupported,
+                            "this server cannot run buffers on other machines",
+                        ),
+                        Vec::new(),
+                    );
+                }
                 if command.is_empty() {
                     return (
                         error_response(
@@ -5198,6 +5209,7 @@ mod tests {
                     env: BTreeMap::new(),
                     size: None,
                     session_id: None,
+                    host: None,
                 },
             )
             .await;

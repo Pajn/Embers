@@ -66,6 +66,7 @@ impl Harness {
                     env: Default::default(),
                     size: None,
                     session_id: None,
+                    host: None,
                 })
             })
             .await
