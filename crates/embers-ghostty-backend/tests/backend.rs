@@ -35,6 +35,18 @@ fn text_wide_and_combining_characters() {
 }
 
 #[test]
+fn emoji_sequences_are_one_character_even_after_a_reset() {
+    // A flag (white flag, ZWJ, transgender symbol), then its first column
+    // overwritten: the whole flag goes, as in Ghostty.
+    let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+    let mut backend = backend(10, 1);
+    backend.ingest_bytes(format!("{flag}x\x1b[Ha").as_bytes());
+    assert_eq!(text(&backend), ["a x"]);
+    backend.ingest_bytes(format!("\x1bc{flag}x\x1b[Ha").as_bytes());
+    assert_eq!(text(&backend), ["a x"]);
+}
+
+#[test]
 fn trailing_blanks_are_trimmed_but_cells_that_show_are_kept() {
     let mut backend = backend(8, 4);
     backend.ingest_bytes(b"a   \r\nb\x1b[41m  \x1b[0m\r\nc\x1b[4m  \x1b[0m\r\nd\x1b[7m \x1b[0m");

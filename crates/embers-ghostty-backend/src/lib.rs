@@ -28,6 +28,7 @@ const MODE_FOCUS_EVENT: u16 = 1004;
 const MODE_UTF8_MOUSE: u16 = 1005;
 const MODE_SGR_MOUSE: u16 = 1006;
 const MODE_BRACKETED_PASTE: u16 = 2004;
+const MODE_GRAPHEME_CLUSTER: u16 = 2027;
 
 pub struct GhosttyTerminalBackend {
     terminal: sys::GhosttyTerminal,
@@ -215,6 +216,17 @@ impl GhosttyTerminalBackend {
             self.set(
                 Option::GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
                 (&raw const max_scrollback_lines).cast(),
+            );
+            // Ghostty itself starts with grapheme clustering on. Without it a
+            // multi-codepoint emoji such as a flag is split over narrow
+            // cells, and overwriting the first leaves the rest standing.
+            let grapheme_cluster = sys::GhosttyTerminalModeConfig {
+                mode: MODE_GRAPHEME_CLUSTER,
+                value: true,
+            };
+            self.set(
+                Option::GHOSTTY_TERMINAL_OPT_MODE_DEFAULT,
+                (&raw const grapheme_cluster).cast(),
             );
         }
     }
