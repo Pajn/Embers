@@ -293,6 +293,7 @@ mod tests {
                 run(2, TermColor::Rgb { r: 1, g: 2, b: 3 }, 0),
             ],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         };
         assert_eq!(
             render_with_escapes(&line),

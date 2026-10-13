@@ -1,7 +1,7 @@
 use std::num::NonZeroU64;
 
 use embers_core::{
-    ActivityState, BufferId, CellAttrs, ClipboardSelection, CursorPosition, CursorShape,
+    ActivityState, BufferId, CellAttrs, CellSpan, ClipboardSelection, CursorPosition, CursorShape,
     CursorState, ErrorCode, FloatGeometry, FloatingId, Hyperlink, NodeId, PassthroughWrite,
     PtySize, RequestId, SessionId, Size, SnapshotLine, SplitDirection, StyledRun, TermColor,
     WireError,
@@ -571,29 +571,38 @@ type StyledLinesOffset<'a> = flatbuffers::WIPOffset<
 
 /// Encode sparse per-line styling.
 ///
-/// Only lines that actually carry styling are emitted, each tagged with its
-/// index into the parallel `lines` array, so a mostly-plain buffer costs one
-/// entry per styled line rather than one per line. Returns `None` when every
-/// line is plain, so plain buffers produce a frame with no `styles` field —
-/// byte-identical to pre-styling frames.
+/// Only lines that actually carry styling or cells are emitted, each tagged
+/// with its index into the parallel `lines` array, so a mostly-plain buffer
+/// costs one entry per styled line rather than one per line. Returns `None`
+/// when every line is plain, so plain buffers produce a frame with no `styles`
+/// field — byte-identical to pre-styling frames.
 fn encode_styled_lines<'a>(
     builder: &mut FlatBufferBuilder<'a>,
     lines: &[SnapshotLine],
 ) -> Option<StyledLinesOffset<'a>> {
-    if lines.iter().all(|line| line.runs.is_empty()) {
+    let annotated = |line: &SnapshotLine| !line.runs.is_empty() || !line.cell_spans.is_empty();
+    if !lines.iter().any(annotated) {
         return None;
     }
 
     let line_offsets: Vec<_> = lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| !line.runs.is_empty())
+        .filter(|(_, line)| annotated(line))
         .map(|(index, line)| {
             let runs: Vec<fb::StyledRunWire> = line.runs.iter().map(encode_styled_run).collect();
             let runs = builder.create_vector(&runs);
             let underline_colors =
                 encode_underline_colors(&line.runs).map(|colors| builder.create_vector(&colors));
             let (links, run_links) = encode_line_links(builder, line);
+            let cells = (!line.cell_spans.is_empty()).then(|| {
+                let cells: Vec<fb::CellSpanWire> = line
+                    .cell_spans
+                    .iter()
+                    .map(|span| fb::CellSpanWire::new(span.len, span.width))
+                    .collect();
+                builder.create_vector(&cells)
+            });
             fb::StyledLine::create(
                 builder,
                 &fb::StyledLineArgs {
@@ -602,6 +611,7 @@ fn encode_styled_lines<'a>(
                     underline_colors,
                     links,
                     run_links,
+                    cells,
                 },
             )
         })
@@ -693,8 +703,8 @@ fn decode_styled_lines(
     texts: Vec<String>,
     styles: Option<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<fb::StyledLine<'_>>>>,
 ) -> Vec<SnapshotLine> {
-    let mut per_line: Vec<(Vec<StyledRun>, Vec<Hyperlink>)> =
-        vec![(Vec::new(), Vec::new()); texts.len()];
+    let mut per_line: Vec<(Vec<StyledRun>, Vec<Hyperlink>, Vec<CellSpan>)> =
+        vec![(Vec::new(), Vec::new(), Vec::new()); texts.len()];
     if let Some(styles) = styles {
         for entry in styles.iter() {
             let index = entry.line_index() as usize;
@@ -710,7 +720,18 @@ fn decode_styled_lines(
                     }
                 }
                 let links = decode_line_links(&entry, &mut decoded);
-                per_line[index] = (decoded, links);
+                // Spans that do not fit the text are ignored when the line is
+                // drawn (see `SnapshotLine::cells`).
+                let cells = entry
+                    .cells()
+                    .into_iter()
+                    .flatten()
+                    .map(|span| CellSpan {
+                        len: span.len(),
+                        width: span.width(),
+                    })
+                    .collect();
+                per_line[index] = (decoded, links, cells);
             }
         }
     }
@@ -718,12 +739,18 @@ fn decode_styled_lines(
     texts
         .into_iter()
         .zip(per_line)
-        .map(|(text, (runs, links))| {
+        .map(|(text, (runs, links, cell_spans))| {
             let covered: u64 = runs.iter().map(|run| u64::from(run.len)).sum();
-            if runs.is_empty() || covered == text.len() as u64 {
-                SnapshotLine { text, runs, links }
+            let (runs, links) = if runs.is_empty() || covered == text.len() as u64 {
+                (runs, links)
             } else {
-                SnapshotLine::plain(text)
+                (Vec::new(), Vec::new())
+            };
+            SnapshotLine {
+                text,
+                runs,
+                links,
+                cell_spans,
             }
         })
         .collect()
@@ -7151,6 +7178,34 @@ mod tests {
     }
 
     #[test]
+    fn cells_round_trip_on_plain_and_styled_lines() {
+        let spans = |widths: &[(u32, u8)]| {
+            widths
+                .iter()
+                .map(|&(len, width)| CellSpan { len, width })
+                .collect::<Vec<_>>()
+        };
+        // An emoji sequence split over narrow cells, on a plain line and on a
+        // styled one, beside a line whose text gives its cells.
+        let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+        let plain = SnapshotLine {
+            cell_spans: spans(&[(10, 1), (6, 1)]),
+            ..SnapshotLine::plain(flag)
+        };
+        let styled = SnapshotLine {
+            runs: vec![StyledRun {
+                len: 17,
+                fg: TermColor::Indexed(2),
+                ..StyledRun::default()
+            }],
+            cell_spans: spans(&[(1, 1), (10, 1), (6, 1)]),
+            ..SnapshotLine::plain(format!("x{flag}"))
+        };
+        let envelope = styled_visible(vec![plain, SnapshotLine::plain("ok"), styled]);
+        assert_eq!(round_trip(&envelope), envelope);
+    }
+
+    #[test]
     fn styled_visible_snapshot_round_trips() {
         let envelope = styled_visible(vec![
             SnapshotLine {
@@ -7174,6 +7229,7 @@ mod tests {
                     },
                 ],
                 links: Vec::new(),
+                cell_spans: Vec::new(),
             },
             SnapshotLine::plain("plain"),
         ]);
@@ -7195,6 +7251,7 @@ mod tests {
                 link: 0,
             }],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         };
         let envelope = styled_visible(vec![
             SnapshotLine::plain("first"),
@@ -7239,6 +7296,7 @@ mod tests {
                     uri: "file:///tmp/a;b".to_owned(),
                 },
             ],
+            cell_spans: Vec::new(),
         };
         let colored = SnapshotLine {
             text: "red".to_owned(),
@@ -7248,6 +7306,7 @@ mod tests {
                 ..StyledRun::default()
             }],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         };
         let envelope = styled_visible(vec![linked, colored]);
         assert_eq!(round_trip(&envelope), envelope);
@@ -7277,6 +7336,7 @@ mod tests {
                 id: None,
                 uri: "https://example.com".to_owned(),
             }],
+            cell_spans: Vec::new(),
         }]);
         let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = round_trip(&envelope)
         else {
@@ -7317,11 +7377,13 @@ mod tests {
                 text: "abcd".to_owned(),
                 runs: vec![curly_red, dotted, indexed],
                 links: Vec::new(),
+                cell_spans: Vec::new(),
             },
             SnapshotLine {
                 text: "x".to_owned(),
                 runs: vec![dotted],
                 links: Vec::new(),
+                cell_spans: Vec::new(),
             },
         ]);
         assert_eq!(round_trip(&envelope), envelope);
@@ -7356,6 +7418,7 @@ mod tests {
                 link: 0,
             }],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         }]);
         let decoded = round_trip(&envelope);
         if let ServerEnvelope::Response(ServerResponse::VisibleSnapshot(resp)) = decoded {

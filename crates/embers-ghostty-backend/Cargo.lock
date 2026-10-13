@@ -482,6 +482,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
@@ -490,6 +492,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "embers-cli",
+ "embers-client",
  "embers-core",
  "embers-ghostty-sys",
  "embers-server",

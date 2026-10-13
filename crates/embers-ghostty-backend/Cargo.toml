@@ -20,6 +20,7 @@ embers-server = { path = "../embers-server" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
+embers-client = { path = "../embers-client" }
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::ptr;
 
 use embers_core::{
-    CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape, CursorState,
-    Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, PtySize, SnapshotLine, StyledRun, TermColor,
+    CellAttrs, CellSpan, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
+    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, PtySize, SnapshotLine, StyledRun, TermColor,
     TerminalModes, TerminalSnapshot,
 };
 use embers_ghostty_sys as sys;
@@ -685,7 +685,7 @@ impl TerminalBackend for GhosttyTerminalBackend {
         let mut lines: Vec<String> = self
             .screen_rows(0, self.total_lines())
             .iter()
-            .map(|row| snapshot_line(row).text)
+            .map(|row| row_line(row).0.text)
             .collect();
         while matches!(lines.last(), Some(last) if last.is_empty()) {
             lines.pop();
@@ -799,6 +799,13 @@ impl TerminalBackend for GhosttyTerminalBackend {
 
 /// A row's cells as a snapshot line, the way the alacritty backend builds one.
 fn snapshot_line(row: &Row) -> SnapshotLine {
+    let (mut line, cells) = row_line(row);
+    line.set_cells(cells);
+    line
+}
+
+/// A row as a snapshot line without its cells, and the cells to set on it.
+fn row_line(row: &Row) -> (SnapshotLine, Vec<CellSpan>) {
     let cells = &row.cells;
     let content_len = cells
         .iter()
@@ -811,6 +818,7 @@ fn snapshot_line(row: &Row) -> SnapshotLine {
     // The line's link index for each of the row's links, once used.
     let mut line_links: Vec<u16> = vec![0; row.links.len()];
     let mut styled = false;
+    let mut spans = Vec::with_capacity(content_len);
     for column in 0..content_len {
         let cell = &cells[column];
         let blank = match cell.wide {
@@ -839,6 +847,11 @@ fn snapshot_line(row: &Row) -> SnapshotLine {
             row.push_text(cell.text, &mut text);
         }
         let len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
+        let wide = !blank && cell.wide == sys::GhosttyCellWide::GHOSTTY_CELL_WIDE_WIDE;
+        spans.push(CellSpan {
+            len,
+            width: if wide { 2 } else { 1 },
+        });
 
         let link = match usize::from(cell.link).checked_sub(1) {
             None => 0,
@@ -880,7 +893,13 @@ fn snapshot_line(row: &Row) -> SnapshotLine {
     if !styled {
         runs.clear();
     }
-    SnapshotLine { text, runs, links }
+    let line = SnapshotLine {
+        text,
+        runs,
+        links,
+        cell_spans: Vec::new(),
+    };
+    (line, spans)
 }
 
 /// The parts of a raw cell the snapshot needs, read in one call.

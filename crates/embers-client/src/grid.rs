@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use embers_core::{CellAttrs, CursorShape, Hyperlink, Rect, SnapshotLine, StyledRun, TermColor};
+use embers_core::{
+    CellAttrs, CursorShape, Hyperlink, Rect, SnapshotLine, StyledRun, TermColor, grapheme_width,
+};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::host_terminal::HostCapabilities;
 
@@ -268,19 +269,22 @@ impl RenderGrid {
         }
     }
 
-    /// Draw a styled snapshot line, mapping each grapheme to the style of the
-    /// run that contains its first byte.
+    /// Draw a styled snapshot line, mapping each cell to the style of the run
+    /// that contains its first byte.
     ///
-    /// Mirrors [`truncate`]'s column budget: when the text is wider than `width`,
-    /// it draws up to `width - 1` columns then a default-styled `~` marker.
-    /// Hidden runs draw spaces (keeping fg/bg) so the glyph is blanked. Linked
-    /// runs keep their OSC 8 hyperlink on the drawn cells.
+    /// Cells are the line's own ([`SnapshotLine::cells`]), so they cover the
+    /// columns the pane's emulator gave them even where Unicode measures
+    /// their text otherwise. Mirrors [`truncate`]'s column budget: when the
+    /// line is wider than `width`, it draws up to `width - 1` columns then a
+    /// default-styled `~` marker. Hidden runs draw spaces (keeping fg/bg) so
+    /// the glyph is blanked. Linked runs keep their OSC 8 hyperlink on the
+    /// drawn cells.
     pub fn put_snapshot_line(&mut self, x: u16, y: u16, width: u16, line: &SnapshotLine) {
         if width == 0 || y >= self.height || x >= self.width {
             return;
         }
 
-        let truncated = UnicodeWidthStr::width(line.text.as_str()) > usize::from(width);
+        let truncated = line.width() > usize::from(width);
         let budget = if truncated {
             width.saturating_sub(1)
         } else {
@@ -291,15 +295,13 @@ impl RenderGrid {
         let links: Vec<Arc<Hyperlink>> = line.links.iter().cloned().map(Arc::new).collect();
 
         let mut column = 0_u16;
-        let mut byte_offset = 0_usize;
         let mut runs = RunCursor::new(&line.runs);
-        for grapheme in UnicodeSegmentation::graphemes(line.text.as_str(), true) {
-            let grapheme_width = grapheme_width(grapheme);
-            if column.saturating_add(grapheme_width) > budget {
+        for cell in line.cells() {
+            if column.saturating_add(cell.width) > budget {
                 break;
             }
 
-            let run = runs.run_at(byte_offset);
+            let run = runs.run_at(cell.offset);
             let style = run.map(style_for_run).unwrap_or_default();
             let hidden = run.is_some_and(|run| run.attrs.contains(CellAttrs::HIDDEN));
             let link = run
@@ -308,14 +310,14 @@ impl RenderGrid {
 
             let draw_x = x.saturating_add(column);
             if hidden {
-                let blank = " ".repeat(usize::from(grapheme_width));
+                let blank = " ".repeat(usize::from(cell.width));
                 self.put_str_linked(draw_x, y, &blank, style, link);
-            } else {
-                self.put_str_linked(draw_x, y, grapheme, style, link);
+            } else if draw_x.saturating_add(cell.width) <= self.width {
+                self.clear_overlapping_cells(draw_x, y, cell.width);
+                self.set_cell(draw_x, y, cell.text, style, cell.width, link);
             }
 
-            column = column.saturating_add(grapheme_width);
-            byte_offset += grapheme.len();
+            column = column.saturating_add(cell.width);
         }
 
         if truncated {
@@ -492,41 +494,49 @@ impl RenderGrid {
     /// The rows as text with escape sequences, for a host terminal with
     /// `host`'s capabilities: without underline styles every underline is
     /// plain, without underline color it follows the text, and without
-    /// hyperlinks linked text is plain text.
+    /// hyperlinks linked text is plain text. Each row is for the host's first
+    /// column on: where the host could size a cell otherwise, the row puts
+    /// the cursor back in its column (see `write_cell_text`).
     pub fn ansi_lines_for(&self, host: HostCapabilities) -> Vec<String> {
         (0..self.height)
             .map(|row| {
                 let start = usize::from(row) * usize::from(self.width);
-                let end = start + usize::from(self.width);
-                let mut output = String::new();
-                let mut current_style = CellStyle::default();
-                let mut current_link: Option<&Arc<Hyperlink>> = None;
-                for cell in &self.cells[start..end] {
-                    if cell.continuation {
+                let cells = &self.cells[start..start + usize::from(self.width)];
+                let mut writer = RowWriter {
+                    host,
+                    output: String::new(),
+                    style: CellStyle::default(),
+                    link: None,
+                };
+                let mut column = 0;
+                while column < cells.len() {
+                    if cells[column].continuation {
+                        column += 1;
                         continue;
                     }
-                    let style = cell.style.for_host(host);
-                    write_style_transition(&mut output, current_style, style);
-                    current_style = style;
-                    if host.hyperlinks && cell.link.as_ref() != current_link {
-                        current_link = cell.link.as_ref();
-                        write_hyperlink(&mut output, current_link.map(Arc::as_ref));
-                    }
-                    if cell.text.is_empty() {
-                        output.push(' ');
+                    if joined_next(cells, column).is_none() {
+                        let width = cell_width(cells, column);
+                        writer.cell(&cells[column], column, width);
+                        column += width;
                     } else {
-                        output.push_str(&cell.text);
+                        let joined = joined_cells(cells, column);
+                        let end = joined
+                            .last()
+                            .map_or(column, |&last| last + cell_width(cells, last));
+                        // A host that clusters graphemes joins a character to
+                        // the one in the cell to its left, wherever the cursor
+                        // went in between. Written right to left into cleared
+                        // cells, each part has nothing to join.
+                        let _ = write!(writer.output, "\x1b[{}G\x1b[{}X", column + 1, end - column);
+                        for &part in joined.iter().rev() {
+                            let _ = write!(writer.output, "\x1b[{}G", part + 1);
+                            writer.cell(&cells[part], part, cell_width(cells, part));
+                        }
+                        let _ = write!(writer.output, "\x1b[{}G", end + 1);
+                        column = end;
                     }
                 }
-                // Links never span rows: the next row (or the status line)
-                // must not inherit one.
-                if current_link.is_some() {
-                    write_hyperlink(&mut output, None);
-                }
-                if !current_style.is_plain() {
-                    output.push_str("\x1b[0m");
-                }
-                output
+                writer.finish()
             })
             .collect()
     }
@@ -601,10 +611,122 @@ pub fn replace_controls(text: &str) -> Cow<'_, str> {
     }
 }
 
-fn grapheme_width(grapheme: &str) -> u16 {
-    let width = UnicodeWidthStr::width(grapheme);
-    u16::try_from(width.max(1)).unwrap_or(u16::MAX)
+/// Writes one row for the host terminal, tracking the style and link it has
+/// set.
+struct RowWriter<'a> {
+    host: HostCapabilities,
+    output: String,
+    style: CellStyle,
+    link: Option<&'a Arc<Hyperlink>>,
 }
+
+impl<'a> RowWriter<'a> {
+    fn cell(&mut self, cell: &'a Cell, column: usize, width: usize) {
+        let style = cell.style.for_host(self.host);
+        write_style_transition(&mut self.output, self.style, style);
+        self.style = style;
+        if self.host.hyperlinks && cell.link.as_ref() != self.link {
+            self.link = cell.link.as_ref();
+            write_hyperlink(&mut self.output, self.link.map(Arc::as_ref));
+        }
+        write_cell_text(&mut self.output, &cell.text, column, width);
+    }
+
+    fn finish(mut self) -> String {
+        // Links never span rows: the next row (or the status line) must not
+        // inherit one.
+        if self.link.is_some() {
+            write_hyperlink(&mut self.output, None);
+        }
+        if !self.style.is_plain() {
+            self.output.push_str("\x1b[0m");
+        }
+        self.output
+    }
+}
+
+/// Columns the cell at `column` covers: it and its continuation cells.
+fn cell_width(cells: &[Cell], column: usize) -> usize {
+    1 + cells[column + 1..]
+        .iter()
+        .take_while(|cell| cell.continuation)
+        .count()
+}
+
+/// The cell at `column` and those after it that each form one grapheme
+/// cluster with the cell before: parts of a character a pane's emulator gave
+/// cells of their own, such as alacritty with an emoji and its skin tone.
+fn joined_cells(cells: &[Cell], column: usize) -> Vec<usize> {
+    let mut joined = vec![column];
+    while let Some(next) = joined_next(cells, joined[joined.len() - 1]) {
+        joined.push(next);
+    }
+    joined
+}
+
+/// The column of the cell after the one at `column`, when the two form one
+/// grapheme cluster.
+fn joined_next(cells: &[Cell], column: usize) -> Option<usize> {
+    let next = column + cell_width(cells, column);
+    let cell = cells.get(next)?;
+    let joins = !cell.text.is_ascii()
+        && format!("{}{}", cells[column].text, cell.text)
+            .graphemes(true)
+            .nth(1)
+            .is_none();
+    joins.then_some(next)
+}
+
+/// Write a cell's text for the host terminal, which sizes the text by itself:
+/// where it would not cover the cell's `width` columns, it could draw the
+/// rest of the row in other columns than the grid.
+///
+/// Such a cell, which a pane's emulator laid out unlike Unicode measures it,
+/// is erased first and the cursor put after it by column (`column` from the
+/// row's start), so the row stays in its columns whatever the host makes of
+/// the text. Text Unicode measures wider than the cell is drawn narrowed:
+/// alacritty gives each part of an emoji sequence a narrow cell, and a host
+/// drawing a part as wide would spill into the next cell. Hosts disagree on
+/// a regional indicator on its own, half a flag: Unicode makes it one column
+/// wide and Ghostty two, so one in a single column is drawn as U+FFFD.
+fn write_cell_text(output: &mut String, text: &str, column: usize, width: usize) {
+    if text.is_empty() {
+        output.push(' ');
+        return;
+    }
+    let measured = usize::from(grapheme_width(text));
+    let regional = text.chars().any(is_regional_indicator);
+    if measured == width && !regional {
+        output.push_str(text);
+        return;
+    }
+    let _ = write!(output, "\x1b[{width}X");
+    if regional && width < 2 {
+        output.push(REPLACEMENT);
+    } else if measured <= width {
+        output.push_str(text);
+    } else {
+        let narrowed: String = text
+            .chars()
+            .filter(|&ch| ch != EMOJI_PRESENTATION && ch != ZERO_WIDTH_JOINER)
+            .collect();
+        if usize::from(grapheme_width(&narrowed)) <= width {
+            output.push_str(&narrowed);
+        } else {
+            output.extend(std::iter::repeat_n(REPLACEMENT, width));
+        }
+    }
+    let _ = write!(output, "\x1b[{}G", column + width + 1);
+}
+
+fn is_regional_indicator(ch: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch)
+}
+
+/// Variation selector 16, which asks for a codepoint's emoji (wide) form.
+const EMOJI_PRESENTATION: char = '\u{FE0F}';
+const ZERO_WIDTH_JOINER: char = '\u{200D}';
+const REPLACEMENT: char = '\u{FFFD}';
 
 /// Walks run-length style annotations in step with a byte cursor that only
 /// advances, resolving the run covering a given byte offset in amortized O(1).
@@ -877,6 +999,7 @@ mod tests {
                 link: 0,
             }],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         }
     }
 
@@ -929,6 +1052,7 @@ mod tests {
                 },
             ],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         };
         grid.put_snapshot_line(0, 0, 4, &line);
 

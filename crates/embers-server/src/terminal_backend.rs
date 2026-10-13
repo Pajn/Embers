@@ -12,9 +12,9 @@ use alacritty_terminal::vte::ansi::{
     self, Color as AnsiColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use embers_core::{
-    ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
-    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, MAX_PASSTHROUGH_BYTES, PassthroughWrite,
-    PtySize, SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
+    ActivityState, CellAttrs, CellSpan, ClipboardSelection, ClipboardWrite, CursorPosition,
+    CursorShape, CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, MAX_PASSTHROUGH_BYTES,
+    PassthroughWrite, PtySize, SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
 };
 use tracing::debug;
 
@@ -1063,6 +1063,7 @@ impl AlacrittyTerminalBackend {
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut styled = false;
         let mut links = LineLinks::default();
+        let mut cells = Vec::with_capacity(content_len);
 
         for column in 0..content_len {
             let cell = &row[Column(column)];
@@ -1095,6 +1096,19 @@ impl AlacrittyTerminalBackend {
                 emit_cell_text(cell, &mut text);
             }
             let byte_len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
+            // Alacritty gives every codepoint that is not zero-width a cell of
+            // its own, even inside an emoji sequence, and a wide cell only to
+            // a codepoint wide by itself; `set_cells` joins cells that make
+            // up one character.
+            let width = if glyph == CellGlyph::Shown && flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            };
+            cells.push(CellSpan {
+                len: byte_len,
+                width,
+            });
 
             if fg != TermColor::Default
                 || bg != TermColor::Default
@@ -1132,11 +1146,14 @@ impl AlacrittyTerminalBackend {
             runs.clear();
         }
 
-        SnapshotLine {
+        let mut line = SnapshotLine {
             text,
             runs,
             links: links.table,
-        }
+            cell_spans: Vec::new(),
+        };
+        line.set_cells(cells);
+        line
     }
 
     /// Worked out here rather than taken from `renderable_content`, which moves
@@ -1872,6 +1889,25 @@ mod tests {
         assert_eq!(line.runs[0].len, "界".len() as u32);
         assert_eq!(line.runs[0].fg, TermColor::Indexed(1));
         assert_eq!(line.runs[1].len, 1);
+    }
+
+    #[test]
+    fn lines_carry_cells_only_where_the_text_would_mislead() {
+        let size = PtySize::new(8, 1);
+        let widths = |bytes: &str| {
+            let mut backend = backend(size);
+            backend.ingest_bytes(bytes.as_bytes());
+            let line = first_line(&backend, size);
+            let widths: Vec<u16> = line.cells().map(|cell| cell.width).collect();
+            (widths, line.cell_spans.is_empty())
+        };
+        // The flag's two narrow cells cover its two columns, so they join.
+        let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+        assert_eq!(widths(&format!("{flag}a")), (vec![2, 1], true));
+        // A thumbs up and its skin tone take two columns each in alacritty.
+        assert_eq!(widths("\u{1F44D}\u{1F3FD}a"), (vec![2, 2, 1], false));
+        // VS16 makes the symbol wide only to Unicode.
+        assert_eq!(widths("\u{26A7}\u{FE0F}a"), (vec![1, 1], false));
     }
 
     #[test]

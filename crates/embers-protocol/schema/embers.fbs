@@ -578,6 +578,12 @@ struct RunColorWire {
   kind:ubyte; r:ubyte; g:ubyte; b:ubyte;
 }
 
+// One cell of a line: `len` bytes of its text drawn `width` columns wide.
+struct CellSpanWire {
+  len:uint;
+  width:ubyte;
+}
+
 // An OSC 8 hyperlink. `id` is absent when the program gave none.
 table HyperlinkWire {
   id:string;
@@ -598,6 +604,10 @@ table StyledLine {
   // only lines that carry links pay for them.
   links:[HyperlinkWire];
   run_links:[ushort];
+  // Appended: the line's cells, only when its text does not give them (see
+  // SnapshotLine::cell_spans). A line that carries cells but no styling has
+  // an entry with empty `runs`.
+  cells:[CellSpanWire];
 }
 
 table SnapshotResponse {
