@@ -185,6 +185,14 @@ fn client_message_families_round_trip() {
             request_id: RequestId(12),
             buffer_id: BufferId(20),
         }),
+        ClientMessage::Buffer(BufferRequest::Watch {
+            request_id: RequestId(140),
+            buffer_id: BufferId(4),
+        }),
+        ClientMessage::Buffer(BufferRequest::Unwatch {
+            request_id: RequestId(141),
+            buffer_id: BufferId(4),
+        }),
         ClientMessage::Buffer(BufferRequest::Inspect {
             request_id: RequestId(120),
             buffer_id: BufferId(20),

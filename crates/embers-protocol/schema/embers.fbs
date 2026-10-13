@@ -105,6 +105,10 @@ enum BufferOp : ubyte {
   StartPipe = 12,
   StopPipe = 13,
   SetUserOption = 14,
+  // Also send this connection the buffer's clipboard writes and passthrough,
+  // which otherwise go only to clients showing its session.
+  Watch = 15,
+  Unwatch = 16,
 }
 
 enum NodeOp : ubyte {

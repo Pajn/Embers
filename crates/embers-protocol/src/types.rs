@@ -192,6 +192,18 @@ pub enum BufferRequest {
         request_id: RequestId,
         buffer_id: BufferId,
     },
+    /// Also send this connection the buffer's clipboard writes and
+    /// passthrough, which otherwise go only to the clients whose current
+    /// session shows it: a connection that shows the buffer some other way,
+    /// such as another server showing a buffer of this one.
+    Watch {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    Unwatch {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
     Detach {
         request_id: RequestId,
         buffer_id: BufferId,
@@ -257,6 +269,8 @@ impl BufferRequest {
             | Self::List { request_id, .. }
             | Self::Get { request_id, .. }
             | Self::Inspect { request_id, .. }
+            | Self::Watch { request_id, .. }
+            | Self::Unwatch { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Kill { request_id, .. }
             | Self::Capture { request_id, .. }

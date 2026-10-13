@@ -9,7 +9,7 @@ use embers_protocol::{
 use embers_server::{Server, ServerConfig};
 use embers_test_support::{TestConnection, TestServer, cargo_bin_path};
 
-use crate::support::{run_cli, stdout};
+use crate::support::{run_cli, session_snapshot_by_name, stdout};
 use tokio::time::{Duration, Instant, sleep};
 
 const HOST: &str = "devbox";
@@ -585,6 +585,86 @@ async fn a_split_bound_to_a_key_runs_on_the_focused_panes_host() {
         &["list-panes", "-t", "work", "-F", "[#{pane_host}]"],
     );
     assert_eq!(hosts, format!("[{HOST}]\n[{HOST}]"));
+
+    local.shutdown().await.expect("shutdown local server");
+    remote.shutdown().await.expect("shutdown remote server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clipboard_writes_and_passthrough_from_a_remote_pane_reach_its_clients() {
+    let (remote, local) = start_servers().await;
+    // Once told to, the program writes the clipboard (OSC 52) and sends a
+    // notification for the outer terminal (tmux passthrough).
+    let script = r"read _; printf '\033]52;c;%s\a' $(printf from-the-host | base64); printf '\033Ptmux;\033\033]9;hello-''from-host\a\033\\'; sleep 30";
+    cli(
+        &local,
+        &[
+            "new-session",
+            "-d",
+            "-s",
+            "work",
+            "--host",
+            HOST,
+            "--",
+            "/bin/sh",
+            "-c",
+            script,
+        ],
+    );
+
+    // A client showing the session gets what its pane sends.
+    let mut client = connect(&local).await;
+    client.subscribe(None).await.expect("subscribe");
+    let snapshot = session_snapshot_by_name(&mut client, "work").await;
+    client
+        .request(&ClientMessage::Client(
+            embers_protocol::ClientRequest::Switch {
+                request_id: new_request_id(),
+                client_id: None,
+                session_id: snapshot.session.id,
+                node_id: None,
+            },
+        ))
+        .await
+        .expect("switch to the session");
+    let buffer_id = snapshot.buffers[0].id;
+    send(&mut client, buffer_id, "\r").await;
+
+    let mut clipboard = None;
+    let mut passthrough = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while clipboard.is_none() || !String::from_utf8_lossy(&passthrough).contains("hello-from-host")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "missing clipboard {clipboard:?} or passthrough {:?}",
+            String::from_utf8_lossy(&passthrough)
+        );
+        let event = client
+            .wait_for_event(Duration::from_secs(10), |event| {
+                matches!(
+                    event,
+                    embers_protocol::ServerEvent::Clipboard(_)
+                        | embers_protocol::ServerEvent::Passthrough(_)
+                )
+            })
+            .await
+            .expect("event arrives");
+        match event {
+            embers_protocol::ServerEvent::Clipboard(event) => {
+                assert_eq!(event.buffer_id, buffer_id);
+                clipboard = Some(event.text);
+            }
+            embers_protocol::ServerEvent::Passthrough(event) => {
+                assert_eq!(event.buffer_id, buffer_id);
+                for write in event.writes {
+                    passthrough.extend(write.bytes);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    assert_eq!(clipboard.as_deref(), Some("from-the-host"));
 
     local.shutdown().await.expect("shutdown local server");
     remote.shutdown().await.expect("shutdown remote server");

@@ -470,6 +470,9 @@ struct ClientConnection {
     /// Whether the client forwards kitty graphics queries to a host terminal
     /// that answers them (`ClientRequest::SetHostGraphics`).
     host_graphics: bool,
+    /// Buffers whose clipboard writes and passthrough the client also gets
+    /// (`BufferRequest::Watch`), whether or not its session shows them.
+    watched_buffers: BTreeSet<BufferId>,
     shutdown: Option<oneshot::Sender<()>>,
     stopped: Option<oneshot::Receiver<()>>,
 }
@@ -1175,6 +1178,7 @@ impl Runtime {
             ClientConnection {
                 current_session_id: None,
                 host_graphics: false,
+                watched_buffers: BTreeSet::new(),
                 shutdown: Some(shutdown),
                 stopped: Some(stopped),
             },
@@ -1932,6 +1936,27 @@ impl Runtime {
                 ),
                 Err(error) => (mux_error_response(Some(request_id), error), Vec::new()),
             },
+            BufferRequest::Watch {
+                request_id,
+                buffer_id,
+            } => {
+                if let Err(error) = self.state.lock().await.buffer(buffer_id) {
+                    return (mux_error_response(Some(request_id), error), Vec::new());
+                }
+                if let Some(client) = self.clients.lock().await.get_mut(&connection_id) {
+                    client.watched_buffers.insert(buffer_id);
+                }
+                (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+            }
+            BufferRequest::Unwatch {
+                request_id,
+                buffer_id,
+            } => {
+                if let Some(client) = self.clients.lock().await.get_mut(&connection_id) {
+                    client.watched_buffers.remove(&buffer_id);
+                }
+                (ServerResponse::Ok(OkResponse { request_id }), Vec::new())
+            }
             BufferRequest::Inspect {
                 request_id,
                 buffer_id,
@@ -4010,8 +4035,8 @@ impl Runtime {
     /// clients on other sessions are not. A write from a detached buffer, or
     /// one whose session no client is showing, is dropped.
     async fn forward_clipboard(&self, buffer_id: BufferId, write: ClipboardWrite) {
-        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
-            debug!(%buffer_id, "dropping clipboard write: no client shows its session");
+        let Some(client_ids) = self.clients_showing_buffer(buffer_id).await else {
+            debug!(%buffer_id, "dropping clipboard write: no client shows the buffer");
             return;
         };
         let event = ServerEnvelope::Event(ServerEvent::Clipboard(ClipboardEvent {
@@ -4028,8 +4053,8 @@ impl Runtime {
     /// anyway (`all`). The writes go out in order, in as few events as fit a
     /// protocol frame.
     async fn forward_passthrough(&self, buffer_id: BufferId, writes: Vec<PassthroughWrite>) {
-        let Some(client_ids) = self.clients_showing_buffer_session(buffer_id).await else {
-            debug!(%buffer_id, "dropping passthrough: no client shows its session");
+        let Some(client_ids) = self.clients_showing_buffer(buffer_id).await else {
+            debug!(%buffer_id, "dropping passthrough: no client shows the buffer");
             return;
         };
         for writes in batch_passthrough_writes(writes) {
@@ -4041,23 +4066,27 @@ impl Runtime {
         }
     }
 
-    /// The clients whose current session contains `buffer_id`, or `None` when
-    /// the buffer is detached or no client shows its session.
-    async fn clients_showing_buffer_session(&self, buffer_id: BufferId) -> Option<BTreeSet<u64>> {
+    /// The clients that show `buffer_id`: those whose current session
+    /// contains it, and those watching it (`BufferRequest::Watch`), such as a
+    /// server showing it in a pane of its own. `None` when there are none.
+    async fn clients_showing_buffer(&self, buffer_id: BufferId) -> Option<BTreeSet<u64>> {
         let session_id = {
             let state = self.state.lock().await;
             let buffer = state.buffer(buffer_id).ok()?;
-            let BufferAttachment::Attached(node_id) = buffer.attachment else {
-                return None;
-            };
-            state.node(node_id).ok()?.session_id()
+            match buffer.attachment {
+                BufferAttachment::Attached(node_id) => Some(state.node(node_id).ok()?.session_id()),
+                BufferAttachment::Detached => None,
+            }
         };
         let client_ids: BTreeSet<u64> = self
             .clients
             .lock()
             .await
             .iter()
-            .filter(|(_, client)| client.current_session_id == Some(session_id))
+            .filter(|(_, client)| {
+                session_id.is_some_and(|session_id| client.current_session_id == Some(session_id))
+                    || client.watched_buffers.contains(&buffer_id)
+            })
             .map(|(&client_id, _)| client_id)
             .collect();
         (!client_ids.is_empty()).then_some(client_ids)
@@ -5752,6 +5781,7 @@ mod tests {
                 super::ClientConnection {
                     current_session_id: session,
                     host_graphics: false,
+                    watched_buffers: std::collections::BTreeSet::new(),
                     shutdown: None,
                     stopped: None,
                 },
@@ -5871,6 +5901,7 @@ mod tests {
                 shutdown: None,
                 stopped: None,
                 host_graphics: false,
+                watched_buffers: std::collections::BTreeSet::new(),
             },
         );
 
@@ -6010,6 +6041,7 @@ mod tests {
                 shutdown: None,
                 stopped: None,
                 host_graphics: false,
+                watched_buffers: std::collections::BTreeSet::new(),
             },
         );
         runtime

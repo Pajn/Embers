@@ -605,10 +605,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for SynchronizePanesModeWire {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_BUFFER_OP: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_BUFFER_OP: u8 = 14;
+pub const ENUM_MAX_BUFFER_OP: u8 = 16;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 15] = [
+pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 17] = [
   BufferOp::Create,
   BufferOp::List,
   BufferOp::Get,
@@ -624,6 +624,8 @@ pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 15] = [
   BufferOp::StartPipe,
   BufferOp::StopPipe,
   BufferOp::SetUserOption,
+  BufferOp::Watch,
+  BufferOp::Unwatch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -646,9 +648,11 @@ impl BufferOp {
   pub const StartPipe: Self = Self(12);
   pub const StopPipe: Self = Self(13);
   pub const SetUserOption: Self = Self(14);
+  pub const Watch: Self = Self(15);
+  pub const Unwatch: Self = Self(16);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 14;
+  pub const ENUM_MAX: u8 = 16;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Create,
     Self::List,
@@ -665,6 +669,8 @@ impl BufferOp {
     Self::StartPipe,
     Self::StopPipe,
     Self::SetUserOption,
+    Self::Watch,
+    Self::Unwatch,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -684,6 +690,8 @@ impl BufferOp {
       Self::StartPipe => Some("StartPipe"),
       Self::StopPipe => Some("StopPipe"),
       Self::SetUserOption => Some("SetUserOption"),
+      Self::Watch => Some("Watch"),
+      Self::Unwatch => Some("Unwatch"),
       _ => None,
     }
   }

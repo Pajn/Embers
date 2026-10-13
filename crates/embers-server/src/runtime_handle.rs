@@ -163,12 +163,11 @@ impl BufferRuntimeHandle {
     }
 
     /// Whether some client forwards kitty graphics queries to a host
-    /// terminal that answers them. Another host's buffers do not pass
-    /// graphics on yet, so they are not told.
+    /// terminal that answers them.
     pub async fn set_host_graphics(&self, enabled: bool) -> Result<()> {
         match self {
             Self::Keeper(keeper) => keeper.set_host_graphics(enabled).await,
-            Self::Remote(_) => Ok(()),
+            Self::Remote(remote) => remote.set_host_graphics(enabled).await,
         }
     }
 

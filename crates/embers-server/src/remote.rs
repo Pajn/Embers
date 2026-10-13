@@ -3,12 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
-    ActivityState, BufferId, MuxError, PtySize, Result, TerminalModes, TerminalSnapshot,
-    new_request_id,
+    ActivityState, BufferId, ClipboardWrite, MuxError, PassthroughWrite, PtySize, Result,
+    TerminalModes, TerminalSnapshot, new_request_id,
 };
 use embers_protocol::{
     BufferPipeRecord, BufferPipeState, BufferPipeStopReason, BufferRecord, BufferRecordState,
-    BufferRequest, ClientMessage, InputRequest, ServerEvent, ServerResponse, SubscribeRequest,
+    BufferRequest, ClientMessage, ClientRequest, InputRequest, ServerEvent, ServerResponse,
+    SubscribeRequest,
 };
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -91,14 +92,38 @@ enum HostCommand {
         message: ClientMessage,
         reply: oneshot::Sender<Result<ServerResponse>>,
     },
-    /// Pass on the host's reports that `buffer_id` changed.
+    /// Pass on what the host reports about `buffer_id`.
     Watch {
         buffer_id: BufferId,
-        changes: mpsc::Sender<()>,
+        watcher: Watcher,
     },
     Unwatch {
         buffer_id: BufferId,
     },
+}
+
+/// Where the host connection passes on what the host reports about one
+/// buffer.
+struct Watcher {
+    /// That the buffer changed, coalesced: one waiting report stands for any
+    /// number.
+    changes: mpsc::Sender<()>,
+    /// What the buffer's program sent for the terminal, in order.
+    writes: mpsc::UnboundedSender<HostWrite>,
+}
+
+/// Clipboard writes and passthrough from a buffer on the host, for the
+/// terminals showing it here.
+enum HostWrite {
+    Clipboard(ClipboardWrite),
+    Passthrough(Vec<PassthroughWrite>),
+}
+
+/// The receiving ends of a [`Watcher`], which close when the connection is
+/// lost.
+struct Watched {
+    changes: mpsc::Receiver<()>,
+    writes: mpsc::UnboundedReceiver<HostWrite>,
 }
 
 /// One host's server, shared by every buffer running there. A task owns the
@@ -144,16 +169,37 @@ impl HostConnection {
         }
     }
 
-    /// Reports that the host's buffer `buffer_id` changed, coalesced: one
-    /// waiting report stands for any number. The channel closes when the
-    /// connection is lost.
-    async fn watch(&self, buffer_id: BufferId) -> Result<mpsc::Receiver<()>> {
-        let (changes, receiver) = mpsc::channel(1);
+    /// What the host reports about its buffer `buffer_id`: that it changed,
+    /// and what its program sends for the terminal. The host sends the latter
+    /// only to connections watching the buffer, since no session of its own
+    /// shows it; a host from before watching does not, and the buffer works
+    /// without.
+    async fn watch(&self, buffer_id: BufferId) -> Result<Watched> {
+        let (changes, changes_receiver) = mpsc::channel(1);
+        let (writes, writes_receiver) = mpsc::unbounded_channel();
         self.commands
-            .send(HostCommand::Watch { buffer_id, changes })
+            .send(HostCommand::Watch {
+                buffer_id,
+                watcher: Watcher { changes, writes },
+            })
             .await
             .map_err(|_| self.lost())?;
-        Ok(receiver)
+        if let Err(error) = self
+            .request(ClientMessage::Buffer(BufferRequest::Watch {
+                request_id: new_request_id(),
+                buffer_id,
+            }))
+            .await
+        {
+            if !self.is_open() {
+                return Err(error);
+            }
+            debug!(host = %self.host, %buffer_id, %error, "host does not pass on clipboard writes");
+        }
+        Ok(Watched {
+            changes: changes_receiver,
+            writes: writes_receiver,
+        })
     }
 
     fn unwatch(&self, buffer_id: BufferId) {
@@ -170,7 +216,7 @@ async fn serve_host(
     mut upstream: Upstream,
     mut commands: mpsc::Receiver<HostCommand>,
 ) {
-    let mut watchers = HashMap::<BufferId, mpsc::Sender<()>>::new();
+    let mut watchers = HashMap::<BufferId, Watcher>::new();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -185,8 +231,8 @@ async fn serve_host(
                         break;
                     }
                 }
-                Some(HostCommand::Watch { buffer_id, changes }) => {
-                    watchers.insert(buffer_id, changes);
+                Some(HostCommand::Watch { buffer_id, watcher }) => {
+                    watchers.insert(buffer_id, watcher);
                 }
                 Some(HostCommand::Unwatch { buffer_id }) => {
                     watchers.remove(&buffer_id);
@@ -194,9 +240,22 @@ async fn serve_host(
             },
             event = upstream.next_event() => match event {
                 Ok(Some(ServerEvent::RenderInvalidated(event))) => {
-                    if let Some(changes) = watchers.get(&event.buffer_id) {
+                    if let Some(watcher) = watchers.get(&event.buffer_id) {
                         // Full means a report is already waiting.
-                        let _ = changes.try_send(());
+                        let _ = watcher.changes.try_send(());
+                    }
+                }
+                Ok(Some(ServerEvent::Clipboard(event))) => {
+                    if let Some(watcher) = watchers.get(&event.buffer_id) {
+                        let _ = watcher.writes.send(HostWrite::Clipboard(ClipboardWrite {
+                            selection: event.selection,
+                            text: event.text,
+                        }));
+                    }
+                }
+                Ok(Some(ServerEvent::Passthrough(event))) => {
+                    if let Some(watcher) = watchers.get(&event.buffer_id) {
+                        let _ = watcher.writes.send(HostWrite::Passthrough(event.writes));
                     }
                 }
                 Ok(Some(_)) => {}
@@ -301,7 +360,7 @@ impl RemoteRuntimeHandle {
         record: BufferRecord,
         callbacks: BufferRuntimeCallbacks,
     ) -> Result<Self> {
-        let changes = connection.watch(record.id).await?;
+        let watched = connection.watch(record.id).await?;
         let inner = Arc::new(RemoteInner {
             buffer_id,
             remote_id: record.id,
@@ -309,7 +368,7 @@ impl RemoteRuntimeHandle {
             status: StdMutex::new(status_from_record(&record)),
             pump: StdMutex::new(None),
         });
-        let pump = tokio::spawn(pump_changes(inner.clone(), changes, callbacks));
+        let pump = tokio::spawn(pump_changes(inner.clone(), watched, callbacks));
         *lock(&inner.pump) = Some(pump);
         Ok(Self { inner })
     }
@@ -435,6 +494,19 @@ impl RemoteRuntimeHandle {
         .map(drop)
     }
 
+    /// Tell the host whether some client here forwards kitty graphics queries
+    /// to a terminal that answers them, so its buffers hold their own replies
+    /// to such a query until the terminal's arrives. Like any client's, the
+    /// setting covers every buffer on the host.
+    pub async fn set_host_graphics(&self, enabled: bool) -> Result<()> {
+        self.request(ClientMessage::Client(ClientRequest::SetHostGraphics {
+            request_id: new_request_id(),
+            enabled,
+        }))
+        .await
+        .map(drop)
+    }
+
     /// Start a pipe on the host: `command` runs there, in `cwd` on the host.
     pub async fn start_pipe(
         &self,
@@ -497,20 +569,36 @@ impl RemoteRuntimeHandle {
 }
 
 /// Read the host's record whenever it reports the buffer changed, and pass
-/// on what changed as the keeper's status poller would, until the buffer
-/// exits, disappears from the host, or the connection is lost.
+/// on what changed as the keeper's status poller would, along with what the
+/// program sends for the terminal, until the buffer exits, disappears from
+/// the host, or the connection is lost.
 async fn pump_changes(
     inner: Arc<RemoteInner>,
-    mut changes: mpsc::Receiver<()>,
+    mut watched: Watched,
     callbacks: BufferRuntimeCallbacks,
 ) {
     // The first read catches whatever changed between the record the buffer
     // started from and the watch starting.
     let mut changed = true;
     loop {
-        if !changed && changes.recv().await.is_none() {
-            (callbacks.on_lost)(inner.buffer_id);
-            return;
+        if !changed {
+            tokio::select! {
+                change = watched.changes.recv() => {
+                    if change.is_none() {
+                        (callbacks.on_lost)(inner.buffer_id);
+                        return;
+                    }
+                }
+                Some(write) = watched.writes.recv() => {
+                    match write {
+                        HostWrite::Clipboard(write) => (callbacks.on_clipboard)(inner.buffer_id, write),
+                        HostWrite::Passthrough(writes) => {
+                            (callbacks.on_passthrough)(inner.buffer_id, writes);
+                        }
+                    }
+                    continue;
+                }
+            }
         }
         changed = false;
         let record = match get_record(&inner.connection, inner.remote_id).await {

@@ -321,6 +321,8 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
         }
         BufferRequest::Get { buffer_id, .. }
         | BufferRequest::Inspect { buffer_id, .. }
+        | BufferRequest::Watch { buffer_id, .. }
+        | BufferRequest::Unwatch { buffer_id, .. }
         | BufferRequest::Detach { buffer_id, .. }
         | BufferRequest::Kill { buffer_id, .. }
         | BufferRequest::Capture { buffer_id, .. }
@@ -1387,6 +1389,40 @@ fn encode_buffer_request<'a>(
         ),
         BufferRequest::Get { buffer_id, .. } => (
             fb::BufferOp::Get,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Watch { buffer_id, .. } => (
+            fb::BufferOp::Watch,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Unwatch { buffer_id, .. } => (
+            fb::BufferOp::Unwatch,
             (*buffer_id).into(),
             0,
             0,
@@ -4296,6 +4332,20 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     detached_only: req.detached_only(),
                 },
                 fb::BufferOp::Get => BufferRequest::Get {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Watch => BufferRequest::Watch {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Unwatch => BufferRequest::Unwatch {
                     request_id,
                     buffer_id: decode_required_buffer_id(
                         req.buffer_id(),

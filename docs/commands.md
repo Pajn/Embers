@@ -437,11 +437,16 @@ again the same way; it never replaces one with a local shell. `kill-server`
 ends remote programs too. A server stopped any other way leaves them running
 on their hosts for the next server.
 
-Not yet passed on from remote panes: OSC 52 clipboard writes, and passthrough
-(images, notifications). The `is-vim` option Neovim sets from inside a remote
-pane lands on HOST's server, though smart navigation still tells Neovim by
-the pane's foreground command. An exited remote program's buffer stays in
-HOST's server's buffer list until that server restarts.
+OSC 52 clipboard writes and passthrough (images, notifications) from a remote
+pane reach the terminals showing it here, as from any pane, so a yank in a
+remote Neovim lands on this machine's clipboard. This needs HOST's embers to
+be a release that passes them on to the server showing its buffers; with an
+older one the pane works without them.
+
+The `is-vim` option Neovim sets from inside a remote pane lands on HOST's
+server, though smart navigation still tells Neovim by the pane's foreground
+command. An exited remote program's buffer stays in HOST's server's buffer
+list until that server restarts.
 
 ## tmux compatibility
 
