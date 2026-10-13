@@ -3,13 +3,14 @@ use embers_client::{
     SelectionKind, SelectionPoint, SelectionState,
 };
 use embers_core::{
-    CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine, StyledRun,
-    TermColor,
+    CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, Size, SnapshotLine,
+    SplitDirection, StyledRun, TermColor,
 };
 
 use crate::support::{
     FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_BUFFER_LEAF_ID,
-    ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state, root_focus_state, root_split_state,
+    ROOT_TABS_ID, SESSION_ID, demo_state, nested_split_state, root_buffer_state, root_focus_state,
+    root_split_state,
 };
 
 /// Build a single-run styled line covering the whole text.
@@ -197,6 +198,40 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
         assert_eq!(style.fg, None, "row {row}");
         assert!(style.dim, "row {row}");
     }
+}
+
+#[test]
+fn dividers_join_where_a_nested_split_meets_them() {
+    let viewport = Size {
+        width: 9,
+        height: 5,
+    };
+    let render = |outer| {
+        let state = nested_split_state(outer);
+        let presentation = PresentationModel::project(&state, SESSION_ID, viewport).unwrap();
+        Renderer::default().render(&state, &presentation).render()
+    };
+
+    assert_eq!(
+        render(SplitDirection::Vertical),
+        concat!(
+            "    │    \n",
+            "    │    \n",
+            "    ├────\n",
+            "    │    \n",
+            "    │    "
+        )
+    );
+    assert_eq!(
+        render(SplitDirection::Horizontal),
+        concat!(
+            "         \n",
+            "         \n",
+            "────┬────\n",
+            "    │    \n",
+            "    │    "
+        )
+    );
 }
 
 /// The demo popup's frame spans columns 14 to 33 and rows 5 to 11, with its

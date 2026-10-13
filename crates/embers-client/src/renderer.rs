@@ -140,11 +140,13 @@ impl Renderer {
         let dividers = model
             .dividers
             .iter()
-            .filter(|divider| divider.floating_id == floating_id);
+            .filter(|divider| divider.floating_id == floating_id)
+            .collect::<Vec<_>>();
         // A lone divider has the same pane on either side all along it.
-        let lone = dividers.clone().count() == 1;
+        let lone = dividers.len() == 1;
+        let cells = divider_cells(&dividers);
         for divider in dividers {
-            self.render_divider(grid, divider, focused, lone);
+            self.render_divider(grid, divider, focused, lone, &cells);
         }
 
         for tabs in model
@@ -406,22 +408,25 @@ impl Renderer {
     /// pane's rect, with the active border color. A `lone` divider, the only
     /// one between two panes, borders the focused pane all along, so like
     /// tmux it colors only the half on that pane's side: the first half for
-    /// the pane before it, the second for the pane after.
+    /// the pane before it, the second for the pane after. Where another
+    /// divider of the layer, in `cells`, meets it from the side, the line
+    /// joins it with a junction.
     fn render_divider(
         &self,
         grid: &mut RenderGrid,
         divider: &DividerFrame,
         focused: Option<Rect>,
         lone: bool,
+        cells: &BTreeMap<(i32, i32), embers_core::SplitDirection>,
     ) {
         if divider.rect.size.width == 0 || divider.rect.size.height == 0 {
             return;
         }
 
         let rect = divider.rect;
-        let (ch, cells) = match divider.direction {
-            embers_core::SplitDirection::Horizontal => ('─', rect.size.width),
-            embers_core::SplitDirection::Vertical => ('│', rect.size.height),
+        let length = match divider.direction {
+            embers_core::SplitDirection::Horizontal => rect.size.width,
+            embers_core::SplitDirection::Vertical => rect.size.height,
         };
         let half = focused.filter(|_| lone).map(|pane| {
             let before = match divider.direction {
@@ -432,10 +437,10 @@ impl Renderer {
                     pane.origin.x + i32::from(pane.size.width) == rect.origin.x
                 }
             };
-            let middle = cells.div_ceil(2);
-            if before { 0..middle } else { middle..cells }
+            let middle = length.div_ceil(2);
+            if before { 0..middle } else { middle..length }
         });
-        for offset in 0..cells {
+        for offset in 0..length {
             let (x, y) = match divider.direction {
                 embers_core::SplitDirection::Horizontal => {
                     (rect.origin.x + i32::from(offset), rect.origin.y)
@@ -460,6 +465,7 @@ impl Renderer {
                 },
                 None => divider_style(),
             };
+            let ch = divider_char(divider.direction, x, y, cells);
             grid.put_char_styled(clamp_i32_to_u16(x), clamp_i32_to_u16(y), ch, style);
         }
     }
@@ -931,6 +937,45 @@ fn borders(pane: Rect, direction: embers_core::SplitDirection, x: i32, y: i32) -
         embers_core::SplitDirection::Horizontal => {
             (y == top - 1 || y == bottom) && (left..right).contains(&x)
         }
+    }
+}
+
+/// Every cell of `dividers` and the direction of the divider it belongs to.
+fn divider_cells(dividers: &[&DividerFrame]) -> BTreeMap<(i32, i32), embers_core::SplitDirection> {
+    let mut cells = BTreeMap::new();
+    for divider in dividers {
+        let rect = divider.rect;
+        for dx in 0..i32::from(rect.size.width) {
+            for dy in 0..i32::from(rect.size.height) {
+                cells.insert((rect.origin.x + dx, rect.origin.y + dy), divider.direction);
+            }
+        }
+    }
+    cells
+}
+
+/// The line for the divider cell at `x`, `y`: straight along `direction`,
+/// or a junction where a divider across it, in `cells`, ends beside it.
+fn divider_char(
+    direction: embers_core::SplitDirection,
+    x: i32,
+    y: i32,
+    cells: &BTreeMap<(i32, i32), embers_core::SplitDirection>,
+) -> char {
+    let across = |x, y| cells.get(&(x, y)).is_some_and(|other| *other != direction);
+    match direction {
+        embers_core::SplitDirection::Vertical => match (across(x - 1, y), across(x + 1, y)) {
+            (true, true) => '┼',
+            (true, false) => '┤',
+            (false, true) => '├',
+            (false, false) => '│',
+        },
+        embers_core::SplitDirection::Horizontal => match (across(x, y - 1), across(x, y + 1)) {
+            (true, true) => '┼',
+            (true, false) => '┴',
+            (false, true) => '┬',
+            (false, false) => '─',
+        },
     }
 }
 

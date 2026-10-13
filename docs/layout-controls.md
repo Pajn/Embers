@@ -62,9 +62,10 @@ The built-in config turns this on; `mouse.set_drag_resize(false)` turns it off.
 
 ## Divider colors
 
-Dividers between panes are drawn as continuous lines, dim by default. Like tmux's
-`pane-border-style` and `pane-active-border-style`, the theme can color them,
-with the cells along the focused pane's edges in a color of their own:
+Dividers between panes are drawn as continuous lines, joined where one meets
+another, dim by default. Like tmux's `pane-border-style` and
+`pane-active-border-style`, the theme can color them, with the cells along the
+focused pane's edges in a color of their own:
 
 ```rhai
 theme.set_pane_border_color("brightblack");
