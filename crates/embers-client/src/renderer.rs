@@ -137,12 +137,14 @@ impl Renderer {
             .focused_leaf()
             .filter(|leaf| leaf.floating_id == floating_id)
             .map(|leaf| leaf.rect);
-        for divider in model
+        let dividers = model
             .dividers
             .iter()
-            .filter(|divider| divider.floating_id == floating_id)
-        {
-            self.render_divider(grid, divider, focused);
+            .filter(|divider| divider.floating_id == floating_id);
+        // A lone divider has the same pane on either side all along it.
+        let lone = dividers.clone().count() == 1;
+        for divider in dividers {
+            self.render_divider(grid, divider, focused, lone);
         }
 
         for tabs in model
@@ -401,17 +403,38 @@ impl Renderer {
     }
 
     /// Draw a divider, coloring the cells that border `focused`, the focused
-    /// pane's rect, with the active border color.
-    fn render_divider(&self, grid: &mut RenderGrid, divider: &DividerFrame, focused: Option<Rect>) {
+    /// pane's rect, with the active border color. A `lone` divider, the only
+    /// one between two panes, borders the focused pane all along, so like
+    /// tmux it colors only the half on that pane's side: the first half for
+    /// the pane before it, the second for the pane after.
+    fn render_divider(
+        &self,
+        grid: &mut RenderGrid,
+        divider: &DividerFrame,
+        focused: Option<Rect>,
+        lone: bool,
+    ) {
         if divider.rect.size.width == 0 || divider.rect.size.height == 0 {
             return;
         }
 
         let rect = divider.rect;
         let (ch, cells) = match divider.direction {
-            embers_core::SplitDirection::Horizontal => ('-', rect.size.width),
-            embers_core::SplitDirection::Vertical => ('|', rect.size.height),
+            embers_core::SplitDirection::Horizontal => ('─', rect.size.width),
+            embers_core::SplitDirection::Vertical => ('│', rect.size.height),
         };
+        let half = focused.filter(|_| lone).map(|pane| {
+            let before = match divider.direction {
+                embers_core::SplitDirection::Horizontal => {
+                    pane.origin.y + i32::from(pane.size.height) == rect.origin.y
+                }
+                embers_core::SplitDirection::Vertical => {
+                    pane.origin.x + i32::from(pane.size.width) == rect.origin.x
+                }
+            };
+            let middle = cells.div_ceil(2);
+            if before { 0..middle } else { middle..cells }
+        });
         for offset in 0..cells {
             let (x, y) = match divider.direction {
                 embers_core::SplitDirection::Horizontal => {
@@ -421,7 +444,10 @@ impl Renderer {
                     (rect.origin.x, rect.origin.y + i32::from(offset))
                 }
             };
-            let active = focused.is_some_and(|pane| borders(pane, divider.direction, x, y));
+            let active = match &half {
+                Some(half) => half.contains(&offset),
+                None => focused.is_some_and(|pane| borders(pane, divider.direction, x, y)),
+            };
             let color = if active {
                 self.pane_borders.active.or(self.pane_borders.inactive)
             } else {

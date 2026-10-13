@@ -9,7 +9,7 @@ use embers_core::{
 
 use crate::support::{
     FLOATING_ID, FLOATING_TOP_LEAF_ID, FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, ROOT_BUFFER_LEAF_ID,
-    ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state, root_split_state,
+    ROOT_TABS_ID, SESSION_ID, demo_state, root_buffer_state, root_focus_state, root_split_state,
 };
 
 /// Build a single-run styled line covering the whole text.
@@ -109,19 +109,19 @@ fn renders_nested_tabs_splits_and_floating_overlay() {
         grid.render(),
         concat!(
             "[demo]   shell  [!workspace]            \n",
-            "left pane    | !build  [ logs-long-tit~]\n",
-            "line two     |logs visible              \n",
-            "line three   |second row                \n",
-            "             |third row                 \n",
-            "             |╭─popup────────────╮      \n",
-            "             |│popup top         │      \n",
-            "             |│                  │      \n",
-            "             |│------------------│      \n",
-            "             |│popup bottom      │      \n",
-            "             |│                  │      \n",
-            "             |╰──────────────────╯      \n",
-            "             |                          \n",
-            "             |                          "
+            "left pane    │ !build  [ logs-long-tit~]\n",
+            "line two     │logs visible              \n",
+            "line three   │second row                \n",
+            "             │third row                 \n",
+            "             │╭─popup────────────╮      \n",
+            "             ││popup top         │      \n",
+            "             ││                  │      \n",
+            "             ││──────────────────│      \n",
+            "             ││popup bottom      │      \n",
+            "             ││                  │      \n",
+            "             │╰──────────────────╯      \n",
+            "             │                          \n",
+            "             │                          "
         )
     );
 }
@@ -152,18 +152,43 @@ fn pane_borders_take_theme_colors_next_to_the_focused_pane() {
 
     let grid = renderer.render(&state, &presentation);
 
-    // The divider is column 13. The focused pane on its right starts at row 2,
-    // under its nested tab bar: the divider is active alongside it only.
+    // The divider is column 13, rows 1 to 13, and the only one between the
+    // root panes. Like tmux, it is active along the half on the focused
+    // pane's side: the bottom half for the right pane.
     assert_eq!(
         grid.render().lines().nth(2).unwrap().chars().nth(13),
-        Some('|')
+        Some('│')
     );
-    for row in 2..5 {
-        let style = grid.cell_style(13, row).unwrap();
-        assert_eq!(style.fg, Some(active), "row {row}");
-        assert!(!style.dim, "row {row}");
+    for row in 1..14 {
+        let expected = if row >= 8 { active } else { inactive };
+        assert_eq!(
+            grid.cell_style(13, row).unwrap().fg,
+            Some(expected),
+            "row {row}"
+        );
+        assert!(!grid.cell_style(13, row).unwrap().dim, "row {row}");
     }
-    assert_eq!(grid.cell_style(13, 1).unwrap().fg, Some(inactive));
+
+    // The top half for the left pane.
+    let left = root_focus_state();
+    let presentation = PresentationModel::project(
+        &left,
+        SESSION_ID,
+        Size {
+            width: 40,
+            height: 14,
+        },
+    )
+    .expect("projection succeeds");
+    let grid = renderer.render(&left, &presentation);
+    for row in 1..14 {
+        let expected = if row < 8 { active } else { inactive };
+        assert_eq!(
+            grid.cell_style(13, row).unwrap().fg,
+            Some(expected),
+            "row {row}"
+        );
+    }
 
     // Without theme colors every divider cell stays dim and uncolored.
     let plain = Renderer::default().render(&state, &presentation);
@@ -1008,9 +1033,9 @@ fn panes_without_title_rows_show_content_from_their_first_row() {
     assert_eq!(
         grid.render(),
         concat!(
-            "left root pane |right root pane\n",
-            "               |               \n",
-            "               |               "
+            "left root pane │right root pane\n",
+            "               │               \n",
+            "               │               "
         )
     );
 }
@@ -1027,9 +1052,9 @@ fn pane_title_rows_are_drawn_above_or_below_the_content() {
     assert_eq!(
         top.render(),
         concat!(
-            "   root-left   |>+ root-right  \n",
-            "left root pane |right root pane\n",
-            "               |               "
+            "   root-left   │>+ root-right  \n",
+            "left root pane │right root pane\n",
+            "               │               "
         )
     );
 
@@ -1037,9 +1062,9 @@ fn pane_title_rows_are_drawn_above_or_below_the_content() {
     assert_eq!(
         bottom.render(),
         concat!(
-            "left root pane |right root pane\n",
-            "               |               \n",
-            "   root-left   |>+ root-right  "
+            "left root pane │right root pane\n",
+            "               │               \n",
+            "   root-left   │>+ root-right  "
         )
     );
 }
