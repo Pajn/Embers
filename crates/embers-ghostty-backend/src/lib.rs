@@ -6,8 +6,7 @@
 //! snapshot lines (trailing blanks trimmed, cells that show without a glyph
 //! kept, half a wide character left by an edit drawn as a blank), the same
 //! modes and the same replies to the queries Embers answers itself. What
-//! differs is the emulation, and one thing libghostty does not report:
-//! hyperlink ids, so snapshot links carry only their URI.
+//! differs is the emulation.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -408,8 +407,8 @@ impl GhosttyTerminalBackend {
                     // The render state holds no hyperlinks; the few linked
                     // cells are looked up on the terminal.
                     let link = if fields.has_link {
-                        let uri = self.viewport_link(x, y);
-                        row.link(uri)
+                        let link = self.viewport_link(x, y);
+                        row.link(link)
                     } else {
                         0
                     };
@@ -476,7 +475,7 @@ impl GhosttyTerminalBackend {
         }
     }
 
-    fn viewport_link(&self, x: u16, y: u32) -> Option<String> {
+    fn viewport_link(&self, x: u16, y: u32) -> Option<Hyperlink> {
         let point = sys::GhosttyPoint {
             tag: sys::GhosttyPointTag::GHOSTTY_POINT_TAG_VIEWPORT,
             value: sys::GhosttyPointValue {
@@ -492,7 +491,7 @@ impl GhosttyTerminalBackend {
         unsafe {
             (sys::ghostty_terminal_grid_ref(self.terminal, point, &mut grid_ref)
                 == sys::GhosttyResult::GHOSTTY_SUCCESS)
-                .then(|| hyperlink_uri(&grid_ref))
+                .then(|| hyperlink(&grid_ref))
                 .flatten()
         }
     }
@@ -858,10 +857,7 @@ fn row_line(row: &Row) -> (SnapshotLine, Vec<CellSpan>) {
             None => 0,
             Some(index) => {
                 if line_links[index] == 0 {
-                    links.push(Hyperlink {
-                        id: None,
-                        uri: row.links[index].clone(),
-                    });
+                    links.push(row.links[index].clone());
                     line_links[index] = u16::try_from(links.len()).unwrap_or(u16::MAX);
                 }
                 line_links[index]
@@ -1078,7 +1074,7 @@ impl CellView {
 struct Row {
     cells: Vec<CellView>,
     clusters: Vec<String>,
-    links: Vec<String>,
+    links: Vec<Hyperlink>,
 }
 
 impl Row {
@@ -1087,14 +1083,14 @@ impl Row {
         CellText::Cluster(u32::try_from(self.clusters.len() - 1).unwrap_or(u32::MAX))
     }
 
-    fn link(&mut self, uri: Option<String>) -> u16 {
-        let Some(uri) = uri else {
+    fn link(&mut self, link: Option<Hyperlink>) -> u16 {
+        let Some(link) = link else {
             return 0;
         };
-        let index = match self.links.iter().position(|known| *known == uri) {
+        let index = match self.links.iter().position(|known| *known == link) {
             Some(index) => index,
             None => {
-                self.links.push(uri);
+                self.links.push(link);
                 self.links.len() - 1
             }
         };
@@ -1156,25 +1152,44 @@ fn style_attrs(style: &sys::GhosttyStyle) -> CellAttrs {
     attrs
 }
 
-/// The URI of the link on the cell `grid_ref` points at.
+/// The link on the cell `grid_ref` points at: its URI, and its id when the
+/// program gave one.
 ///
 /// # Safety
 ///
 /// `grid_ref` must be valid: no terminal call may have come since it was made.
-unsafe fn hyperlink_uri(grid_ref: &sys::GhosttyGridRef) -> Option<String> {
-    let mut uri = vec![0_u8; 256];
+unsafe fn hyperlink(grid_ref: &sys::GhosttyGridRef) -> Option<Hyperlink> {
+    // SAFETY: as the caller promises; each call fills at most `len` bytes.
+    unsafe {
+        let uri = grid_ref_text(|buf, len, out| {
+            sys::ghostty_grid_ref_hyperlink_uri(grid_ref, buf, len, out)
+        })?;
+        let id = grid_ref_text(|buf, len, out| {
+            sys::ghostty_grid_ref_hyperlink_id(grid_ref, buf, len, out)
+        });
+        Some(Hyperlink { id, uri })
+    }
+}
+
+/// Text a grid ref call writes into a buffer, growing the buffer to the size
+/// the call asks for. `None` when there is none.
+///
+/// # Safety
+///
+/// `read` must write at most the given length into the given buffer, and
+/// report the length written, or needed, through the given `usize`.
+unsafe fn grid_ref_text(
+    read: impl Fn(*mut u8, usize, &mut usize) -> sys::GhosttyResult::Type,
+) -> Option<String> {
+    let mut text = vec![0_u8; 256];
     loop {
         let mut len = 0;
-        // SAFETY: as the caller promises; the buffer holds `uri.len()` bytes.
-        let result = unsafe {
-            sys::ghostty_grid_ref_hyperlink_uri(grid_ref, uri.as_mut_ptr(), uri.len(), &mut len)
-        };
-        match result {
+        match read(text.as_mut_ptr(), text.len(), &mut len) {
             sys::GhosttyResult::GHOSTTY_SUCCESS if len > 0 => {
-                return Some(String::from_utf8_lossy(&uri[..len]).into_owned());
+                return Some(String::from_utf8_lossy(&text[..len]).into_owned());
             }
             // Too small: `len` is the size needed.
-            sys::GhosttyResult::GHOSTTY_OUT_OF_SPACE if len > uri.len() => uri.resize(len, 0),
+            sys::GhosttyResult::GHOSTTY_OUT_OF_SPACE if len > text.len() => text.resize(len, 0),
             _ => return None,
         }
     }

@@ -110,15 +110,39 @@ fn styles_map_to_attributes_and_colors() {
 }
 
 #[test]
-fn hyperlinks_carry_their_uri() {
+fn hyperlinks_carry_their_uri_and_id() {
     let mut backend = backend(12, 1);
-    backend.ingest_bytes(b"a\x1b]8;id=x;https://e.example\x1b\\bc\x1b]8;;\x1b\\d");
+    backend.ingest_bytes(
+        b"a\x1b]8;id=x;https://e.example\x1b\\bc\x1b]8;;\x1b\\d\
+          \x1b]8;;https://e.example\x1b\\e\x1b]8;;\x1b\\",
+    );
     let line = &lines(&backend)[0];
-    assert_eq!(line.text, "abcd");
-    assert_eq!(line.links.len(), 1);
-    assert_eq!(line.links[0].uri, "https://e.example");
+    assert_eq!(line.text, "abcde");
+    // The same URI with and without an id: two links.
+    let links: Vec<(Option<&str>, &str)> = line
+        .links
+        .iter()
+        .map(|link| (link.id.as_deref(), link.uri.as_str()))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            (Some("x"), "https://e.example"),
+            (None, "https://e.example")
+        ]
+    );
     let linked: Vec<u16> = line.runs.iter().map(|run| run.link).collect();
-    assert_eq!(linked, [0, 1, 0]);
+    assert_eq!(linked, [0, 1, 0, 2]);
+}
+
+#[test]
+fn a_link_wrapped_over_rows_keeps_its_id_on_each() {
+    let mut backend = backend(4, 2);
+    backend.ingest_bytes(b"\x1b]8;id=w;https://e.example\x1b\\abcdef\x1b]8;;\x1b\\");
+    for line in lines(&backend) {
+        assert_eq!(line.links.len(), 1, "{}", line.text);
+        assert_eq!(line.links[0].id.as_deref(), Some("w"));
+    }
 }
 
 #[test]

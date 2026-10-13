@@ -8,12 +8,15 @@ use std::process::Command;
 /// The Ghostty commit the library is built from and the bindings are
 /// generated from. Change it only together with regenerating the bindings
 /// (`cargo gen-ghostty`).
-pub const GHOSTTY_COMMIT: &str = "9f6a4640e6bca7a4d65f1b441f2666b151f4d402";
+pub const GHOSTTY_COMMIT: &str = "65a8ac268ebc905a538dbdb2cabc3b85d10af14e";
 
 /// The Zig release that commit builds with.
 pub const ZIG_VERSION: &str = "0.16.0";
 
-const GHOSTTY_REPOSITORY: &str = "https://github.com/ghostty-org/ghostty.git";
+/// Where [`GHOSTTY_COMMIT`] is fetched from: a fork, while the commit adds
+/// `ghostty_grid_ref_hyperlink_id` on top of Ghostty's `main` ahead of its
+/// merge upstream.
+const GHOSTTY_REPOSITORY: &str = "https://github.com/Pajn/ghostty.git";
 
 /// Names a Ghostty checkout to use instead of fetching [`GHOSTTY_COMMIT`].
 pub const SOURCE_DIR_ENV: &str = "GHOSTTY_SOURCE_DIR";
