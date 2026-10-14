@@ -8,7 +8,7 @@ use std::process::Command;
 /// The Ghostty commit the library is built from and the bindings are
 /// generated from. Change it only together with regenerating the bindings
 /// (`cargo gen-ghostty`).
-pub const GHOSTTY_COMMIT: &str = "65a8ac268ebc905a538dbdb2cabc3b85d10af14e";
+pub const GHOSTTY_COMMIT: &str = "8fc5815978aa198ddefcea3ca8c199220cb02805";
 
 /// The Zig release that commit builds with.
 pub const ZIG_VERSION: &str = "0.16.0";
