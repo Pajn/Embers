@@ -3,8 +3,12 @@
 //! failed to start.
 
 use embers_core::{RequestId, init_test_tracing};
-use embers_protocol::{BufferRequest, ClientMessage, ProtocolClient, ServerResponse};
-use embers_server::{Server, ServerConfig};
+use std::path::Path;
+
+use embers_protocol::{
+    BufferRequest, ClientMessage, KillServerRequest, ProtocolClient, ServerResponse,
+};
+use embers_server::{Server, ServerConfig, ServerHandle};
 use tempfile::tempdir;
 use tokio::time::{Duration, Instant};
 
@@ -21,6 +25,26 @@ fn create_request(request_id: u64, command: &[&str]) -> ClientMessage {
         size: None,
         session_id: None,
     })
+}
+
+/// Stop the server and end every program it runs, as `kill-server` does. A
+/// plain shutdown leaves keepers running for a restarted server to take up,
+/// and with no server to report their programs' exits to, they never stop.
+async fn kill_server(handle: ServerHandle, socket_path: &Path) {
+    let mut client = ProtocolClient::connect(socket_path)
+        .await
+        .expect("connect client");
+    let response = client
+        .request(&ClientMessage::KillServer(KillServerRequest {
+            request_id: RequestId(u64::MAX),
+        }))
+        .await
+        .expect("kill-server request round-trips");
+    assert!(
+        matches!(response, ServerResponse::Ok(_)),
+        "expected ok response, got {response:?}"
+    );
+    handle.shutdown().await.expect("shutdown server");
 }
 
 /// Creating many buffers at once used to fail now and then with "Connection
@@ -62,7 +86,7 @@ async fn concurrent_buffer_creation_always_reaches_the_keeper() {
         failures.extend(worker.await.expect("worker task"));
     }
 
-    handle.shutdown().await.expect("shutdown server");
+    kill_server(handle, &socket_path).await;
     assert!(
         failures.is_empty(),
         "{} of {} buffer creations failed: {failures:#?}",
@@ -146,7 +170,7 @@ async fn creating_a_buffer_whose_command_exits_immediately_succeeds() {
         failures.extend(worker.await.expect("worker task"));
     }
 
-    handle.shutdown().await.expect("shutdown server");
+    kill_server(handle, &socket_path).await;
     assert!(
         failures.is_empty(),
         "{} of {} creations failed: {failures:#?}",
