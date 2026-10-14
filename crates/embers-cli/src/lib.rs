@@ -37,8 +37,9 @@ use embers_protocol::{
     BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason,
     BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest,
     FloatingRecord, FloatingRequest, FloatingResponse, KillServerRequest, NodeBreakDestination,
-    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
+    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ProtocolError, ServerResponse,
+    SessionRecord, SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode,
+    buffer_ids_in_subtree,
 };
 use embers_server::{BUFFER_ENV_VAR, SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -2352,11 +2353,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     interactive::run(socket, None, config).await
                 }
                 Some(Command::Attach { target }) => {
-                    if !server_is_available(&socket).await {
-                        return Err(MuxError::not_found(format!(
-                            "no embers server is listening on {}",
-                            socket.display()
-                        )));
+                    if !server_is_available(&socket).await? {
+                        return Err(no_server_error(&socket));
                     }
                     let target = match target {
                         Some(target) => Some(
@@ -2496,16 +2494,71 @@ fn pid_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
-async fn server_is_available(socket_path: &Path) -> bool {
+/// Whether a server is listening on `socket_path`. A server that answers but
+/// speaks another protocol, such as one left running from an earlier build, is
+/// an error rather than an absent server: a server started in its place would
+/// find it holding the pid file and exit.
+async fn server_is_available(socket_path: &Path) -> Result<bool> {
     if validate_runtime_socket_parent(socket_path).is_err() {
-        return false;
+        return Ok(false);
     }
-    CliConnection::connect(socket_path).await.is_ok()
+    match ProtocolClient::connect(socket_path).await {
+        Ok(_) => Ok(true),
+        Err(
+            error @ (ProtocolError::IncompatibleServer { .. }
+            | ProtocolError::ServerPredatesHandshake { .. }),
+        ) => {
+            let stop = match server_process(socket_path) {
+                Some(pid) => format!("stop it with `kill {pid}`"),
+                None => "stop it with the embers it was started from".to_owned(),
+            };
+            Err(MuxError::conflict(format!(
+                "a server is listening on {}, but {error}; {stop}",
+                socket_path.display()
+            )))
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// The live process the pid file next to `socket_path` names: the server
+/// that owns the socket, whether or not it answers on it.
+fn server_process(socket_path: &Path) -> Option<u32> {
+    let pid = fs::read_to_string(pid_path(socket_path))
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    process_is_alive(pid).ok()?.then_some(pid)
+}
+
+/// A server process that owns `socket_path` but does not answer on it. A
+/// server started in its place would find it holding the pid file and exit.
+fn unresponsive_server_error(socket_path: &Path, pid: u32) -> MuxError {
+    MuxError::conflict(format!(
+        "embers server process {pid} owns {} but does not answer on it; stop it with `kill {pid}`",
+        socket_path.display()
+    ))
+}
+
+/// The error for a command that needs a running server when none answers on
+/// `socket_path`.
+fn no_server_error(socket_path: &Path) -> MuxError {
+    match server_process(socket_path) {
+        Some(pid) => unresponsive_server_error(socket_path, pid),
+        None => MuxError::not_found(format!(
+            "no embers server is listening on {}",
+            socket_path.display()
+        )),
+    }
 }
 
 async fn ensure_server_process(socket_path: &Path, log_filter: &str) -> Result<()> {
-    if server_is_available(socket_path).await {
+    if server_is_available(socket_path).await? {
         return Ok(());
+    }
+    if let Some(pid) = server_process(socket_path) {
+        return Err(unresponsive_server_error(socket_path, pid));
     }
 
     ensure_socket_parent(socket_path)?;
@@ -2527,19 +2580,22 @@ async fn ensure_server_process(socket_path: &Path, log_filter: &str) -> Result<(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut exited_status = None;
     loop {
-        if server_is_available(socket_path).await {
+        if server_is_available(socket_path).await? {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
             exited_status.get_or_insert(status);
-            if server_is_available(socket_path).await {
+            if server_is_available(socket_path).await? {
                 return Ok(());
             }
         }
         if tokio::time::Instant::now() >= deadline {
             if let Some(status) = exited_status {
+                let log_dir = socket_path.parent().unwrap_or(Path::new("."));
                 return Err(MuxError::transport(format!(
-                    "embers server exited before becoming ready with status {status}"
+                    "embers server exited before becoming ready with status {status}; \
+                     its log in {} says why",
+                    log_dir.display()
                 )));
             }
             let _ = child.kill();
@@ -2562,6 +2618,14 @@ async fn run_server(socket_path: PathBuf, log_filter: &str) -> Result<()> {
         embers_core::init_server_tracing(log_filter, dir)?;
         install_server_panic_hook();
     }
+    // A detached server's stderr is discarded, so write why it stopped to the
+    // log, where the client that started it points.
+    serve(socket_path).await.inspect_err(|error| {
+        tracing::error!("server stopped: {error}");
+    })
+}
+
+async fn serve(socket_path: PathBuf) -> Result<()> {
     let secure_parent = socket_path
         .parent()
         .is_some_and(|parent| parent == default_runtime_dir().as_path());
@@ -2582,15 +2646,12 @@ const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 /// wait until it no longer accepts connections, so a following command does
 /// not reach the old server. Never starts a server.
 async fn kill_server(socket_path: &Path) -> Result<()> {
-    if !server_is_available(socket_path).await {
-        return Err(MuxError::not_found(format!(
-            "no embers server is listening on {}",
-            socket_path.display()
-        )));
+    if !server_is_available(socket_path).await? {
+        return Err(no_server_error(socket_path));
     }
     execute(socket_path, Command::KillServer, None).await?;
     let deadline = tokio::time::Instant::now() + KILL_SERVER_TIMEOUT;
-    while server_is_available(socket_path).await {
+    while server_is_available(socket_path).await? {
         if tokio::time::Instant::now() >= deadline {
             return Err(MuxError::timeout(format!(
                 "embers server on {} did not stop",
