@@ -62,9 +62,10 @@ The built-in config turns this on; `mouse.set_drag_resize(false)` turns it off.
 
 ## Divider colors
 
-Dividers between panes are drawn dim by default. Like tmux's
-`pane-border-style` and `pane-active-border-style`, the theme can color them,
-with the cells along the focused pane's edges in a color of their own:
+Dividers between panes are drawn as continuous lines, joined where one meets
+another, dim by default. Like tmux's `pane-border-style` and
+`pane-active-border-style`, the theme can color them, with the cells along the
+focused pane's edges in a color of their own:
 
 ```rhai
 theme.set_pane_border_color("brightblack");
@@ -75,6 +76,11 @@ Colors are `"#RRGGBB"` or one of the sixteen ANSI names, `"black"` to
 `"white"` and `"brightblack"` to `"brightwhite"`, which follow the host
 terminal's color scheme. Without an active color the cells next to the focused
 pane take the other color. Popup frames are not affected.
+
+When a divider is the only one, between just two panes, it borders the focused
+pane all along, so like tmux only the half on that pane's side takes the active
+color: the top or left half for the first pane, the bottom or right half for
+the second.
 
 ## Popup frames
 

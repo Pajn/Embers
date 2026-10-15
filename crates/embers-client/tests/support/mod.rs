@@ -27,6 +27,11 @@ pub const ROOT_BUFFER_LEAF_ID: NodeId = NodeId(50);
 pub const ROOT_ONLY_SPLIT_ID: NodeId = NodeId(60);
 pub const ROOT_SPLIT_LEFT_LEAF_ID: NodeId = NodeId(61);
 pub const ROOT_SPLIT_RIGHT_LEAF_ID: NodeId = NodeId(62);
+pub const OUTER_SPLIT_ID: NodeId = NodeId(70);
+pub const OUTER_LEAF_ID: NodeId = NodeId(71);
+pub const INNER_SPLIT_ID: NodeId = NodeId(72);
+pub const INNER_FIRST_LEAF_ID: NodeId = NodeId(73);
+pub const INNER_SECOND_LEAF_ID: NodeId = NodeId(74);
 
 pub fn demo_state() -> ClientState {
     let mut state = ClientState::default();
@@ -240,6 +245,68 @@ fn root_buffer_snapshot() -> SessionSnapshot {
         )],
         floating: Vec::new(),
     }
+}
+
+/// A root split in `outer` direction of a pane and a split across it of two
+/// more, with the first inner pane focused.
+pub fn nested_split_state(outer: SplitDirection) -> ClientState {
+    let inner = match outer {
+        SplitDirection::Horizontal => SplitDirection::Vertical,
+        SplitDirection::Vertical => SplitDirection::Horizontal,
+    };
+    let split = |id, parent_id, direction, child_ids| NodeRecord {
+        id,
+        session_id: SESSION_ID,
+        parent_id,
+        kind: NodeRecordKind::Split,
+        buffer_view: None,
+        split: Some(SplitRecord {
+            direction,
+            child_ids,
+            sizes: vec![1, 1],
+        }),
+        tabs: None,
+        focus_leaf_id: None,
+    };
+    let mut state = ClientState::default();
+    state.apply_session_snapshot(SessionSnapshot {
+        session: SessionRecord {
+            id: SESSION_ID,
+            name: "nested-split".to_owned(),
+            root_node_id: OUTER_SPLIT_ID,
+            floating_ids: Vec::new(),
+            focused_leaf_id: Some(INNER_FIRST_LEAF_ID),
+            focused_floating_id: None,
+            zoomed_node_id: None,
+            viewport: None,
+            base_index: None,
+            pane_titles: false,
+        },
+        nodes: vec![
+            split(
+                OUTER_SPLIT_ID,
+                None,
+                outer,
+                vec![OUTER_LEAF_ID, INNER_SPLIT_ID],
+            ),
+            buffer_view_node(OUTER_LEAF_ID, Some(OUTER_SPLIT_ID), BufferId(7)),
+            split(
+                INNER_SPLIT_ID,
+                Some(OUTER_SPLIT_ID),
+                inner,
+                vec![INNER_FIRST_LEAF_ID, INNER_SECOND_LEAF_ID],
+            ),
+            buffer_view_node(INNER_FIRST_LEAF_ID, Some(INNER_SPLIT_ID), BufferId(8)),
+            buffer_view_node(INNER_SECOND_LEAF_ID, Some(INNER_SPLIT_ID), BufferId(9)),
+        ],
+        buffers: vec![
+            buffer(7, Some(OUTER_LEAF_ID), "outer", ActivityState::Idle),
+            buffer(8, Some(INNER_FIRST_LEAF_ID), "first", ActivityState::Idle),
+            buffer(9, Some(INNER_SECOND_LEAF_ID), "second", ActivityState::Idle),
+        ],
+        floating: Vec::new(),
+    });
+    state
 }
 
 fn root_split_snapshot() -> SessionSnapshot {
