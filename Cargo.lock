@@ -565,7 +565,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embers-cli"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "assert_cmd",
@@ -592,7 +592,7 @@ dependencies = [
 
 [[package]]
 name = "embers-client"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "embers-core"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "embers-ghostty-backend"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "embers-client",
  "embers-core",
@@ -645,15 +645,15 @@ dependencies = [
 
 [[package]]
 name = "embers-ghostty-gen"
-version = "0.3.3"
+version = "0.4.0"
 
 [[package]]
 name = "embers-ghostty-sys"
-version = "0.3.3"
+version = "0.4.0"
 
 [[package]]
 name = "embers-protocol"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "embers-core",
  "flatbuffers",
@@ -663,11 +663,11 @@ dependencies = [
 
 [[package]]
 name = "embers-protocol-gen"
-version = "0.3.3"
+version = "0.4.0"
 
 [[package]]
 name = "embers-server"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "embers-test-support"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
  "base64",
