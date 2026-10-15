@@ -1,20 +1,24 @@
+use std::fmt;
 use std::path::Path;
 
 use embers_core::RequestId;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use crate::codec::{ProtocolError, decode_server_envelope, encode_client_message};
 use crate::framing::{FrameType, RawFrame, read_frame, write_frame};
-use crate::types::{ClientMessage, ServerEnvelope, ServerResponse};
+use crate::types::{ClientMessage, HelloRequest, ServerEnvelope, ServerResponse};
+use crate::{PROTOCOL_VERSION, SOFTWARE_VERSION};
 
 type ReaderItem = Result<Option<ServerEnvelope>, ProtocolError>;
 
-#[derive(Debug)]
+/// A connection to a server: over its socket ([`Self::connect`]), or over any
+/// byte stream to it, such as the pipes of `embers proxy` run over SSH
+/// ([`Self::from_split`]).
 pub struct ProtocolClient {
-    writer: OwnedWriteHalf,
+    writer: Box<dyn AsyncWrite + Send + Unpin>,
     reader_rx: mpsc::Receiver<ReaderItem>,
     reader_reached_eof: bool,
     reader_abort_handle: AbortHandle,
@@ -23,13 +27,58 @@ pub struct ProtocolClient {
 impl ProtocolClient {
     const READER_CHANNEL_CAPACITY: usize = 64;
 
+    /// Connect to the server at `path` and check that it speaks this
+    /// client's protocol (see [`Self::handshake`]).
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self, ProtocolError> {
         let stream = UnixStream::connect(path).await?;
-        Ok(Self::from_stream(stream))
+        let mut client = Self::from_stream(stream);
+        client.handshake().await?;
+        Ok(client)
+    }
+
+    /// Tell the server which protocol this client speaks and refuse a server
+    /// that speaks another. Answered before any other request is sent, so its
+    /// request id cannot collide with theirs.
+    pub async fn handshake(&mut self) -> Result<(), ProtocolError> {
+        let hello = ClientMessage::Hello(HelloRequest {
+            request_id: RequestId(0),
+            protocol_version: PROTOCOL_VERSION,
+            software_version: SOFTWARE_VERSION.to_owned(),
+        });
+        match self.request(&hello).await? {
+            ServerResponse::Hello(response) if response.protocol_version == PROTOCOL_VERSION => {
+                Ok(())
+            }
+            ServerResponse::Hello(response) => Err(ProtocolError::IncompatibleServer {
+                client_version: SOFTWARE_VERSION.to_owned(),
+                client_protocol: PROTOCOL_VERSION,
+                server_version: response.software_version,
+                server_protocol: response.protocol_version,
+            }),
+            // A server from before the handshake cannot decode the request
+            // and answers it with an error.
+            ServerResponse::Error(_) => Err(ProtocolError::ServerPredatesHandshake {
+                client_version: SOFTWARE_VERSION.to_owned(),
+            }),
+            _ => Err(ProtocolError::InvalidMessage(
+                "server answered the version check with another response",
+            )),
+        }
     }
 
     fn from_stream(stream: UnixStream) -> Self {
         let (reader, writer) = stream.into_split();
+        Self::from_split(reader, writer)
+    }
+
+    /// A client reading the server's frames from `reader` and writing its own
+    /// to `writer`. Unlike [`Self::connect`] it does not check the server's
+    /// version; call [`Self::handshake`] before any other request.
+    pub fn from_split<R, W>(reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
         let (reader_tx, reader_rx) = mpsc::channel(Self::READER_CHANNEL_CAPACITY);
         let reader_task = tokio::spawn(async move {
             Self::run_reader(reader, reader_tx).await;
@@ -37,14 +86,17 @@ impl ProtocolClient {
         let reader_abort_handle = reader_task.abort_handle();
 
         Self {
-            writer,
+            writer: Box::new(writer),
             reader_rx,
             reader_reached_eof: false,
             reader_abort_handle,
         }
     }
 
-    async fn run_reader(mut reader: OwnedReadHalf, reader_tx: mpsc::Sender<ReaderItem>) {
+    async fn run_reader<R>(mut reader: R, reader_tx: mpsc::Sender<ReaderItem>)
+    where
+        R: AsyncRead + Unpin,
+    {
         loop {
             let next = match read_frame(&mut reader).await {
                 Ok(Some(frame)) => Self::decode_frame(frame).map(Some),
@@ -146,6 +198,15 @@ impl ProtocolClient {
     }
 }
 
+impl fmt::Debug for ProtocolClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProtocolClient")
+            .field("reader_reached_eof", &self.reader_reached_eof)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for ProtocolClient {
     fn drop(&mut self) {
         self.reader_abort_handle.abort();
@@ -175,12 +236,107 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio::time::{Duration, timeout};
 
-    use crate::codec::{ProtocolError, encode_server_envelope};
+    use crate::codec::{ProtocolError, decode_client_message, encode_server_envelope};
     use crate::framing::{FrameType, RawFrame, read_frame, write_frame};
     use crate::types::{
-        ClientMessage, ErrorResponse, PingRequest, ServerEnvelope, ServerEvent, ServerResponse,
-        SessionClosedEvent,
+        ClientMessage, ErrorResponse, HelloResponse, PingRequest, ServerEnvelope, ServerEvent,
+        ServerResponse, SessionClosedEvent,
     };
+    use crate::{PROTOCOL_VERSION, SOFTWARE_VERSION};
+
+    /// Read the client's first request, check that it is the version check,
+    /// and answer it with `response`.
+    async fn answer_hello(mut server: UnixStream, response: ServerResponse) {
+        let frame = read_frame(&mut server)
+            .await
+            .expect("read request frame")
+            .expect("request frame");
+        match decode_client_message(&frame.payload).expect("decode request") {
+            ClientMessage::Hello(hello) => {
+                assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(hello.software_version, SOFTWARE_VERSION);
+            }
+            other => panic!("expected the version check first, got {other:?}"),
+        }
+        let payload =
+            encode_server_envelope(&ServerEnvelope::Response(response)).expect("encode response");
+        let frame = RawFrame::new(FrameType::Response, frame.request_id, payload);
+        write_frame(&mut server, &frame)
+            .await
+            .expect("write response frame");
+    }
+
+    #[tokio::test]
+    async fn handshake_accepts_a_server_speaking_the_same_protocol() {
+        let (server, client_stream) = UnixStream::pair().expect("create unix stream pair");
+        let mut client = ProtocolClient::from_stream(client_stream);
+        let server_task = tokio::spawn(answer_hello(
+            server,
+            ServerResponse::Hello(HelloResponse {
+                request_id: RequestId(0),
+                protocol_version: PROTOCOL_VERSION,
+                software_version: "some other release".to_owned(),
+            }),
+        ));
+
+        client.handshake().await.expect("handshake succeeds");
+        server_task.await.expect("server task joins");
+    }
+
+    #[tokio::test]
+    async fn handshake_refuses_a_server_speaking_another_protocol() {
+        let (server, client_stream) = UnixStream::pair().expect("create unix stream pair");
+        let mut client = ProtocolClient::from_stream(client_stream);
+        let server_task = tokio::spawn(answer_hello(
+            server,
+            ServerResponse::Hello(HelloResponse {
+                request_id: RequestId(0),
+                protocol_version: PROTOCOL_VERSION + 1,
+                software_version: "9.9.9".to_owned(),
+            }),
+        ));
+
+        let error = client.handshake().await.expect_err("handshake fails");
+        match &error {
+            ProtocolError::IncompatibleServer {
+                server_version,
+                server_protocol,
+                ..
+            } => {
+                assert_eq!(server_version, "9.9.9");
+                assert_eq!(*server_protocol, PROTOCOL_VERSION + 1);
+            }
+            other => panic!("expected an incompatible server, got {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("9.9.9"), "{message}");
+        assert!(message.contains(SOFTWARE_VERSION), "{message}");
+        server_task.await.expect("server task joins");
+    }
+
+    #[tokio::test]
+    async fn handshake_refuses_a_server_from_before_the_handshake() {
+        let (server, client_stream) = UnixStream::pair().expect("create unix stream pair");
+        let mut client = ProtocolClient::from_stream(client_stream);
+        // What an older server answers a request kind it cannot decode with.
+        let server_task = tokio::spawn(answer_hello(
+            server,
+            ServerResponse::Error(ErrorResponse {
+                request_id: Some(RequestId(0)),
+                error: WireError::new(
+                    ErrorCode::ProtocolViolation,
+                    "invalid message: unexpected client message kind",
+                ),
+            }),
+        ));
+
+        let error = client.handshake().await.expect_err("handshake fails");
+        assert!(
+            matches!(error, ProtocolError::ServerPredatesHandshake { .. }),
+            "{error:?}"
+        );
+        server_task.await.expect("server task joins");
+    }
 
     #[tokio::test]
     async fn request_accepts_unscoped_error_response() {

@@ -101,6 +101,34 @@ fn remain_on_exit_from_env() -> RemainOnExit {
         .unwrap_or_default()
 }
 
+/// Environment variable replacing [`DEFAULT_REMOTE_COMMAND`], split on
+/// whitespace.
+pub const REMOTE_COMMAND_ENV_VAR: &str = "EMBERS_REMOTE_COMMAND";
+/// What stands for the host in the remote command.
+pub const REMOTE_HOST_PLACEHOLDER: &str = "{host}";
+/// The command the server runs to reach the embers server of another host,
+/// for buffers that run there: its standard input and output must reach that
+/// server, as `embers proxy` gives them.
+pub const DEFAULT_REMOTE_COMMAND: [&str; 4] = ["ssh", REMOTE_HOST_PLACEHOLDER, "embers", "proxy"];
+
+/// The remote command from [`REMOTE_COMMAND_ENV_VAR`], or
+/// [`DEFAULT_REMOTE_COMMAND`] when it is unset or blank.
+fn remote_command_from_env() -> Vec<String> {
+    let command = std::env::var(REMOTE_COMMAND_ENV_VAR)
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if command.is_empty() {
+        DEFAULT_REMOTE_COMMAND.map(str::to_owned).to_vec()
+    } else {
+        command
+    }
+}
+
 /// Environment variable turning restore of panes whose keeper is gone on or off.
 pub const RESTORE_ENV_VAR: &str = "EMBERS_RESTORE";
 /// Environment variable replacing [`DEFAULT_RESTORE_COMMANDS`].
@@ -188,6 +216,10 @@ pub struct ServerConfig {
     /// Whether exited buffers that do not set the `remain-on-exit` option
     /// stay in their views.
     pub remain_on_exit: RemainOnExit,
+    /// The command reaching another host's embers server, with
+    /// [`REMOTE_HOST_PLACEHOLDER`] standing for the host (see
+    /// [`DEFAULT_REMOTE_COMMAND`]).
+    pub remote_command: Vec<String>,
 }
 
 impl ServerConfig {
@@ -215,6 +247,7 @@ impl ServerConfig {
             limits: ResourceLimits::from_env(),
             restore: RestoreConfig::from_env(),
             remain_on_exit: remain_on_exit_from_env(),
+            remote_command: remote_command_from_env(),
         }
     }
 

@@ -41,6 +41,21 @@ pub enum ProtocolError {
     },
     #[error("reader task exited unexpectedly")]
     ReaderTaskExited,
+    #[error(
+        "the server runs embers {server_version} (protocol {server_protocol}), \
+         which this client, embers {client_version} (protocol {client_protocol}), cannot talk to"
+    )]
+    IncompatibleServer {
+        client_version: String,
+        client_protocol: u32,
+        server_version: String,
+        server_protocol: u32,
+    },
+    #[error(
+        "the server runs an embers release older than this client's ({client_version}), \
+         from before the version check, and cannot be talked to"
+    )]
+    ServerPredatesHandshake { client_version: String },
 }
 
 fn required<T>(value: Option<T>, field: &'static str) -> Result<T, ProtocolError> {
@@ -306,6 +321,8 @@ fn validate_buffer_request(req: &BufferRequest) -> Result<(), ProtocolError> {
         }
         BufferRequest::Get { buffer_id, .. }
         | BufferRequest::Inspect { buffer_id, .. }
+        | BufferRequest::Watch { buffer_id, .. }
+        | BufferRequest::Unwatch { buffer_id, .. }
         | BufferRequest::Detach { buffer_id, .. }
         | BufferRequest::Kill { buffer_id, .. }
         | BufferRequest::Capture { buffer_id, .. }
@@ -936,6 +953,7 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
     let mut builder = FlatBufferBuilder::new();
 
     let envelope = match message {
+        ClientMessage::Hello(req) => encode_hello_request(&mut builder, req),
         ClientMessage::Ping(req) => encode_ping_request(&mut builder, req),
         ClientMessage::Session(req) => encode_session_request(&mut builder, req)?,
         ClientMessage::Buffer(req) => encode_buffer_request(&mut builder, req)?,
@@ -957,6 +975,29 @@ pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>, Protoco
 
     builder.finish(envelope, Some("EMBR"));
     Ok(builder.finished_data().to_vec())
+}
+
+fn encode_hello_request<'a>(
+    builder: &mut FlatBufferBuilder<'a>,
+    req: &HelloRequest,
+) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
+    let software_version = builder.create_string(&req.software_version);
+    let hello_request = fb::HelloRequest::create(
+        builder,
+        &fb::HelloRequestArgs {
+            protocol_version: req.protocol_version,
+            software_version: Some(software_version),
+        },
+    );
+    fb::Envelope::create(
+        builder,
+        &fb::EnvelopeArgs {
+            request_id: req.request_id.into(),
+            kind: fb::MessageKind::HelloRequest,
+            hello_request: Some(hello_request),
+            ..Default::default()
+        },
+    )
 }
 
 fn encode_ping_request<'a>(
@@ -1363,6 +1404,40 @@ fn encode_buffer_request<'a>(
             None,
             None,
         ),
+        BufferRequest::Watch { buffer_id, .. } => (
+            fb::BufferOp::Watch,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
+        BufferRequest::Unwatch { buffer_id, .. } => (
+            fb::BufferOp::Unwatch,
+            (*buffer_id).into(),
+            0,
+            0,
+            false,
+            false,
+            false,
+            0,
+            0,
+            fb::BufferHistoryScopeWire::Full,
+            fb::BufferHistoryPlacementWire::Tab,
+            None,
+            None,
+            None,
+            None,
+        ),
         BufferRequest::Inspect { buffer_id, .. } => (
             fb::BufferOp::Inspect,
             (*buffer_id).into(),
@@ -1623,6 +1698,12 @@ fn encode_buffer_request<'a>(
         } => *size,
         _ => PtySize::new(0, 0),
     };
+    let host = match req {
+        BufferRequest::Create {
+            host: Some(host), ..
+        } => Some(builder.create_string(host)),
+        _ => None,
+    };
     let buffer_req = fb::BufferRequest::create(
         builder,
         &fb::BufferRequestArgs {
@@ -1648,6 +1729,7 @@ fn encode_buffer_request<'a>(
             pty_rows: pty_size.rows,
             pty_pixel_width: pty_size.pixel_width,
             pty_pixel_height: pty_size.pixel_height,
+            host,
         },
     );
 
@@ -1835,7 +1917,10 @@ fn validate_session_snapshot(snapshot: &SessionSnapshot) -> Result<(), ProtocolE
 
 fn validate_server_response(response: &ServerResponse) -> Result<(), ProtocolError> {
     match response {
-        ServerResponse::Pong(_) | ServerResponse::Ok(_) | ServerResponse::Error(_) => Ok(()),
+        ServerResponse::Hello(_)
+        | ServerResponse::Pong(_)
+        | ServerResponse::Ok(_)
+        | ServerResponse::Error(_) => Ok(()),
         ServerResponse::Sessions(response) => {
             for session in &response.sessions {
                 validate_session_record(session)?;
@@ -2995,6 +3080,25 @@ fn encode_server_response<'a>(
     response: &ServerResponse,
 ) -> flatbuffers::WIPOffset<fb::Envelope<'a>> {
     match response {
+        ServerResponse::Hello(r) => {
+            let software_version = builder.create_string(&r.software_version);
+            let hello = fb::HelloResponse::create(
+                builder,
+                &fb::HelloResponseArgs {
+                    protocol_version: r.protocol_version,
+                    software_version: Some(software_version),
+                },
+            );
+            fb::Envelope::create(
+                builder,
+                &fb::EnvelopeArgs {
+                    request_id: r.request_id.into(),
+                    kind: fb::MessageKind::HelloResponse,
+                    hello_response: Some(hello),
+                    ..Default::default()
+                },
+            )
+        }
         ServerResponse::Pong(r) => {
             let payload = builder.create_string(&r.payload);
             let pong = fb::PingResponse::create(
@@ -3783,6 +3887,7 @@ fn encode_buffer_record<'a>(
         .pipe
         .as_ref()
         .map(|pipe| encode_buffer_pipe_record(builder, pipe));
+    let host = record.host.as_ref().map(|host| builder.create_string(host));
 
     fb::BufferRecord::create(
         builder,
@@ -3817,6 +3922,8 @@ fn encode_buffer_record<'a>(
             user_option_keys: Some(user_option_keys),
             user_option_values: Some(user_option_values),
             foreground_command,
+            bell_sequence: record.bell_sequence,
+            host,
         },
     )
 }
@@ -4028,6 +4135,16 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
     let request_id = RequestId(envelope.request_id());
 
     match envelope.kind() {
+        fb::MessageKind::HelloRequest => {
+            let req = required(envelope.hello_request(), "hello_request")?;
+            let software_version =
+                required(req.software_version(), "hello_request.software_version")?;
+            Ok(ClientMessage::Hello(HelloRequest {
+                request_id,
+                protocol_version: req.protocol_version(),
+                software_version: software_version.to_owned(),
+            }))
+        }
         fb::MessageKind::PingRequest => {
             let req = required(envelope.ping_request(), "ping_request")?;
             let payload = required(req.payload(), "ping_request.payload")?;
@@ -4201,6 +4318,7 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                         env,
                         size,
                         session_id: (req.session_id() != 0).then(|| SessionId(req.session_id())),
+                        host: req.host().map(str::to_owned),
                     }
                 }
                 fb::BufferOp::List => BufferRequest::List {
@@ -4214,6 +4332,20 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ProtocolErro
                     detached_only: req.detached_only(),
                 },
                 fb::BufferOp::Get => BufferRequest::Get {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Watch => BufferRequest::Watch {
+                    request_id,
+                    buffer_id: decode_required_buffer_id(
+                        req.buffer_id(),
+                        "buffer_request.buffer_id",
+                    )?,
+                },
+                fb::BufferOp::Unwatch => BufferRequest::Unwatch {
                     request_id,
                     buffer_id: decode_required_buffer_id(
                         req.buffer_id(),
@@ -4735,6 +4867,18 @@ pub fn decode_server_envelope(bytes: &[u8]) -> Result<ServerEnvelope, ProtocolEr
     let envelope = fb::root_as_envelope(bytes)?;
 
     match envelope.kind() {
+        fb::MessageKind::HelloResponse => {
+            let resp = required(envelope.hello_response(), "hello_response")?;
+            let software_version =
+                required(resp.software_version(), "hello_response.software_version")?;
+            Ok(ServerEnvelope::Response(ServerResponse::Hello(
+                HelloResponse {
+                    request_id: RequestId(envelope.request_id()),
+                    protocol_version: resp.protocol_version(),
+                    software_version: software_version.to_owned(),
+                },
+            )))
+        }
         fb::MessageKind::PingResponse => {
             let resp = required(envelope.ping_response(), "ping_response")?;
             let payload = required(resp.payload(), "ping_response.payload")?;
@@ -5323,6 +5467,8 @@ fn decode_buffer_record(record: fb::BufferRecord) -> Result<BufferRecord, Protoc
         env,
         user_options,
         foreground_command,
+        bell_sequence: record.bell_sequence(),
+        host: record.host().map(str::to_owned),
     };
     record
         .validate()
@@ -5630,6 +5776,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         };
 
         let error = record
@@ -5670,6 +5818,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: Default::default(),
             foreground_command: None,
+            bell_sequence: 0,
+            host: None,
         };
 
         let error = record
@@ -6073,6 +6223,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(0), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6112,6 +6264,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(8), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6152,6 +6306,8 @@ mod tests {
                         env: Default::default(),
                         user_options: Default::default(),
                         foreground_command: None,
+                        bell_sequence: 0,
+                        host: None,
                     },
                     location: BufferLocation::detached(BufferId(7)),
                     at_root_tab: false,
@@ -6182,6 +6338,8 @@ mod tests {
                         env: Default::default(),
                         user_options: Default::default(),
                         foreground_command: None,
+                        bell_sequence: 0,
+                        host: None,
                     },
                     location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                     at_root_tab: false,
@@ -6211,6 +6369,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 at_root_tab: false,
@@ -6260,6 +6420,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location: BufferLocation::floating(
                     BufferId(7),
@@ -6304,6 +6466,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
                 true,
@@ -6344,6 +6508,8 @@ mod tests {
                 env: Default::default(),
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             BufferLocation::session(BufferId(7), SessionId(2), NodeId(3)),
             false,
@@ -6381,6 +6547,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6408,6 +6576,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6450,6 +6620,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6477,6 +6649,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))
@@ -6579,6 +6753,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
             }),
         ))

@@ -25,6 +25,24 @@ pub struct PingResponse {
     pub payload: String,
 }
 
+/// The versions a client sends first, before any other request (see
+/// [`crate::PROTOCOL_VERSION`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloRequest {
+    pub request_id: RequestId,
+    pub protocol_version: u32,
+    /// The release the client was built from, for error messages.
+    pub software_version: String,
+}
+
+/// The server's answer to a [`HelloRequest`]: its own versions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HelloResponse {
+    pub request_id: RequestId,
+    pub protocol_version: u32,
+    pub software_version: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRequest {
     Create {
@@ -156,6 +174,9 @@ pub enum BufferRequest {
         /// The session the buffer is created for. Its environment (see
         /// `SessionRequest::SetEnvironment`) is applied under `env`.
         session_id: Option<SessionId>,
+        /// The machine to run the buffer on, through its own embers server.
+        /// `None` runs it on this server.
+        host: Option<String>,
     },
     List {
         request_id: RequestId,
@@ -168,6 +189,18 @@ pub enum BufferRequest {
         buffer_id: BufferId,
     },
     Inspect {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    /// Also send this connection the buffer's clipboard writes and
+    /// passthrough, which otherwise go only to the clients whose current
+    /// session shows it: a connection that shows the buffer some other way,
+    /// such as another server showing a buffer of this one.
+    Watch {
+        request_id: RequestId,
+        buffer_id: BufferId,
+    },
+    Unwatch {
         request_id: RequestId,
         buffer_id: BufferId,
     },
@@ -236,6 +269,8 @@ impl BufferRequest {
             | Self::List { request_id, .. }
             | Self::Get { request_id, .. }
             | Self::Inspect { request_id, .. }
+            | Self::Watch { request_id, .. }
+            | Self::Unwatch { request_id, .. }
             | Self::Detach { request_id, .. }
             | Self::Kill { request_id, .. }
             | Self::Capture { request_id, .. }
@@ -720,6 +755,7 @@ impl ClientRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientMessage {
+    Hello(HelloRequest),
     Ping(PingRequest),
     Session(SessionRequest),
     Buffer(BufferRequest),
@@ -735,6 +771,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     pub fn request_id(&self) -> RequestId {
         match self {
+            Self::Hello(request) => request.request_id,
             Self::Ping(request) => request.request_id,
             Self::KillServer(request) => request.request_id,
             Self::Session(request) => request.request_id(),
@@ -807,6 +844,10 @@ pub struct BufferRecord {
     /// is not the buffer's own process, for example a program its shell runs.
     /// `None` while the buffer's own process is in the foreground.
     pub foreground_command: Option<Vec<String>>,
+    /// Bells rung in the buffer since its program started.
+    pub bell_sequence: u64,
+    /// The machine whose embers server runs the buffer, `None` for this one.
+    pub host: Option<String>,
 }
 
 impl BufferRecord {
@@ -1185,6 +1226,7 @@ pub struct ScrollbackSliceResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerResponse {
+    Hello(HelloResponse),
     Pong(PingResponse),
     Ok(OkResponse),
     Error(ErrorResponse),
@@ -1208,6 +1250,7 @@ pub enum ServerResponse {
 impl ServerResponse {
     pub fn request_id(&self) -> Option<RequestId> {
         match self {
+            Self::Hello(response) => Some(response.request_id),
             Self::Pong(response) => Some(response.request_id),
             Self::Ok(response) => Some(response.request_id),
             Self::Error(response) => response.request_id,
@@ -1412,6 +1455,8 @@ mod tests {
             env: BTreeMap::new(),
             user_options: BTreeMap::new(),
             foreground_command: foreground.map(owned),
+            bell_sequence: 0,
+            host: None,
         }
     }
 

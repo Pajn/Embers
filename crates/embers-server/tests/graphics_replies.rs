@@ -84,6 +84,7 @@ impl Detection {
                     pixel_height: 432,
                 }),
                 session_id: None,
+                host: None,
             }))
             .await
             .expect("create buffer")

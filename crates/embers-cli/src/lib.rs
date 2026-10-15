@@ -5,6 +5,7 @@ mod formats;
 mod interactive;
 mod options;
 mod popup;
+mod proxy;
 mod sessions;
 mod target;
 
@@ -36,8 +37,9 @@ use embers_protocol::{
     BufferLocationResponse, BufferPipeRecord, BufferPipeState, BufferPipeStopReason,
     BufferRecordState, BufferRequest, BufferResponse, ClientMessage, ClientRecord, ClientRequest,
     FloatingRecord, FloatingRequest, FloatingResponse, KillServerRequest, NodeBreakDestination,
-    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ServerResponse, SessionRecord,
-    SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode, buffer_ids_in_subtree,
+    NodeJoinPlacement, NodeRequest, PingRequest, ProtocolClient, ProtocolError, ServerResponse,
+    SessionRecord, SessionRequest, SessionSnapshot, SnapshotResponse, SynchronizePanesMode,
+    buffer_ids_in_subtree,
 };
 use embers_server::{BUFFER_ENV_VAR, SOCKET_ENV_VAR, Server, ServerConfig};
 use tokio::time::{Duration, sleep};
@@ -125,6 +127,40 @@ fn parse_base_index_arg(value: &str) -> std::result::Result<u32, String> {
     })
 }
 
+/// Where a new pane's program runs.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct SpawnHost {
+    /// Run the program on HOST's embers server, reached with the server's
+    /// remote command (`ssh HOST embers proxy` unless `EMBERS_REMOTE_COMMAND`
+    /// says otherwise). Defaults to the host of the pane the new one is
+    /// created from.
+    #[arg(long, value_name = "HOST", conflicts_with = "local")]
+    pub host: Option<String>,
+    /// Run the program on this machine, even when the pane the new one is
+    /// created from runs on another host.
+    #[arg(long)]
+    pub local: bool,
+}
+
+impl SpawnHost {
+    /// The host to run on: `--host`, none with `--local`, or else the host of
+    /// `pane_id`, the pane the new one is created from.
+    fn resolve(self, snapshot: &SessionSnapshot, pane_id: Option<NodeId>) -> Option<String> {
+        if self.local {
+            return None;
+        }
+        self.host.or_else(|| {
+            let pane_id = pane_id?;
+            snapshot
+                .buffers
+                .iter()
+                .find(|buffer| buffer.attachment_node_id == Some(pane_id))?
+                .host
+                .clone()
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Attach {
@@ -162,6 +198,10 @@ pub enum Command {
         #[arg(default_value = "phase0")]
         payload: String,
     },
+    /// Connect standard input and output to the server, starting it if it is
+    /// not running, for a client that reaches the server through a pipe:
+    /// `ssh HOST embers proxy` connects to the server on HOST.
+    Proxy,
     /// Stop the server and end every program it runs. Unlike stopping the
     /// server with a signal, nothing is left for a restarted server to
     /// reattach to or restore.
@@ -175,7 +215,7 @@ pub enum Command {
         /// The old form's session name.
         #[arg(
             value_name = "NAME",
-            conflicts_with_all = ["session_name", "attach_existing", "cwd", "window_name", "width", "height", "print", "format", "command"]
+            conflicts_with_all = ["session_name", "attach_existing", "cwd", "window_name", "width", "height", "print", "format", "command", "host"]
         )]
         name: Option<String>,
         /// Do not attach (or, from the command prompt, switch) to the session.
@@ -193,6 +233,10 @@ pub enum Command {
         /// `#{pane_current_path}`. Defaults to the current directory.
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        /// Run the first window's program on HOST's embers server (see
+        /// `new-window --host`).
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
         /// Size to lay the session out at until a client shows it.
         #[arg(short = 'x', value_name = "COLUMNS")]
         width: Option<u16>,
@@ -314,6 +358,8 @@ pub enum Command {
         title: Option<String>,
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Keep the current window active.
         #[arg(short = 'd')]
         detached: bool,
@@ -380,6 +426,8 @@ pub enum Command {
         vertical: bool,
         #[arg(short = 'c', value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Keep the split pane focused.
         #[arg(short = 'd')]
         detached: bool,
@@ -576,6 +624,8 @@ pub enum Command {
         /// directory.
         #[arg(short = 'd', short_alias = 'c', long = "cwd", value_name = "DIR")]
         cwd: Option<String>,
+        #[command(flatten)]
+        spawn_host: SpawnHost,
         /// Print information about the popup once it is shown (`-F`, default
         /// `#{popup_id}`).
         #[arg(short = 'P')]
@@ -819,7 +869,8 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
         Command::Attach { .. }
         | Command::Serve
         | Command::RuntimeKeeper { .. }
-        | Command::Automation { .. } => Err(MuxError::invalid_input(
+        | Command::Automation { .. }
+        | Command::Proxy => Err(MuxError::invalid_input(
             "interactive commands must be dispatched through run()",
         )),
         Command::Ping { payload } => {
@@ -867,6 +918,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             session_name,
             window_name,
             cwd,
+            host,
             width,
             height,
             print,
@@ -880,6 +932,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     name: session_name,
                     window_name,
                     cwd,
+                    host,
                     width,
                     height,
                     format: print.then(|| format.unwrap_or_else(|| "#{session_name}:".to_owned())),
@@ -1363,6 +1416,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             target,
             title,
             cwd,
+            spawn_host,
             detached,
             print,
             format,
@@ -1372,14 +1426,32 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let command = buffer_command(command);
             let window_title = title.unwrap_or_else(|| default_title(&command, "window"));
             let snapshot = connection.session_snapshot(session.id).await?;
-            let cwd = connection
-                .spawn_cwd(cwd.as_deref(), Some(&snapshot))
-                .await?;
+            let source = snapshot.session.focused_leaf_id;
+            let host = spawn_host.resolve(&snapshot, source);
+            let cwd = match host {
+                Some(_) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&snapshot), source)
+                        .await?
+                }
+                None => {
+                    connection
+                        .spawn_cwd(cwd.as_deref(), Some(&snapshot))
+                        .await?
+                }
+            };
             let previous_window = current_root_window(&snapshot)?;
             let previous_focus = snapshot.session.focused_leaf_id;
             let size = spawn_size(&snapshot, PanePlacement::RootTab);
             let buffer = connection
-                .create_buffer(Some(window_title.clone()), command, cwd, size, session.id)
+                .create_buffer(
+                    Some(window_title.clone()),
+                    command,
+                    cwd,
+                    size,
+                    session.id,
+                    host,
+                )
                 .await?;
             let response = connection
                 .request(ClientMessage::Session(SessionRequest::AddRootTab {
@@ -1523,6 +1595,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             horizontal,
             vertical: _,
             cwd,
+            spawn_host,
             detached,
             print,
             format,
@@ -1538,9 +1611,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             } else {
                 SplitDirection::Vertical
             };
-            let cwd = connection
-                .spawn_cwd_for_pane(cwd.as_deref(), &pane.snapshot, pane.leaf_id)
-                .await?;
+            let host = spawn_host.resolve(&pane.snapshot, Some(pane.leaf_id));
+            let cwd = match host {
+                Some(_) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&pane.snapshot), Some(pane.leaf_id))
+                        .await?
+                }
+                None => {
+                    connection
+                        .spawn_cwd_for_pane(cwd.as_deref(), &pane.snapshot, pane.leaf_id)
+                        .await?
+                }
+            };
             let size = spawn_size(
                 &pane.snapshot,
                 PanePlacement::Split {
@@ -1555,6 +1638,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                     cwd,
                     size,
                     pane.snapshot.session.id,
+                    host,
                 )
                 .await?;
             let response = connection
@@ -1915,6 +1999,7 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             height,
             close_on_exit,
             cwd,
+            spawn_host,
             print,
             format,
             no_wait,
@@ -1944,13 +2029,19 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
                 }
                 None => default_title(&command, "popup"),
             };
-            let cwd = match pane_id {
-                Some(pane_id) => {
+            let host = spawn_host.resolve(&snapshot, pane_id);
+            let cwd = match (&host, pane_id) {
+                (Some(_), _) => {
+                    connection
+                        .remote_spawn_cwd(cwd.as_deref(), Some(&snapshot), pane_id)
+                        .await?
+                }
+                (None, Some(pane_id)) => {
                     connection
                         .spawn_cwd_for_pane(cwd.as_deref(), &snapshot, pane_id)
                         .await?
                 }
-                None => {
+                (None, None) => {
                     connection
                         .spawn_cwd(cwd.as_deref(), Some(&snapshot))
                         .await?
@@ -1967,7 +2058,14 @@ async fn execute_command(connection: &mut CliConnection, command: Command) -> Re
             let border = !no_border;
             let size = spawn_size(&snapshot, PanePlacement::Floating { geometry, border });
             let buffer = connection
-                .create_buffer(Some(popup_title.clone()), command, cwd, size, session_id)
+                .create_buffer(
+                    Some(popup_title.clone()),
+                    command,
+                    cwd,
+                    size,
+                    session_id,
+                    host,
+                )
                 .await?;
             // Keep the buffer once its command exits, so a waiting CLI can
             // read the exit status; `-EE` keeps it after a failure.
@@ -2255,11 +2353,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                     interactive::run(socket, None, config).await
                 }
                 Some(Command::Attach { target }) => {
-                    if !server_is_available(&socket).await {
-                        return Err(MuxError::not_found(format!(
-                            "no embers server is listening on {}",
-                            socket.display()
-                        )));
+                    if !server_is_available(&socket).await? {
+                        return Err(no_server_error(&socket));
                     }
                     let target = match target {
                         Some(target) => Some(
@@ -2279,6 +2374,10 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }) => {
                     ensure_server_process(&socket, &log_filter).await?;
                     automation::run(socket, target, all_sessions).await
+                }
+                Some(Command::Proxy) => {
+                    ensure_server_process(&socket, &log_filter).await?;
+                    proxy::run(&socket).await
                 }
                 Some(Command::Serve) => run_server(socket, &log_filter).await,
                 Some(Command::KillServer) => kill_server(&socket).await,
@@ -2395,16 +2494,71 @@ fn pid_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
-async fn server_is_available(socket_path: &Path) -> bool {
+/// Whether a server is listening on `socket_path`. A server that answers but
+/// speaks another protocol, such as one left running from an earlier build, is
+/// an error rather than an absent server: a server started in its place would
+/// find it holding the pid file and exit.
+async fn server_is_available(socket_path: &Path) -> Result<bool> {
     if validate_runtime_socket_parent(socket_path).is_err() {
-        return false;
+        return Ok(false);
     }
-    CliConnection::connect(socket_path).await.is_ok()
+    match ProtocolClient::connect(socket_path).await {
+        Ok(_) => Ok(true),
+        Err(
+            error @ (ProtocolError::IncompatibleServer { .. }
+            | ProtocolError::ServerPredatesHandshake { .. }),
+        ) => {
+            let stop = match server_process(socket_path) {
+                Some(pid) => format!("stop it with `kill {pid}`"),
+                None => "stop it with the embers it was started from".to_owned(),
+            };
+            Err(MuxError::conflict(format!(
+                "a server is listening on {}, but {error}; {stop}",
+                socket_path.display()
+            )))
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// The live process the pid file next to `socket_path` names: the server
+/// that owns the socket, whether or not it answers on it.
+fn server_process(socket_path: &Path) -> Option<u32> {
+    let pid = fs::read_to_string(pid_path(socket_path))
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    process_is_alive(pid).ok()?.then_some(pid)
+}
+
+/// A server process that owns `socket_path` but does not answer on it. A
+/// server started in its place would find it holding the pid file and exit.
+fn unresponsive_server_error(socket_path: &Path, pid: u32) -> MuxError {
+    MuxError::conflict(format!(
+        "embers server process {pid} owns {} but does not answer on it; stop it with `kill {pid}`",
+        socket_path.display()
+    ))
+}
+
+/// The error for a command that needs a running server when none answers on
+/// `socket_path`.
+fn no_server_error(socket_path: &Path) -> MuxError {
+    match server_process(socket_path) {
+        Some(pid) => unresponsive_server_error(socket_path, pid),
+        None => MuxError::not_found(format!(
+            "no embers server is listening on {}",
+            socket_path.display()
+        )),
+    }
 }
 
 async fn ensure_server_process(socket_path: &Path, log_filter: &str) -> Result<()> {
-    if server_is_available(socket_path).await {
+    if server_is_available(socket_path).await? {
         return Ok(());
+    }
+    if let Some(pid) = server_process(socket_path) {
+        return Err(unresponsive_server_error(socket_path, pid));
     }
 
     ensure_socket_parent(socket_path)?;
@@ -2426,19 +2580,22 @@ async fn ensure_server_process(socket_path: &Path, log_filter: &str) -> Result<(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut exited_status = None;
     loop {
-        if server_is_available(socket_path).await {
+        if server_is_available(socket_path).await? {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
             exited_status.get_or_insert(status);
-            if server_is_available(socket_path).await {
+            if server_is_available(socket_path).await? {
                 return Ok(());
             }
         }
         if tokio::time::Instant::now() >= deadline {
             if let Some(status) = exited_status {
+                let log_dir = socket_path.parent().unwrap_or(Path::new("."));
                 return Err(MuxError::transport(format!(
-                    "embers server exited before becoming ready with status {status}"
+                    "embers server exited before becoming ready with status {status}; \
+                     its log in {} says why",
+                    log_dir.display()
                 )));
             }
             let _ = child.kill();
@@ -2461,6 +2618,14 @@ async fn run_server(socket_path: PathBuf, log_filter: &str) -> Result<()> {
         embers_core::init_server_tracing(log_filter, dir)?;
         install_server_panic_hook();
     }
+    // A detached server's stderr is discarded, so write why it stopped to the
+    // log, where the client that started it points.
+    serve(socket_path).await.inspect_err(|error| {
+        tracing::error!("server stopped: {error}");
+    })
+}
+
+async fn serve(socket_path: PathBuf) -> Result<()> {
     let secure_parent = socket_path
         .parent()
         .is_some_and(|parent| parent == default_runtime_dir().as_path());
@@ -2481,15 +2646,12 @@ const KILL_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 /// wait until it no longer accepts connections, so a following command does
 /// not reach the old server. Never starts a server.
 async fn kill_server(socket_path: &Path) -> Result<()> {
-    if !server_is_available(socket_path).await {
-        return Err(MuxError::not_found(format!(
-            "no embers server is listening on {}",
-            socket_path.display()
-        )));
+    if !server_is_available(socket_path).await? {
+        return Err(no_server_error(socket_path));
     }
     execute(socket_path, Command::KillServer, None).await?;
     let deadline = tokio::time::Instant::now() + KILL_SERVER_TIMEOUT;
-    while server_is_available(socket_path).await {
+    while server_is_available(socket_path).await? {
         if tokio::time::Instant::now() >= deadline {
             return Err(MuxError::timeout(format!(
                 "embers server on {} did not stop",
@@ -2757,6 +2919,7 @@ fn interactive_command_name(command: &Command) -> Option<&'static str> {
         Command::Serve => Some("__serve"),
         Command::RuntimeKeeper { .. } => Some("__runtime-keeper"),
         Command::Automation { .. } => Some("automation"),
+        Command::Proxy => Some("proxy"),
         _ => None,
     }
 }
@@ -2983,6 +3146,7 @@ impl CliConnection {
         cwd: Option<String>,
         size: Option<PtySize>,
         session_id: SessionId,
+        host: Option<String>,
     ) -> Result<BufferResponse> {
         match self
             .request(ClientMessage::Buffer(BufferRequest::Create {
@@ -2993,6 +3157,7 @@ impl CliConnection {
                 env: Default::default(),
                 size,
                 session_id: Some(session_id),
+                host,
             }))
             .await?
         {
@@ -4198,6 +4363,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(7), SessionId(1), NodeId(3)),
         );
@@ -4236,6 +4403,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(8), SessionId(1), NodeId(4)),
         );
@@ -4281,6 +4450,8 @@ mod tests {
             pipe: None,
             user_options: Default::default(),
             foreground_command,
+            bell_sequence: 0,
+            host: None,
         };
         let location = BufferLocation::session(BufferId(10), SessionId(1), NodeId(6));
         let row = |details: &str, name: &str| {
@@ -4334,6 +4505,8 @@ mod tests {
                 pipe: None,
                 user_options: Default::default(),
                 foreground_command: None,
+                bell_sequence: 0,
+                host: None,
             },
             &BufferLocation::session(BufferId(9), SessionId(1), NodeId(5)),
         );

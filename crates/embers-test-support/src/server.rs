@@ -19,14 +19,19 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn start() -> Result<Self> {
+        Self::start_with(|_| {}).await
+    }
+
+    /// Start a server whose configuration `configure` adjusts first.
+    pub async fn start_with(configure: impl FnOnce(&mut ServerConfig)) -> Result<Self> {
         init_test_tracing();
         reap_stale_helper_processes();
 
         let tempdir = tempfile::tempdir()?;
         let socket_path = tempdir.path().join("mux.sock");
-        let handle = Server::new(ServerConfig::new(socket_path.clone()))
-            .start()
-            .await?;
+        let mut config = ServerConfig::new(socket_path.clone());
+        configure(&mut config);
+        let handle = Server::new(config).start().await?;
 
         Ok(Self {
             socket_path,

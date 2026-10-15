@@ -83,6 +83,7 @@ async fn create_buffer_with_command(
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer succeeds");

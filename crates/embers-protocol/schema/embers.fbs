@@ -13,6 +13,7 @@ enum MessageKind : ubyte {
   ClientRequest = 9,
   // Carries no table: the envelope's request_id is the whole request.
   KillServerRequest = 10,
+  HelloRequest = 11,
 
   PingResponse = 20,
   OkResponse = 21,
@@ -32,6 +33,7 @@ enum MessageKind : ubyte {
   BufferLocationResponse = 35,
   BufferWithLocationResponse = 36,
   EnvironmentResponse = 37,
+  HelloResponse = 38,
 
   SessionCreatedEvent = 40,
   SessionClosedEvent = 41,
@@ -103,6 +105,10 @@ enum BufferOp : ubyte {
   StartPipe = 12,
   StopPipe = 13,
   SetUserOption = 14,
+  // Also send this connection the buffer's clipboard writes and passthrough,
+  // which otherwise go only to clients showing its session.
+  Watch = 15,
+  Unwatch = 16,
 }
 
 enum NodeOp : ubyte {
@@ -234,6 +240,14 @@ table PingRequest {
   payload:string;
 }
 
+// The first request a client sends: the protocol version it speaks and the
+// release it was built from, so a server from another release is refused with
+// an error naming both instead of misreading its messages.
+table HelloRequest {
+  protocol_version:uint;
+  software_version:string;
+}
+
 table SessionRequest {
   op:SessionOp = Create (id: 0);
   session_id:ulong = 0 (id: 1);
@@ -278,6 +292,9 @@ table BufferRequest {
   pty_rows:ushort = 0 (id: 19);
   pty_pixel_width:ushort = 0 (id: 20);
   pty_pixel_height:ushort = 0 (id: 21);
+  // Create: the machine whose embers server runs the buffer, reached through
+  // the server's remote command. Absent for a buffer run by this server.
+  host:string (id: 22);
 }
 
 table NodeRequest {
@@ -361,6 +378,11 @@ table PingResponse {
   payload:string;
 }
 
+table HelloResponse {
+  protocol_version:uint;
+  software_version:string;
+}
+
 table OkResponse {}
 
 table ErrorResponse {
@@ -412,6 +434,12 @@ table BufferRecord {
   foreground_command:[string] (id: 24);
   pty_pixel_width:ushort = 0 (id: 25);
   pty_pixel_height:ushort = 0 (id: 26);
+  // Bells rung in the buffer since its program started, so a watcher can tell
+  // a new bell from other output once the buffer is already marked Bell.
+  bell_sequence:ulong = 0 (id: 27);
+  // The machine whose embers server runs the buffer; absent when it is this
+  // server.
+  host:string (id: 28);
 }
 
 table BufferPipeRecord {
@@ -784,6 +812,8 @@ table Envelope {
   environment_response:EnvironmentResponse (id: 40);
   display_message_event:DisplayMessageEvent (id: 41);
   passthrough_event:PassthroughEvent (id: 42);
+  hello_request:HelloRequest (id: 43);
+  hello_response:HelloResponse (id: 44);
 }
 
 root_type Envelope;

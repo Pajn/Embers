@@ -2597,6 +2597,12 @@ where
             )
             .map(|size| size.with_cell_size(self.host_cell_size))
         };
+        // Like `split-window`, a new pane runs on the host of the pane it is
+        // created from.
+        let host = presentation
+            .focused_buffer_id()
+            .and_then(|buffer_id| self.client.state().buffers.get(&buffer_id))
+            .and_then(|buffer| buffer.host.clone());
         match tree {
             TreeSpec::BufferCurrent => presentation
                 .focused_buffer_id()
@@ -2604,7 +2610,7 @@ where
                 .ok_or_else(|| MuxError::invalid_input("no current buffer is focused")),
             TreeSpec::BufferAttach { buffer_id } => Ok(ResolvedTreeBuffer::Existing(buffer_id)),
             TreeSpec::BufferSpawn(spec) => self
-                .create_buffer(spec, size(), session_id)
+                .create_buffer(spec, size(), session_id, host)
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
             TreeSpec::BufferEmpty => self
@@ -2617,6 +2623,7 @@ where
                     },
                     size(),
                     session_id,
+                    host,
                 )
                 .await
                 .map(ResolvedTreeBuffer::NewlySpawned),
@@ -2631,6 +2638,7 @@ where
         spec: crate::scripting::BufferSpawnSpec,
         size: Option<PtySize>,
         session_id: SessionId,
+        host: Option<String>,
     ) -> Result<BufferId> {
         let response = self
             .client
@@ -2642,6 +2650,7 @@ where
                 env: spec.env,
                 size,
                 session_id: Some(session_id),
+                host,
             }))
             .await?;
 
@@ -6221,6 +6230,8 @@ mod tests {
                     env: Default::default(),
                     user_options: Default::default(),
                     foreground_command: None,
+                    bell_sequence: 0,
+                    host: None,
                 },
                 location,
                 false,

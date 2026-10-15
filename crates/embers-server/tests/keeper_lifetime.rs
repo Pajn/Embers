@@ -117,6 +117,7 @@ async fn keepers_outlive_shutdown_but_exit_once_their_socket_is_removed() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -182,6 +183,7 @@ async fn keeper_of_killed_buffer_exits_once_no_server_is_attached() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -291,6 +293,7 @@ async fn kill_server_ends_programs_and_keepers_and_forgets_the_workspace() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -399,6 +402,7 @@ async fn exited_keepers_are_reaped_while_the_server_runs() {
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -469,6 +473,7 @@ async fn split_releasable_pane(
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await
@@ -555,6 +560,7 @@ async fn keeper_whose_child_exits_while_no_server_is_attached_waits_to_report_th
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         },
     )
     .await

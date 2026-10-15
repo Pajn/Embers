@@ -58,6 +58,7 @@ async fn create_echo_buffer(connection: &mut TestConnection, title: &str) -> Buf
             env: Default::default(),
             size: None,
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer request succeeds");
@@ -428,6 +429,7 @@ async fn resizing_a_buffer_updates_its_view_render_size() {
             env: Default::default(),
             size: Some(PtySize::new(97, 31)),
             session_id: None,
+            host: None,
         }))
         .await
         .expect("create buffer request succeeds");

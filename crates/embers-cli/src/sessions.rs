@@ -19,6 +19,8 @@ pub(crate) struct NewSession {
     pub name: Option<String>,
     pub window_name: Option<String>,
     pub cwd: Option<String>,
+    /// The host to run the first window's program on.
+    pub host: Option<String>,
     pub width: Option<u16>,
     pub height: Option<u16>,
     /// The `-F` format to print, when `-P` was given.
@@ -111,7 +113,13 @@ impl CliConnection {
             .await?;
             snapshot.session.viewport = Some(viewport);
         }
-        let cwd = self.spawn_cwd(args.cwd.as_deref(), None).await?;
+        let cwd = match args.host {
+            Some(_) => {
+                self.remote_spawn_cwd(args.cwd.as_deref(), None, None)
+                    .await?
+            }
+            None => self.spawn_cwd(args.cwd.as_deref(), None).await?,
+        };
         let command = buffer_command(args.command.clone());
         let title = args
             .window_name
@@ -119,7 +127,14 @@ impl CliConnection {
             .unwrap_or_else(|| default_title(&command, "shell"));
         let size = spawn_size(&snapshot, PanePlacement::RootTab);
         let buffer = self
-            .create_buffer(Some(title.clone()), command, cwd, size, session_id)
+            .create_buffer(
+                Some(title.clone()),
+                command,
+                cwd,
+                size,
+                session_id,
+                args.host.clone(),
+            )
             .await?;
         let response = self
             .request(ClientMessage::Session(SessionRequest::AddRootTab {

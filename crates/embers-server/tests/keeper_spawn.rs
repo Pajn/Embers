@@ -24,6 +24,7 @@ fn create_request(request_id: u64, command: &[&str]) -> ClientMessage {
         env: Default::default(),
         size: None,
         session_id: None,
+        host: None,
     })
 }
 

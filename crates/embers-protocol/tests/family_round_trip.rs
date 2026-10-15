@@ -110,6 +110,7 @@ fn client_message_families_round_trip() {
             env: std::collections::BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]),
             size: None,
             session_id: None,
+            host: None,
         }),
         ClientMessage::Buffer(BufferRequest::Create {
             request_id: RequestId(91),
@@ -124,6 +125,7 @@ fn client_message_families_round_trip() {
                 pixel_height: 540,
             }),
             session_id: Some(SessionId(10)),
+            host: Some("devbox".to_owned()),
         }),
         ClientMessage::Session(SessionRequest::SetEnvironment {
             request_id: RequestId(92),
@@ -182,6 +184,14 @@ fn client_message_families_round_trip() {
         ClientMessage::Buffer(BufferRequest::Get {
             request_id: RequestId(12),
             buffer_id: BufferId(20),
+        }),
+        ClientMessage::Buffer(BufferRequest::Watch {
+            request_id: RequestId(140),
+            buffer_id: BufferId(4),
+        }),
+        ClientMessage::Buffer(BufferRequest::Unwatch {
+            request_id: RequestId(141),
+            buffer_id: BufferId(4),
         }),
         ClientMessage::Buffer(BufferRequest::Inspect {
             request_id: RequestId(120),
@@ -501,6 +511,7 @@ fn sizes_must_be_non_zero_in_both_directions() {
         env: Default::default(),
         size: Some(PtySize::new(80, 0)),
         session_id: None,
+        host: None,
     });
     encode_client_message(&create).expect_err("zero-row pty size is rejected");
 
@@ -988,5 +999,7 @@ fn sample_buffer_record(
         env: std::collections::BTreeMap::from([("TERM".to_owned(), "xterm-256color".to_owned())]),
         user_options: std::collections::BTreeMap::from([("is-vim".to_owned(), "1".to_owned())]),
         foreground_command: (!is_helper).then(|| vec!["vim".to_owned(), "notes.txt".to_owned()]),
+        bell_sequence: 3,
+        host: (!is_helper).then(|| "devbox".to_owned()),
     }
 }

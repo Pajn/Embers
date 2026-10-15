@@ -10,6 +10,9 @@ The project is still early, but the shape is already close to a tmux-like workfl
 - Sessions, windows, panes, tab trees, splits, and floating popups
 - Durable terminal buffers that can be detached, reattached, moved, and captured
 - Layout saved as it changes and panes restored after a crash or reboot, tmux-resurrect style
+- Remote panes: a program run on another machine's embers server over SSH, shown in local
+  panes, windows and popups and reconnected when the connection drops (see
+  [`docs/commands.md`](docs/commands.md#remote-buffers))
 - Scrollback, visible snapshots, search, and a vi-style copy mode with mouse selection (see
   [`docs/copy-mode.md`](docs/copy-mode.md))
 - A session/window/pane picker, a command prompt that runs the CLI's commands,
@@ -131,7 +134,8 @@ Useful subcommand groups include:
 - `popup`: `display-popup` (`-B` for no frame, like tmux), `kill-popup`
 - `client`: `list-clients`, `detach-client`, `switch-client`, `display-message` (`-p` prints instead)
 - `server`: `kill-server` (stop the server and every program it runs; attached clients print
-  `[server exited]` and exit)
+  `[server exited]` and exit), `proxy` (connect standard input and output to the server, as in
+  `ssh HOST embers proxy`; see [`docs/commands.md`](docs/commands.md#proxy))
 
 As in tmux, `kill-pane`, `kill-window`, `kill-session` and `kill-popup` end the
 programs they show; pass `--detach` to keep them running as detached buffers

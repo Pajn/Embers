@@ -16,7 +16,7 @@ pub const ENUM_MIN_MESSAGE_KIND: u8 = 0;
 pub const ENUM_MAX_MESSAGE_KIND: u8 = 54;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MESSAGE_KIND: [MessageKind; 44] = [
+pub const ENUM_VALUES_MESSAGE_KIND: [MessageKind; 46] = [
   MessageKind::None,
   MessageKind::PingRequest,
   MessageKind::SessionRequest,
@@ -28,6 +28,7 @@ pub const ENUM_VALUES_MESSAGE_KIND: [MessageKind; 44] = [
   MessageKind::UnsubscribeRequest,
   MessageKind::ClientRequest,
   MessageKind::KillServerRequest,
+  MessageKind::HelloRequest,
   MessageKind::PingResponse,
   MessageKind::OkResponse,
   MessageKind::ErrorResponse,
@@ -46,6 +47,7 @@ pub const ENUM_VALUES_MESSAGE_KIND: [MessageKind; 44] = [
   MessageKind::BufferLocationResponse,
   MessageKind::BufferWithLocationResponse,
   MessageKind::EnvironmentResponse,
+  MessageKind::HelloResponse,
   MessageKind::SessionCreatedEvent,
   MessageKind::SessionClosedEvent,
   MessageKind::BufferCreatedEvent,
@@ -79,6 +81,7 @@ impl MessageKind {
   pub const UnsubscribeRequest: Self = Self(8);
   pub const ClientRequest: Self = Self(9);
   pub const KillServerRequest: Self = Self(10);
+  pub const HelloRequest: Self = Self(11);
   pub const PingResponse: Self = Self(20);
   pub const OkResponse: Self = Self(21);
   pub const ErrorResponse: Self = Self(22);
@@ -97,6 +100,7 @@ impl MessageKind {
   pub const BufferLocationResponse: Self = Self(35);
   pub const BufferWithLocationResponse: Self = Self(36);
   pub const EnvironmentResponse: Self = Self(37);
+  pub const HelloResponse: Self = Self(38);
   pub const SessionCreatedEvent: Self = Self(40);
   pub const SessionClosedEvent: Self = Self(41);
   pub const BufferCreatedEvent: Self = Self(42);
@@ -127,6 +131,7 @@ impl MessageKind {
     Self::UnsubscribeRequest,
     Self::ClientRequest,
     Self::KillServerRequest,
+    Self::HelloRequest,
     Self::PingResponse,
     Self::OkResponse,
     Self::ErrorResponse,
@@ -145,6 +150,7 @@ impl MessageKind {
     Self::BufferLocationResponse,
     Self::BufferWithLocationResponse,
     Self::EnvironmentResponse,
+    Self::HelloResponse,
     Self::SessionCreatedEvent,
     Self::SessionClosedEvent,
     Self::BufferCreatedEvent,
@@ -175,6 +181,7 @@ impl MessageKind {
       Self::UnsubscribeRequest => Some("UnsubscribeRequest"),
       Self::ClientRequest => Some("ClientRequest"),
       Self::KillServerRequest => Some("KillServerRequest"),
+      Self::HelloRequest => Some("HelloRequest"),
       Self::PingResponse => Some("PingResponse"),
       Self::OkResponse => Some("OkResponse"),
       Self::ErrorResponse => Some("ErrorResponse"),
@@ -193,6 +200,7 @@ impl MessageKind {
       Self::BufferLocationResponse => Some("BufferLocationResponse"),
       Self::BufferWithLocationResponse => Some("BufferWithLocationResponse"),
       Self::EnvironmentResponse => Some("EnvironmentResponse"),
+      Self::HelloResponse => Some("HelloResponse"),
       Self::SessionCreatedEvent => Some("SessionCreatedEvent"),
       Self::SessionClosedEvent => Some("SessionClosedEvent"),
       Self::BufferCreatedEvent => Some("BufferCreatedEvent"),
@@ -597,10 +605,10 @@ impl ::flatbuffers::SimpleToVerifyInSlice for SynchronizePanesModeWire {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_BUFFER_OP: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
-pub const ENUM_MAX_BUFFER_OP: u8 = 14;
+pub const ENUM_MAX_BUFFER_OP: u8 = 16;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 15] = [
+pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 17] = [
   BufferOp::Create,
   BufferOp::List,
   BufferOp::Get,
@@ -616,6 +624,8 @@ pub const ENUM_VALUES_BUFFER_OP: [BufferOp; 15] = [
   BufferOp::StartPipe,
   BufferOp::StopPipe,
   BufferOp::SetUserOption,
+  BufferOp::Watch,
+  BufferOp::Unwatch,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -638,9 +648,11 @@ impl BufferOp {
   pub const StartPipe: Self = Self(12);
   pub const StopPipe: Self = Self(13);
   pub const SetUserOption: Self = Self(14);
+  pub const Watch: Self = Self(15);
+  pub const Unwatch: Self = Self(16);
 
   pub const ENUM_MIN: u8 = 0;
-  pub const ENUM_MAX: u8 = 14;
+  pub const ENUM_MAX: u8 = 16;
   pub const ENUM_VALUES: &'static [Self] = &[
     Self::Create,
     Self::List,
@@ -657,6 +669,8 @@ impl BufferOp {
     Self::StartPipe,
     Self::StopPipe,
     Self::SetUserOption,
+    Self::Watch,
+    Self::Unwatch,
   ];
   /// Returns the variant's name or "" if unknown.
   pub fn variant_name(self) -> Option<&'static str> {
@@ -676,6 +690,8 @@ impl BufferOp {
       Self::StartPipe => Some("StartPipe"),
       Self::StopPipe => Some("StopPipe"),
       Self::SetUserOption => Some("SetUserOption"),
+      Self::Watch => Some("Watch"),
+      Self::Unwatch => Some("Unwatch"),
       _ => None,
     }
   }
@@ -3143,6 +3159,119 @@ impl ::core::fmt::Debug for PingRequest<'_> {
       ds.finish()
   }
 }
+pub enum HelloRequestOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct HelloRequest<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HelloRequest<'a> {
+  type Inner = HelloRequest<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HelloRequest<'a> {
+  pub const VT_PROTOCOL_VERSION: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SOFTWARE_VERSION: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HelloRequest { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HelloRequestArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HelloRequest<'bldr>> {
+    let mut builder = HelloRequestBuilder::new(_fbb);
+    if let Some(x) = args.software_version { builder.add_software_version(x); }
+    builder.add_protocol_version(args.protocol_version);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn protocol_version(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(HelloRequest::VT_PROTOCOL_VERSION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn software_version(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HelloRequest::VT_SOFTWARE_VERSION, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HelloRequest<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u32>("protocol_version", Self::VT_PROTOCOL_VERSION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("software_version", Self::VT_SOFTWARE_VERSION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HelloRequestArgs<'a> {
+    pub protocol_version: u32,
+    pub software_version: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for HelloRequestArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HelloRequestArgs {
+      protocol_version: 0,
+      software_version: None,
+    }
+  }
+}
+
+pub struct HelloRequestBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HelloRequestBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_protocol_version(&mut self, protocol_version: u32) {
+    self.fbb_.push_slot::<u32>(HelloRequest::VT_PROTOCOL_VERSION, protocol_version, 0);
+  }
+  #[inline]
+  pub fn add_software_version(&mut self, software_version: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HelloRequest::VT_SOFTWARE_VERSION, software_version);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HelloRequestBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HelloRequestBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HelloRequest<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HelloRequest<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HelloRequest");
+      ds.field("protocol_version", &self.protocol_version());
+      ds.field("software_version", &self.software_version());
+      ds.finish()
+  }
+}
 pub enum SessionRequestOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -3515,6 +3644,7 @@ impl<'a> BufferRequest<'a> {
   pub const VT_PTY_ROWS: ::flatbuffers::VOffsetT = 42;
   pub const VT_PTY_PIXEL_WIDTH: ::flatbuffers::VOffsetT = 44;
   pub const VT_PTY_PIXEL_HEIGHT: ::flatbuffers::VOffsetT = 46;
+  pub const VT_HOST: ::flatbuffers::VOffsetT = 48;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -3530,6 +3660,7 @@ impl<'a> BufferRequest<'a> {
     builder.add_start_line(args.start_line);
     builder.add_session_id(args.session_id);
     builder.add_buffer_id(args.buffer_id);
+    if let Some(x) = args.host { builder.add_host(x); }
     if let Some(x) = args.user_option_value { builder.add_user_option_value(x); }
     if let Some(x) = args.user_option_key { builder.add_user_option_key(x); }
     if let Some(x) = args.env_values { builder.add_env_values(x); }
@@ -3706,6 +3837,13 @@ impl<'a> BufferRequest<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u16>(BufferRequest::VT_PTY_PIXEL_HEIGHT, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BufferRequest::VT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BufferRequest<'_> {
@@ -3736,6 +3874,7 @@ impl ::flatbuffers::Verifiable for BufferRequest<'_> {
      .visit_field::<u16>("pty_rows", Self::VT_PTY_ROWS, false)?
      .visit_field::<u16>("pty_pixel_width", Self::VT_PTY_PIXEL_WIDTH, false)?
      .visit_field::<u16>("pty_pixel_height", Self::VT_PTY_PIXEL_HEIGHT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("host", Self::VT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -3763,6 +3902,7 @@ pub struct BufferRequestArgs<'a> {
     pub pty_rows: u16,
     pub pty_pixel_width: u16,
     pub pty_pixel_height: u16,
+    pub host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for BufferRequestArgs<'a> {
   #[inline]
@@ -3790,6 +3930,7 @@ impl<'a> Default for BufferRequestArgs<'a> {
       pty_rows: 0,
       pty_pixel_width: 0,
       pty_pixel_height: 0,
+      host: None,
     }
   }
 }
@@ -3888,6 +4029,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BufferRequestBuilder<'a, 'b, 
     self.fbb_.push_slot::<u16>(BufferRequest::VT_PTY_PIXEL_HEIGHT, pty_pixel_height, 0);
   }
   #[inline]
+  pub fn add_host(&mut self, host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BufferRequest::VT_HOST, host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BufferRequestBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BufferRequestBuilder {
@@ -3927,6 +4072,7 @@ impl ::core::fmt::Debug for BufferRequest<'_> {
       ds.field("pty_rows", &self.pty_rows());
       ds.field("pty_pixel_width", &self.pty_pixel_width());
       ds.field("pty_pixel_height", &self.pty_pixel_height());
+      ds.field("host", &self.host());
       ds.finish()
   }
 }
@@ -5367,6 +5513,119 @@ impl ::core::fmt::Debug for PingResponse<'_> {
       ds.finish()
   }
 }
+pub enum HelloResponseOffset {}
+#[derive(Copy, Clone, PartialEq)]
+
+pub struct HelloResponse<'a> {
+  pub _tab: ::flatbuffers::Table<'a>,
+}
+
+impl<'a> ::flatbuffers::Follow<'a> for HelloResponse<'a> {
+  type Inner = HelloResponse<'a>;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    Self { _tab: unsafe { ::flatbuffers::Table::new(buf, loc) } }
+  }
+}
+
+impl<'a> HelloResponse<'a> {
+  pub const VT_PROTOCOL_VERSION: ::flatbuffers::VOffsetT = 4;
+  pub const VT_SOFTWARE_VERSION: ::flatbuffers::VOffsetT = 6;
+
+  #[inline]
+  pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+    HelloResponse { _tab: table }
+  }
+  #[allow(unused_mut)]
+  pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr, A: ::flatbuffers::Allocator + 'bldr>(
+    _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+    args: &'args HelloResponseArgs<'args>
+  ) -> ::flatbuffers::WIPOffset<HelloResponse<'bldr>> {
+    let mut builder = HelloResponseBuilder::new(_fbb);
+    if let Some(x) = args.software_version { builder.add_software_version(x); }
+    builder.add_protocol_version(args.protocol_version);
+    builder.finish()
+  }
+
+
+  #[inline]
+  pub fn protocol_version(&self) -> u32 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u32>(HelloResponse::VT_PROTOCOL_VERSION, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn software_version(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(HelloResponse::VT_SOFTWARE_VERSION, None)}
+  }
+}
+
+impl ::flatbuffers::Verifiable for HelloResponse<'_> {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.visit_table(pos)?
+     .visit_field::<u32>("protocol_version", Self::VT_PROTOCOL_VERSION, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("software_version", Self::VT_SOFTWARE_VERSION, false)?
+     .finish();
+    Ok(())
+  }
+}
+pub struct HelloResponseArgs<'a> {
+    pub protocol_version: u32,
+    pub software_version: Option<::flatbuffers::WIPOffset<&'a str>>,
+}
+impl<'a> Default for HelloResponseArgs<'a> {
+  #[inline]
+  fn default() -> Self {
+    HelloResponseArgs {
+      protocol_version: 0,
+      software_version: None,
+    }
+  }
+}
+
+pub struct HelloResponseBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+  fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+  start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> HelloResponseBuilder<'a, 'b, A> {
+  #[inline]
+  pub fn add_protocol_version(&mut self, protocol_version: u32) {
+    self.fbb_.push_slot::<u32>(HelloResponse::VT_PROTOCOL_VERSION, protocol_version, 0);
+  }
+  #[inline]
+  pub fn add_software_version(&mut self, software_version: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(HelloResponse::VT_SOFTWARE_VERSION, software_version);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> HelloResponseBuilder<'a, 'b, A> {
+    let start = _fbb.start_table();
+    HelloResponseBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> ::flatbuffers::WIPOffset<HelloResponse<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    ::flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
+impl ::core::fmt::Debug for HelloResponse<'_> {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    let mut ds = f.debug_struct("HelloResponse");
+      ds.field("protocol_version", &self.protocol_version());
+      ds.field("software_version", &self.software_version());
+      ds.finish()
+  }
+}
 pub enum OkResponseOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -5884,6 +6143,8 @@ impl<'a> BufferRecord<'a> {
   pub const VT_FOREGROUND_COMMAND: ::flatbuffers::VOffsetT = 52;
   pub const VT_PTY_PIXEL_WIDTH: ::flatbuffers::VOffsetT = 54;
   pub const VT_PTY_PIXEL_HEIGHT: ::flatbuffers::VOffsetT = 56;
+  pub const VT_BELL_SEQUENCE: ::flatbuffers::VOffsetT = 58;
+  pub const VT_HOST: ::flatbuffers::VOffsetT = 60;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -5895,10 +6156,12 @@ impl<'a> BufferRecord<'a> {
     args: &'args BufferRecordArgs<'args>
   ) -> ::flatbuffers::WIPOffset<BufferRecord<'bldr>> {
     let mut builder = BufferRecordBuilder::new(_fbb);
+    builder.add_bell_sequence(args.bell_sequence);
     builder.add_helper_source_buffer_id(args.helper_source_buffer_id);
     builder.add_last_snapshot_seq(args.last_snapshot_seq);
     builder.add_attachment_node_id(args.attachment_node_id);
     builder.add_id(args.id);
+    if let Some(x) = args.host { builder.add_host(x); }
     if let Some(x) = args.foreground_command { builder.add_foreground_command(x); }
     if let Some(x) = args.user_option_values { builder.add_user_option_values(x); }
     if let Some(x) = args.user_option_keys { builder.add_user_option_keys(x); }
@@ -6115,6 +6378,20 @@ impl<'a> BufferRecord<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<u16>(BufferRecord::VT_PTY_PIXEL_HEIGHT, Some(0)).unwrap()}
   }
+  #[inline]
+  pub fn bell_sequence(&self) -> u64 {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<u64>(BufferRecord::VT_BELL_SEQUENCE, Some(0)).unwrap()}
+  }
+  #[inline]
+  pub fn host(&self) -> Option<&'a str> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<&str>>(BufferRecord::VT_HOST, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for BufferRecord<'_> {
@@ -6150,6 +6427,8 @@ impl ::flatbuffers::Verifiable for BufferRecord<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<&'_ str>>>>("foreground_command", Self::VT_FOREGROUND_COMMAND, false)?
      .visit_field::<u16>("pty_pixel_width", Self::VT_PTY_PIXEL_WIDTH, false)?
      .visit_field::<u16>("pty_pixel_height", Self::VT_PTY_PIXEL_HEIGHT, false)?
+     .visit_field::<u64>("bell_sequence", Self::VT_BELL_SEQUENCE, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<&str>>("host", Self::VT_HOST, false)?
      .finish();
     Ok(())
   }
@@ -6182,6 +6461,8 @@ pub struct BufferRecordArgs<'a> {
     pub foreground_command: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<&'a str>>>>,
     pub pty_pixel_width: u16,
     pub pty_pixel_height: u16,
+    pub bell_sequence: u64,
+    pub host: Option<::flatbuffers::WIPOffset<&'a str>>,
 }
 impl<'a> Default for BufferRecordArgs<'a> {
   #[inline]
@@ -6214,6 +6495,8 @@ impl<'a> Default for BufferRecordArgs<'a> {
       foreground_command: None,
       pty_pixel_width: 0,
       pty_pixel_height: 0,
+      bell_sequence: 0,
+      host: None,
     }
   }
 }
@@ -6332,6 +6615,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> BufferRecordBuilder<'a, 'b, A
     self.fbb_.push_slot::<u16>(BufferRecord::VT_PTY_PIXEL_HEIGHT, pty_pixel_height, 0);
   }
   #[inline]
+  pub fn add_bell_sequence(&mut self, bell_sequence: u64) {
+    self.fbb_.push_slot::<u64>(BufferRecord::VT_BELL_SEQUENCE, bell_sequence, 0);
+  }
+  #[inline]
+  pub fn add_host(&mut self, host: ::flatbuffers::WIPOffset<&'b  str>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(BufferRecord::VT_HOST, host);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> BufferRecordBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     BufferRecordBuilder {
@@ -6376,6 +6667,8 @@ impl ::core::fmt::Debug for BufferRecord<'_> {
       ds.field("foreground_command", &self.foreground_command());
       ds.field("pty_pixel_width", &self.pty_pixel_width());
       ds.field("pty_pixel_height", &self.pty_pixel_height());
+      ds.field("bell_sequence", &self.bell_sequence());
+      ds.field("host", &self.host());
       ds.finish()
   }
 }
@@ -12164,6 +12457,8 @@ impl<'a> Envelope<'a> {
   pub const VT_ENVIRONMENT_RESPONSE: ::flatbuffers::VOffsetT = 84;
   pub const VT_DISPLAY_MESSAGE_EVENT: ::flatbuffers::VOffsetT = 86;
   pub const VT_PASSTHROUGH_EVENT: ::flatbuffers::VOffsetT = 88;
+  pub const VT_HELLO_REQUEST: ::flatbuffers::VOffsetT = 90;
+  pub const VT_HELLO_RESPONSE: ::flatbuffers::VOffsetT = 92;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -12176,6 +12471,8 @@ impl<'a> Envelope<'a> {
   ) -> ::flatbuffers::WIPOffset<Envelope<'bldr>> {
     let mut builder = EnvelopeBuilder::new(_fbb);
     builder.add_request_id(args.request_id);
+    if let Some(x) = args.hello_response { builder.add_hello_response(x); }
+    if let Some(x) = args.hello_request { builder.add_hello_request(x); }
     if let Some(x) = args.passthrough_event { builder.add_passthrough_event(x); }
     if let Some(x) = args.display_message_event { builder.add_display_message_event(x); }
     if let Some(x) = args.environment_response { builder.add_environment_response(x); }
@@ -12523,6 +12820,20 @@ impl<'a> Envelope<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<PassthroughEvent>>(Envelope::VT_PASSTHROUGH_EVENT, None)}
   }
+  #[inline]
+  pub fn hello_request(&self) -> Option<HelloRequest<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<HelloRequest>>(Envelope::VT_HELLO_REQUEST, None)}
+  }
+  #[inline]
+  pub fn hello_response(&self) -> Option<HelloResponse<'a>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<HelloResponse>>(Envelope::VT_HELLO_RESPONSE, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -12574,6 +12885,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<EnvironmentResponse>>("environment_response", Self::VT_ENVIRONMENT_RESPONSE, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<DisplayMessageEvent>>("display_message_event", Self::VT_DISPLAY_MESSAGE_EVENT, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<PassthroughEvent>>("passthrough_event", Self::VT_PASSTHROUGH_EVENT, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<HelloRequest>>("hello_request", Self::VT_HELLO_REQUEST, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<HelloResponse>>("hello_response", Self::VT_HELLO_RESPONSE, false)?
      .finish();
     Ok(())
   }
@@ -12622,6 +12935,8 @@ pub struct EnvelopeArgs<'a> {
     pub environment_response: Option<::flatbuffers::WIPOffset<EnvironmentResponse<'a>>>,
     pub display_message_event: Option<::flatbuffers::WIPOffset<DisplayMessageEvent<'a>>>,
     pub passthrough_event: Option<::flatbuffers::WIPOffset<PassthroughEvent<'a>>>,
+    pub hello_request: Option<::flatbuffers::WIPOffset<HelloRequest<'a>>>,
+    pub hello_response: Option<::flatbuffers::WIPOffset<HelloResponse<'a>>>,
 }
 impl<'a> Default for EnvelopeArgs<'a> {
   #[inline]
@@ -12670,6 +12985,8 @@ impl<'a> Default for EnvelopeArgs<'a> {
       environment_response: None,
       display_message_event: None,
       passthrough_event: None,
+      hello_request: None,
+      hello_response: None,
     }
   }
 }
@@ -12852,6 +13169,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EnvelopeBuilder<'a, 'b, A> {
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<PassthroughEvent>>(Envelope::VT_PASSTHROUGH_EVENT, passthrough_event);
   }
   #[inline]
+  pub fn add_hello_request(&mut self, hello_request: ::flatbuffers::WIPOffset<HelloRequest<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<HelloRequest>>(Envelope::VT_HELLO_REQUEST, hello_request);
+  }
+  #[inline]
+  pub fn add_hello_response(&mut self, hello_response: ::flatbuffers::WIPOffset<HelloResponse<'b >>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<HelloResponse>>(Envelope::VT_HELLO_RESPONSE, hello_response);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> EnvelopeBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     EnvelopeBuilder {
@@ -12912,6 +13237,8 @@ impl ::core::fmt::Debug for Envelope<'_> {
       ds.field("environment_response", &self.environment_response());
       ds.field("display_message_event", &self.display_message_event());
       ds.field("passthrough_event", &self.passthrough_event());
+      ds.field("hello_request", &self.hello_request());
+      ds.field("hello_response", &self.hello_response());
       ds.finish()
   }
 }

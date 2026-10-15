@@ -92,6 +92,8 @@ pub struct Buffer {
     /// its shell runs. Saved so a restore can decide whether to run it again.
     pub foreground_command: Option<Vec<String>>,
     runtime_socket_path: Option<PathBuf>,
+    /// Where the buffer runs when its program runs on another host.
+    pub remote: Option<RemoteBuffer>,
     pub state: BufferState,
     pub attachment: BufferAttachment,
     pub pty_size: PtySize,
@@ -112,6 +114,12 @@ pub struct Buffer {
     /// before it was reported. Not persisted: each runtime counts from its
     /// own start, and attaching one sets this from its status.
     pub runtime_bell_sequence: u64,
+    /// Whether some connection watches the buffer (`BufferRequest::Watch`),
+    /// as another server does for a buffer it shows in a pane of its own.
+    /// Watching counts as being shown: an exited detached buffer stays while
+    /// it is watched, so the watcher can read its exit, and goes once nothing
+    /// watches it. Not persisted: connections do not outlive the server.
+    pub watched: bool,
 }
 
 /// Buffer option that keeps an exited buffer in its view instead of closing
@@ -166,6 +174,7 @@ impl Buffer {
             user_options: BTreeMap::new(),
             foreground_command: None,
             runtime_socket_path: None,
+            remote: None,
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
             pty_size: PtySize::new(80, 24),
@@ -176,6 +185,7 @@ impl Buffer {
             created_at: Timestamp::now(),
             ever_attached: false,
             runtime_bell_sequence: 0,
+            watched: false,
         }
     }
 
@@ -216,6 +226,7 @@ impl fmt::Debug for Buffer {
             .field("env", &self.env)
             .field("user_options", &self.user_options)
             .field("foreground_command", &self.foreground_command)
+            .field("remote", &self.remote)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
@@ -226,11 +237,12 @@ impl fmt::Debug for Buffer {
             .field("created_at", &self.created_at)
             .field("ever_attached", &self.ever_attached)
             .field("runtime_bell_sequence", &self.runtime_bell_sequence)
+            .field("watched", &self.watched)
             .finish()
     }
 }
 
-// `ever_attached` and `runtime_bell_sequence` are left out: they are
+// `ever_attached`, `runtime_bell_sequence` and `watched` are left out: they are
 // bookkeeping that is not persisted, so a saved and restored buffer still
 // compares equal to the original.
 impl PartialEq for Buffer {
@@ -241,6 +253,7 @@ impl PartialEq for Buffer {
             && self.cwd == other.cwd
             && self.env == other.env
             && self.user_options == other.user_options
+            && self.remote == other.remote
             && self.state == other.state
             && self.attachment == other.attachment
             && self.pty_size == other.pty_size
@@ -253,6 +266,15 @@ impl PartialEq for Buffer {
 }
 
 impl Eq for Buffer {}
+
+/// A buffer whose program runs on another host, as a detached buffer of that
+/// host's embers server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteBuffer {
+    pub host: String,
+    /// The buffer's id on the host's server, once it runs there.
+    pub buffer_id: Option<BufferId>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunningBuffer {

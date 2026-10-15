@@ -36,6 +36,8 @@ fn buffer(id: u64, attachment_node_id: Option<u64>, title: &str) -> BufferRecord
         pipe: None,
         user_options: Default::default(),
         foreground_command: None,
+        bell_sequence: 0,
+        host: None,
     }
 }
 
