@@ -98,9 +98,10 @@ fn terminal() -> (Term<VoidListener>, ansi::Processor) {
 /// The screen as the user sees it: each row's cells up to the last one that
 /// shows anything.
 ///
-/// A hidden glyph shows as a blank in each column it covers. So does half a
-/// wide character whose other half was overwritten or erased: the emulator
-/// keeps that half, but a terminal shows neither, as xterm does.
+/// A hidden glyph shows as a blank in each column it covers. Half a wide
+/// character whose other half was overwritten or erased shows as a plain
+/// blank: the emulator keeps that half, with its style, but a terminal shows
+/// neither half, and Ghostty clears the half that is left to a blank cell.
 fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
     let grid = term.grid();
     let columns = grid.columns();
@@ -120,12 +121,20 @@ fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
                     link: cell.hyperlink().map(|link| link.uri().to_owned()),
                 };
                 let blank_flags = cell.flags - Flags::WIDE_CHAR;
+                let broken_half = || Shown {
+                    text: " ".to_owned(),
+                    fg: Shade::Default,
+                    bg: Shade::Default,
+                    underline_color: None,
+                    flags: Flags::empty(),
+                    link: None,
+                };
                 if cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
                     continue;
                 }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     if column == 0 || !flags(column - 1).contains(Flags::WIDE_CHAR) {
-                        cells.push(shown(" ", blank_flags));
+                        cells.push(broken_half());
                     }
                     continue;
                 }
@@ -133,7 +142,7 @@ fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
                     && (column + 1 == columns
                         || !flags(column + 1).contains(Flags::WIDE_CHAR_SPACER))
                 {
-                    cells.push(shown(" ", blank_flags));
+                    cells.push(broken_half());
                     continue;
                 }
                 if cell.flags.contains(Flags::HIDDEN) {
@@ -150,7 +159,24 @@ fn screen(term: &Term<VoidListener>) -> Vec<Vec<Shown>> {
                     text.push(' ');
                 } else {
                     text.push(cell.c);
-                    text.extend(cell.zerowidth().into_iter().flatten());
+                    // Alacritty gives each part of an emoji sequence a cell
+                    // of its own, which Embers draws without the selector
+                    // and joiner so no host draws the part wide.
+                    text.extend(
+                        cell.zerowidth()
+                            .into_iter()
+                            .flatten()
+                            .filter(|&&ch| ch != '\u{FE0F}' && ch != '\u{200D}'),
+                    );
+                }
+                // Hosts disagree on a regional indicator alone, half a flag,
+                // which Embers draws as U+FFFD; whole flags it draws as they
+                // are. Either way only the columns can be compared.
+                if text
+                    .chars()
+                    .any(|ch| ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch))
+                {
+                    text = "\u{FFFD}".to_owned();
                 }
                 cells.push(shown(&text, cell.flags));
             }
@@ -264,6 +290,19 @@ fn wide_and_combining_characters() {
     assert_round_trip("漢字 e\u{301} 👍\r\n0123456789abcde漢".as_bytes());
 }
 
+/// Transgender flag: white flag, VS16, ZWJ, transgender symbol, VS16.
+const FLAG: &str = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+
+#[test]
+fn emoji_sequences_keep_the_columns_the_emulator_gave_them() {
+    // In the middle of a row, wrapped at its last column, overwritten from
+    // the start, and a symbol made wide by VS16 on its own.
+    assert_round_trip(format!("ab {FLAG} cd").as_bytes());
+    assert_round_trip(format!("0123456789abcde{FLAG}xy").as_bytes());
+    assert_round_trip(format!("\x1b[1;6H{FLAG}x\x1b[1;6Ha").as_bytes());
+    assert_round_trip("a \u{26A7}\u{FE0F} b \u{2764}\u{FE0F} c #\u{FE0F}\u{20E3}".as_bytes());
+}
+
 #[test]
 fn erase_with_background_color() {
     assert_round_trip(b"\x1b[44m\x1b[2J\x1b[Htext\x1b[0m");
@@ -278,7 +317,19 @@ fn screen_alignment_pattern() {
 fn step() -> impl Strategy<Value = Vec<u8>> {
     let text = prop::collection::vec(
         prop::sample::select(vec![
-            "a", "Z", " ", "~", "漢", "e\u{301}", "👍", "\t", "\r", "\n",
+            "a",
+            "Z",
+            " ",
+            "~",
+            "漢",
+            "e\u{301}",
+            "👍",
+            "\t",
+            "\r",
+            "\n",
+            FLAG,
+            "\u{26A7}\u{FE0F}",
+            "\u{1F1F8}",
         ]),
         1..8,
     )

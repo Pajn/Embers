@@ -1,0 +1,9 @@
+[package]
+name = "embers-ghostty-gen"
+description = "Regenerates the checked-in libghostty-vt bindings for embers-ghostty-sys."
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true

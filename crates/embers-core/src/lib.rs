@@ -18,6 +18,6 @@ pub use ids::{BufferId, ClientId, FloatingId, IdAllocator, NodeId, RequestId, Se
 pub use metadata::{ActivityState, EntityMetadata, Timestamp};
 pub use passthrough::{MAX_PASSTHROUGH_BYTES, PassthroughWrite};
 pub use snapshot::{
-    CellAttrs, CursorPosition, CursorShape, CursorState, Hyperlink, SnapshotLine, StyledRun,
-    TermColor, TerminalModes, TerminalSnapshot,
+    CellAttrs, CellSpan, Cells, CursorPosition, CursorShape, CursorState, Hyperlink, LineCell,
+    SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot, grapheme_width,
 };

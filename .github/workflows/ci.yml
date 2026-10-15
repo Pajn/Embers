@@ -9,6 +9,10 @@ on:
 env:
   FLATBUFFERS_VERSION: 25.12.19
   FLATBUFFERS_SHA256: 9f87066dc5dfa7fe02090b55bab5f3e55df03e32c9b0cdf229004ade7d091039
+  # Keep in step with ZIG_VERSION in crates/embers-ghostty-sys/ghostty_source.rs
+  # and BINDGEN_VERSION in crates/embers-ghostty-gen.
+  ZIG_VERSION: 0.16.0
+  BINDGEN_VERSION: 0.72.1
 
 jobs:
   fmt-lint:
@@ -19,10 +23,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Lint without Ghostty
+        run: cargo clippy -p embers-cli --no-default-features --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -34,6 +43,9 @@ jobs:
           sha256: ${{ env.FLATBUFFERS_SHA256 }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Install mdBook
         run: cargo install mdbook --version 0.5.2 --locked
       - name: Run unit and integration tests
@@ -67,3 +79,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored PTY smoke test
         run: cargo test -p embers-test-support pty_round_trips_input -- --ignored
+
+  # The libghostty-vt bindings are generated from the pinned Ghostty commit's
+  # headers and checked in.
+  ghostty-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Install bindgen
+        run: cargo install bindgen-cli --version "${BINDGEN_VERSION}" --locked
+      - name: Regenerate libghostty-vt bindings
+        run: cargo gen-ghostty
+      - name: Verify checked-in libghostty-vt bindings
+        run: |
+          status="$(git status --porcelain -- crates/embers-ghostty-sys/src/bindings.rs)"
+          if [ -n "$status" ]; then
+            echo "libghostty-vt bindings are out of date after regeneration:"
+            git diff --stat -- crates/embers-ghostty-sys/src/bindings.rs
+            exit 1
+          fi

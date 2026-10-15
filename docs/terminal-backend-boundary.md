@@ -53,6 +53,16 @@ Backends must be able to:
 - surface OSC 52 clipboard writes
 - report the cursor position, shown or hidden, for passthrough
 
+## Choosing the backend
+
+Keepers emulate with `AlacrittyTerminalBackend` unless the binary chose another with `set_terminal_backend`, a factory from the pane's size and scrollback ceiling to a `Box<dyn TerminalBackend>`. A keeper is a process of its own, started from the server's executable (or `EMBERS_RUNTIME_KEEPER_BIN`), so a binary that chooses sets the factory first thing in `main`, whatever it runs as.
+
+`embers-cli` chooses `GhosttyTerminalBackend`, in `crates/embers-ghostty-backend`, on libghostty-vt, with its `ghostty` feature, which is on by default; built without it, panes run on alacritty. Only keepers emulate, so it sets the factory when it runs as one. libghostty answers DECRQSS and the capabilities it knows itself; for those queries the Ghostty backend's `answer_query` adds only what libghostty left unanswered, so a program never gets two replies.
+
+## Compaction when idle
+
+A backend can shrink what it holds in memory in bounded steps (`TerminalBackend::compact_step`); the Ghostty backend compresses scrollback pages, which cuts a pane with full scrollback from about 16 MiB to under 1 MiB. Steps never run on the output path. The keeper counts output, resizes and reads of the scrollback as activity, and a thread of its own runs the steps once five seconds pass without any, taking the surface lock for one step at a time so output and requests get in between. Activity stops the run, which starts over when the pane is quiet again. Alacritty's backend has nothing to compact.
+
 ## Clipboard writes
 
 The emulator runs with OSC 52 set to copy-only: stores raise a clipboard event and queries are dropped without a reply. `take_events` drains the latest store with the activity state and query replies. The keeper keeps only the most recent write, numbered, and reports the number in its status reply; when the number advances the server's status poller fetches the write with a separate `Clipboard` request, so status polls stay small and keepers that predate clipboard forwarding are never asked. The server then sends a `ClipboardEvent` straight to the clients whose current session contains the buffer, rather than broadcasting it, and each client re-emits it to its host terminal as OSC 52 unless `set_clipboard(false)` is configured. See [Clipboard (OSC 52)](configuration.md#clipboard-osc-52).
@@ -105,7 +115,9 @@ In practice, Embers currently inherits alternate-screen capture semantics from t
 
 ## Code anchors
 
-- Raw routing + backend trait: `crates/embers-server/src/terminal_backend.rs`
+- Raw routing + backend trait + backend choice: `crates/embers-server/src/terminal_backend.rs`
+- Ghostty backend: `crates/embers-ghostty-backend`, on libghostty-vt from `crates/embers-ghostty-sys`
 - Keeper-owned surface: `crates/embers-server/src/buffer_runtime.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
 - Replies held behind kitty graphics queries: `crates/embers-server/src/reply_hold.rs`
+- Compaction when idle: `crates/embers-server/src/idle_compaction.rs`

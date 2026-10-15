@@ -1897,6 +1897,9 @@ async fn killing_the_second_window_keeps_the_tab_bar() {
     use embers_client::ConfiguredClient;
 
     let server = TestServer::start().await.expect("server starts");
+    let mut connection = TestConnection::connect(server.socket_path())
+        .await
+        .expect("protocol connection");
     run_cli(&server, &["new-session", "alpha"]);
     for title in ["one", "two"] {
         run_cli(
@@ -1911,6 +1914,34 @@ async fn killing_the_second_window_keeps_the_tab_bar() {
                 "/bin/sh",
             ],
         );
+        if title == "one" {
+            // No client shows the session, so the shell's prompt flags its
+            // window. Killing window two makes this one current, which clears
+            // the flag, but only if the server has seen the prompt by then: a
+            // later one would put an activity marker in the tab bar. A capture
+            // brings the server up to date with what it shows.
+            let snapshot = session_snapshot_by_name(&mut connection, "alpha").await;
+            let leaf_id = snapshot
+                .session
+                .focused_leaf_id
+                .expect("window one is focused");
+            let buffer_id = buffer_for_leaf(&snapshot, leaf_id);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let capture = connection
+                    .capture_buffer(buffer_id)
+                    .await
+                    .expect("capture succeeds");
+                if capture.lines.iter().any(|line| !line.trim().is_empty()) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "window one's shell never printed a prompt"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
     }
     run_cli(&server, &["rename-window", "-t", "alpha:one", "renamed"]);
     run_cli(&server, &["kill-window", "-t", "alpha:two"]);

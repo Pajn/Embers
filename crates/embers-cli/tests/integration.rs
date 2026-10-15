@@ -2,6 +2,7 @@ mod automation;
 mod chooser;
 mod command_prompt;
 mod display_message;
+mod emulator;
 mod environment;
 mod interactive;
 mod kill;

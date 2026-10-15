@@ -1,0 +1,12 @@
+[package]
+name = "embers-ghostty-sys"
+description = "Raw bindings to libghostty-vt, Ghostty's terminal emulation library, built from a pinned Ghostty commit."
+links = "ghostty-vt"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+doctest = false

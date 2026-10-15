@@ -25,6 +25,7 @@ fn styled_line(text: &str, fg: TermColor, attrs: u16) -> SnapshotLine {
             link: 0,
         }],
         links: Vec::new(),
+        cell_spans: Vec::new(),
     }
 }
 
@@ -794,6 +795,7 @@ fn renders_underline_styles_with_colon_subparameters() {
             })
             .collect(),
         links: Vec::new(),
+        cell_spans: Vec::new(),
     };
     let ansi = render_focused_with_lines(vec![line])
         .ansi_lines()
@@ -848,6 +850,7 @@ fn linked_line(text: &str, linked_len: u32, link: Hyperlink) -> SnapshotLine {
             },
         ],
         links: vec![link],
+        cell_spans: Vec::new(),
     }
 }
 

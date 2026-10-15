@@ -1,0 +1,25 @@
+[package]
+name = "embers-ghostty-backend"
+description = "The Embers terminal backend on libghostty-vt, Ghostty's terminal emulation."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+embers-core.workspace = true
+embers-ghostty-sys.workspace = true
+embers-server.workspace = true
+
+[dev-dependencies]
+embers-client.workspace = true
+proptest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true

@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use unicode_segmentation::{GraphemeIndices, UnicodeSegmentation};
+use unicode_width::UnicodeWidthStr;
 
 use crate::geometry::PtySize;
 
@@ -146,6 +148,29 @@ pub struct Hyperlink {
     pub uri: String,
 }
 
+/// One cell of a [`SnapshotLine`] as the emulator laid it out: `len` bytes of
+/// the line's text, drawn `width` columns wide.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellSpan {
+    pub len: u32,
+    pub width: u8,
+}
+
+/// A cell of a line: where its text starts in the line's text, the text, and
+/// how many columns it covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineCell<'a> {
+    pub offset: usize,
+    pub text: &'a str,
+    pub width: u16,
+}
+
+/// Columns a grapheme cluster covers as one cell: its Unicode width, at least
+/// one.
+pub fn grapheme_width(grapheme: &str) -> u16 {
+    u16::try_from(UnicodeWidthStr::width(grapheme).max(1)).unwrap_or(u16::MAX)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotLine {
     pub text: String,
@@ -159,6 +184,16 @@ pub struct SnapshotLine {
     /// it is sliced out of scrollback or moved between views.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Hyperlink>,
+    /// The line's cells, listed only when the text alone does not give them.
+    /// Empty means one cell per grapheme cluster, as wide as Unicode says
+    /// ([`grapheme_width`]). Emulators do not always agree: alacritty gives
+    /// each codepoint of an emoji sequence a cell of its own, and Ghostty
+    /// draws a lone regional indicator two columns wide. A line from such an
+    /// emulator lists every cell, so it is drawn over the columns the program
+    /// in the pane sees. Spans that do not cover `text` exactly, on character
+    /// boundaries, are ignored. Set them with [`SnapshotLine::set_cells`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_spans: Vec<CellSpan>,
 }
 
 impl SnapshotLine {
@@ -168,6 +203,113 @@ impl SnapshotLine {
             text: text.into(),
             runs: Vec::new(),
             links: Vec::new(),
+            cell_spans: Vec::new(),
+        }
+    }
+
+    /// The line's cells, in order.
+    pub fn cells(&self) -> Cells<'_> {
+        let spans_cover_text = !self.cell_spans.is_empty() && {
+            let mut end = 0_usize;
+            self.cell_spans.iter().all(|span| {
+                end = end.saturating_add(span.len as usize);
+                span.len > 0 && end <= self.text.len() && self.text.is_char_boundary(end)
+            }) && end == self.text.len()
+        };
+        if spans_cover_text {
+            Cells::Spans {
+                text: &self.text,
+                spans: self.cell_spans.iter(),
+                offset: 0,
+            }
+        } else {
+            Cells::Graphemes(self.text.grapheme_indices(true))
+        }
+    }
+
+    /// Columns the line covers.
+    pub fn width(&self) -> usize {
+        self.cells().map(|cell| usize::from(cell.width)).sum()
+    }
+
+    /// Record the cells an emulator laid the text out in, `len` bytes and
+    /// `width` columns each. They are kept only when they differ from what
+    /// the text alone gives, so most lines carry none.
+    ///
+    /// An emulator without grapheme clustering, such as alacritty, gives each
+    /// codepoint that is not zero-width a cell of its own, so a flag's two
+    /// regional indicators or the parts of a ZWJ emoji sequence take a cell
+    /// each. Cells that together make up exactly one grapheme cluster, over
+    /// the columns Unicode gives it, become one cell, which a host terminal
+    /// that clusters draws whole, unless they are styled apart. Set `runs`
+    /// first.
+    pub fn set_cells(&mut self, cells: Vec<CellSpan>) {
+        self.cell_spans = Vec::new();
+        // Most lines: a narrow cell per ASCII character, as the text gives.
+        if self.text.is_ascii()
+            && cells.len() == self.text.len()
+            && cells.iter().all(|cell| cell.width == 1)
+        {
+            return;
+        }
+
+        // Where style runs end: cells styled apart are never joined.
+        let mut run_ends = self
+            .runs
+            .iter()
+            .scan(0_usize, |end, run| {
+                *end += run.len as usize;
+                Some(*end)
+            })
+            .peekable();
+        let mut offset = 0_usize;
+        let mut spans = Vec::with_capacity(cells.len());
+        let mut differs = false;
+        let mut cells = cells.into_iter().peekable();
+        // Bytes of the text the cells taken so far cover past the grapheme
+        // being walked, when a cell runs over a grapheme's end.
+        let mut ahead = 0_usize;
+        for grapheme in self.text.graphemes(true) {
+            let start = offset;
+            offset += grapheme.len();
+            while run_ends.next_if(|&end| end <= start).is_some() {}
+            let one_style = run_ends.peek().is_none_or(|&end| end >= offset);
+            if ahead >= grapheme.len() {
+                ahead -= grapheme.len();
+                continue;
+            }
+            let first = spans.len();
+            let mut covered = ahead;
+            let mut width = 0_u16;
+            while covered < grapheme.len() {
+                let Some(cell) = cells.next() else {
+                    break;
+                };
+                covered += cell.len as usize;
+                width += u16::from(cell.width);
+                spans.push(cell);
+            }
+            let aligned = ahead == 0 && covered == grapheme.len();
+            ahead = covered.saturating_sub(grapheme.len());
+            let joined = u32::try_from(grapheme.len())
+                .ok()
+                .zip(u8::try_from(width).ok());
+            if let Some((len, width)) = joined
+                && aligned
+                && (one_style || spans.len() - first == 1)
+                && u16::from(width) == grapheme_width(grapheme)
+            {
+                if spans.len() - first > 1 {
+                    spans.truncate(first);
+                    spans.push(CellSpan { len, width });
+                }
+            } else {
+                differs = true;
+            }
+        }
+        spans.extend(cells);
+        if differs {
+            self.cell_spans = spans;
         }
     }
 
@@ -176,6 +318,47 @@ impl SnapshotLine {
     pub fn link(&self, run: &StyledRun) -> Option<&Hyperlink> {
         let index = usize::from(run.link).checked_sub(1)?;
         self.links.get(index)
+    }
+}
+
+/// The cells of a [`SnapshotLine`]; see [`SnapshotLine::cells`].
+pub enum Cells<'a> {
+    Graphemes(GraphemeIndices<'a>),
+    Spans {
+        text: &'a str,
+        spans: std::slice::Iter<'a, CellSpan>,
+        offset: usize,
+    },
+}
+
+impl<'a> Iterator for Cells<'a> {
+    type Item = LineCell<'a>;
+
+    fn next(&mut self) -> Option<LineCell<'a>> {
+        match self {
+            Self::Graphemes(graphemes) => {
+                let (offset, text) = graphemes.next()?;
+                Some(LineCell {
+                    offset,
+                    text,
+                    width: grapheme_width(text),
+                })
+            }
+            Self::Spans {
+                text,
+                spans,
+                offset,
+            } => {
+                let span = spans.next()?;
+                let start = *offset;
+                *offset += span.len as usize;
+                Some(LineCell {
+                    offset: start,
+                    text: &text[start..*offset],
+                    width: u16::from(span.width.max(1)),
+                })
+            }
+        }
     }
 }
 
@@ -230,7 +413,7 @@ impl TerminalSnapshot {
 mod tests {
     use crate::geometry::PtySize;
 
-    use super::{CellAttrs, SnapshotLine, StyledRun, TermColor, TerminalSnapshot};
+    use super::{CellAttrs, CellSpan, SnapshotLine, StyledRun, TermColor, TerminalSnapshot};
 
     #[test]
     fn plain_text_joins_lines() {
@@ -269,6 +452,7 @@ mod tests {
                 },
             ],
             links: Vec::new(),
+            cell_spans: Vec::new(),
         };
 
         let json = serde_json::to_string(&line).unwrap();
@@ -315,5 +499,81 @@ mod tests {
         assert_eq!(serde_json::to_string(&attrs).unwrap(), "1");
         let decoded: CellAttrs = serde_json::from_str("1").unwrap();
         assert_eq!(decoded, attrs);
+    }
+
+    const FLAG: &str = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+
+    fn span(len: usize, width: u8) -> CellSpan {
+        CellSpan {
+            len: len as u32,
+            width,
+        }
+    }
+
+    fn cells(line: &SnapshotLine) -> Vec<(&str, u16)> {
+        line.cells().map(|cell| (cell.text, cell.width)).collect()
+    }
+
+    #[test]
+    fn without_spans_cells_are_graphemes_as_wide_as_unicode_says() {
+        let line = SnapshotLine::plain(format!("a{FLAG}漢e\u{301}"));
+        assert_eq!(
+            cells(&line),
+            [("a", 1), (FLAG, 2), ("漢", 2), ("e\u{301}", 1)]
+        );
+        assert_eq!(line.width(), 6);
+    }
+
+    #[test]
+    fn cells_the_text_gives_are_not_kept() {
+        let mut line = SnapshotLine::plain(format!("ab{FLAG}"));
+        line.set_cells(vec![span(1, 1), span(1, 1), span(FLAG.len(), 2)]);
+        assert!(line.cell_spans.is_empty());
+    }
+
+    #[test]
+    fn cells_that_differ_from_the_text_are_kept_and_drawn() {
+        // Alacritty: a thumbs up and its skin tone, two columns each, and a
+        // symbol VS16 makes wide only to Unicode.
+        let (thumb, tone, symbol) = ("\u{1F44D}", "\u{1F3FD}", "\u{26A7}\u{FE0F}");
+        let mut line = SnapshotLine::plain(format!("{thumb}{tone}{symbol}x"));
+        line.set_cells(vec![span(4, 2), span(4, 2), span(6, 1), span(1, 1)]);
+        assert_eq!(cells(&line), [(thumb, 2), (tone, 2), (symbol, 1), ("x", 1)]);
+        assert_eq!(line.width(), 6);
+
+        let json = serde_json::to_string(&line).unwrap();
+        assert_eq!(serde_json::from_str::<SnapshotLine>(&json).unwrap(), line);
+    }
+
+    #[test]
+    fn cells_that_make_up_one_character_are_joined() {
+        // Alacritty: the white flag with its selector and joiner in one
+        // narrow cell, the transgender symbol in another, then a flag's two
+        // regional indicators. Each pair covers the columns Unicode gives
+        // the whole, so the text gives the cells.
+        let (head, tail) = FLAG.split_at(FLAG.find('\u{26A7}').unwrap());
+        let mut line = SnapshotLine::plain(format!("{FLAG}\u{1F1F8}\u{1F1EA}"));
+        line.set_cells(vec![
+            span(head.len(), 1),
+            span(tail.len(), 1),
+            span(4, 1),
+            span(4, 1),
+        ]);
+        assert!(line.cell_spans.is_empty());
+
+        // Alone after another cell that stays, the pair is one cell.
+        let mut line = SnapshotLine::plain(format!("\u{26A7}\u{FE0F}{FLAG}"));
+        line.set_cells(vec![span(6, 1), span(head.len(), 1), span(tail.len(), 1)]);
+        assert_eq!(cells(&line), [("\u{26A7}\u{FE0F}", 1), (FLAG, 2)]);
+    }
+
+    #[test]
+    fn spans_that_do_not_fit_the_text_are_ignored() {
+        let mut line = SnapshotLine::plain("漢x");
+        // Short of the text, then splitting a character.
+        line.cell_spans = vec![span(3, 2)];
+        assert_eq!(cells(&line), [("漢", 2), ("x", 1)]);
+        line.cell_spans = vec![span(1, 1), span(3, 1)];
+        assert_eq!(cells(&line), [("漢", 2), ("x", 1)]);
     }
 }

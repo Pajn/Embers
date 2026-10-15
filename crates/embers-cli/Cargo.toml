@@ -25,12 +25,19 @@ bin-dir = "{ name }-{ target }-v{ version }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 disabled-strategies = ["quick-install"]
 
+[features]
+default = ["ghostty"]
+# Panes emulated by Ghostty's libghostty-vt, whose build needs Zig. Without it
+# they are emulated by alacritty.
+ghostty = ["dep:embers-ghostty-backend"]
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
 clap.workspace = true
 embers-client.workspace = true
 embers-core.workspace = true
+embers-ghostty-backend = { workspace = true, optional = true }
 embers-protocol.workspace = true
 embers-server.workspace = true
 libc.workspace = true

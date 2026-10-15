@@ -2920,6 +2920,133 @@ impl<'a> RunColorWire {
 
 }
 
+// struct CellSpanWire, aligned to 4
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq)]
+pub struct CellSpanWire(pub [u8; 8]);
+impl Default for CellSpanWire { 
+  fn default() -> Self { 
+    Self([0; 8])
+  }
+}
+impl ::core::fmt::Debug for CellSpanWire {
+  fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+    f.debug_struct("CellSpanWire")
+      .field("len", &self.len())
+      .field("width", &self.width())
+      .finish()
+  }
+}
+
+impl ::flatbuffers::SimpleToVerifyInSlice for CellSpanWire {}
+impl<'a> ::flatbuffers::Follow<'a> for CellSpanWire {
+  type Inner = &'a CellSpanWire;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { <&'a CellSpanWire>::follow(buf, loc) }
+  }
+}
+impl<'a> ::flatbuffers::Follow<'a> for &'a CellSpanWire {
+  type Inner = &'a CellSpanWire;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    unsafe { ::flatbuffers::follow_cast_ref::<CellSpanWire>(buf, loc) }
+  }
+}
+impl<'b> ::flatbuffers::Push for CellSpanWire {
+    type Output = CellSpanWire;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        let src = unsafe { ::core::slice::from_raw_parts(self as *const CellSpanWire as *const u8, <Self as ::flatbuffers::Push>::size()) };
+        dst.copy_from_slice(src);
+    }
+    #[inline]
+    fn alignment() -> ::flatbuffers::PushAlignment {
+        ::flatbuffers::PushAlignment::new(4)
+    }
+}
+
+impl<'a> ::flatbuffers::Verifiable for CellSpanWire {
+  #[inline]
+  fn run_verifier(
+    v: &mut ::flatbuffers::Verifier, pos: usize
+  ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+    v.in_buffer::<Self>(pos)
+  }
+}
+
+impl<'a> CellSpanWire {
+  #[allow(clippy::too_many_arguments)]
+  pub fn new(
+    len: u32,
+    width: u8,
+  ) -> Self {
+    let mut s = Self([0; 8]);
+    s.set_len(len);
+    s.set_width(width);
+    s
+  }
+
+  pub fn len(&self) -> u32 {
+    let mut mem = ::core::mem::MaybeUninit::<<u32 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[0..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_len(&mut self, x: u32) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[0..].as_mut_ptr(),
+        ::core::mem::size_of::<<u32 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+  pub fn width(&self) -> u8 {
+    let mut mem = ::core::mem::MaybeUninit::<<u8 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        self.0[4..].as_ptr(),
+        mem.as_mut_ptr() as *mut u8,
+        ::core::mem::size_of::<<u8 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+      mem.assume_init()
+    })
+  }
+
+  pub fn set_width(&mut self, x: u8) {
+    let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+    // Safety:
+    // Created from a valid Table for this object
+    // Which contains a valid value in this slot
+    unsafe {
+      ::core::ptr::copy_nonoverlapping(
+        &x_le as *const _ as *const u8,
+        self.0[4..].as_mut_ptr(),
+        ::core::mem::size_of::<<u8 as ::flatbuffers::EndianScalar>::Scalar>(),
+      );
+    }
+  }
+
+}
+
 pub enum PingRequestOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
@@ -9427,6 +9554,7 @@ impl<'a> StyledLine<'a> {
   pub const VT_UNDERLINE_COLORS: ::flatbuffers::VOffsetT = 8;
   pub const VT_LINKS: ::flatbuffers::VOffsetT = 10;
   pub const VT_RUN_LINKS: ::flatbuffers::VOffsetT = 12;
+  pub const VT_CELLS: ::flatbuffers::VOffsetT = 14;
 
   #[inline]
   pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -9438,6 +9566,7 @@ impl<'a> StyledLine<'a> {
     args: &'args StyledLineArgs<'args>
   ) -> ::flatbuffers::WIPOffset<StyledLine<'bldr>> {
     let mut builder = StyledLineBuilder::new(_fbb);
+    if let Some(x) = args.cells { builder.add_cells(x); }
     if let Some(x) = args.run_links { builder.add_run_links(x); }
     if let Some(x) = args.links { builder.add_links(x); }
     if let Some(x) = args.underline_colors { builder.add_underline_colors(x); }
@@ -9482,6 +9611,13 @@ impl<'a> StyledLine<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, u16>>>(StyledLine::VT_RUN_LINKS, None)}
   }
+  #[inline]
+  pub fn cells(&self) -> Option<::flatbuffers::Vector<'a, CellSpanWire>> {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'a, CellSpanWire>>>(StyledLine::VT_CELLS, None)}
+  }
 }
 
 impl ::flatbuffers::Verifiable for StyledLine<'_> {
@@ -9495,6 +9631,7 @@ impl ::flatbuffers::Verifiable for StyledLine<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, RunColorWire>>>("underline_colors", Self::VT_UNDERLINE_COLORS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<HyperlinkWire>>>>("links", Self::VT_LINKS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u16>>>("run_links", Self::VT_RUN_LINKS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, CellSpanWire>>>("cells", Self::VT_CELLS, false)?
      .finish();
     Ok(())
   }
@@ -9505,6 +9642,7 @@ pub struct StyledLineArgs<'a> {
     pub underline_colors: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, RunColorWire>>>,
     pub links: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<HyperlinkWire<'a>>>>>,
     pub run_links: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u16>>>,
+    pub cells: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, CellSpanWire>>>,
 }
 impl<'a> Default for StyledLineArgs<'a> {
   #[inline]
@@ -9515,6 +9653,7 @@ impl<'a> Default for StyledLineArgs<'a> {
       underline_colors: None,
       links: None,
       run_links: None,
+      cells: None,
     }
   }
 }
@@ -9545,6 +9684,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> StyledLineBuilder<'a, 'b, A> 
     self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StyledLine::VT_RUN_LINKS, run_links);
   }
   #[inline]
+  pub fn add_cells(&mut self, cells: ::flatbuffers::WIPOffset<::flatbuffers::Vector<'b , CellSpanWire>>) {
+    self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(StyledLine::VT_CELLS, cells);
+  }
+  #[inline]
   pub fn new(_fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>) -> StyledLineBuilder<'a, 'b, A> {
     let start = _fbb.start_table();
     StyledLineBuilder {
@@ -9567,6 +9710,7 @@ impl ::core::fmt::Debug for StyledLine<'_> {
       ds.field("underline_colors", &self.underline_colors());
       ds.field("links", &self.links());
       ds.field("run_links", &self.run_links());
+      ds.field("cells", &self.cells());
       ds.finish()
   }
 }

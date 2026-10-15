@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Row};
@@ -12,9 +12,9 @@ use alacritty_terminal::vte::ansi::{
     self, Color as AnsiColor, CursorShape as AlacrittyCursorShape, NamedColor,
 };
 use embers_core::{
-    ActivityState, CellAttrs, ClipboardSelection, ClipboardWrite, CursorPosition, CursorShape,
-    CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, MAX_PASSTHROUGH_BYTES, PassthroughWrite,
-    PtySize, SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
+    ActivityState, CellAttrs, CellSpan, ClipboardSelection, ClipboardWrite, CursorPosition,
+    CursorShape, CursorState, Hyperlink, MAX_CLIPBOARD_WRITE_BYTES, MAX_PASSTHROUGH_BYTES,
+    PassthroughWrite, PtySize, SnapshotLine, StyledRun, TermColor, TerminalModes, TerminalSnapshot,
 };
 use tracing::debug;
 
@@ -94,6 +94,39 @@ pub trait TerminalBackend: Send {
     fn answer_query(&mut self, query: &TerminalQuery);
     /// Where the cursor is on the screen, whether or not it is shown.
     fn cursor_position(&self) -> CursorPosition;
+    /// One bounded step of shrinking what the backend holds in memory, which
+    /// the keeper runs once the pane has gone quiet. Whether more steps are
+    /// left. Nothing a snapshot shows may change. By default there is nothing
+    /// to do.
+    fn compact_step(&mut self) -> bool {
+        false
+    }
+}
+
+/// Makes the backend a buffer's keeper emulates its pane with, from the pane's
+/// size and the scrollback ceiling in lines.
+pub type TerminalBackendFactory = fn(PtySize, usize) -> Box<dyn TerminalBackend>;
+
+static TERMINAL_BACKEND: OnceLock<TerminalBackendFactory> = OnceLock::new();
+
+/// Emulate panes with the backends `factory` makes instead of alacritty's, for
+/// a binary that brings its own emulation. Keepers are processes of their own,
+/// so the binary sets it early in `main`, whatever it runs as. Only the first
+/// call counts; it returns whether this one did.
+pub fn set_terminal_backend(factory: TerminalBackendFactory) -> bool {
+    TERMINAL_BACKEND.set(factory).is_ok()
+}
+
+/// A backend for a new buffer: the one [`set_terminal_backend`] chose, else
+/// alacritty's.
+pub(crate) fn new_terminal_backend(
+    size: PtySize,
+    max_scrollback_lines: usize,
+) -> Box<dyn TerminalBackend> {
+    match TERMINAL_BACKEND.get() {
+        Some(factory) => factory(size, max_scrollback_lines),
+        None => Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
+    }
 }
 
 /// A DCS query intercepted by [`RawByteRouter`] for the backend to answer.
@@ -695,8 +728,9 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// XTGETTCAP reply: one `DCS 1 + r name=value ST` per known name and
-/// `DCS 0 + r name ST` per unknown one, in request order.
-fn termcap_reply(payload: &[u8]) -> String {
+/// `DCS 0 + r name ST` per unknown one, in request order. `payload` is the
+/// query's hex-encoded names separated by `;`.
+pub fn termcap_reply(payload: &[u8]) -> String {
     let mut reply = String::new();
     for hex_name in payload.split(|&byte| byte == b';') {
         let decoded = hex_decode(hex_name).unwrap_or_default();
@@ -724,46 +758,59 @@ fn termcap_reply(payload: &[u8]) -> String {
     reply
 }
 
-/// The SGR parameters (without `CSI` and `m`) that recreate `template`'s pen,
-/// for a DECRQSS reply. Always starts with `0` so the report is absolute.
-fn sgr_report(template: &Cell) -> String {
+/// The SGR parameters (without `CSI` and `m`) that recreate a pen with these
+/// attributes and colors, for a DECRQSS reply. Always starts with `0` so the
+/// report is absolute.
+pub fn sgr_report(
+    attrs: CellAttrs,
+    fg: TermColor,
+    bg: TermColor,
+    underline_color: TermColor,
+) -> String {
     use std::fmt::Write as _;
     let mut params = String::from("0");
-    let flags = template.flags;
-    for (flag, code) in [
-        (Flags::BOLD, "1"),
-        (Flags::DIM, "2"),
-        (Flags::ITALIC, "3"),
-        (Flags::UNDERLINE, "4"),
-        (Flags::DOUBLE_UNDERLINE, "4:2"),
-        (Flags::UNDERCURL, "4:3"),
-        (Flags::DOTTED_UNDERLINE, "4:4"),
-        (Flags::DASHED_UNDERLINE, "4:5"),
-        (Flags::INVERSE, "7"),
-        (Flags::HIDDEN, "8"),
-        (Flags::STRIKEOUT, "9"),
+    for (attr, code) in [
+        (CellAttrs::BOLD, "1"),
+        (CellAttrs::DIM, "2"),
+        (CellAttrs::ITALIC, "3"),
+        (CellAttrs::UNDERLINE, "4"),
+        (CellAttrs::DOUBLE_UNDERLINE, "4:2"),
+        (CellAttrs::CURLY_UNDERLINE, "4:3"),
+        (CellAttrs::DOTTED_UNDERLINE, "4:4"),
+        (CellAttrs::DASHED_UNDERLINE, "4:5"),
+        (CellAttrs::INVERSE, "7"),
+        (CellAttrs::HIDDEN, "8"),
+        (CellAttrs::STRIKEOUT, "9"),
     ] {
-        if flags.contains(flag) {
+        if attrs.contains(attr) {
             params.push(';');
             params.push_str(code);
         }
     }
-    for (color, base) in [
-        (Some(template.fg), 38),
-        (Some(template.bg), 48),
-        (template.underline_color(), 58),
-    ] {
-        match color.map(map_color) {
-            None | Some(TermColor::Default) => {}
-            Some(TermColor::Indexed(index)) => {
+    for (color, base) in [(fg, 38), (bg, 48), (underline_color, 58)] {
+        match color {
+            TermColor::Default => {}
+            TermColor::Indexed(index) => {
                 let _ = write!(params, ";{base}:5:{index}");
             }
-            Some(TermColor::Rgb { r, g, b }) => {
+            TermColor::Rgb { r, g, b } => {
                 let _ = write!(params, ";{base}:2::{r}:{g}:{b}");
             }
         }
     }
     params
+}
+
+/// The SGR parameters for alacritty's pen, `template`.
+fn template_sgr_report(template: &Cell) -> String {
+    sgr_report(
+        map_attrs(template.flags),
+        map_color(template.fg),
+        map_color(template.bg),
+        template
+            .underline_color()
+            .map_or(TermColor::Default, map_color),
+    )
 }
 
 /// Percent-decode a byte slice (`%XX` escapes) as used by `file://` URIs.
@@ -1016,6 +1063,7 @@ impl AlacrittyTerminalBackend {
         let mut runs: Vec<StyledRun> = Vec::new();
         let mut styled = false;
         let mut links = LineLinks::default();
+        let mut cells = Vec::with_capacity(content_len);
 
         for column in 0..content_len {
             let cell = &row[Column(column)];
@@ -1025,11 +1073,19 @@ impl AlacrittyTerminalBackend {
                 continue;
             }
 
-            let fg = map_color(cell.fg);
-            let bg = map_color(cell.bg);
-            let attrs = map_attrs(flags);
-            let underline_color = cell.underline_color().map_or(TermColor::Default, map_color);
-            let link = links.index_of(cell.hyperlink());
+            // What is left of a broken wide character keeps none of its style.
+            let (fg, bg, attrs, underline_color, link) = if glyph == CellGlyph::Blank {
+                let default = TermColor::Default;
+                (default, default, CellAttrs::empty(), default, 0)
+            } else {
+                (
+                    map_color(cell.fg),
+                    map_color(cell.bg),
+                    map_attrs(flags),
+                    cell.underline_color().map_or(TermColor::Default, map_color),
+                    links.index_of(cell.hyperlink()),
+                )
+            };
 
             // `emit_cell_text` always writes at least one byte (a char or a
             // space), so every cell contributes to exactly one run.
@@ -1040,6 +1096,19 @@ impl AlacrittyTerminalBackend {
                 emit_cell_text(cell, &mut text);
             }
             let byte_len = u32::try_from(text.len() - start).unwrap_or(u32::MAX);
+            // Alacritty gives every codepoint that is not zero-width a cell of
+            // its own, even inside an emoji sequence, and a wide cell only to
+            // a codepoint wide by itself; `set_cells` joins cells that make
+            // up one character.
+            let width = if glyph == CellGlyph::Shown && flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            };
+            cells.push(CellSpan {
+                len: byte_len,
+                width,
+            });
 
             if fg != TermColor::Default
                 || bg != TermColor::Default
@@ -1077,11 +1146,14 @@ impl AlacrittyTerminalBackend {
             runs.clear();
         }
 
-        SnapshotLine {
+        let mut line = SnapshotLine {
             text,
             runs,
             links: links.table,
-        }
+            cell_spans: Vec::new(),
+        };
+        line.set_cells(cells);
+        line
     }
 
     /// Worked out here rather than taken from `renderable_content`, which moves
@@ -1286,7 +1358,7 @@ impl TerminalBackend for AlacrittyTerminalBackend {
             // the terminal keeps curly underlines before it uses them (and
             // underline colors) under a TERM without `Smulx`.
             TerminalQuery::RequestSetting(setting) if setting == b"m" => {
-                let pen = sgr_report(&self.term.grid().cursor.template);
+                let pen = template_sgr_report(&self.term.grid().cursor.template);
                 format!("\x1bP1$r{pen}m\x1b\\")
             }
             // Any other setting: the "invalid request" reply.
@@ -1406,9 +1478,10 @@ enum CellGlyph {
     /// Nothing: the cell is covered by the wide character before it, or
     /// holds the place of one wrapped to the next row.
     Covered,
-    /// A space in the cell's style: the cell is half of a wide character
-    /// whose other half was overwritten or erased. The emulator keeps the
-    /// half that is left, but a terminal shows neither, as xterm does.
+    /// A plain space: the cell is half of a wide character whose other half
+    /// was overwritten or erased. The emulator keeps the half that is left,
+    /// with its style, but a terminal shows neither half, and Ghostty clears
+    /// the half that is left to a blank cell.
     Blank,
 }
 
@@ -1816,6 +1889,25 @@ mod tests {
         assert_eq!(line.runs[0].len, "界".len() as u32);
         assert_eq!(line.runs[0].fg, TermColor::Indexed(1));
         assert_eq!(line.runs[1].len, 1);
+    }
+
+    #[test]
+    fn lines_carry_cells_only_where_the_text_would_mislead() {
+        let size = PtySize::new(8, 1);
+        let widths = |bytes: &str| {
+            let mut backend = backend(size);
+            backend.ingest_bytes(bytes.as_bytes());
+            let line = first_line(&backend, size);
+            let widths: Vec<u16> = line.cells().map(|cell| cell.width).collect();
+            (widths, line.cell_spans.is_empty())
+        };
+        // The flag's two narrow cells cover its two columns, so they join.
+        let flag = "\u{1F3F3}\u{FE0F}\u{200D}\u{26A7}\u{FE0F}";
+        assert_eq!(widths(&format!("{flag}a")), (vec![2, 1], true));
+        // A thumbs up and its skin tone take two columns each in alacritty.
+        assert_eq!(widths("\u{1F44D}\u{1F3FD}a"), (vec![2, 2, 1], false));
+        // VS16 makes the symbol wide only to Unicode.
+        assert_eq!(widths("\u{26A7}\u{FE0F}a"), (vec![1, 1], false));
     }
 
     #[test]

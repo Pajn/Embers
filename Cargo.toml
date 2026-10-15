@@ -7,6 +7,9 @@ members = [
   "crates/embers-client",
   "crates/embers-cli",
   "crates/embers-test-support",
+  "crates/embers-ghostty-gen",
+  "crates/embers-ghostty-sys",
+  "crates/embers-ghostty-backend",
 ]
 resolver = "2"
 
@@ -27,6 +30,8 @@ criterion = "0.7"
 directories = "6"
 embers-client = { version = "0.3.3", path = "crates/embers-client" }
 embers-core = { version = "0.3.3", path = "crates/embers-core" }
+embers-ghostty-backend = { version = "0.3.3", path = "crates/embers-ghostty-backend" }
+embers-ghostty-sys = { version = "0.3.3", path = "crates/embers-ghostty-sys" }
 embers-protocol = { version = "0.3.3", path = "crates/embers-protocol" }
 embers-server = { version = "0.3.3", path = "crates/embers-server" }
 embers-test-support = { version = "0.3.3", path = "crates/embers-test-support" }

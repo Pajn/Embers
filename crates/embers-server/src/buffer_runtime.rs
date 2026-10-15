@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use embers_core::{
-    ActivityState, BufferId, ClipboardWrite, CursorPosition, Hyperlink, MuxError, PassthroughWrite,
-    PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
+    ActivityState, BufferId, CellSpan, ClipboardWrite, CursorPosition, Hyperlink, MuxError,
+    PassthroughWrite, PtySize, Result, SnapshotLine, StyledRun, TerminalSnapshot,
 };
 use portable_pty::{
     Child, ChildKiller, CommandBuilder, MasterPty, NativePtySystem, PtySize as PortablePtySize,
@@ -32,8 +32,9 @@ use portable_pty::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error};
 
+use crate::idle_compaction::{COMPACTION_IDLE, IdleCompaction};
 use crate::reply_hold::ReplyHold;
-use crate::{AlacrittyTerminalBackend, BackendEvents, RawByteRouter, TerminalBackend};
+use crate::{BackendEvents, RawByteRouter, TerminalBackend};
 
 /// How long spawning a buffer waits for its runtime keeper to report that it
 /// is ready (socket listening, child running) or that it failed to start.
@@ -392,6 +393,53 @@ const MAX_STYLE_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 /// only to estimate whether a slice's styling fits the budget.
 const ESTIMATED_STYLED_RUN_JSON_BYTES: usize = 64;
 
+/// Rough per-span cost when a [`CellSpan`] is serialized to keeper JSON,
+/// `{"len":1,"width":2}` and its separator.
+const ESTIMATED_CELL_SPAN_JSON_BYTES: usize = 24;
+
+/// Keep a scrollback slice's styles, links and cells within
+/// [`MAX_STYLE_PAYLOAD_BYTES`], so a large `line_count` cannot blow the keeper
+/// JSON (16 MiB) or client frame (8 MiB) caps. The text always survives.
+///
+/// Cells go last: without them a line is drawn over other columns than the
+/// program sees, so styles are dropped first to make room for them. Link
+/// tables count at their URI and id length, since one long URI can outweigh
+/// many runs. A field with nothing in it is cleared, which leaves it out of
+/// the JSON.
+fn fit_slice_payload(
+    styles: &mut Vec<Vec<StyledRun>>,
+    links: &mut Vec<Vec<Hyperlink>>,
+    cells: &mut Vec<Vec<CellSpan>>,
+) {
+    let run_count: usize = styles.iter().map(Vec::len).sum();
+    let link_bytes: usize = links
+        .iter()
+        .flatten()
+        .map(|link| link.uri.len() + link.id.as_ref().map_or(0, String::len))
+        .sum();
+    let cell_bytes = cells
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>()
+        .saturating_mul(ESTIMATED_CELL_SPAN_JSON_BYTES);
+    if cell_bytes > MAX_STYLE_PAYLOAD_BYTES || cells.iter().all(Vec::is_empty) {
+        cells.clear();
+    }
+    let cell_bytes = if cells.is_empty() { 0 } else { cell_bytes };
+    if run_count
+        .saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES)
+        .saturating_add(link_bytes)
+        .saturating_add(cell_bytes)
+        > MAX_STYLE_PAYLOAD_BYTES
+        || styles.iter().all(Vec::is_empty)
+    {
+        styles.clear();
+    }
+    if styles.is_empty() || links.iter().all(Vec::is_empty) {
+        links.clear();
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct KeeperScrollbackSlice {
     pub start_line: u64,
@@ -407,21 +455,28 @@ pub struct KeeperScrollbackSlice {
     /// for the same compatibility reason. Empty when no line carries a link.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Vec<Hyperlink>>,
+    /// Parallel per-line cells (see [`SnapshotLine::cell_spans`]), kept
+    /// separate for the same compatibility reason. Empty when no line
+    /// carries any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<Vec<CellSpan>>,
 }
 
 impl KeeperScrollbackSlice {
-    /// Zip `lines`, `styles` and `links` back into styled snapshot lines. A
-    /// missing or short `styles`/`links` entry yields a plain or link-free line,
-    /// so old keepers degrade to text.
+    /// Zip `lines`, `styles`, `links` and `cells` back into styled snapshot
+    /// lines. A missing or short `styles`/`links`/`cells` entry yields a
+    /// plain, link-free or text-laid-out line, so old keepers degrade to text.
     pub fn into_snapshot_lines(self) -> Vec<SnapshotLine> {
         let mut styles = self.styles.into_iter();
         let mut links = self.links.into_iter();
+        let mut cells = self.cells.into_iter();
         self.lines
             .into_iter()
             .map(|text| SnapshotLine {
                 text,
                 runs: styles.next().unwrap_or_default(),
                 links: links.next().unwrap_or_default(),
+                cell_spans: cells.next().unwrap_or_default(),
             })
             .collect()
     }
@@ -451,6 +506,9 @@ struct KeeperRuntime {
     /// read the child's exit may have crashed before saving it, so the keeper
     /// must stay reachable for the next one to reattach and read it again.
     exit_recorded: AtomicBool,
+    /// When to compact the backend: output, resizes and reads of the
+    /// scrollback are activity, after which the backend compacts once quiet.
+    compaction: IdleCompaction,
     pid: Option<u32>,
 }
 
@@ -1038,7 +1096,7 @@ impl KeeperSurface {
         let max_scrollback_lines = crate::config::ResourceLimits::from_env().max_scrollback_lines;
         Self {
             router: RawByteRouter::default(),
-            backend: Box::new(AlacrittyTerminalBackend::new(size, max_scrollback_lines)),
+            backend: crate::terminal_backend::new_terminal_backend(size, max_scrollback_lines),
             size,
             passthrough: PassthroughQueue::default(),
             reply_hold: ReplyHold::default(),
@@ -1093,34 +1151,15 @@ impl KeeperSurface {
         let mut lines = Vec::with_capacity(slice.lines.len());
         let mut styles = Vec::with_capacity(slice.lines.len());
         let mut links = Vec::with_capacity(slice.lines.len());
+        let mut cells = Vec::with_capacity(slice.lines.len());
         for line in slice.lines {
             lines.push(line.text);
             styles.push(line.runs);
             links.push(line.links);
+            cells.push(line.cell_spans);
         }
 
-        // Styles are best-effort: a large `line_count` could produce a styled
-        // payload big enough to blow the keeper JSON (16 MiB) or client frame
-        // (8 MiB) caps. If the estimated styling exceeds the budget, ship plain
-        // text — the text always survives. Link tables count at their URI and
-        // id length, since one long URI can outweigh many runs.
-        let run_count: usize = styles.iter().map(Vec::len).sum();
-        let link_bytes: usize = links
-            .iter()
-            .flatten()
-            .map(|link| link.uri.len() + link.id.as_ref().map_or(0, String::len))
-            .sum();
-        if run_count
-            .saturating_mul(ESTIMATED_STYLED_RUN_JSON_BYTES)
-            .saturating_add(link_bytes)
-            > MAX_STYLE_PAYLOAD_BYTES
-            || styles.iter().all(Vec::is_empty)
-        {
-            styles.clear();
-        }
-        if styles.is_empty() || links.iter().all(Vec::is_empty) {
-            links.clear();
-        }
+        fit_slice_payload(&mut styles, &mut links, &mut cells);
 
         KeeperScrollbackSlice {
             start_line: slice.start_line,
@@ -1128,6 +1167,7 @@ impl KeeperSurface {
             lines,
             styles,
             links,
+            cells,
         }
     }
 }
@@ -1448,6 +1488,7 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
         clipboard: Mutex::new(None),
         exit_code: Mutex::new(None),
         exit_recorded: AtomicBool::new(false),
+        compaction: IdleCompaction::default(),
         pid,
     });
 
@@ -1460,6 +1501,11 @@ fn serve_runtime_keeper(cli: RuntimeKeeperCli, readiness: &mut KeeperReadiness) 
     let _reply_hold = thread::Builder::new()
         .name(format!("keeper-reply-hold-{}", cli.socket_path.display()))
         .spawn(move || keeper_reply_hold_loop(hold_runtime))
+        .map_err(|error| MuxError::internal(error.to_string()))?;
+    let compaction_runtime = runtime.clone();
+    let _compaction = thread::Builder::new()
+        .name(format!("keeper-compaction-{}", cli.socket_path.display()))
+        .spawn(move || keeper_compaction_loop(compaction_runtime))
         .map_err(|error| MuxError::internal(error.to_string()))?;
     let wait_runtime = runtime.clone();
     let wait_join = thread::Builder::new()
@@ -1787,6 +1833,7 @@ impl KeeperRuntime {
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?
             .resize(size);
+        self.compaction.note_activity();
         Ok(())
     }
 
@@ -1795,6 +1842,8 @@ impl KeeperRuntime {
             .surface
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?;
+        // Reading the whole scrollback restores what compaction compressed.
+        self.compaction.note_activity();
         Ok(KeeperSnapshot {
             sequence: self.sequence.load(Ordering::Relaxed),
             size: surface.size,
@@ -1817,6 +1866,7 @@ impl KeeperRuntime {
             .surface
             .lock()
             .map_err(|_| MuxError::internal("runtime keeper surface lock poisoned"))?;
+        self.compaction.note_activity();
         Ok(surface.capture_scrollback_slice(start_line, line_count))
     }
 
@@ -1931,6 +1981,7 @@ fn keeper_read_loop(runtime: Arc<KeeperRuntime>, mut reader: Box<dyn Read + Send
                     runtime.bell_sequence.fetch_add(1, Ordering::Relaxed);
                 }
                 runtime.sequence.fetch_add(1, Ordering::Relaxed);
+                runtime.compaction.note_activity();
                 if let Ok(mut state) = runtime.activity.lock() {
                     *state = activity;
                 }
@@ -1987,6 +2038,17 @@ fn keeper_reply_hold_loop(runtime: Arc<KeeperRuntime>) {
         };
         surface = next;
     }
+}
+
+/// Compact the backend each time the pane goes quiet (see
+/// `crate::idle_compaction`).
+fn keeper_compaction_loop(runtime: Arc<KeeperRuntime>) {
+    runtime.compaction.run(COMPACTION_IDLE, || {
+        runtime
+            .surface
+            .lock()
+            .is_ok_and(|mut surface| surface.backend.compact_step())
+    });
 }
 
 /// Own the PTY-master writer and serialize every write submitted through the
@@ -2576,7 +2638,7 @@ fn reap_keeper_process(mut child: std::process::Child) {
 }
 
 fn resolve_runtime_keeper_executable() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("EMBERS_RUNTIME_KEEPER_BIN").map(PathBuf::from)
+    if let Some(path) = env::var_os(crate::config::RUNTIME_KEEPER_BIN_ENV_VAR).map(PathBuf::from)
         && is_executable_file(&path)
     {
         return Some(path);
@@ -2793,10 +2855,50 @@ mod tests {
 
     use super::{
         BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimeInner, BufferRuntimePipeStatus,
-        BufferRuntimePipeStopReason, BufferRuntimeStatus, KEEPER_PIPE_WRITE_QUEUE_CAPACITY,
-        KeeperConnection, KeeperPipe, MAX_FRAME_SIZE, RuntimeThreads, read_message,
-        spawn_status_poller, status_update_delta, wait_for_keeper_ready,
+        BufferRuntimePipeStopReason, BufferRuntimeStatus, ESTIMATED_CELL_SPAN_JSON_BYTES,
+        ESTIMATED_STYLED_RUN_JSON_BYTES, KEEPER_PIPE_WRITE_QUEUE_CAPACITY, KeeperConnection,
+        KeeperPipe, MAX_FRAME_SIZE, MAX_STYLE_PAYLOAD_BYTES, RuntimeThreads, fit_slice_payload,
+        read_message, spawn_status_poller, status_update_delta, wait_for_keeper_ready,
     };
+
+    fn spans(count: usize) -> Vec<embers_core::CellSpan> {
+        vec![embers_core::CellSpan { len: 4, width: 2 }; count]
+    }
+
+    #[test]
+    fn a_slice_within_budget_keeps_its_styles_and_cells() {
+        let mut styles = vec![vec![embers_core::StyledRun::default()]];
+        let mut links = vec![Vec::new()];
+        let mut cells = vec![spans(3)];
+        fit_slice_payload(&mut styles, &mut links, &mut cells);
+        assert_eq!(styles.len(), 1);
+        assert!(links.is_empty(), "no line carries a link");
+        assert_eq!(cells, vec![spans(3)]);
+    }
+
+    #[test]
+    fn styles_make_room_for_cells_over_budget() {
+        // Each fits the budget alone, but not together.
+        let runs = MAX_STYLE_PAYLOAD_BYTES * 6 / 10 / ESTIMATED_STYLED_RUN_JSON_BYTES;
+        let cell_count = MAX_STYLE_PAYLOAD_BYTES * 6 / 10 / ESTIMATED_CELL_SPAN_JSON_BYTES;
+        let mut styles = vec![vec![embers_core::StyledRun::default(); runs]];
+        let mut links = vec![Vec::new()];
+        let mut cells = vec![spans(cell_count)];
+        fit_slice_payload(&mut styles, &mut links, &mut cells);
+        assert!(styles.is_empty(), "styles go first");
+        assert_eq!(cells, vec![spans(cell_count)]);
+    }
+
+    #[test]
+    fn cells_over_budget_on_their_own_are_dropped() {
+        let over = MAX_STYLE_PAYLOAD_BYTES / ESTIMATED_CELL_SPAN_JSON_BYTES + 1;
+        let mut styles = vec![vec![embers_core::StyledRun::default()]];
+        let mut links = vec![Vec::new()];
+        let mut cells = vec![spans(over)];
+        fit_slice_payload(&mut styles, &mut links, &mut cells);
+        assert!(cells.is_empty(), "the text is drawn without them");
+        assert_eq!(styles.len(), 1, "the styles fit once the cells are gone");
+    }
 
     #[test]
     fn keeper_readiness_accepts_ready_report_split_across_reads() {
