@@ -29,7 +29,7 @@ pub use config::{
 pub use model::{
     Buffer, BufferAttachment, BufferPipe, BufferPipeState, BufferPipeStopReason, BufferState,
     BufferViewNode, BufferViewState, ExitedBuffer, FloatingWindow, IS_VIM_OPTION,
-    InterruptedBuffer, Node, REMAIN_ON_EXIT_OPTION, RemainOnExit, RemoteBuffer, RunningBuffer,
+    InterruptedBuffer, Node, Placement, REMAIN_ON_EXIT_OPTION, RemainOnExit, RunningBuffer,
     Session, SplitNode, TabEntry, TabsNode,
 };
 pub use remote::RemoteRuntimeHandle;

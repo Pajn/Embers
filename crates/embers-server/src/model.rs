@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use embers_core::{
     ActivityState, BufferId, FloatGeometry, FloatingId, NodeId, PtySize, SessionId, Size,
@@ -91,9 +91,7 @@ pub struct Buffer {
     /// PTY when that was not the buffer's own process, for example a program
     /// its shell runs. Saved so a restore can decide whether to run it again.
     pub foreground_command: Option<Vec<String>>,
-    runtime_socket_path: Option<PathBuf>,
-    /// Where the buffer runs when its program runs on another host.
-    pub remote: Option<RemoteBuffer>,
+    placement: Placement,
     pub state: BufferState,
     pub attachment: BufferAttachment,
     pub pty_size: PtySize,
@@ -173,8 +171,7 @@ impl Buffer {
             env,
             user_options: BTreeMap::new(),
             foreground_command: None,
-            runtime_socket_path: None,
-            remote: None,
+            placement: Placement::default(),
             state: BufferState::Created,
             attachment: BufferAttachment::Detached,
             pty_size: PtySize::new(80, 24),
@@ -206,12 +203,13 @@ impl Buffer {
         }
     }
 
-    pub(crate) fn runtime_socket_path(&self) -> Option<&PathBuf> {
-        self.runtime_socket_path.as_ref()
+    /// Where the buffer's program runs.
+    pub fn placement(&self) -> &Placement {
+        &self.placement
     }
 
-    pub(crate) fn set_runtime_socket_path(&mut self, runtime_socket_path: Option<PathBuf>) {
-        self.runtime_socket_path = runtime_socket_path;
+    pub(crate) fn set_placement(&mut self, placement: Placement) {
+        self.placement = placement;
     }
 }
 
@@ -226,7 +224,7 @@ impl fmt::Debug for Buffer {
             .field("env", &self.env)
             .field("user_options", &self.user_options)
             .field("foreground_command", &self.foreground_command)
-            .field("remote", &self.remote)
+            .field("placement", &self.placement)
             .field("state", &self.state)
             .field("attachment", &self.attachment)
             .field("pty_size", &self.pty_size)
@@ -253,7 +251,7 @@ impl PartialEq for Buffer {
             && self.cwd == other.cwd
             && self.env == other.env
             && self.user_options == other.user_options
-            && self.remote == other.remote
+            && self.placement.same_place(&other.placement)
             && self.state == other.state
             && self.attachment == other.attachment
             && self.pty_size == other.pty_size
@@ -267,13 +265,51 @@ impl PartialEq for Buffer {
 
 impl Eq for Buffer {}
 
-/// A buffer whose program runs on another host, as a detached buffer of that
-/// host's embers server.
+/// Where a buffer's program runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteBuffer {
-    pub host: String,
-    /// The buffer's id on the host's server, once it runs there.
-    pub buffer_id: Option<BufferId>,
+pub enum Placement {
+    /// In a keeper on this machine, reached on `socket_path` while one runs
+    /// for the buffer.
+    Local { socket_path: Option<PathBuf> },
+    /// On `host`, as a detached buffer of that host's embers server, with
+    /// its id there once it runs.
+    Remote {
+        host: String,
+        buffer_id: Option<BufferId>,
+    },
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self::Local { socket_path: None }
+    }
+}
+
+impl Placement {
+    /// The host the buffer runs on, unless it runs on this machine.
+    pub fn host(&self) -> Option<&str> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Remote { host, .. } => Some(host),
+        }
+    }
+
+    /// The socket of the keeper the buffer runs in, while one does.
+    pub fn socket_path(&self) -> Option<&Path> {
+        match self {
+            Self::Local { socket_path } => socket_path.as_deref(),
+            Self::Remote { .. } => None,
+        }
+    }
+
+    /// Whether both name the same place. A keeper's socket is where its
+    /// runtime is reached, not where the buffer runs, so it is left out.
+    pub fn same_place(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local { .. }, Self::Local { .. }) => true,
+            _ => self == other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

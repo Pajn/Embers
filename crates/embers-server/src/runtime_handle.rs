@@ -8,6 +8,7 @@ use crate::buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
     BufferRuntimeStatus, KeeperRuntimeHandle, RuntimeScrollbackSlice, RuntimeSnapshot,
 };
+use crate::model::Placement;
 use crate::remote::{HostConnection, RemoteRuntimeHandle};
 
 /// What runs a buffer's program and emulates its terminal, as the server sees
@@ -79,20 +80,17 @@ impl BufferRuntimeHandle {
             .map(Self::Remote)
     }
 
-    /// The socket of the keeper running this buffer, which the workspace
-    /// saves so a later server can reattach to it.
-    pub fn keeper_socket_path(&self) -> Option<&Path> {
+    /// Where this runtime runs the buffer, which the workspace saves so a
+    /// later server can take the buffer up again.
+    pub fn placement(&self) -> Placement {
         match self {
-            Self::Keeper(keeper) => Some(keeper.socket_path()),
-            Self::Remote(_) => None,
-        }
-    }
-
-    /// The host running this buffer and the buffer's id there.
-    pub fn remote(&self) -> Option<(&str, BufferId)> {
-        match self {
-            Self::Keeper(_) => None,
-            Self::Remote(remote) => Some((remote.host(), remote.remote_id())),
+            Self::Keeper(keeper) => Placement::Local {
+                socket_path: Some(keeper.socket_path().to_path_buf()),
+            },
+            Self::Remote(remote) => Placement::Remote {
+                host: remote.host().to_owned(),
+                buffer_id: Some(remote.remote_id()),
+            },
         }
     }
 

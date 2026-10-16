@@ -111,7 +111,7 @@ pub fn buffer_record(buffer: &Buffer) -> BufferRecord {
         user_options: buffer.user_options.clone(),
         foreground_command: buffer.foreground_command.clone(),
         bell_sequence: buffer.runtime_bell_sequence,
-        host: buffer.remote.as_ref().map(|remote| remote.host.clone()),
+        host: buffer.placement().host().map(str::to_owned),
     }
 }
 

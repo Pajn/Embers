@@ -34,7 +34,7 @@ use tracing::{Instrument, debug, error, info, warn};
 use crate::config::{BUFFER_ENV_VAR, DEFAULT_REMOTE_COMMAND, ResourceLimits, RestoreConfig};
 use crate::model::{
     BufferKind, BufferPipe, BufferPipeState, BufferPipeStopReason, HelperBufferScope,
-    IS_VIM_OPTION, Node, RemoteBuffer,
+    IS_VIM_OPTION, Node, Placement,
 };
 use crate::persist::{
     PersistedWorkspace, encode_persisted_workspace, load_workspace, same_saved_state,
@@ -702,7 +702,7 @@ impl Runtime {
             .filter(|buffer_id| {
                 state.buffers.get(buffer_id).is_none_or(|buffer| {
                     matches!(buffer.state, BufferState::Exited(_))
-                        || buffer.runtime_socket_path().is_none()
+                        || buffer.placement().socket_path().is_none()
                 })
             })
             .collect()
@@ -914,14 +914,14 @@ impl Runtime {
             // A buffer on another host is taken up again once the server
             // listens (see `reattach_remote_buffers`): reaching a host can
             // take long, and must not hold up the start.
-            if buffer.remote.is_some() {
+            if buffer.placement().host().is_some() {
                 if !matches!(buffer.state, BufferState::Exited(_)) {
                     let mut state = self.state.lock().await;
                     let _ = state.mark_buffer_interrupted(buffer.id, None);
                 }
                 continue;
             }
-            let Some(socket_path) = buffer.runtime_socket_path().cloned() else {
+            let Some(socket_path) = buffer.placement().socket_path().map(Path::to_path_buf) else {
                 if matches!(buffer.state, BufferState::Running(_) | BufferState::Created) {
                     let mut state = self.state.lock().await;
                     let _ =
@@ -936,7 +936,7 @@ impl Runtime {
                     "skipping runtime restore because keeper socket is missing"
                 );
                 let mut state = self.state.lock().await;
-                let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                let _ = state.set_buffer_placement(buffer.id, Placement::default());
                 let _ = state.mark_buffer_interrupted(buffer.id, buffer_pid_hint(&buffer.state));
                 continue;
             }
@@ -959,7 +959,7 @@ impl Runtime {
                                 let _ = runtime.kill().await;
                                 status.pipe = None;
                                 let mut state = self.state.lock().await;
-                                let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                                let _ = state.set_buffer_placement(buffer.id, Placement::default());
                                 let _ = state.mark_buffer_interrupted(
                                     buffer.id,
                                     buffer_pid_hint(&buffer.state),
@@ -972,8 +972,12 @@ impl Runtime {
                         }
                     }
                     let mut state = self.state.lock().await;
-                    let _ =
-                        state.set_buffer_runtime_socket_path(buffer.id, Some(socket_path.clone()));
+                    let _ = state.set_buffer_placement(
+                        buffer.id,
+                        Placement::Local {
+                            socket_path: Some(socket_path.clone()),
+                        },
+                    );
                     apply_runtime_status(&mut state, buffer.id, &status);
                     drop(state);
                     self.insert_buffer_runtime(buffer.id, runtime).await;
@@ -986,7 +990,7 @@ impl Runtime {
                         "failed to restore buffer runtime"
                     );
                     let mut state = self.state.lock().await;
-                    let _ = state.set_buffer_runtime_socket_path(buffer.id, None);
+                    let _ = state.set_buffer_placement(buffer.id, Placement::default());
                     let _ =
                         state.mark_buffer_interrupted(buffer.id, buffer_pid_hint(&buffer.state));
                 }
@@ -1090,7 +1094,7 @@ impl Runtime {
                 .filter(|buffer| {
                     matches!(buffer.state, BufferState::Interrupted(_))
                         && matches!(buffer.kind, BufferKind::Pty)
-                        && buffer.remote.is_none()
+                        && buffer.placement().host().is_none()
                 })
                 .map(|buffer| (buffer.id, buffer.attachment.clone()))
                 .partition(|(_, attachment)| matches!(attachment, BufferAttachment::Attached(_)));
@@ -1799,13 +1803,14 @@ impl Runtime {
                         cwd.map(Into::into),
                         buffer_env,
                     );
-                    if let Some(host) = host
-                        && let Some(buffer) = state.buffers.get_mut(&buffer_id)
-                    {
-                        buffer.remote = Some(RemoteBuffer {
-                            host,
-                            buffer_id: None,
-                        });
+                    if let Some(host) = host {
+                        let _ = state.set_buffer_placement(
+                            buffer_id,
+                            Placement::Remote {
+                                host,
+                                buffer_id: None,
+                            },
+                        );
                     }
                     // Start the command at the size it will be drawn at, so it
                     // never sees the default size first.
@@ -3019,7 +3024,7 @@ impl Runtime {
                 buffer.pty_size,
                 buffer.env.clone(),
                 buffer.title.clone(),
-                buffer.remote.as_ref().map(|remote| remote.host.clone()),
+                buffer.placement().host().map(str::to_owned),
             )
         };
 
@@ -3095,19 +3100,10 @@ impl Runtime {
                 self.mark_workspace_dirty();
                 return Err(error);
             }
-            state.set_buffer_runtime_socket_path(
-                buffer_id,
-                runtime.keeper_socket_path().map(Path::to_path_buf),
-            )?;
+            state.set_buffer_placement(buffer_id, runtime.placement())?;
             if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                 buffer.command = command;
                 buffer.cwd = cwd;
-                if let Some((host, remote_id)) = runtime.remote() {
-                    buffer.remote = Some(RemoteBuffer {
-                        host: host.to_owned(),
-                        buffer_id: Some(remote_id),
-                    });
-                }
             }
             apply_runtime_status(&mut state, buffer_id, &status);
         }
@@ -4179,8 +4175,7 @@ impl Runtime {
             .await
             .buffers
             .get(&buffer_id)
-            .and_then(|buffer| buffer.remote.as_ref())
-            .map(|remote| remote.host.clone());
+            .and_then(|buffer| buffer.placement().host().map(str::to_owned));
         if let Some(host) = host {
             self.reconnect_host(host);
         }
@@ -4260,14 +4255,16 @@ impl Runtime {
         let mut by_host = BTreeMap::<String, Vec<(BufferId, BufferId)>>::new();
         for buffer in state.buffers.values() {
             if let BufferState::Interrupted(_) = buffer.state
-                && let Some(remote) = &buffer.remote
-                && let Some(remote_id) = remote.buffer_id
-                && host.is_none_or(|host| host == remote.host)
+                && let Placement::Remote {
+                    host: buffer_host,
+                    buffer_id: Some(remote_id),
+                } = buffer.placement()
+                && host.is_none_or(|host| host == buffer_host)
             {
                 by_host
-                    .entry(remote.host.clone())
+                    .entry(buffer_host.clone())
                     .or_default()
-                    .push((buffer.id, remote_id));
+                    .push((buffer.id, *remote_id));
             }
         }
         by_host
@@ -5272,7 +5269,7 @@ mod tests {
         OUTBOUND_CHANNEL_CAPACITY, Runtime, ShutdownSignal, Subscription, wait_for_shutdown,
     };
     use crate::ResourceLimits;
-    use crate::model::HelperBufferScope;
+    use crate::model::{HelperBufferScope, Placement};
     use crate::{
         BufferRuntimePipeStatus, BufferRuntimePipeStopReason, BufferRuntimeUpdate, BufferState,
         ServerState,
@@ -6622,11 +6619,13 @@ mod tests {
             .mark_buffer_running(buffer_id, Some(42))
             .expect("mark running");
         state
-            .set_buffer_runtime_socket_path(
+            .set_buffer_placement(
                 buffer_id,
-                Some(tempdir.path().join("missing-runtime.sock")),
+                Placement::Local {
+                    socket_path: Some(tempdir.path().join("missing-runtime.sock")),
+                },
             )
-            .expect("set runtime socket path");
+            .expect("set placement");
 
         let runtime = Arc::new(Runtime::new(
             state,
@@ -6645,7 +6644,7 @@ mod tests {
         let state = runtime.state.lock().await;
         let buffer = state.buffer(buffer_id).expect("buffer exists");
         assert!(matches!(buffer.state, BufferState::Interrupted(_)));
-        assert_eq!(buffer.runtime_socket_path(), None);
+        assert_eq!(buffer.placement().socket_path(), None);
     }
 
     #[cfg(unix)]
@@ -6662,8 +6661,13 @@ mod tests {
             .mark_buffer_running(buffer_id, Some(42))
             .expect("mark running");
         state
-            .set_buffer_runtime_socket_path(buffer_id, Some(socket_path.clone()))
-            .expect("set runtime socket path");
+            .set_buffer_placement(
+                buffer_id,
+                Placement::Local {
+                    socket_path: Some(socket_path.clone()),
+                },
+            )
+            .expect("set placement");
 
         let runtime = Arc::new(Runtime::new(
             state,
@@ -6682,7 +6686,7 @@ mod tests {
         let state = runtime.state.lock().await;
         let buffer = state.buffer(buffer_id).expect("buffer exists");
         assert!(matches!(buffer.state, BufferState::Interrupted(_)));
-        assert_eq!(buffer.runtime_socket_path(), None);
+        assert_eq!(buffer.placement().socket_path(), None);
     }
 
     #[tokio::test]
