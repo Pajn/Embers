@@ -1,31 +1,44 @@
 //! The buffer runtimes of a server: starting each buffer's runtime where its
-//! placement says, taking runtimes up again after a restart, following them
-//! until they end or the server is done with them, and letting a keeper go
-//! once a saved workspace no longer needs it.
+//! placement says, taking runtimes up again after a restart or once a lost
+//! host can be reached again, following them until they end or the server is
+//! done with them, and letting a keeper go once a saved workspace no longer
+//! needs it.
 //!
 //! The server keeps the buffer records; this module never reads them. It is
-//! told what to start or take up, and reports through
-//! [`BufferRuntimeCallbacks`] how each runtime ended.
+//! told what to start, take up or release, and reports through [`Callbacks`]
+//! how each runtime ended and which buffers on hosts run again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak};
+use std::time::Duration;
 
 use embers_core::{BufferId, MuxError, PtySize, Result};
-use tokio::sync::Mutex;
-use tracing::debug;
+use tokio::sync::{Mutex, watch};
+use tracing::{debug, info, warn};
 
 use crate::buffer_runtime::{BufferRuntimeCallbacks, BufferRuntimeStatus, RuntimeEnd};
 use crate::config::BUFFER_ENV_VAR;
 use crate::model::Placement;
-use crate::remote::RemoteHosts;
+use crate::remote::{HostConnection, RemoteHosts};
 use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::runtime_handle::BufferRuntimeHandle;
 
-/// Makes the callbacks for one runtime. Called once per runtime started or
-/// taken up.
-pub(crate) type CallbacksFactory = Arc<dyn Fn() -> BufferRuntimeCallbacks + Send + Sync>;
+/// How long to wait before trying to reach a lost host again, doubling after
+/// each failure up to [`RECONNECT_MAX_DELAY`].
+const RECONNECT_FIRST_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// How the runtimes report to the server.
+pub(crate) struct Callbacks {
+    /// Makes the callbacks for one runtime, once per runtime started or taken
+    /// up.
+    pub runtime: Arc<dyn Fn() -> BufferRuntimeCallbacks + Send + Sync>,
+    /// A buffer interrupted on its host runs there again, with the status its
+    /// runtime reported if it did. Its runtime is registered by then.
+    pub taken_up: Arc<dyn Fn(BufferId, Option<BufferRuntimeStatus>) + Send + Sync>,
+}
 
 /// What to start for a buffer (see [`BufferRuntimes::start`]).
 pub(crate) struct StartRequest<'a> {
@@ -46,7 +59,7 @@ pub(crate) struct Started {
     pub status: BufferRuntimeStatus,
 }
 
-/// What [`BufferRuntimes::restore`] found for a buffer.
+/// What [`BufferRuntimes::restore`] found for a buffer in a keeper.
 pub(crate) enum Restored {
     /// Its keeper was taken up again and reported this.
     Running(BufferRuntimeStatus),
@@ -65,20 +78,13 @@ pub(crate) struct KeeperSettings {
 }
 
 pub(crate) struct BufferRuntimes {
-    keepers: KeeperSettings,
-    hosts: RemoteHosts,
-    callbacks: OnceLock<CallbacksFactory>,
-    books: Arc<Books>,
-    /// Whether some client forwards kitty graphics queries to a host
-    /// terminal that answers them, as every runtime was last told. Held while
-    /// they are told, so they hear changes in order.
-    host_graphics: Mutex<bool>,
+    inner: Arc<Inner>,
 }
 
-/// What the callbacks of a runtime update as it ends, from whichever thread
-/// reports it.
-#[derive(Default)]
-struct Books {
+struct Inner {
+    keepers: KeeperSettings,
+    hosts: RemoteHosts,
+    callbacks: OnceLock<Callbacks>,
     running: StdMutex<BTreeMap<BufferId, BufferRuntimeHandle>>,
     /// Keepers waiting to hear that the workspace no longer needs them (see
     /// [`BufferRuntimes::awaiting_save`]).
@@ -88,14 +94,26 @@ struct Books {
     /// Buffers whose runtimes the server is shutting down: however they end
     /// now, their programs may still run for the next server.
     shutting_down: StdMutex<BTreeSet<BufferId>>,
+    /// Buffers interrupted on a host, by host, each with its id there, until
+    /// they are taken up again or released.
+    waiting_for_host: StdMutex<BTreeMap<String, BTreeMap<BufferId, BufferId>>>,
+    /// The hosts being reached again, one attempt at a time each.
+    reaching: StdMutex<BTreeSet<String>>,
+    /// Set once the server shuts down; hosts are no longer reached then.
+    stopping: watch::Sender<bool>,
+    /// Whether some client forwards kitty graphics queries to a host
+    /// terminal that answers them, as every keeper and host was last told.
+    /// Held while they are told, so they hear changes in order.
+    host_graphics: Mutex<bool>,
 }
 
 impl std::fmt::Debug for BufferRuntimes {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("BufferRuntimes")
-            .field("running", &lock(&self.books.running).len())
-            .field("awaiting_save", &lock(&self.books.awaiting_save).len())
+            .field("running", &lock(&self.inner.running).len())
+            .field("awaiting_save", &lock(&self.inner.awaiting_save).len())
+            .field("waiting_for_host", &lock(&self.inner.waiting_for_host))
             .finish_non_exhaustive()
     }
 }
@@ -105,23 +123,31 @@ impl BufferRuntimes {
     /// by running `remote_command` (see [`RemoteHosts::new`]).
     pub(crate) fn new(keepers: KeeperSettings, remote_command: Vec<String>) -> Self {
         Self {
-            keepers,
-            hosts: RemoteHosts::new(remote_command),
-            callbacks: OnceLock::new(),
-            books: Arc::default(),
-            host_graphics: Mutex::new(false),
+            inner: Arc::new(Inner {
+                keepers,
+                hosts: RemoteHosts::new(remote_command),
+                callbacks: OnceLock::new(),
+                running: StdMutex::default(),
+                awaiting_save: StdMutex::default(),
+                exited_early: StdMutex::default(),
+                shutting_down: StdMutex::default(),
+                waiting_for_host: StdMutex::default(),
+                reaching: StdMutex::default(),
+                stopping: watch::Sender::new(false),
+                host_graphics: Mutex::new(false),
+            }),
         }
     }
 
-    /// Set how the callbacks of each runtime are made, unless they already
-    /// were. Needed before any runtime is started or taken up.
-    pub(crate) fn set_callbacks(&self, factory: impl FnOnce() -> CallbacksFactory) {
-        self.callbacks.get_or_init(factory);
+    /// Set how the runtimes report, unless that already was. Needed before
+    /// any runtime is started or taken up.
+    pub(crate) fn set_callbacks(&self, callbacks: impl FnOnce() -> Callbacks) {
+        self.inner.callbacks.get_or_init(callbacks);
     }
 
     /// The runtime of `buffer_id`, while one runs it for this server.
     pub(crate) fn get(&self, buffer_id: BufferId) -> Option<BufferRuntimeHandle> {
-        lock(&self.books.running).get(&buffer_id).cloned()
+        lock(&self.inner.running).get(&buffer_id).cloned()
     }
 
     /// Start a runtime for `buffer_id`: a keeper on this machine, or a buffer
@@ -132,12 +158,13 @@ impl BufferRuntimes {
         buffer_id: BufferId,
         request: StartRequest<'_>,
     ) -> Result<Started> {
-        let callbacks = self.runtime_callbacks()?;
+        let inner = &self.inner;
+        let callbacks = inner.runtime_callbacks()?;
         let runtime = match request.host {
             // The host's server sets the program's own environment, its
             // socket and buffer id included.
             Some(host) => {
-                let connection = self.hosts.connect(host).await?;
+                let connection = inner.hosts.connect(host).await?;
                 BufferRuntimeHandle::spawn_remote(
                     buffer_id,
                     connection,
@@ -151,7 +178,7 @@ impl BufferRuntimes {
                 .await?
             }
             None => {
-                let mut env = self.keepers.env.clone();
+                let mut env = inner.keepers.env.clone();
                 for (key, value) in request.env {
                     env.insert(key.clone(), OsString::from(value));
                 }
@@ -163,7 +190,7 @@ impl BufferRuntimes {
                 );
                 BufferRuntimeHandle::spawn_keeper(
                     buffer_id,
-                    self.keeper_socket(buffer_id)?,
+                    inner.keeper_socket(buffer_id)?,
                     request.command,
                     request.cwd,
                     &env,
@@ -179,30 +206,270 @@ impl BufferRuntimes {
             Ok(status) => status,
             Err(error) => {
                 let _ = runtime.kill().await;
-                self.stop_unregistered(buffer_id, runtime).await;
+                inner.stop_unregistered(buffer_id, runtime).await;
                 return Err(error);
             }
         };
         let placement = runtime.placement();
-        self.register(buffer_id, runtime, &status).await;
+        if !inner.register(buffer_id, runtime, Some(&status)).await {
+            return Err(MuxError::conflict("the server is shutting down"));
+        }
         Ok(Started { placement, status })
     }
 
-    /// Take up again the keepers a previous server left, each listening on
-    /// the socket given with its buffer.
+    /// Take up again the runtimes a previous server left, by where it saved
+    /// each buffer to run: a keeper is taken up before this returns, with
+    /// what was found for it reported here; a host is reached in the
+    /// background, each buffer reported through [`Callbacks::taken_up`] once
+    /// it runs again, or as exited when its host no longer has it. A buffer
+    /// on a host stays interrupted while the host cannot be reached.
     pub(crate) async fn restore(
         &self,
-        keepers: Vec<(BufferId, PathBuf)>,
+        placements: Vec<(BufferId, Placement)>,
     ) -> Vec<(BufferId, Restored)> {
-        let mut restored = Vec::with_capacity(keepers.len());
-        for (buffer_id, socket_path) in keepers {
-            let outcome = self.restore_keeper(buffer_id, socket_path).await;
-            restored.push((buffer_id, outcome));
+        let inner = &self.inner;
+        let mut restored = Vec::new();
+        let mut hosts = BTreeSet::new();
+        for (buffer_id, placement) in placements {
+            match placement {
+                Placement::Local {
+                    socket_path: Some(socket_path),
+                } => {
+                    let outcome = inner.restore_keeper(buffer_id, socket_path).await;
+                    restored.push((buffer_id, outcome));
+                }
+                Placement::Remote {
+                    host,
+                    buffer_id: Some(remote_id),
+                } => {
+                    lock(&inner.waiting_for_host)
+                        .entry(host.clone())
+                        .or_default()
+                        .insert(buffer_id, remote_id);
+                    hosts.insert(host);
+                }
+                // Nothing runs it anywhere to take up.
+                Placement::Local { socket_path: None }
+                | Placement::Remote {
+                    buffer_id: None, ..
+                } => {}
+            }
+        }
+        // Reaching a host can take long, and must not hold up the start.
+        for host in hosts {
+            Inner::reach_host(inner, host, Duration::ZERO);
         }
         restored
     }
 
-    async fn restore_keeper(&self, buffer_id: BufferId, socket_path: PathBuf) -> Restored {
+    /// Stop the runtime of `buffer_id`, whose program the server does not
+    /// want after all, as when the buffer's record went away while it
+    /// started. Its keeper waits for a save (see [`Self::awaiting_save`]).
+    pub(crate) async fn discard(&self, buffer_id: BufferId) {
+        let runtime = lock(&self.inner.running).remove(&buffer_id);
+        if let Some(runtime) = runtime {
+            let _ = runtime.kill().await;
+            self.inner.stop_unregistered(buffer_id, runtime).await;
+        }
+    }
+
+    /// The server is done with the runtime of `buffer_id`, whose record it
+    /// removed: no callback reports on the buffer after this, and it is no
+    /// longer taken up if its host was lost. A host removes the buffer once
+    /// it has exited; a keeper waits for a save (see [`Self::awaiting_save`]).
+    pub(crate) async fn release(&self, buffer_id: BufferId) {
+        for buffers in lock(&self.inner.waiting_for_host).values_mut() {
+            buffers.remove(&buffer_id);
+        }
+        let runtime = lock(&self.inner.running).remove(&buffer_id);
+        if let Some(runtime) = runtime {
+            if let Err(error) = runtime.release().await {
+                debug!(%buffer_id, %error, "failed to release buffer runtime");
+            }
+            self.inner.await_save(buffer_id, runtime);
+        }
+    }
+
+    /// The buffers whose keepers wait to hear that the workspace no longer
+    /// needs them: their program exited or the server released them. A
+    /// keeper whose child has exited stays alive for the next server until
+    /// then: if this server crashed after reading the exit but before saving
+    /// it, a restart would otherwise find no keeper, take the pane for
+    /// interrupted and run its command again.
+    pub(crate) fn awaiting_save(&self) -> Vec<BufferId> {
+        lock(&self.inner.awaiting_save).keys().copied().collect()
+    }
+
+    /// Tell the keepers of `buffer_ids`, from [`Self::awaiting_save`], that
+    /// a save that no longer needs them has completed.
+    pub(crate) async fn saved(&self, buffer_ids: Vec<BufferId>) {
+        let keepers: Vec<_> = {
+            let mut awaiting = lock(&self.inner.awaiting_save);
+            buffer_ids
+                .into_iter()
+                .filter_map(|buffer_id| {
+                    awaiting
+                        .remove(&buffer_id)
+                        .map(|keeper| (buffer_id, keeper))
+                })
+                .collect()
+        };
+        for (buffer_id, keeper) in keepers {
+            if let Err(error) = keeper.acknowledge_exit_recorded().await {
+                debug!(%buffer_id, %error, "failed to tell keeper its exit was saved");
+            }
+        }
+    }
+
+    /// Tell every keeper and host whether any client now forwards kitty
+    /// graphics queries to a host terminal that answers them, when that
+    /// changed. A host hears it once, for all its buffers.
+    pub(crate) async fn set_host_graphics(&self, enabled: bool) {
+        let mut host_graphics = self.inner.host_graphics.lock().await;
+        if *host_graphics == enabled {
+            return;
+        }
+        *host_graphics = enabled;
+        let keepers: Vec<_> = lock(&self.inner.running)
+            .iter()
+            .filter_map(|(buffer_id, runtime)| match runtime {
+                BufferRuntimeHandle::Keeper(keeper) => Some((*buffer_id, keeper.clone())),
+                BufferRuntimeHandle::Remote(_) => None,
+            })
+            .collect();
+        for (buffer_id, keeper) in keepers {
+            // A keeper that predates this rejects it, and never holds replies.
+            if let Err(error) = keeper.set_host_graphics(enabled).await {
+                debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
+            }
+        }
+        self.inner.hosts.set_host_graphics(enabled).await;
+    }
+
+    /// Stop following every runtime, as the server shuts down. Each buffer
+    /// that reports an end from now on is interrupted, however its runtime
+    /// ended, and lost hosts are no longer reached. With `kill` (kill-server)
+    /// every program is ended too, along with the keepers waiting for a save;
+    /// otherwise keepers keep running so a restarted server can take them up,
+    /// and programs on hosts keep running there.
+    pub(crate) async fn shut_down(&self, kill: bool) {
+        let inner = &self.inner;
+        inner.stopping.send_replace(true);
+        lock(&inner.waiting_for_host).clear();
+        let runtimes: Vec<_> = {
+            let runtimes = lock(&inner.running);
+            lock(&inner.shutting_down).extend(runtimes.keys().copied());
+            runtimes.values().cloned().collect()
+        };
+        if kill {
+            let mut ending = std::mem::take(&mut *lock(&inner.awaiting_save));
+            ending.extend(lock(&inner.running).clone());
+            // Keepers stop concurrently: each may wait out a grace period for a
+            // program that ignores SIGHUP.
+            let mut terminations = tokio::task::JoinSet::new();
+            for runtime in ending.into_values() {
+                terminations.spawn(async move {
+                    if let Err(error) = runtime.terminate().await {
+                        debug!(%error, "failed to terminate buffer runtime");
+                    }
+                });
+            }
+            while terminations.join_next().await.is_some() {}
+        }
+        for runtime in runtimes {
+            if let Err(error) = runtime.release().await {
+                debug!(%error, "failed to release buffer runtime during shutdown");
+            }
+        }
+        lock(&inner.running).clear();
+    }
+
+    /// Let go of the keepers still waiting for a save, after the last one:
+    /// they stay up for the next server.
+    pub(crate) fn close(&self) {
+        lock(&self.inner.awaiting_save).clear();
+    }
+}
+
+impl Inner {
+    fn callbacks(&self) -> Result<&Callbacks> {
+        self.callbacks
+            .get()
+            .ok_or_else(|| MuxError::internal("buffer runtime callbacks are not set"))
+    }
+
+    /// The callbacks for a new runtime, with its end recorded here before
+    /// the server hears of it.
+    fn runtime_callbacks(self: &Arc<Self>) -> Result<BufferRuntimeCallbacks> {
+        let mut callbacks = (self.callbacks()?.runtime)();
+        let on_ended = callbacks.on_ended.clone();
+        // A runtime outliving its server's runtimes records nothing here.
+        let inner = Arc::downgrade(self);
+        callbacks.on_ended = Arc::new(move |buffer_id, end| {
+            let Some(inner) = Weak::upgrade(&inner) else {
+                on_ended(buffer_id, end);
+                return;
+            };
+            let (end, lost_host) = inner.ended(buffer_id, end);
+            // The server records the interrupt before the host is tried again.
+            on_ended(buffer_id, end);
+            if let Some(host) = lost_host {
+                Self::reach_host(&inner, host, RECONNECT_FIRST_DELAY);
+            }
+        });
+        Ok(callbacks)
+    }
+
+    /// Record that `buffer_id`'s runtime ended as `end`. Returns how the
+    /// server should take it, and the host to reach again when it was lost
+    /// there.
+    fn ended(&self, buffer_id: BufferId, end: RuntimeEnd) -> (RuntimeEnd, Option<String>) {
+        let shutting_down = lock(&self.shutting_down).remove(&buffer_id);
+        let end = if shutting_down {
+            RuntimeEnd::Interrupted
+        } else {
+            end
+        };
+        let mut running = lock(&self.running);
+        let mut lost_host = None;
+        match end {
+            RuntimeEnd::Interrupted => {
+                let runtime = running.remove(&buffer_id);
+                drop(running);
+                if !shutting_down
+                    && let Some(Placement::Remote {
+                        host,
+                        buffer_id: Some(remote_id),
+                    }) = runtime.as_ref().map(BufferRuntimeHandle::placement)
+                {
+                    lock(&self.waiting_for_host)
+                        .entry(host.clone())
+                        .or_default()
+                        .insert(buffer_id, remote_id);
+                    lost_host = Some(host);
+                }
+            }
+            // The runtime stays registered: an exited buffer can still be
+            // shown and captured. Its keeper is held for a save from now on.
+            RuntimeEnd::Exited(_) => match running.get(&buffer_id) {
+                Some(runtime) => {
+                    if matches!(runtime, BufferRuntimeHandle::Keeper(_)) {
+                        lock(&self.awaiting_save).insert(buffer_id, runtime.clone());
+                    }
+                }
+                None => {
+                    lock(&self.exited_early).insert(buffer_id);
+                }
+            },
+        }
+        (end, lost_host)
+    }
+
+    async fn restore_keeper(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        socket_path: PathBuf,
+    ) -> Restored {
         if !socket_path.exists() {
             debug!(
                 %buffer_id,
@@ -258,20 +525,81 @@ impl BufferRuntimes {
                 }
             }
         }
-        self.register(buffer_id, runtime, &status).await;
+        if !self.register(buffer_id, runtime, Some(&status)).await {
+            return Restored::Gone;
+        }
         Restored::Running(status)
     }
 
-    /// Take up again `buffers` on `host`, each with its id there. Fails when
-    /// the host cannot be reached; otherwise reports for each buffer what
-    /// its runtime reported, if it did, or why it could not be taken up.
-    pub(crate) async fn take_up_on_host(
-        &self,
-        host: &str,
-        buffers: Vec<(BufferId, BufferId)>,
-    ) -> Result<Vec<(BufferId, Result<Option<BufferRuntimeStatus>>)>> {
-        let connection = self.hosts.connect(host).await?;
-        let mut taken_up = Vec::with_capacity(buffers.len());
+    /// Keep trying to reach `host` after `delay`, waiting longer after each
+    /// failure, and take up its interrupted buffers once it answers. One
+    /// attempt runs per host at a time; it gives up once no buffer waits for
+    /// the host or the server shuts down.
+    fn reach_host(self: &Arc<Self>, host: String, delay: Duration) {
+        if *self.stopping.borrow() || !lock(&self.reaching).insert(host.clone()) {
+            return;
+        }
+        let Ok(tokio) = tokio::runtime::Handle::try_current() else {
+            lock(&self.reaching).remove(&host);
+            return;
+        };
+        let inner = self.clone();
+        let mut stopping = self.stopping.subscribe();
+        tokio.spawn(async move {
+            tokio::select! {
+                () = inner.reach_until_taken_up(&host, delay) => {}
+                _ = stopping.wait_for(|stopping| *stopping) => {}
+            }
+            lock(&inner.reaching).remove(&host);
+            // A buffer lost after the last attempt found this task still
+            // running and left it to it.
+            if inner.waits_for(&host) {
+                Self::reach_host(&inner, host, RECONNECT_FIRST_DELAY);
+            }
+        });
+    }
+
+    async fn reach_until_taken_up(self: &Arc<Self>, host: &str, mut delay: Duration) {
+        loop {
+            tokio::time::sleep(delay).await;
+            if !self.waits_for(host) {
+                return;
+            }
+            match self.hosts.connect(host).await {
+                // Buffers left interrupted are tried again with the rest.
+                Ok(connection) => {
+                    if self.take_up_on_host(host, connection).await {
+                        return;
+                    }
+                }
+                // Only the first attempt after a restart says so: a host it
+                // cannot reach is worth a warning, a retry is not.
+                Err(error) if delay.is_zero() => {
+                    warn!(%host, %error, "could not reach host to take up its buffers again");
+                }
+                Err(error) => {
+                    debug!(%host, %error, ?delay, "host still cannot be reached");
+                }
+            }
+            delay = (delay * 2).clamp(RECONNECT_FIRST_DELAY, RECONNECT_MAX_DELAY);
+        }
+    }
+
+    fn waits_for(&self, host: &str) -> bool {
+        lock(&self.waiting_for_host)
+            .get(host)
+            .is_some_and(|buffers| !buffers.is_empty())
+    }
+
+    /// Take up the buffers waiting for `host` on `connection`. Returns
+    /// whether none is left waiting for a reason trying again could fix:
+    /// taking it up failed some other way than the host no longer having it.
+    async fn take_up_on_host(self: &Arc<Self>, host: &str, connection: HostConnection) -> bool {
+        let buffers: Vec<_> = lock(&self.waiting_for_host)
+            .get(host)
+            .map(|buffers| buffers.iter().map(|(&id, &remote)| (id, remote)).collect())
+            .unwrap_or_default();
+        let mut done = true;
         for (buffer_id, remote_id) in buffers {
             let attached = match self.runtime_callbacks() {
                 Ok(callbacks) => {
@@ -285,134 +613,87 @@ impl BufferRuntimes {
                 }
                 Err(error) => Err(error),
             };
-            let outcome = match attached {
+            // Released while its host was being reached.
+            let waiting = lock(&self.waiting_for_host)
+                .get_mut(host)
+                .is_some_and(|buffers| buffers.remove(&buffer_id).is_some());
+            match attached {
+                Ok(runtime) if !waiting => {
+                    let _ = runtime.release().await;
+                }
                 Ok(runtime) => {
                     let status = runtime.status().await.ok();
-                    self.register(buffer_id, runtime, status.as_ref()).await;
-                    Ok(status)
+                    if self.register(buffer_id, runtime, status.as_ref()).await
+                        && let Ok(callbacks) = self.callbacks()
+                    {
+                        info!(%buffer_id, %host, "took up buffer on host again");
+                        (callbacks.taken_up)(buffer_id, status);
+                    }
                 }
-                Err(error) => Err(error),
-            };
-            taken_up.push((buffer_id, outcome));
-        }
-        Ok(taken_up)
-    }
-
-    /// Stop the runtime of `buffer_id`, whose program the server does not
-    /// want after all, as when the buffer's record went away while it
-    /// started. Its keeper waits for a save (see [`Self::awaiting_save`]).
-    pub(crate) async fn discard(&self, buffer_id: BufferId) {
-        let runtime = lock(&self.books.running).remove(&buffer_id);
-        if let Some(runtime) = runtime {
-            let _ = runtime.kill().await;
-            self.stop_unregistered(buffer_id, runtime).await;
-        }
-    }
-
-    /// The server is done with the runtime of `buffer_id`, whose record it
-    /// removed: no callback reports on the buffer after this. A host removes
-    /// the buffer once it has exited; a keeper waits for a save (see
-    /// [`Self::awaiting_save`]).
-    pub(crate) async fn release(&self, buffer_id: BufferId) {
-        let runtime = lock(&self.books.running).remove(&buffer_id);
-        if let Some(runtime) = runtime {
-            if let Err(error) = runtime.release().await {
-                debug!(%buffer_id, %error, "failed to release buffer runtime");
+                Err(_) if !waiting => {}
+                // The host no longer has it, as if its program exited.
+                Err(error) if error.is_not_found() => {
+                    if let Ok(callbacks) = self.callbacks() {
+                        ((callbacks.runtime)().on_ended)(buffer_id, RuntimeEnd::Exited(None));
+                    }
+                }
+                Err(error) => {
+                    warn!(%buffer_id, %host, %error, "could not take up buffer on host again");
+                    lock(&self.waiting_for_host)
+                        .entry(host.to_owned())
+                        .or_default()
+                        .insert(buffer_id, remote_id);
+                    done = false;
+                }
             }
+        }
+        done
+    }
+
+    /// Register `runtime` as `buffer_id`'s, as it reported `status`. Returns
+    /// whether it was: once the server shuts down, a runtime is let go of
+    /// instead.
+    async fn register(
+        &self,
+        buffer_id: BufferId,
+        runtime: BufferRuntimeHandle,
+        status: Option<&BufferRuntimeStatus>,
+    ) -> bool {
+        if *self.stopping.borrow() {
+            self.stop_unregistered(buffer_id, runtime).await;
+            return false;
+        }
+        lock(&self.running).insert(buffer_id, runtime.clone());
+        // A keeper starts out holding no replies; tell this one if it should.
+        // A host was told when it was reached.
+        if let BufferRuntimeHandle::Keeper(keeper) = &runtime {
+            let host_graphics = self.host_graphics.lock().await;
+            if *host_graphics && let Err(error) = keeper.set_host_graphics(true).await {
+                debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
+            }
+        }
+        // Its program may have exited before it was registered, when its end
+        // found nothing to hold for a save, or before it was taken up again,
+        // which a runtime reports as its status rather than as an end.
+        let exited = status.is_some_and(|status| !status.running);
+        if lock(&self.exited_early).remove(&buffer_id) || exited {
             self.await_save(buffer_id, runtime);
         }
+        true
     }
 
-    /// The buffers whose keepers wait to hear that the workspace no longer
-    /// needs them: their program exited or the server released them. A
-    /// keeper whose child has exited stays alive for the next server until
-    /// then: if this server crashed after reading the exit but before saving
-    /// it, a restart would otherwise find no keeper, take the pane for
-    /// interrupted and run its command again.
-    pub(crate) fn awaiting_save(&self) -> Vec<BufferId> {
-        lock(&self.books.awaiting_save).keys().copied().collect()
+    /// Stop following a runtime that is not registered, and hold its keeper
+    /// for a save.
+    async fn stop_unregistered(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
+        let _ = runtime.release().await;
+        lock(&self.exited_early).remove(&buffer_id);
+        self.await_save(buffer_id, runtime);
     }
 
-    /// Tell the keepers of `buffer_ids`, from [`Self::awaiting_save`], that
-    /// a save that no longer needs them has completed.
-    pub(crate) async fn saved(&self, buffer_ids: Vec<BufferId>) {
-        let keepers: Vec<_> = {
-            let mut awaiting = lock(&self.books.awaiting_save);
-            buffer_ids
-                .into_iter()
-                .filter_map(|buffer_id| {
-                    awaiting
-                        .remove(&buffer_id)
-                        .map(|keeper| (buffer_id, keeper))
-                })
-                .collect()
-        };
-        for (buffer_id, keeper) in keepers {
-            if let Err(error) = keeper.acknowledge_exit_recorded().await {
-                debug!(%buffer_id, %error, "failed to tell keeper its exit was saved");
-            }
+    fn await_save(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
+        if matches!(runtime, BufferRuntimeHandle::Keeper(_)) {
+            lock(&self.awaiting_save).insert(buffer_id, runtime);
         }
-    }
-
-    /// Tell every runtime whether any client now forwards kitty graphics
-    /// queries to a host terminal that answers them, when that changed.
-    pub(crate) async fn set_host_graphics(&self, enabled: bool) {
-        let mut host_graphics = self.host_graphics.lock().await;
-        if *host_graphics == enabled {
-            return;
-        }
-        *host_graphics = enabled;
-        let runtimes: Vec<_> = lock(&self.books.running)
-            .iter()
-            .map(|(buffer_id, runtime)| (*buffer_id, runtime.clone()))
-            .collect();
-        for (buffer_id, runtime) in runtimes {
-            // A keeper that predates this rejects it, and never holds replies.
-            if let Err(error) = runtime.set_host_graphics(enabled).await {
-                debug!(%buffer_id, %error, "failed to tell runtime about host graphics");
-            }
-        }
-    }
-
-    /// Stop following every runtime, as the server shuts down. Each buffer
-    /// that reports an end from now on is interrupted, however its runtime
-    /// ended. With `kill` (kill-server) every program is ended too, along
-    /// with the keepers waiting for a save; otherwise keepers keep running so
-    /// a restarted server can take them up, and programs on hosts keep
-    /// running there.
-    pub(crate) async fn shut_down(&self, kill: bool) {
-        let runtimes: Vec<_> = {
-            let runtimes = lock(&self.books.running);
-            lock(&self.books.shutting_down).extend(runtimes.keys().copied());
-            runtimes.values().cloned().collect()
-        };
-        if kill {
-            let mut ending = std::mem::take(&mut *lock(&self.books.awaiting_save));
-            ending.extend(lock(&self.books.running).clone());
-            // Keepers stop concurrently: each may wait out a grace period for a
-            // program that ignores SIGHUP.
-            let mut terminations = tokio::task::JoinSet::new();
-            for runtime in ending.into_values() {
-                terminations.spawn(async move {
-                    if let Err(error) = runtime.terminate().await {
-                        debug!(%error, "failed to terminate buffer runtime");
-                    }
-                });
-            }
-            while terminations.join_next().await.is_some() {}
-        }
-        for runtime in runtimes {
-            if let Err(error) = runtime.release().await {
-                debug!(%error, "failed to release buffer runtime during shutdown");
-            }
-        }
-        lock(&self.books.running).clear();
-    }
-
-    /// Let go of the keepers still waiting for a save, after the last one:
-    /// they stay up for the next server.
-    pub(crate) fn close(&self) {
-        lock(&self.books.awaiting_save).clear();
     }
 
     fn keeper_socket(&self, buffer_id: BufferId) -> Result<PathBuf> {
@@ -423,93 +704,6 @@ impl BufferRuntimes {
         );
         prepare_keeper_socket_dir(&path)?;
         Ok(path)
-    }
-
-    /// The callbacks for a new runtime of the server, with its end recorded
-    /// here before the server hears of it.
-    fn runtime_callbacks(&self) -> Result<BufferRuntimeCallbacks> {
-        let factory = self
-            .callbacks
-            .get()
-            .ok_or_else(|| MuxError::internal("buffer runtime callbacks are not set"))?;
-        let mut callbacks = factory();
-        let on_ended = callbacks.on_ended.clone();
-        let books = self.books.clone();
-        callbacks.on_ended = Arc::new(move |buffer_id, end| {
-            let end = books.ended(buffer_id, end);
-            on_ended(buffer_id, end);
-        });
-        Ok(callbacks)
-    }
-
-    /// Register `runtime` as `buffer_id`'s, as it reported `status`.
-    async fn register<'a>(
-        &self,
-        buffer_id: BufferId,
-        runtime: BufferRuntimeHandle,
-        status: impl Into<Option<&'a BufferRuntimeStatus>>,
-    ) {
-        lock(&self.books.running).insert(buffer_id, runtime.clone());
-        // A runtime starts out holding no replies; tell this one if it should.
-        let host_graphics = self.host_graphics.lock().await;
-        if *host_graphics && let Err(error) = runtime.set_host_graphics(true).await {
-            debug!(%buffer_id, %error, "failed to tell runtime about host graphics");
-        }
-        drop(host_graphics);
-        // Its program may have exited before it was registered, when its end
-        // found nothing to hold for a save, or before it was taken up again,
-        // which a runtime reports as its status rather than as an end.
-        let exited = status.into().is_some_and(|status| !status.running);
-        if lock(&self.books.exited_early).remove(&buffer_id) || exited {
-            self.await_save(buffer_id, runtime);
-        }
-    }
-
-    /// Stop following a runtime that is not registered, and hold its keeper
-    /// for a save.
-    async fn stop_unregistered(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
-        let _ = runtime.release().await;
-        lock(&self.books.exited_early).remove(&buffer_id);
-        self.await_save(buffer_id, runtime);
-    }
-
-    fn await_save(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
-        if matches!(runtime, BufferRuntimeHandle::Keeper(_)) {
-            lock(&self.books.awaiting_save).insert(buffer_id, runtime);
-        }
-    }
-}
-
-impl Books {
-    /// Record that `buffer_id`'s runtime ended as `end`, and return how the
-    /// server should take it.
-    fn ended(&self, buffer_id: BufferId, end: RuntimeEnd) -> RuntimeEnd {
-        let end = if lock(&self.shutting_down).remove(&buffer_id) {
-            RuntimeEnd::Interrupted
-        } else {
-            end
-        };
-        let mut running = lock(&self.running);
-        match end {
-            RuntimeEnd::Interrupted => {
-                let runtime = running.remove(&buffer_id);
-                drop(running);
-                drop(runtime);
-            }
-            // The runtime stays registered: an exited buffer can still be
-            // shown and captured. Its keeper is held for a save from now on.
-            RuntimeEnd::Exited(_) => match running.get(&buffer_id) {
-                Some(runtime) => {
-                    if matches!(runtime, BufferRuntimeHandle::Keeper(_)) {
-                        lock(&self.awaiting_save).insert(buffer_id, runtime.clone());
-                    }
-                }
-                None => {
-                    lock(&self.exited_early).insert(buffer_id);
-                }
-            },
-        }
-        end
     }
 }
 
@@ -532,7 +726,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc;
 
-    use super::{Books, BufferRuntimes, KeeperSettings, Restored, StartRequest, Started, lock};
+    use super::{BufferRuntimes, Callbacks, KeeperSettings, Restored, StartRequest, Started, lock};
     use crate::buffer_runtime::{BufferRuntimeCallbacks, RuntimeEnd};
     use crate::model::Placement;
 
@@ -555,8 +749,8 @@ mod tests {
             Vec::new(),
         );
         let (ends, ended) = mpsc::unbounded_channel();
-        runtimes.set_callbacks(|| {
-            Arc::new(move || {
+        runtimes.set_callbacks(|| Callbacks {
+            runtime: Arc::new(move || {
                 let ends = ends.clone();
                 BufferRuntimeCallbacks {
                     on_ended: Arc::new(move |buffer_id, end| {
@@ -564,7 +758,8 @@ mod tests {
                     }),
                     ..BufferRuntimeCallbacks::default()
                 }
-            })
+            }),
+            taken_up: Arc::new(|_, _| {}),
         });
         (runtimes, ended, dir)
     }
@@ -669,7 +864,14 @@ mod tests {
 
         // Another server, with keepers elsewhere, takes it up by its socket.
         let (next, _next_ended, _next_dir) = new_runtimes();
-        let restored = next.restore(vec![(buffer, socket_path)]).await;
+        let restored = next
+            .restore(vec![(
+                buffer,
+                Placement::Local {
+                    socket_path: Some(socket_path),
+                },
+            )])
+            .await;
         assert!(matches!(
             restored.as_slice(),
             [(id, Restored::Running(status))] if *id == buffer && status.running
@@ -683,7 +885,12 @@ mod tests {
         let (runtimes, _ended, dir) = new_runtimes();
 
         let restored = runtimes
-            .restore(vec![(BufferId(5), dir.path().join("missing.sock"))])
+            .restore(vec![(
+                BufferId(5),
+                Placement::Local {
+                    socket_path: Some(dir.path().join("missing.sock")),
+                },
+            )])
             .await;
 
         assert!(matches!(restored.as_slice(), [(_, Restored::Gone)]));
@@ -696,7 +903,14 @@ mod tests {
         let socket_path = dir.path().join("stale.sock");
         drop(UnixListener::bind(&socket_path).expect("bind stale socket"));
 
-        let restored = runtimes.restore(vec![(BufferId(6), socket_path)]).await;
+        let restored = runtimes
+            .restore(vec![(
+                BufferId(6),
+                Placement::Local {
+                    socket_path: Some(socket_path),
+                },
+            )])
+            .await;
 
         assert!(matches!(restored.as_slice(), [(_, Restored::Gone)]));
         assert!(runtimes.get(BufferId(6)).is_none());
@@ -734,17 +948,40 @@ mod tests {
 
     #[test]
     fn an_end_during_shutdown_is_an_interrupt() {
-        let books = Books::default();
-        lock(&books.shutting_down).insert(BufferId(8));
+        let (runtimes, _ended, _dir) = new_runtimes();
+        let inner = &runtimes.inner;
+        lock(&inner.shutting_down).insert(BufferId(8));
 
         assert_eq!(
-            books.ended(BufferId(8), RuntimeEnd::Exited(Some(0))),
-            RuntimeEnd::Interrupted
+            inner.ended(BufferId(8), RuntimeEnd::Exited(Some(0))),
+            (RuntimeEnd::Interrupted, None)
         );
         // Only the end the shutdown caused.
         assert_eq!(
-            books.ended(BufferId(8), RuntimeEnd::Exited(Some(0))),
-            RuntimeEnd::Exited(Some(0))
+            inner.ended(BufferId(8), RuntimeEnd::Exited(Some(0))),
+            (RuntimeEnd::Exited(Some(0)), None)
         );
+    }
+
+    #[tokio::test]
+    async fn a_buffer_on_a_host_waits_for_it_until_released() {
+        let (runtimes, _ended, _dir) = new_runtimes();
+
+        let restored = runtimes
+            .restore(vec![(
+                BufferId(9),
+                Placement::Remote {
+                    host: "devbox".to_owned(),
+                    buffer_id: Some(BufferId(3)),
+                },
+            )])
+            .await;
+
+        // Its host is reached in the background, so nothing is reported now.
+        assert!(restored.is_empty());
+        assert!(runtimes.inner.waits_for("devbox"));
+        runtimes.release(BufferId(9)).await;
+        assert!(!runtimes.inner.waits_for("devbox"));
+        runtimes.shut_down(false).await;
     }
 }
