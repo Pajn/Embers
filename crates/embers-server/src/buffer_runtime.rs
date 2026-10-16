@@ -168,6 +168,18 @@ pub struct BufferRuntimeCallbacks {
     pub on_passthrough: Arc<dyn Fn(BufferId, Vec<PassthroughWrite>) + Send + Sync>,
 }
 
+impl Default for BufferRuntimeCallbacks {
+    /// Callbacks that ignore everything reported.
+    fn default() -> Self {
+        Self {
+            on_output: Arc::new(|_, _| {}),
+            on_ended: Arc::new(|_, _| {}),
+            on_clipboard: Arc::new(|_, _| {}),
+            on_passthrough: Arc::new(|_, _| {}),
+        }
+    }
+}
+
 /// How a buffer runtime stopped reporting on its buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeEnd {
