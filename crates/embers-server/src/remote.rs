@@ -18,7 +18,7 @@ use tracing::debug;
 use crate::Upstream;
 use crate::buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
-    BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeScrollbackSlice, RuntimeSnapshot,
+    BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeEnd, RuntimeScrollbackSlice, RuntimeSnapshot,
     status_update_delta,
 };
 use crate::config::REMOTE_HOST_PLACEHOLDER;
@@ -588,7 +588,7 @@ impl RemoteRuntimeHandle {
     /// Stop passing on the host's reports about this buffer, which the server
     /// here is done with. A program still running keeps running on the host
     /// until it is killed; an exited one's buffer is removed there.
-    pub async fn join_threads(&self) -> Result<()> {
+    pub async fn release(&self) -> Result<()> {
         if let Some(pump) = lock(&self.inner.pump).take() {
             pump.abort();
         }
@@ -635,7 +635,7 @@ async fn pump_changes(
             tokio::select! {
                 change = watched.changes.recv() => {
                     if change.is_none() {
-                        (callbacks.on_lost)(inner.buffer_id);
+                        (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Interrupted);
                         return;
                     }
                 }
@@ -654,11 +654,11 @@ async fn pump_changes(
         let record = match get_record(&inner.connection, inner.remote_id).await {
             Ok(record) => record,
             Err(error) if error.is_not_found() => {
-                (callbacks.on_exit)(inner.buffer_id, None);
+                (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(None));
                 return;
             }
             Err(_) if !inner.connection.is_open() => {
-                (callbacks.on_lost)(inner.buffer_id);
+                (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Interrupted);
                 return;
             }
             Err(error) => {
@@ -699,7 +699,7 @@ async fn pump_changes(
             (callbacks.on_output)(inner.buffer_id, update);
         }
         if record.state == BufferRecordState::Exited {
-            (callbacks.on_exit)(inner.buffer_id, record.exit_code);
+            (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(record.exit_code));
             return;
         }
     }

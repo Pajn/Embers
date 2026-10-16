@@ -157,17 +157,26 @@ struct RuntimeThreads {
 #[derive(Clone)]
 pub struct BufferRuntimeCallbacks {
     pub on_output: Arc<dyn Fn(BufferId, BufferRuntimeUpdate) + Send + Sync>,
-    pub on_exit: Arc<dyn Fn(BufferId, Option<i32>) + Send + Sync>,
+    /// The runtime will report nothing more about the buffer (see
+    /// [`RuntimeEnd`]).
+    pub on_ended: Arc<dyn Fn(BufferId, RuntimeEnd) + Send + Sync>,
     /// A program in the buffer wrote to the clipboard with OSC 52.
     pub on_clipboard: Arc<dyn Fn(BufferId, ClipboardWrite) + Send + Sync>,
     /// A program in the buffer sent sequences for the host terminal (tmux
     /// passthrough), in the order it sent them. Called once per poll with
     /// every write the poll fetched.
     pub on_passthrough: Arc<dyn Fn(BufferId, Vec<PassthroughWrite>) + Send + Sync>,
-    /// The runtime can no longer be reached, though its program may still
-    /// run: a buffer on another host whose connection was lost. A keeper's
-    /// runtime never reports this.
-    pub on_lost: Arc<dyn Fn(BufferId) + Send + Sync>,
+}
+
+/// How a buffer runtime stopped reporting on its buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeEnd {
+    /// The buffer's program exited, with its exit code when known.
+    Exited(Option<i32>),
+    /// The runtime can no longer be reached, though the program may still
+    /// run: a buffer on another host whose connection was lost. A keeper
+    /// never reports this.
+    Interrupted,
 }
 
 #[derive(Clone)]
@@ -866,7 +875,9 @@ impl KeeperRuntimeHandle {
         .map_err(|error| MuxError::internal(error.to_string()))?
     }
 
-    pub async fn join_threads(&self) -> Result<()> {
+    /// Stop following the keeper: its poller stops and no callback is
+    /// called after this returns. The keeper and its program keep running.
+    pub async fn release(&self) -> Result<()> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || inner.join_threads_blocking())
             .await
@@ -2304,7 +2315,7 @@ fn spawn_status_poller(
                         Err(error) => {
                             error!(%error, %inner.buffer_id, "status poll failed");
                             notify_pipe_removed(&callbacks, inner.buffer_id, &mut last, saw_exit);
-                            (callbacks.on_exit)(inner.buffer_id, None);
+                            (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(None));
                             break;
                         }
                     }
@@ -2345,7 +2356,7 @@ fn spawn_status_poller(
 
                 if !saw_exit && !status.running {
                     saw_exit = true;
-                    (callbacks.on_exit)(inner.buffer_id, status.exit_code);
+                    (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(status.exit_code));
                 }
 
                 thread::sleep(STATUS_POLL_INTERVAL);
@@ -2889,8 +2900,8 @@ mod tests {
         BufferRuntimeCallbacks, BufferRuntimeInner, BufferRuntimePipeStatus,
         BufferRuntimePipeStopReason, BufferRuntimeStatus, ESTIMATED_CELL_SPAN_JSON_BYTES,
         ESTIMATED_STYLED_RUN_JSON_BYTES, KEEPER_PIPE_WRITE_QUEUE_CAPACITY, KeeperConnection,
-        KeeperPipe, KeeperRuntimeHandle, MAX_FRAME_SIZE, MAX_STYLE_PAYLOAD_BYTES, RuntimeThreads,
-        fit_slice_payload, read_message, spawn_status_poller, status_update_delta,
+        KeeperPipe, KeeperRuntimeHandle, MAX_FRAME_SIZE, MAX_STYLE_PAYLOAD_BYTES, RuntimeEnd,
+        RuntimeThreads, fit_slice_payload, read_message, spawn_status_poller, status_update_delta,
         wait_for_keeper_ready,
     };
 
@@ -3340,14 +3351,13 @@ mod tests {
                         .send((buffer_id, update))
                         .expect("send output notification");
                 }),
-                on_exit: Arc::new(move |buffer_id, exit_code| {
+                on_ended: Arc::new(move |buffer_id, end| {
                     exit_tx
-                        .send((buffer_id, exit_code))
+                        .send((buffer_id, end))
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
                 on_passthrough: Arc::new(|_, _| {}),
-                on_lost: Arc::new(|_| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -3372,7 +3382,7 @@ mod tests {
             exit_rx
                 .recv_timeout(Duration::from_secs(1))
                 .expect("poller should report exit"),
-            (BufferId(1), None)
+            (BufferId(1), RuntimeEnd::Exited(None))
         );
         let (buffer_id, update) = output_rx
             .recv_timeout(Duration::from_secs(1))
@@ -3403,14 +3413,13 @@ mod tests {
                         .send((buffer_id, update))
                         .expect("send output notification");
                 }),
-                on_exit: Arc::new(move |buffer_id, exit_code| {
+                on_ended: Arc::new(move |buffer_id, end| {
                     exit_tx
-                        .send((buffer_id, exit_code))
+                        .send((buffer_id, end))
                         .expect("send exit notification");
                 }),
                 on_clipboard: Arc::new(|_, _| {}),
                 on_passthrough: Arc::new(|_, _| {}),
-                on_lost: Arc::new(|_| {}),
             },
             BufferRuntimeStatus {
                 pid: None,
@@ -3447,7 +3456,7 @@ mod tests {
             exit_rx
                 .recv_timeout(Duration::from_secs(1))
                 .expect("poller should report exit"),
-            (BufferId(2), None)
+            (BufferId(2), RuntimeEnd::Exited(None))
         );
     }
 

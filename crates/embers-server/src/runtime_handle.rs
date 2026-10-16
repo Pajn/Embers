@@ -226,10 +226,14 @@ impl BufferRuntimeHandle {
         }
     }
 
-    pub async fn join_threads(&self) -> Result<()> {
+    /// Stop following the runtime: no callback is called after this
+    /// returns. The program keeps running; a host removes the buffer once it
+    /// has exited, and a keeper exits once its exit was saved and its last
+    /// handle is dropped.
+    pub async fn release(&self) -> Result<()> {
         match self {
-            Self::Keeper(keeper) => keeper.join_threads().await,
-            Self::Remote(remote) => remote.join_threads().await,
+            Self::Keeper(keeper) => keeper.release().await,
+            Self::Remote(remote) => remote.release().await,
         }
     }
 }

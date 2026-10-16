@@ -18,7 +18,7 @@ mod upstream;
 
 pub use buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
-    BufferRuntimeStatus, BufferRuntimeUpdate, KeeperRuntimeHandle, RuntimeKeeperCli,
+    BufferRuntimeStatus, BufferRuntimeUpdate, KeeperRuntimeHandle, RuntimeEnd, RuntimeKeeperCli,
     run_runtime_keeper,
 };
 pub use config::{

@@ -48,7 +48,7 @@ use crate::restore::{default_shell, plan_restore};
 use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::{
     BufferAttachment, BufferRuntimeCallbacks, BufferRuntimeHandle, BufferRuntimePipeStatus,
-    BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, BufferState,
+    BufferRuntimePipeStopReason, BufferRuntimeStatus, BufferRuntimeUpdate, BufferState, RuntimeEnd,
     ServerConfig, ServerState, TabEntry,
 };
 
@@ -734,7 +734,7 @@ impl Runtime {
 
     /// Register `runtime` as `buffer_id`'s. Its status poller is already
     /// running, so the buffer may have exited (or its record gone) before
-    /// this, when [`Self::record_buffer_exit`] could not find the runtime yet;
+    /// this, when [`Self::record_buffer_end`] could not find the runtime yet;
     /// such a runtime waits for a save here instead.
     async fn insert_buffer_runtime(&self, buffer_id: BufferId, runtime: BufferRuntimeHandle) {
         self.buffer_runtimes
@@ -847,9 +847,6 @@ impl Runtime {
         let output_runtime = self.clone();
         let exit_runtime = self.clone();
         let clipboard_runtime = self.clone();
-        let lost_runtime = self.clone();
-        let lost_handle = output_handle.clone();
-        let lost_tasks = self.state_tasks.clone();
         let output_tasks = self.state_tasks.clone();
         let exit_tasks = self.state_tasks.clone();
         let clipboard_tasks = self.state_tasks.clone();
@@ -879,12 +876,15 @@ impl Runtime {
                     runtime.record_buffer_update(buffer_id, update).await;
                 }));
             }),
-            on_exit: Arc::new(move |buffer_id, exit_code| {
+            on_ended: Arc::new(move |buffer_id, end| {
                 let runtime = exit_runtime.clone();
                 let task = exit_tasks.enter();
                 std::mem::drop(exit_handle.spawn(async move {
                     let _task = task;
-                    runtime.record_buffer_exit(buffer_id, exit_code).await;
+                    runtime.record_buffer_end(buffer_id, end).await;
+                    if end == RuntimeEnd::Interrupted {
+                        runtime.reach_buffer_host_again(buffer_id).await;
+                    }
                 }));
             }),
             on_clipboard: Arc::new(move |buffer_id, write| {
@@ -900,14 +900,6 @@ impl Runtime {
                 if passthrough_tx.send((buffer_id, writes, task)).is_err() {
                     debug!(%buffer_id, "dropping passthrough: forwarder stopped");
                 }
-            }),
-            on_lost: Arc::new(move |buffer_id| {
-                let runtime = lost_runtime.clone();
-                let task = lost_tasks.enter();
-                std::mem::drop(lost_handle.spawn(async move {
-                    let _task = task;
-                    runtime.record_buffer_lost(buffer_id).await;
-                }));
             }),
         }
     }
@@ -973,7 +965,7 @@ impl Runtime {
                                     buffer_pid_hint(&buffer.state),
                                 );
                                 drop(state);
-                                let _ = runtime.join_threads().await;
+                                let _ = runtime.release().await;
                                 self.await_saved_exit(buffer.id, runtime);
                                 continue;
                             }
@@ -1067,7 +1059,8 @@ impl Runtime {
                     info!(%buffer_id, %host, "took up buffer on host again");
                 }
                 Err(error) if error.is_not_found() => {
-                    self.record_buffer_exit(buffer_id, None).await;
+                    self.record_buffer_end(buffer_id, RuntimeEnd::Exited(None))
+                        .await;
                 }
                 Err(error) => {
                     warn!(%buffer_id, %host, %error, "could not take up buffer on host again");
@@ -3078,7 +3071,7 @@ impl Runtime {
             Ok(status) => status,
             Err(error) => {
                 let _ = runtime.kill().await;
-                let _ = runtime.join_threads().await;
+                let _ = runtime.release().await;
                 self.await_saved_exit(buffer_id, runtime);
                 self.mark_workspace_dirty();
                 return Err(error);
@@ -3097,7 +3090,7 @@ impl Runtime {
             {
                 drop(state);
                 let _ = runtime.kill().await;
-                let _ = runtime.join_threads().await;
+                let _ = runtime.release().await;
                 self.await_saved_exit(buffer_id, runtime);
                 self.mark_workspace_dirty();
                 return Err(error);
@@ -4176,16 +4169,9 @@ impl Runtime {
         }
     }
 
-    /// The buffer's runtime can no longer be reached, though its program may
-    /// still run on its host: mark it interrupted, as a server shutting down
-    /// marks the buffers whose keepers it leaves, and try to reach the host
-    /// again.
-    async fn record_buffer_lost(self: &Arc<Self>, buffer_id: BufferId) {
-        self.buffer_shutdown_intents
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(buffer_id);
-        self.record_buffer_exit(buffer_id, None).await;
+    /// Try to reach the host of `buffer_id` again, whose runtime there was
+    /// interrupted though its program may still run.
+    async fn reach_buffer_host_again(self: &Arc<Self>, buffer_id: BufferId) {
         self.mark_workspace_dirty();
         let host = self
             .state
@@ -4287,8 +4273,15 @@ impl Runtime {
         by_host
     }
 
-    async fn record_buffer_exit(&self, buffer_id: BufferId, exit_code: Option<i32>) {
-        let should_interrupt = self.take_buffer_shutdown_intent(buffer_id);
+    /// Record how `buffer_id`'s runtime ended. A buffer whose runtime the
+    /// server is shutting down is interrupted however the runtime ended.
+    async fn record_buffer_end(&self, buffer_id: BufferId, end: RuntimeEnd) {
+        let shutting_down = self.take_buffer_shutdown_intent(buffer_id);
+        let should_interrupt = shutting_down || end == RuntimeEnd::Interrupted;
+        let exit_code = match end {
+            RuntimeEnd::Exited(exit_code) => exit_code,
+            RuntimeEnd::Interrupted => None,
+        };
         if should_interrupt {
             let runtime = self.buffer_runtimes.lock().await.remove(&buffer_id);
             drop(runtime);
@@ -4492,7 +4485,7 @@ impl Runtime {
         // last handle after that closes the keeper connection; with its child
         // gone and no server attached, the keeper then exits.
         for (buffer_id, runtime) in runtimes {
-            if let Err(error) = runtime.join_threads().await {
+            if let Err(error) = runtime.release().await {
                 debug!(%error, "failed to join runtime threads of a removed buffer");
             }
             self.await_saved_exit(buffer_id, runtime);
@@ -4520,7 +4513,8 @@ impl Runtime {
         )
         .await;
         if !status.running {
-            self.record_buffer_exit(buffer_id, status.exit_code).await;
+            self.record_buffer_end(buffer_id, RuntimeEnd::Exited(status.exit_code))
+                .await;
         }
         Ok(())
     }
@@ -4565,7 +4559,7 @@ impl Runtime {
             while terminations.join_next().await.is_some() {}
         }
         for (_, runtime) in runtimes {
-            if let Err(error) = runtime.join_threads().await {
+            if let Err(error) = runtime.release().await {
                 debug!(%error, "failed to join buffer runtime threads during shutdown");
             }
         }
