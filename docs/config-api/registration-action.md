@@ -868,6 +868,29 @@ Move to the middle row of the view (`M`).
 </div>
 </br>
 <div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_next_paragraph </h2>
+
+```rust,ignore
+fn copy_next_paragraph(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_next_paragraph" id="link-copy_next_paragraph-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_next_paragraph', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_next_paragraph" id="copy_next_paragraph-Description" class="tabcontent"  style="display: block;" >
+Move to the blank line after the next paragraph (`}`), or to the end
+of the last line. A line of only spaces counts as blank.
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
     <h2 class="func-name"> <code>fn</code> copy_next_space </h2>
 
 ```rust,ignore
@@ -995,6 +1018,29 @@ Description
 
 <div group="copy_page_up" id="copy_page_up-Description" class="tabcontent"  style="display: block;" >
 Scroll the view and move the cursor up a page (`C-b`).
+</div>
+
+</div>
+</div>
+</br>
+<div style='box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); padding: 15px; border-radius: 5px; border: 1px solid var(--theme-hover)'>
+    <h2 class="func-name"> <code>fn</code> copy_previous_paragraph </h2>
+
+```rust,ignore
+fn copy_previous_paragraph(_: ActionApi) -> Action
+```
+
+<div>
+<div class="tab">
+<button group="copy_previous_paragraph" id="link-copy_previous_paragraph-Description"  class="tablinks active"
+    onclick="openTab(event, 'copy_previous_paragraph', 'Description')">
+Description
+</button>
+</div>
+
+<div group="copy_previous_paragraph" id="copy_previous_paragraph-Description" class="tabcontent"  style="display: block;" >
+Move to the blank line before the previous paragraph (`{`), or to the
+start of history. A line of only spaces counts as blank.
 </div>
 
 </div>

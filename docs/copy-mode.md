@@ -15,12 +15,17 @@ Copies go to the host terminal's clipboard as OSC 52, so the terminal must allow
   ```
 
 - Drag with the mouse (see [Mouse](#mouse)).
-- While the view is scrolled back in `normal` mode (with `PageUp` or the mouse wheel), `v`, `V` and
-  `<C-v>` start a selection, which also enters copy mode.
+- Scroll the focused pane back: `PageUp`, the mouse wheel, or any `scroll_line_up()`,
+  `scroll_page_up()` or `scroll_to_top()` binding in `normal` mode. Scrolling down to the bottom
+  again leaves copy mode, unless a selection is active. In a pane that shows all of its history
+  already, scrolling up does nothing. This is tmux's `copy-mode -e`, which its
+  wheel and `PageUp` bindings use.
 
 Entering copy mode freezes the pane's view, so new output does not move it, and puts the cursor
-where the program's cursor is. `q`, `<C-c>` or `<Esc>` (with no selection) leaves copy mode. This
-drops the cursor, the selection and any search highlights, and the view follows output again.
+where the program's cursor is. When copy mode starts by scrolling, the scroll then moves the cursor
+to stay on screen, so it lands on the bottom row. `q`, `<C-c>` or `<Esc>` (with no selection) leaves
+copy mode. This drops the cursor, the selection and any search highlights, and the view follows
+output again.
 
 Copy mode does not start on the alternate screen (full-screen programs such as vim or less), which
 has no scrollback.
@@ -37,6 +42,7 @@ These keys work in `copy` mode and in `select` mode. `select` is copy mode with 
 | `0` / `<Home>`, `^`, `$` / `<End>` | line start, first non-blank, last character | `copy_start_of_line()`, `copy_back_to_indentation()`, `copy_end_of_line()` |
 | `gg`, `G` | first line of history, last line | `copy_history_top()`, `copy_history_bottom()` |
 | `H` `M` `L` | top, middle and bottom row of the view | `copy_top_line()`, `copy_middle_line()`, `copy_bottom_line()` |
+| `{` `}` | previous or next paragraph | `copy_previous_paragraph()`, `copy_next_paragraph()` |
 | `<C-u>` `<C-d>` | half a page up or down | `copy_halfpage_up()`, `copy_halfpage_down()` |
 | `<C-b>` `<C-f>`, `<PageUp>` `<PageDown>` | a page up or down | `copy_page_up()`, `copy_page_down()` |
 | `<C-y>` `<C-e>` | scroll a line, keeping the cursor on screen | `scroll_line_up()`, `scroll_line_down()` |
@@ -72,6 +78,13 @@ same as vim's default `iskeyword`. Letters, digits, `_` and all non-ASCII charac
 characters. An empty line counts as a word for `w` and `b`, as in vim. `W`, `B` and `E` split on
 whitespace only.
 
+### Paragraphs
+
+`{` and `}` move to the blank line before or after a paragraph, as in vim: from a blank line they
+first skip the blank lines next to it. Without another blank line, `{` stops at the start of history
+and `}` at the last character of the last line. A line of only spaces counts as blank, because
+terminal rows are often padded with them.
+
 ### Search
 
 `/` and `?` open a prompt in the status line, which starts empty. `<Enter>` runs the search and
@@ -93,7 +106,18 @@ With the default `mouse.set_select(true)`, in a pane whose program has not asked
 
 If the program has requested mouse reporting (vim with `mouse=a`, for example), presses, drags and
 releases go to the program as before. The mouse wheel scrolls as before. In copy mode, scrolling
-with the wheel keeps the view frozen even at the bottom and moves the cursor to stay on screen.
+with the wheel moves the cursor to stay on screen. Scrolling the focused pane back with the wheel
+enters copy mode (see [Entering and leaving](#entering-and-leaving)); the wheel over another pane
+only scrolls its view.
+
+## Leader bindings
+
+`normal` mode bindings that start with the leader also work in `copy` and `select` mode, as tmux's
+prefix table does in copy mode. Each leaves copy mode before it runs, so `<leader>'` switching
+session, say, leaves you typing into the program as usual. A binding of the same keys in `copy` or
+`select` mode takes precedence, and so does a binding of the leader key itself there: with
+`set_leader("<C-b>")`, copy mode's `<C-b>` stays a page up. `unbind` in either mode removes an
+inherited binding, or all of them when given the leader key.
 
 ## Customising
 

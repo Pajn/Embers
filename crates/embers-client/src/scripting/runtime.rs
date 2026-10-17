@@ -2547,6 +2547,20 @@ mod documented_action_api {
         copy_motion(CopyMotion::BottomLine)
     }
 
+    /// Move to the blank line before the previous paragraph (`{`), or to the
+    /// start of history. A line of only spaces counts as blank.
+    #[rhai_fn(name = "copy_previous_paragraph")]
+    pub fn copy_previous_paragraph(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::PreviousParagraph)
+    }
+
+    /// Move to the blank line after the next paragraph (`}`), or to the end
+    /// of the last line. A line of only spaces counts as blank.
+    #[rhai_fn(name = "copy_next_paragraph")]
+    pub fn copy_next_paragraph(_: &mut ActionApi) -> Action {
+        copy_motion(CopyMotion::NextParagraph)
+    }
+
     /// Scroll the view and move the cursor up half a page (`C-u`).
     #[rhai_fn(name = "copy_halfpage_up")]
     pub fn copy_halfpage_up(_: &mut ActionApi) -> Action {

@@ -63,6 +63,10 @@ pub enum CopyMotion {
     MiddleLine,
     /// `L`: bottom row of the view.
     BottomLine,
+    /// `{`: the blank line before the previous paragraph.
+    PreviousParagraph,
+    /// `}`: the blank line after the next paragraph.
+    NextParagraph,
     /// `C-u`: scroll and move up half a page.
     HalfPageUp,
     /// `C-d`: scroll and move down half a page.
@@ -86,6 +90,8 @@ impl CopyMotion {
                 | Self::NextSpaceEnd
                 | Self::BackToIndentation
                 | Self::EndOfLine
+                | Self::PreviousParagraph
+                | Self::NextParagraph
         )
     }
 
@@ -251,6 +257,8 @@ pub fn apply_motion(
                 .min(last_line),
             column: 0,
         },
+        CopyMotion::PreviousParagraph => previous_paragraph(lines, cursor),
+        CopyMotion::NextParagraph => next_paragraph(lines, last_line, cursor),
         CopyMotion::HalfPageUp | CopyMotion::PageUp => {
             let delta = page_delta(motion, viewport.rows);
             top = top.saturating_sub(delta);
@@ -577,6 +585,49 @@ fn previous_word_start(
     walker.point()
 }
 
+/// Whether a line separates paragraphs. Terminal rows pad with spaces, so a
+/// line of only whitespace counts as blank.
+fn is_blank_line(lines: &[String], line: u64) -> bool {
+    line_text(lines, line).trim().is_empty()
+}
+
+/// `{`: the nearest blank line above the cursor that follows text, as in vim.
+/// Without one, the start of the first line.
+fn previous_paragraph(lines: &[String], cursor: SelectionPoint) -> SelectionPoint {
+    let mut line = cursor.line;
+    while line > 0 && is_blank_line(lines, line) {
+        line -= 1;
+    }
+    while line > 0 {
+        line -= 1;
+        if is_blank_line(lines, line) {
+            return SelectionPoint { line, column: 0 };
+        }
+    }
+    SelectionPoint { line: 0, column: 0 }
+}
+
+/// `}`: the nearest blank line below the cursor that follows text, as in vim.
+/// Without one, the last character of the last line.
+fn next_paragraph(lines: &[String], last_line: u64, cursor: SelectionPoint) -> SelectionPoint {
+    let mut line = cursor.line;
+    while line < last_line && is_blank_line(lines, line) {
+        line += 1;
+    }
+    while line < last_line {
+        line += 1;
+        if is_blank_line(lines, line) {
+            return SelectionPoint { line, column: 0 };
+        }
+    }
+    SelectionPoint {
+        line: last_line,
+        column: cells(line_text(lines, last_line))
+            .last()
+            .map_or(0, |cell| cell.column),
+    }
+}
+
 /// Detects double and triple clicks: repeated presses on the same cell of the
 /// same pane, each within [`MULTI_CLICK_INTERVAL`] of the last.
 #[derive(Clone, Debug, Default)]
@@ -636,6 +687,9 @@ pub(crate) struct CopyModeState {
     pub text: Option<CapturedText>,
     pub clicks: ClickTracker,
     pub mouse: Option<MouseSelection>,
+    /// Copy mode began by scrolling back, so scrolling to the bottom again
+    /// leaves it, as tmux's `copy-mode -e` does.
+    pub exit_at_bottom: bool,
 }
 
 impl CopyModeState {
@@ -701,6 +755,32 @@ mod tests {
         }
         // let | x | = | foo | ( | bar_baz | ); then the final character.
         assert_eq!(stops, vec![4, 5, 6, 9, 10, 17, 18]);
+    }
+
+    #[test]
+    fn paragraph_motions_stop_on_blank_lines_between_text() {
+        let text = lines(&["one", "two", "", "   ", "three", "", "four"]);
+        assert_eq!(run(&text, CopyMotion::NextParagraph, point(0, 1)), (2, 0));
+        // From a blank line, skip the blank run and the paragraph after it.
+        assert_eq!(run(&text, CopyMotion::NextParagraph, point(2, 0)), (5, 0));
+        assert_eq!(
+            run(&text, CopyMotion::PreviousParagraph, point(6, 2)),
+            (5, 0)
+        );
+        assert_eq!(
+            run(&text, CopyMotion::PreviousParagraph, point(5, 0)),
+            (3, 0)
+        );
+    }
+
+    #[test]
+    fn paragraph_motions_stop_at_the_ends_without_a_blank_line() {
+        let text = lines(&["one", "two", "three"]);
+        assert_eq!(run(&text, CopyMotion::NextParagraph, point(0, 0)), (2, 4));
+        assert_eq!(
+            run(&text, CopyMotion::PreviousParagraph, point(2, 3)),
+            (0, 0)
+        );
     }
 
     #[test]

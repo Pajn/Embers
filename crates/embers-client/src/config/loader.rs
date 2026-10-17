@@ -50,6 +50,8 @@ for mode in ["copy", "select"] {
     bind(mode, "H", action.copy_top_line());
     bind(mode, "M", action.copy_middle_line());
     bind(mode, "L", action.copy_bottom_line());
+    bind(mode, "{", action.copy_previous_paragraph());
+    bind(mode, "}", action.copy_next_paragraph());
     bind(mode, "<C-u>", action.copy_halfpage_up());
     bind(mode, "<C-d>", action.copy_halfpage_down());
     bind(mode, "<C-b>", action.copy_page_up());

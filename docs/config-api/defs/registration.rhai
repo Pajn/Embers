@@ -295,6 +295,10 @@ fn copy_jump_to_forward(_: ActionApi) -> Action;
 /// Move to the middle row of the view (`M`).
 fn copy_middle_line(_: ActionApi) -> Action;
 
+/// Move to the blank line after the next paragraph (`}`), or to the end
+/// of the last line. A line of only spaces counts as blank.
+fn copy_next_paragraph(_: ActionApi) -> Action;
+
 /// Move to the start of the next whitespace-separated word (`W`).
 fn copy_next_space(_: ActionApi) -> Action;
 
@@ -313,6 +317,10 @@ fn copy_page_down(_: ActionApi) -> Action;
 
 /// Scroll the view and move the cursor up a page (`C-b`).
 fn copy_page_up(_: ActionApi) -> Action;
+
+/// Move to the blank line before the previous paragraph (`{`), or to the
+/// start of history. A line of only spaces counts as blank.
+fn copy_previous_paragraph(_: ActionApi) -> Action;
 
 /// Move to the start of the previous whitespace-separated word (`B`).
 fn copy_previous_space(_: ActionApi) -> Action;

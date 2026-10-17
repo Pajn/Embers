@@ -6,7 +6,7 @@ use std::fs;
 use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseButton,
     MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel, SelectionKind,
-    SelectionPoint,
+    SelectionPoint, SelectionState,
 };
 use embers_core::{
     BufferId, CursorPosition, CursorShape, CursorState, NodeId, RequestId, Size, SnapshotLine,
@@ -785,5 +785,260 @@ async fn drags_go_to_programs_that_requested_the_mouse() {
             .unwrap()
             .selection_state
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn scrolling_back_enters_copy_mode_and_scrolling_to_the_bottom_leaves_it() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    // The cursor starts at the program's cursor and stays on screen.
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!((cursor(&client), top(&client)), ((6, 0), 3));
+    press(&mut client, chars("k")).await;
+    assert_eq!(cursor(&client), (5, 0));
+
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+    assert_eq!(client.current_mode(), "normal");
+    let view = client.client().state().view_state(NODE).unwrap();
+    assert!(view.copy_cursor.is_none());
+    assert!(view.follow_output);
+}
+
+#[tokio::test]
+async fn scrolling_to_the_bottom_keeps_a_selection() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, chars("v")).await;
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+    assert_eq!(client.current_mode(), "select");
+}
+
+#[tokio::test]
+async fn scrolling_to_the_bottom_with_the_search_prompt_open_stays_in_copy_mode() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, chars("/")).await;
+    assert_eq!(client.current_mode(), "search");
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+
+    press(&mut client, vec![KeyEvent::Escape]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(cursor(&client), (6, 0));
+}
+
+#[tokio::test]
+async fn scrolling_up_without_history_stays_in_normal_mode() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    // The whole buffer fits on screen, so there is nothing to scroll back to.
+    let view = client
+        .client_mut()
+        .state_mut()
+        .view_state_mut(NODE)
+        .unwrap();
+    view.total_line_count = u64::from(ROWS);
+    view.scroll_top_line = 0;
+    let (x, y) = content_origin(&client);
+
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, vec![KeyEvent::PageUp]).await;
+    assert_eq!(client.current_mode(), "normal");
+    assert!(
+        client
+            .client()
+            .state()
+            .view_state(NODE)
+            .unwrap()
+            .copy_cursor
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn page_up_enters_copy_mode_with_the_cursor_on_screen() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+
+    push_slice(&transport, 2);
+    press(&mut client, vec![KeyEvent::PageUp]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!((cursor(&client), top(&client)), ((5, 0), 2));
+}
+
+#[tokio::test]
+async fn paragraph_motions_move_between_blank_lines() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, ENTER_COPY);
+    enter_copy(&mut client).await;
+
+    push_capture(&transport);
+    press(&mut client, chars("}")).await;
+    assert_eq!(cursor(&client), (8, 0));
+    press(&mut client, chars("}")).await;
+    assert_eq!(cursor(&client), (9, 5));
+    press(&mut client, chars("{")).await;
+    assert_eq!(cursor(&client), (8, 0));
+
+    push_slice(&transport, 0);
+    press(&mut client, chars("{")).await;
+    assert_eq!((cursor(&client), top(&client)), ((0, 0), 0));
+}
+
+#[tokio::test]
+async fn leader_bindings_leave_copy_mode_and_run() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(
+        &transport,
+        r#"
+            set_leader("<C-a>");
+            bind("normal", "<C-x>", action.enter_copy_mode());
+            bind("normal", "<leader>:", action.command_prompt());
+        "#,
+    );
+    enter_copy(&mut client).await;
+    press(&mut client, chars("v")).await;
+
+    press(&mut client, vec![KeyEvent::Ctrl('a'), KeyEvent::Char(':')]).await;
+    assert_eq!(client.current_mode(), "prompt");
+    let view = client.client().state().view_state(NODE).unwrap();
+    assert!(view.copy_cursor.is_none());
+    assert!(view.selection_state.is_none());
+    assert!(view.follow_output);
+}
+
+#[tokio::test]
+async fn a_copy_mode_binding_of_the_leader_key_shadows_leader_bindings() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(
+        &transport,
+        r#"
+            set_leader("<C-a>");
+            bind("normal", "<C-x>", action.enter_copy_mode());
+            bind("normal", "<leader>:", action.command_prompt());
+            bind("copy", "<C-a>", action.copy_cursor_up());
+        "#,
+    );
+    enter_copy(&mut client).await;
+
+    push_slice(&transport, 5);
+    press(&mut client, vec![KeyEvent::Ctrl('a'), KeyEvent::Char(':')]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(cursor(&client), (5, 0));
+}
+
+/// A split with the left pane focused, showing the bottom of `LINES` like
+/// `copy_state`, and the right pane following its output. Returns the client
+/// and the content origins of the left and right panes.
+fn split_copy_client(
+    transport: &FakeTransport,
+) -> (
+    ConfiguredClient<FakeTransport>,
+    TempDir,
+    (u16, u16),
+    (u16, u16),
+) {
+    let (config, tempdir) = manager_from_source("");
+    let mut client = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    let mut state = root_split_state();
+    state.sessions.get_mut(&SESSION_ID).unwrap().focused_leaf_id = Some(ROOT_SPLIT_LEFT_LEAF_ID);
+    let single = copy_state();
+    *state.snapshots.get_mut(&BUFFER).unwrap() = single.snapshots[&BUFFER].clone();
+    *state.view_state_mut(ROOT_SPLIT_LEFT_LEAF_ID).unwrap() =
+        single.view_state(NODE).unwrap().clone();
+    *client.client_mut().state_mut() = state;
+    let presentation =
+        PresentationModel::project(client.client().state(), SESSION_ID, VIEWPORT).unwrap();
+    let origin = |node_id| {
+        let leaf = presentation
+            .leaves
+            .iter()
+            .find(|leaf| leaf.node_id == node_id)
+            .unwrap();
+        (
+            leaf.content_rect.origin.x as u16,
+            leaf.content_rect.origin.y as u16,
+        )
+    };
+    let left = origin(ROOT_SPLIT_LEFT_LEAF_ID);
+    let right = origin(ROOT_SPLIT_RIGHT_LEAF_ID);
+    (client, tempdir, left, right)
+}
+
+#[tokio::test]
+async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir, (left_x, left_y), (right_x, right_y)) =
+        split_copy_client(&transport);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(left_x, left_y, MouseEventKind::WheelUp)).await;
+    assert_eq!(client.current_mode(), "copy");
+
+    send_mouse(
+        &mut client,
+        mouse(right_x, right_y, MouseEventKind::WheelDown),
+    )
+    .await;
+    assert_eq!(client.current_mode(), "copy");
+    let left = client
+        .client()
+        .state()
+        .view_state(ROOT_SPLIT_LEFT_LEAF_ID)
+        .unwrap();
+    assert!(left.copy_cursor.is_some());
+    assert_eq!(left.scroll_top_line, 3);
+}
+
+#[tokio::test]
+async fn scrolling_to_the_bottom_keeps_a_selection_in_another_pane() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir, (left_x, left_y), _) = split_copy_client(&transport);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(left_x, left_y, MouseEventKind::WheelUp)).await;
+    // As after moving focus to the right pane in copy mode and pressing `v`.
+    let selection = SelectionState {
+        kind: SelectionKind::Character,
+        anchor: SelectionPoint { line: 0, column: 0 },
+        cursor: SelectionPoint { line: 0, column: 4 },
+    };
+    client
+        .client_mut()
+        .state_mut()
+        .view_state_mut(ROOT_SPLIT_RIGHT_LEAF_ID)
+        .unwrap()
+        .selection_state = Some(selection.clone());
+
+    push_slice(&transport, 6);
+    send_mouse(
+        &mut client,
+        mouse(left_x, left_y, MouseEventKind::WheelDown),
+    )
+    .await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(
+        client
+            .client()
+            .state()
+            .view_state(ROOT_SPLIT_RIGHT_LEAF_ID)
+            .unwrap()
+            .selection_state,
+        Some(selection)
     );
 }
