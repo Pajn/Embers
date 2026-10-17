@@ -8,6 +8,7 @@ use crate::buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
     BufferRuntimeStatus, KeeperRuntimeHandle, RuntimeScrollbackSlice, RuntimeSnapshot,
 };
+use crate::model::Placement;
 use crate::remote::{HostConnection, RemoteRuntimeHandle};
 
 /// What runs a buffer's program and emulates its terminal, as the server sees
@@ -79,20 +80,17 @@ impl BufferRuntimeHandle {
             .map(Self::Remote)
     }
 
-    /// The socket of the keeper running this buffer, which the workspace
-    /// saves so a later server can reattach to it.
-    pub fn keeper_socket_path(&self) -> Option<&Path> {
+    /// Where this runtime runs the buffer, which the workspace saves so a
+    /// later server can take the buffer up again.
+    pub fn placement(&self) -> Placement {
         match self {
-            Self::Keeper(keeper) => Some(keeper.socket_path()),
-            Self::Remote(_) => None,
-        }
-    }
-
-    /// The host running this buffer and the buffer's id there.
-    pub fn remote(&self) -> Option<(&str, BufferId)> {
-        match self {
-            Self::Keeper(_) => None,
-            Self::Remote(remote) => Some((remote.host(), remote.remote_id())),
+            Self::Keeper(keeper) => Placement::Local {
+                socket_path: Some(keeper.socket_path().to_path_buf()),
+            },
+            Self::Remote(remote) => Placement::Remote {
+                host: remote.host().to_owned(),
+                buffer_id: Some(remote.remote_id()),
+            },
         }
     }
 
@@ -162,15 +160,6 @@ impl BufferRuntimeHandle {
         }
     }
 
-    /// Whether some client forwards kitty graphics queries to a host
-    /// terminal that answers them.
-    pub async fn set_host_graphics(&self, enabled: bool) -> Result<()> {
-        match self {
-            Self::Keeper(keeper) => keeper.set_host_graphics(enabled).await,
-            Self::Remote(remote) => remote.set_host_graphics(enabled).await,
-        }
-    }
-
     pub async fn kill(&self) -> Result<()> {
         match self {
             Self::Keeper(keeper) => keeper.kill().await,
@@ -226,10 +215,14 @@ impl BufferRuntimeHandle {
         }
     }
 
-    pub async fn join_threads(&self) -> Result<()> {
+    /// Stop following the runtime: no callback is called after this
+    /// returns. The program keeps running; a host removes the buffer once it
+    /// has exited, and a keeper exits once its exit was saved and its last
+    /// handle is dropped.
+    pub async fn release(&self) -> Result<()> {
         match self {
-            Self::Keeper(keeper) => keeper.join_threads().await,
-            Self::Remote(remote) => remote.join_threads().await,
+            Self::Keeper(keeper) => keeper.release().await,
+            Self::Remote(remote) => remote.release().await,
         }
     }
 }

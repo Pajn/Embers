@@ -1,6 +1,8 @@
 # Terminal runtime contract
 
-This note locks down the runtime contract Embers uses for PTY-backed buffers.
+This note locks down the runtime contract Embers uses for PTY-backed buffers. The terms it uses
+for where and how a buffer runs (buffer runtime, keeper, host, placement, interrupted, release) are
+defined in `GLOSSARY.md`.
 
 ## Runtime ownership
 
@@ -8,7 +10,8 @@ This note locks down the runtime contract Embers uses for PTY-backed buffers.
 
 - the PTY/process command, cwd, and environment hints
 - runtime identity and lifecycle state (`Created`, `Running`, `Interrupted`, `Exited`)
-- the runtime keeper socket path used to reconnect after restore
+- its placement: in a keeper on this machine, with the keeper's socket path used to reconnect
+  after restore, or on a host, with the buffer's id there (see "Buffers on other hosts")
 - attachment state (`Attached(NodeId)` or `Detached`)
 - the authoritative PTY size policy
 - terminal-facing metadata surfaced outside layout code:
@@ -176,6 +179,8 @@ The intended transition graph is:
 - `Created -> Running` when the runtime keeper is spawned or restored
 - `Running -> Exited` when the child process terminates normally or is explicitly killed
 - `Running/Created -> Interrupted` when a restore cannot reconnect to a keeper
+- `Running -> Interrupted` when the connection to a buffer's host is lost, and
+  `Interrupted -> Running` once the host is reached again and still runs the buffer
 - `Interrupted -> Running` when restore starts a fresh process for that buffer (see below)
 - `Interrupted -> Exited` when an attached interrupted buffer is killed; a detached one is removed
   instead, as is one that restore does not restart because it is detached
@@ -213,13 +218,33 @@ socket in the server's runtime directory.
 - while no server is attached, a keeper also watches its socket; once the socket is removed or
   replaced no server can reattach, so the keeper stops its child (SIGHUP, then SIGKILL) and exits
 
+## Buffers on other hosts
+
+A buffer can run on another machine's embers server, its host, instead of in a keeper here (see
+"Remote buffers" in `docs/commands.md` for how panes are put on a host and how hosts are reached).
+The host runs the program as a detached buffer of its own, which no session there shows; this
+server follows it over one connection per host.
+
+- input, resizes, captures, pipes and kills go to the host; output, bells, titles, options the
+  program sets, clipboard writes and passthrough come back from it
+- once the buffer's program has exited and this server releases the buffer, the host removes it
+- a clean server shutdown releases buffers on hosts and leaves their programs running there;
+  `kill-server` kills them
+- when the connection to a host is lost, its buffers become `Interrupted`, since their programs may
+  still run there. The server tries the host again after a second, then waits twice as long after
+  each failure, up to 30 seconds, until no buffer waits for the host. A buffer the host still has
+  runs again where it was; one the host no longer has is taken as exited
+- a restarted server marks the buffers it saved on hosts `Interrupted` and reaches their hosts in
+  the background, so a host that is slow to answer does not hold up the start. Restore after keepers
+  are gone does not start fresh processes for them: their programs may still run on their hosts
+
 ## Workspace persistence
 
 The server saves the workspace to `<socket>.workspace.json`: sessions, the layout tree (splits,
 tabs, floating windows, focus and zoom) and every buffer record. For a buffer that is its id,
 title, command, environment hints, the options set on it (`embers buffer set-option`), last known
-working directory, the command line of the job last seen in its foreground, its keeper socket path,
-its lifecycle state and its attachment. Terminal contents and scrollback are not saved; they live
+working directory, the command line of the job last seen in its foreground, its keeper socket path
+or the host it runs on and its id there, its lifecycle state and its attachment. Terminal contents and scrollback are not saved; they live
 in the keeper only.
 
 The workspace is saved whenever it changes, not only on a clean shutdown:
@@ -301,6 +326,9 @@ same runtime stays alive.
 - Runtime model: `crates/embers-server/src/model.rs`
 - State transitions: `crates/embers-server/src/state.rs`
 - Runtime keeper and PTY lifecycle: `crates/embers-server/src/buffer_runtime.rs`
+- Starting, taking up, releasing and shutting down buffer runtimes, and reaching hosts again:
+  `crates/embers-server/src/runtimes.rs`
+- Buffers on other hosts: `crates/embers-server/src/remote.rs`
 - Server/runtime wiring: `crates/embers-server/src/server.rs`
 - Workspace file format and atomic writes: `crates/embers-server/src/persist.rs`
 - Restore planning and the command allowlist: `crates/embers-server/src/restore.rs`

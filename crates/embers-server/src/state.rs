@@ -11,7 +11,7 @@ use crate::environment::EnvironmentStore;
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
-    RemainOnExit, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
+    Placement, RemainOnExit, RunningBuffer, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::persist::{
     CURRENT_FORMAT_VERSION, PersistedWorkspace, persisted_buffer, persisted_floating,
@@ -582,13 +582,12 @@ impl ServerState {
         Ok(())
     }
 
-    pub fn set_buffer_runtime_socket_path(
+    pub fn set_buffer_placement(
         &mut self,
         buffer_id: BufferId,
-        runtime_socket_path: Option<PathBuf>,
+        placement: Placement,
     ) -> Result<()> {
-        self.buffer_mut(buffer_id)?
-            .set_runtime_socket_path(runtime_socket_path);
+        self.buffer_mut(buffer_id)?.set_placement(placement);
         Ok(())
     }
 

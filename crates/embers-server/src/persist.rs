@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{
     Buffer, BufferAttachment, BufferKind, BufferState, BufferViewNode, BufferViewState,
     ExitedBuffer, FloatingWindow, HelperBuffer, HelperBufferScope, InterruptedBuffer, Node,
-    RemoteBuffer, Session, SplitNode, TabEntry, TabsNode,
+    Placement, Session, SplitNode, TabEntry, TabsNode,
 };
 use crate::state::ServerState;
 
@@ -98,7 +98,7 @@ pub struct PersistedBuffer {
     pub created_at_ms: u64,
 }
 
-/// Where a buffer that runs on another host runs (see [`RemoteBuffer`]).
+/// Where a buffer that runs on another host runs (see [`Placement::Remote`]).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedRemoteBuffer {
     pub host: String,
@@ -483,11 +483,14 @@ pub fn persisted_buffer(buffer: &Buffer) -> PersistedBuffer {
         env: buffer.env.clone(),
         user_options: buffer.user_options.clone(),
         foreground_command: buffer.foreground_command.clone(),
-        runtime_socket_path: buffer.runtime_socket_path().cloned(),
-        remote: buffer.remote.as_ref().map(|remote| PersistedRemoteBuffer {
-            host: remote.host.clone(),
-            buffer_id: remote.buffer_id.map(|id| id.0),
-        }),
+        runtime_socket_path: buffer.placement().socket_path().map(Path::to_path_buf),
+        remote: match buffer.placement() {
+            Placement::Local { .. } => None,
+            Placement::Remote { host, buffer_id } => Some(PersistedRemoteBuffer {
+                host: host.clone(),
+                buffer_id: buffer_id.map(|id| id.0),
+            }),
+        },
         state: persisted_buffer_state(&buffer.state),
         attachment: persisted_buffer_attachment(&buffer.attachment),
         pty_size: buffer.pty_size,
@@ -508,10 +511,15 @@ pub fn restored_buffer(buffer: PersistedBuffer) -> Result<Buffer> {
     );
     restored.user_options = buffer.user_options;
     restored.foreground_command = buffer.foreground_command;
-    restored.set_runtime_socket_path(buffer.runtime_socket_path);
-    restored.remote = buffer.remote.map(|remote| RemoteBuffer {
-        host: remote.host,
-        buffer_id: remote.buffer_id.map(BufferId),
+    restored.set_placement(match buffer.remote {
+        // A server from before remote buffers left no socket path for one.
+        Some(remote) => Placement::Remote {
+            host: remote.host,
+            buffer_id: remote.buffer_id.map(BufferId),
+        },
+        None => Placement::Local {
+            socket_path: buffer.runtime_socket_path,
+        },
     });
     restored.state = restored_buffer_state(buffer.state)?;
     restored.attachment = restored_buffer_attachment(buffer.attachment);
@@ -1128,7 +1136,7 @@ mod tests {
         let local = serde_json::to_value(persisted_buffer(&buffer)).expect("serialize");
         assert!(local.get("remote").is_none(), "{local}");
 
-        buffer.remote = Some(RemoteBuffer {
+        buffer.set_placement(Placement::Remote {
             host: "devbox".to_owned(),
             buffer_id: Some(BufferId(3)),
         });
@@ -1141,7 +1149,7 @@ mod tests {
             })
         );
         let restored = restored_buffer(persisted).expect("restore");
-        assert_eq!(restored.remote, buffer.remote);
+        assert_eq!(restored.placement(), buffer.placement());
     }
 
     #[test]

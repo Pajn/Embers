@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
@@ -18,7 +19,7 @@ use tracing::debug;
 use crate::Upstream;
 use crate::buffer_runtime::{
     BufferRuntimeCallbacks, BufferRuntimePipeStatus, BufferRuntimePipeStopReason,
-    BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeScrollbackSlice, RuntimeSnapshot,
+    BufferRuntimeStatus, BufferRuntimeUpdate, RuntimeEnd, RuntimeScrollbackSlice, RuntimeSnapshot,
     status_update_delta,
 };
 use crate::config::REMOTE_HOST_PLACEHOLDER;
@@ -29,6 +30,9 @@ use crate::config::REMOTE_HOST_PLACEHOLDER;
 pub(crate) struct RemoteHosts {
     command: Vec<String>,
     hosts: Mutex<HashMap<String, HostConnection>>,
+    /// Whether some client here forwards kitty graphics queries to a terminal
+    /// that answers them, as each connection tells its host.
+    host_graphics: AtomicBool,
 }
 
 impl RemoteHosts {
@@ -38,6 +42,7 @@ impl RemoteHosts {
         Self {
             command,
             hosts: Mutex::new(HashMap::new()),
+            host_graphics: AtomicBool::new(false),
         }
     }
 
@@ -66,9 +71,38 @@ impl RemoteHosts {
             session_id: None,
         });
         expect_ok(host, upstream.request(&subscribe).await?)?;
+        // Like any client's, the setting is the connection's, so a new one
+        // starts out without it.
+        if self.host_graphics.load(Ordering::Acquire) {
+            let enable = ClientMessage::Client(ClientRequest::SetHostGraphics {
+                request_id: new_request_id(),
+                enabled: true,
+            });
+            expect_ok(host, upstream.request(&enable).await?)?;
+        }
         let connection = HostConnection::serve(host, upstream);
         hosts.insert(host.to_owned(), connection.clone());
         Ok(connection)
+    }
+}
+
+impl RemoteHosts {
+    /// Tell every host whether some client here forwards kitty graphics
+    /// queries to a terminal that answers them, so its buffers hold their own
+    /// replies to such a query until the terminal's arrives. Hosts reached
+    /// later are told when they are.
+    pub(crate) async fn set_host_graphics(&self, enabled: bool) {
+        self.host_graphics.store(enabled, Ordering::Release);
+        let connections: Vec<_> = self.hosts.lock().await.values().cloned().collect();
+        for connection in connections {
+            let request = ClientMessage::Client(ClientRequest::SetHostGraphics {
+                request_id: new_request_id(),
+                enabled,
+            });
+            if let Err(error) = connection.request(request).await {
+                debug!(host = %connection.host(), %error, "failed to tell host about host graphics");
+            }
+        }
     }
 }
 
@@ -543,19 +577,6 @@ impl RemoteRuntimeHandle {
         .map(drop)
     }
 
-    /// Tell the host whether some client here forwards kitty graphics queries
-    /// to a terminal that answers them, so its buffers hold their own replies
-    /// to such a query until the terminal's arrives. Like any client's, the
-    /// setting covers every buffer on the host.
-    pub async fn set_host_graphics(&self, enabled: bool) -> Result<()> {
-        self.request(ClientMessage::Client(ClientRequest::SetHostGraphics {
-            request_id: new_request_id(),
-            enabled,
-        }))
-        .await
-        .map(drop)
-    }
-
     /// Start a pipe on the host: `command` runs there, in `cwd` on the host.
     pub async fn start_pipe(
         &self,
@@ -588,7 +609,7 @@ impl RemoteRuntimeHandle {
     /// Stop passing on the host's reports about this buffer, which the server
     /// here is done with. A program still running keeps running on the host
     /// until it is killed; an exited one's buffer is removed there.
-    pub async fn join_threads(&self) -> Result<()> {
+    pub async fn release(&self) -> Result<()> {
         if let Some(pump) = lock(&self.inner.pump).take() {
             pump.abort();
         }
@@ -635,7 +656,7 @@ async fn pump_changes(
             tokio::select! {
                 change = watched.changes.recv() => {
                     if change.is_none() {
-                        (callbacks.on_lost)(inner.buffer_id);
+                        (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Interrupted);
                         return;
                     }
                 }
@@ -654,11 +675,11 @@ async fn pump_changes(
         let record = match get_record(&inner.connection, inner.remote_id).await {
             Ok(record) => record,
             Err(error) if error.is_not_found() => {
-                (callbacks.on_exit)(inner.buffer_id, None);
+                (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(None));
                 return;
             }
             Err(_) if !inner.connection.is_open() => {
-                (callbacks.on_lost)(inner.buffer_id);
+                (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Interrupted);
                 return;
             }
             Err(error) => {
@@ -699,7 +720,7 @@ async fn pump_changes(
             (callbacks.on_output)(inner.buffer_id, update);
         }
         if record.state == BufferRecordState::Exited {
-            (callbacks.on_exit)(inner.buffer_id, record.exit_code);
+            (callbacks.on_ended)(inner.buffer_id, RuntimeEnd::Exited(record.exit_code));
             return;
         }
     }
