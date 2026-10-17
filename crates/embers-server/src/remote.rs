@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use embers_core::{
@@ -12,7 +13,7 @@ use embers_protocol::{
     BufferRequest, ClientMessage, ClientRequest, InputRequest, ServerEnvelope, ServerEvent,
     ServerResponse, SubscribeRequest,
 };
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::debug;
 
@@ -24,25 +25,71 @@ use crate::buffer_runtime::{
 };
 use crate::config::REMOTE_HOST_PLACEHOLDER;
 
+/// Reaches other hosts' embers servers: the seam between the host
+/// connections and how their bytes travel.
+pub(crate) trait HostConnector: Send + Sync {
+    /// A connection to `host`'s server, its protocol version checked.
+    fn connect<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Upstream>>;
+}
+
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Reaches a host by running a command whose standard input and output reach
+/// its server, such as `ssh HOST embers proxy`.
+pub(crate) struct CommandConnector {
+    command: Vec<String>,
+}
+
+impl CommandConnector {
+    /// Run `command`, with [`REMOTE_HOST_PLACEHOLDER`] replaced by the host.
+    pub(crate) fn new(command: Vec<String>) -> Self {
+        Self { command }
+    }
+}
+
+impl HostConnector for CommandConnector {
+    fn connect<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Upstream>> {
+        let command = self
+            .command
+            .iter()
+            .map(|part| part.replace(REMOTE_HOST_PLACEHOLDER, host))
+            .collect::<Vec<_>>();
+        Box::pin(async move { Upstream::connect(&command).await })
+    }
+}
+
 /// The connections to other hosts' embers servers, one per host, opened when a
 /// buffer first needs one.
-#[derive(Debug)]
 pub(crate) struct RemoteHosts {
-    command: Vec<String>,
-    hosts: Mutex<HashMap<String, HostConnection>>,
+    connector: Arc<dyn HostConnector>,
+    /// The connections made, by host. Lost ones stay until replaced.
+    open: StdMutex<HashMap<String, HostConnection>>,
+    /// One gate per host, held while a connection to it is made, so buffers
+    /// created on a new host at once share one connection while other hosts
+    /// are reached meanwhile.
+    connecting: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Whether some client here forwards kitty graphics queries to a terminal
-    /// that answers them, as each connection tells its host.
-    host_graphics: AtomicBool,
+    /// that answers them. Every connection follows it, telling its host of
+    /// each change itself.
+    host_graphics: watch::Sender<bool>,
+}
+
+impl std::fmt::Debug for RemoteHosts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteHosts")
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemoteHosts {
-    /// Hosts reached by running `command`, with
-    /// [`REMOTE_HOST_PLACEHOLDER`] replaced by the host.
-    pub(crate) fn new(command: Vec<String>) -> Self {
+    /// Hosts reached through `connector`.
+    pub(crate) fn new(connector: Arc<dyn HostConnector>) -> Self {
         Self {
-            command,
-            hosts: Mutex::new(HashMap::new()),
-            host_graphics: AtomicBool::new(false),
+            connector,
+            open: StdMutex::default(),
+            connecting: StdMutex::default(),
+            host_graphics: watch::Sender::new(false),
         }
     }
 
@@ -50,20 +97,25 @@ impl RemoteHosts {
     /// there is none or it was lost.
     pub(crate) async fn connect(&self, host: &str) -> Result<HostConnection> {
         validate_host(host)?;
-        // Held while connecting, so buffers created on a new host at once
-        // share one connection.
-        let mut hosts = self.hosts.lock().await;
-        if let Some(connection) = hosts.get(host)
-            && connection.is_open()
-        {
-            return Ok(connection.clone());
+        if let Some(connection) = self.open_connection(host) {
+            return Ok(connection);
         }
-        let command = self
-            .command
-            .iter()
-            .map(|part| part.replace(REMOTE_HOST_PLACEHOLDER, host))
-            .collect::<Vec<_>>();
-        let mut upstream = Upstream::connect(&command).await?;
+        let gate = lock(&self.connecting)
+            .entry(host.to_owned())
+            .or_default()
+            .clone();
+        // Dropped after the gate is released, even when this is cancelled.
+        let _gone = GateCleanup {
+            gates: &self.connecting,
+            host,
+            gate: &gate,
+        };
+        let _connecting = gate.lock().await;
+        // Made by whoever held the gate before.
+        if let Some(connection) = self.open_connection(host) {
+            return Ok(connection);
+        }
+        let mut upstream = self.connector.connect(host).await?;
         // Every buffer's output is reported to every subscriber, detached
         // buffers included; the connection passes on those of its buffers.
         let subscribe = ClientMessage::Subscribe(SubscribeRequest {
@@ -71,37 +123,43 @@ impl RemoteHosts {
             session_id: None,
         });
         expect_ok(host, upstream.request(&subscribe).await?)?;
-        // Like any client's, the setting is the connection's, so a new one
-        // starts out without it.
-        if self.host_graphics.load(Ordering::Acquire) {
-            let enable = ClientMessage::Client(ClientRequest::SetHostGraphics {
-                request_id: new_request_id(),
-                enabled: true,
-            });
-            expect_ok(host, upstream.request(&enable).await?)?;
-        }
-        let connection = HostConnection::serve(host, upstream);
-        hosts.insert(host.to_owned(), connection.clone());
+        let connection = HostConnection::serve(host, upstream, self.host_graphics.subscribe());
+        lock(&self.open).insert(host.to_owned(), connection.clone());
         Ok(connection)
+    }
+
+    fn open_connection(&self, host: &str) -> Option<HostConnection> {
+        lock(&self.open)
+            .get(host)
+            .filter(|connection| connection.is_open())
+            .cloned()
+    }
+
+    /// Tell every host whether some client here forwards kitty graphics
+    /// queries to a terminal that answers them, so its buffers hold their own
+    /// replies to such a query until the terminal's arrives. Each connection
+    /// tells its host, and hosts reached later are told when they are; none
+    /// is waited for.
+    pub(crate) fn set_host_graphics(&self, enabled: bool) {
+        self.host_graphics.send_replace(enabled);
     }
 }
 
-impl RemoteHosts {
-    /// Tell every host whether some client here forwards kitty graphics
-    /// queries to a terminal that answers them, so its buffers hold their own
-    /// replies to such a query until the terminal's arrives. Hosts reached
-    /// later are told when they are.
-    pub(crate) async fn set_host_graphics(&self, enabled: bool) {
-        self.host_graphics.store(enabled, Ordering::Release);
-        let connections: Vec<_> = self.hosts.lock().await.values().cloned().collect();
-        for connection in connections {
-            let request = ClientMessage::Client(ClientRequest::SetHostGraphics {
-                request_id: new_request_id(),
-                enabled,
-            });
-            if let Err(error) = connection.request(request).await {
-                debug!(host = %connection.host(), %error, "failed to tell host about host graphics");
-            }
+/// Removes a host's gate once no connection attempt holds or waits for it,
+/// so a host given once, or only cancelled attempts, leaves nothing behind.
+struct GateCleanup<'a> {
+    gates: &'a StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    host: &'a str,
+    gate: &'a Arc<Mutex<()>>,
+}
+
+impl Drop for GateCleanup<'_> {
+    fn drop(&mut self) {
+        let mut gates = lock(self.gates);
+        // The map's reference and this attempt's: any other is an attempt
+        // waiting for the gate, which takes it from the map under this lock.
+        if Arc::strong_count(self.gate) == 2 {
+            gates.remove(self.host);
         }
     }
 }
@@ -162,7 +220,8 @@ struct Watched {
 }
 
 /// One host's server, shared by every buffer running there. A task owns the
-/// connection, sending requests one at a time and passing on what the server
+/// connection, sending requests as they come, up to
+/// [`MAX_REQUESTS_IN_FLIGHT`] unanswered, and passing on what the server
 /// reports about each buffer to that buffer's runtime.
 #[derive(Clone, Debug)]
 pub(crate) struct HostConnection {
@@ -171,9 +230,15 @@ pub(crate) struct HostConnection {
 }
 
 impl HostConnection {
-    fn serve(host: &str, upstream: Upstream) -> Self {
+    /// Serve `upstream`, telling the host whatever `host_graphics` says.
+    fn serve(host: &str, upstream: Upstream, host_graphics: watch::Receiver<bool>) -> Self {
         let (commands, receiver) = mpsc::channel(64);
-        tokio::spawn(serve_host(host.to_owned(), upstream, receiver));
+        tokio::spawn(serve_host(
+            host.to_owned(),
+            upstream,
+            receiver,
+            host_graphics,
+        ));
         Self {
             host: host.into(),
             commands,
@@ -267,14 +332,45 @@ async fn serve_host(
     host: String,
     mut upstream: Upstream,
     mut commands: mpsc::Receiver<HostCommand>,
+    mut host_graphics: watch::Receiver<bool>,
 ) {
     let mut watchers = HashMap::<BufferId, Watcher>::new();
+    // Like any client's, the setting is the connection's, so a new one starts
+    // out without it. Only the latest value is sent, and its answer is not
+    // waited for, so a host that does not answer holds up nothing else.
+    let mut told_host_graphics = false;
+    let mut following_host_graphics = true;
+    host_graphics.mark_changed();
     // Requests sent and not yet answered, by id. Requests go out as they
     // come rather than one round trip at a time, so a slow link costs one
     // round trip for a burst of requests, not one each.
     let mut in_flight = HashMap::<RequestId, oneshot::Sender<Result<ServerResponse>>>::new();
     loop {
         tokio::select! {
+            changed = host_graphics.changed(),
+                if following_host_graphics && in_flight.len() < MAX_REQUESTS_IN_FLIGHT =>
+            {
+                if changed.is_err() {
+                    following_host_graphics = false;
+                    continue;
+                }
+                let enabled = *host_graphics.borrow_and_update();
+                if enabled == told_host_graphics {
+                    continue;
+                }
+                let message = ClientMessage::Client(ClientRequest::SetHostGraphics {
+                    request_id: new_request_id(),
+                    enabled,
+                });
+                if let Err(error) = upstream.send(&message).await {
+                    debug!(%host, %error, "connection to host failed");
+                    break;
+                }
+                // Nobody waits for the answer, and a host that predates the
+                // setting refusing it changes nothing.
+                in_flight.insert(message.request_id(), oneshot::channel().0);
+                told_host_graphics = enabled;
+            }
             command = commands.recv(), if in_flight.len() < MAX_REQUESTS_IN_FLIGHT => match command {
                 None => break,
                 Some(HostCommand::Request { message, reply }) => {
@@ -812,8 +908,343 @@ fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
-    use super::{options_delta, validate_host};
+    use std::time::Duration;
+
+    use embers_core::{BufferId, ErrorCode, RequestId, WireError};
+    use embers_protocol::{
+        BufferRequest, ClientMessage, ClientRequest, ErrorResponse, OkResponse, PingRequest,
+        PingResponse, RenderInvalidatedEvent, ServerEvent, ServerResponse,
+    };
+    use tempfile::tempdir;
+
+    use super::{
+        HostConnection, MAX_REQUESTS_IN_FLIGHT, RemoteHosts, options_delta, validate_host,
+    };
+    use crate::testing_hosts::{ScriptedHost, SocketHosts};
+
+    /// Long enough for a request the connection would send to reach the
+    /// scripted host.
+    const QUIET: Duration = Duration::from_millis(200);
+
+    async fn scripted() -> (HostConnection, ScriptedHost) {
+        let (upstream, host) = ScriptedHost::connect("devbox").await;
+        let host_graphics = tokio::sync::watch::channel(false).1;
+        (
+            HostConnection::serve("devbox", upstream, host_graphics),
+            host,
+        )
+    }
+
+    fn host_graphics_told(request: Option<ClientMessage>) -> bool {
+        match request {
+            Some(ClientMessage::Client(ClientRequest::SetHostGraphics { enabled, .. })) => enabled,
+            other => panic!("expected the host graphics setting, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_tells_its_host_each_graphics_change_without_waiting_for_answers() {
+        let (upstream, mut host) = ScriptedHost::connect("devbox").await;
+        let (host_graphics, following) = tokio::sync::watch::channel(true);
+        let connection = HostConnection::serve("devbox", upstream, following);
+
+        // A new connection starts out without it, so it is told at once.
+        assert!(host_graphics_told(host.next_request().await));
+        // The host answers nothing, and the changes are told anyway.
+        host_graphics.send_replace(false);
+        assert!(!host_graphics_told(host.next_request().await));
+        host_graphics.send_replace(true);
+        assert!(host_graphics_told(host.next_request().await));
+        // Telling it again what it was told last sends nothing.
+        host_graphics.send_replace(true);
+        assert!(host.request_within(QUIET).await.is_none());
+        assert!(connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn a_host_leaves_no_gate_behind_once_its_attempts_are_done_or_cancelled() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        sockets.silence("stuck");
+        let hosts = Arc::new(RemoteHosts::new(Arc::new(sockets)));
+
+        hosts.connect("devbox").await.expect("reach devbox");
+        let stuck = tokio::spawn({
+            let hosts = hosts.clone();
+            async move { hosts.connect("stuck").await.map(drop) }
+        });
+        tokio::time::sleep(QUIET).await;
+        assert!(super::lock(&hosts.connecting).contains_key("stuck"));
+        stuck.abort();
+        let _ = stuck.await;
+
+        assert!(super::lock(&hosts.connecting).is_empty());
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
+
+    fn ping(id: u64) -> ClientMessage {
+        ClientMessage::Ping(PingRequest {
+            request_id: RequestId(id),
+            payload: format!("ping {id}"),
+        })
+    }
+
+    fn pong(request: ClientMessage) -> ServerResponse {
+        let ClientMessage::Ping(ping) = request else {
+            panic!("expected a ping, got {request:?}");
+        };
+        ServerResponse::Pong(PingResponse {
+            request_id: ping.request_id,
+            payload: ping.payload,
+        })
+    }
+
+    #[tokio::test]
+    async fn answers_reach_their_requests_in_whatever_order_they_come() {
+        let (connection, mut host) = scripted().await;
+        let first = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        let second = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(2)).await }
+        });
+        let a = host.next_request().await.expect("a request");
+        let b = host.next_request().await.expect("another request");
+
+        host.respond(pong(b)).await;
+        host.respond(pong(a)).await;
+
+        for (request, id) in [(first, 1), (second, 2)] {
+            match request.await.expect("request task") {
+                Ok(ServerResponse::Pong(pong)) => assert_eq!(pong.payload, format!("ping {id}")),
+                other => panic!("expected the pong for ping {id}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn losing_the_host_fails_the_requests_in_flight_and_ends_the_watches() {
+        let (connection, mut host) = scripted().await;
+        let watching = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.watch(BufferId(5)).await }
+        });
+        let watch = host.next_request().await.expect("the watch request");
+        host.respond(ServerResponse::Ok(OkResponse {
+            request_id: watch.request_id(),
+        }))
+        .await;
+        let mut watched = watching.await.expect("watch task").expect("watch");
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        host.next_request().await.expect("the ping");
+
+        drop(host);
+
+        assert!(pending.await.expect("request task").is_err());
+        assert_eq!(watched.changes.recv().await, None);
+        assert!(!connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_no_request_ends_the_connection() {
+        let (connection, mut host) = scripted().await;
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        host.next_request().await.expect("the ping");
+
+        // A server answers a request it cannot read without its id, so the
+        // connection cannot tell which request failed.
+        host.respond(ServerResponse::Error(ErrorResponse {
+            request_id: None,
+            error: WireError::new(ErrorCode::ProtocolViolation, "unreadable request"),
+        }))
+        .await;
+
+        assert!(pending.await.expect("request task").is_err());
+        assert!(!connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn requests_wait_while_the_most_are_in_flight() {
+        let (connection, mut host) = scripted().await;
+        let requests: Vec<_> = (0..=MAX_REQUESTS_IN_FLIGHT as u64)
+            .map(|id| {
+                let connection = connection.clone();
+                tokio::spawn(async move { connection.request(ping(id + 1)).await })
+            })
+            .collect();
+        let mut received = Vec::new();
+        for _ in 0..MAX_REQUESTS_IN_FLIGHT {
+            received.push(host.next_request().await.expect("a request in flight"));
+        }
+
+        assert!(host.request_within(QUIET).await.is_none());
+        host.respond(pong(received.remove(0))).await;
+        received.push(host.next_request().await.expect("the request that waited"));
+        for request in received {
+            host.respond(pong(request)).await;
+        }
+        for request in requests {
+            assert!(request.await.expect("request task").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_from_before_watching_still_reports_its_buffers_changing() {
+        let (connection, mut host) = scripted().await;
+        let watching = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.watch(BufferId(5)).await }
+        });
+        let Some(ClientMessage::Buffer(BufferRequest::Watch { request_id, .. })) =
+            host.next_request().await
+        else {
+            panic!("expected a watch request");
+        };
+
+        host.respond(ServerResponse::Error(ErrorResponse {
+            request_id: Some(request_id),
+            error: WireError::new(ErrorCode::InvalidRequest, "unknown buffer request"),
+        }))
+        .await;
+        let mut watched = watching.await.expect("watch task").expect("watch anyway");
+        host.send_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+            buffer_id: BufferId(5),
+        }))
+        .await;
+
+        assert_eq!(watched.changes.recv().await, Some(()));
+        assert!(connection.is_open());
+    }
+    use crate::{Server, ServerConfig};
+
+    #[tokio::test]
+    async fn a_host_is_reached_over_any_stream_to_its_server() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        let hosts = RemoteHosts::new(Arc::new(sockets));
+
+        let connection = hosts.connect("devbox").await.expect("reach devbox");
+        let response = connection
+            .request(ClientMessage::Ping(PingRequest {
+                request_id: RequestId(1),
+                payload: "hello".to_owned(),
+            }))
+            .await
+            .expect("ping devbox");
+
+        assert!(matches!(response, ServerResponse::Pong(pong) if pong.payload == "hello"));
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
+
+    #[tokio::test]
+    async fn a_host_that_never_answers_does_not_hold_up_another() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        sockets.silence("stuck");
+        let hosts = Arc::new(RemoteHosts::new(Arc::new(sockets)));
+        let stuck = tokio::spawn({
+            let hosts = hosts.clone();
+            async move { hosts.connect("stuck").await.map(drop) }
+        });
+        tokio::time::sleep(QUIET).await;
+
+        let reached = tokio::time::timeout(Duration::from_secs(5), hosts.connect("devbox")).await;
+
+        assert!(reached.is_ok_and(|connection| connection.is_ok()));
+        assert!(!stuck.is_finished());
+        stuck.abort();
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
+
+    #[tokio::test]
+    async fn buffers_created_on_a_new_host_at_once_share_one_connection() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        let hosts = RemoteHosts::new(Arc::new(sockets.clone()));
+
+        let (first, second) = tokio::join!(hosts.connect("devbox"), hosts.connect("devbox"));
+
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(sockets.attempts("devbox"), 1);
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
+
+    #[tokio::test]
+    async fn a_lost_host_is_reached_again_on_a_new_connection() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        let hosts = RemoteHosts::new(Arc::new(sockets.clone()));
+        let lost = hosts.connect("devbox").await.expect("reach devbox");
+
+        sockets.cut("devbox");
+        let ping = ClientMessage::Ping(PingRequest {
+            request_id: RequestId(2),
+            payload: "anyone?".to_owned(),
+        });
+        assert!(lost.request(ping.clone()).await.is_err());
+        assert!(!lost.is_open());
+        assert!(hosts.connect("devbox").await.is_err());
+
+        sockets.restore("devbox");
+        let found = hosts.connect("devbox").await.expect("reach devbox again");
+        assert!(found.request(ping).await.is_ok());
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
 
     #[test]
     fn option_changes_on_the_host_are_reported_once() {
