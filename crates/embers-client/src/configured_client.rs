@@ -3626,8 +3626,12 @@ where
         self.set_view_scroll_top(node_id, next).await?;
         // Only the pane in copy mode leaves it: the wheel over another pane
         // scrolls that pane alone. Leaving copy mode ends it in every pane, so
-        // a selection in any of them keeps it.
-        if delta.is_positive() && self.copy.exit_at_bottom {
+        // a selection in any of them keeps it, and so does a mode opened from
+        // it, such as the search prompt, which returns to copy mode.
+        if delta.is_positive()
+            && self.copy.exit_at_bottom
+            && self.input_state.current_mode() == COPY_MODE
+        {
             let state = self.client.state();
             let back_at_bottom = state.view_state(node_id).is_some_and(|view| {
                 view.copy_cursor.is_some()

@@ -825,6 +825,24 @@ async fn scrolling_to_the_bottom_keeps_a_selection() {
 }
 
 #[tokio::test]
+async fn scrolling_to_the_bottom_with_the_search_prompt_open_stays_in_copy_mode() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, chars("/")).await;
+    assert_eq!(client.current_mode(), "search");
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+
+    press(&mut client, vec![KeyEvent::Escape]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(cursor(&client), (6, 0));
+}
+
+#[tokio::test]
 async fn page_up_enters_copy_mode_with_the_cursor_on_screen() {
     let transport = FakeTransport::default();
     let (mut client, _tempdir) = copy_client(&transport, "");
