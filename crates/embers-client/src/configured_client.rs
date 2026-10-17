@@ -3624,13 +3624,16 @@ where
         };
         let next = next.max(0) as u64;
         self.set_view_scroll_top(node_id, next).await?;
+        // Only the pane in copy mode leaves it: the wheel over another pane
+        // scrolls that pane alone.
         if delta.is_positive() && self.copy.exit_at_bottom {
             let back_at_bottom = self
                 .client
                 .state()
                 .view_state(node_id)
                 .is_some_and(|state| {
-                    state.selection_state.is_none()
+                    state.copy_cursor.is_some()
+                        && state.selection_state.is_none()
                         && state.scroll_top_line
                             >= state
                                 .total_line_count

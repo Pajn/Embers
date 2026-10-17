@@ -895,3 +895,52 @@ async fn a_copy_mode_binding_of_the_leader_key_shadows_leader_bindings() {
     assert_eq!(client.current_mode(), "copy");
     assert_eq!(cursor(&client), (5, 0));
 }
+
+#[tokio::test]
+async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
+    let transport = FakeTransport::default();
+    let (config, _tempdir) = manager_from_source("");
+    let mut client = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    // The left pane is focused and shows the bottom of `LINES`; the right
+    // pane follows its output.
+    let mut state = root_split_state();
+    state.sessions.get_mut(&SESSION_ID).unwrap().focused_leaf_id = Some(ROOT_SPLIT_LEFT_LEAF_ID);
+    let single = copy_state();
+    *state.snapshots.get_mut(&BUFFER).unwrap() = single.snapshots[&BUFFER].clone();
+    *state.view_state_mut(ROOT_SPLIT_LEFT_LEAF_ID).unwrap() =
+        single.view_state(NODE).unwrap().clone();
+    *client.client_mut().state_mut() = state;
+    let presentation =
+        PresentationModel::project(client.client().state(), SESSION_ID, VIEWPORT).unwrap();
+    let origin = |node_id| {
+        let leaf = presentation
+            .leaves
+            .iter()
+            .find(|leaf| leaf.node_id == node_id)
+            .unwrap();
+        (
+            leaf.content_rect.origin.x as u16,
+            leaf.content_rect.origin.y as u16,
+        )
+    };
+    let (left_x, left_y) = origin(ROOT_SPLIT_LEFT_LEAF_ID);
+    let (right_x, right_y) = origin(ROOT_SPLIT_RIGHT_LEAF_ID);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(left_x, left_y, MouseEventKind::WheelUp)).await;
+    assert_eq!(client.current_mode(), "copy");
+
+    send_mouse(
+        &mut client,
+        mouse(right_x, right_y, MouseEventKind::WheelDown),
+    )
+    .await;
+    assert_eq!(client.current_mode(), "copy");
+    let left = client
+        .client()
+        .state()
+        .view_state(ROOT_SPLIT_LEFT_LEAF_ID)
+        .unwrap();
+    assert!(left.copy_cursor.is_some());
+    assert_eq!(left.scroll_top_line, 3);
+}
