@@ -3653,8 +3653,18 @@ where
     /// Scrolling the focused pane back in `normal` mode enters copy mode with
     /// the cursor at the program's cursor; the scroll then drags it along to
     /// stay on screen. Scrolling down to the bottom again leaves copy mode.
+    /// A view already showing the start of its history cannot move, so
+    /// scrolling it leaves keys going to the program.
     fn enter_copy_mode_by_scrolling(&mut self, node_id: NodeId) {
         if self.input_state.current_mode() != NORMAL_MODE {
+            return;
+        }
+        let can_scroll_back = self
+            .client
+            .state()
+            .view_state(node_id)
+            .is_some_and(|state| state.scroll_top_line > 0);
+        if !can_scroll_back {
             return;
         }
         if self.ensure_copy_cursor(node_id) {

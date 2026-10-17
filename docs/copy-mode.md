@@ -17,7 +17,8 @@ Copies go to the host terminal's clipboard as OSC 52, so the terminal must allow
 - Drag with the mouse (see [Mouse](#mouse)).
 - Scroll the focused pane back: `PageUp`, the mouse wheel, or any `scroll_line_up()`,
   `scroll_page_up()` or `scroll_to_top()` binding in `normal` mode. Scrolling down to the bottom
-  again leaves copy mode, unless a selection is active. This is tmux's `copy-mode -e`, which its
+  again leaves copy mode, unless a selection is active. In a pane that shows all of its history
+  already, scrolling up does nothing. This is tmux's `copy-mode -e`, which its
   wheel and `PageUp` bindings use.
 
 Entering copy mode freezes the pane's view, so new output does not move it, and puts the cursor

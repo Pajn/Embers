@@ -843,6 +843,34 @@ async fn scrolling_to_the_bottom_with_the_search_prompt_open_stays_in_copy_mode(
 }
 
 #[tokio::test]
+async fn scrolling_up_without_history_stays_in_normal_mode() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    // The whole buffer fits on screen, so there is nothing to scroll back to.
+    let view = client
+        .client_mut()
+        .state_mut()
+        .view_state_mut(NODE)
+        .unwrap();
+    view.total_line_count = u64::from(ROWS);
+    view.scroll_top_line = 0;
+    let (x, y) = content_origin(&client);
+
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, vec![KeyEvent::PageUp]).await;
+    assert_eq!(client.current_mode(), "normal");
+    assert!(
+        client
+            .client()
+            .state()
+            .view_state(NODE)
+            .unwrap()
+            .copy_cursor
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn page_up_enters_copy_mode_with_the_cursor_on_screen() {
     let transport = FakeTransport::default();
     let (mut client, _tempdir) = copy_client(&transport, "");
