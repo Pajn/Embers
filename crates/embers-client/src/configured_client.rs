@@ -3625,20 +3625,20 @@ where
         let next = next.max(0) as u64;
         self.set_view_scroll_top(node_id, next).await?;
         // Only the pane in copy mode leaves it: the wheel over another pane
-        // scrolls that pane alone.
+        // scrolls that pane alone. Leaving copy mode ends it in every pane, so
+        // a selection in any of them keeps it.
         if delta.is_positive() && self.copy.exit_at_bottom {
-            let back_at_bottom = self
-                .client
-                .state()
-                .view_state(node_id)
-                .is_some_and(|state| {
-                    state.copy_cursor.is_some()
-                        && state.selection_state.is_none()
-                        && state.scroll_top_line
-                            >= state
-                                .total_line_count
-                                .saturating_sub(u64::from(state.visible_line_count))
-                });
+            let state = self.client.state();
+            let back_at_bottom = state.view_state(node_id).is_some_and(|view| {
+                view.copy_cursor.is_some()
+                    && view.scroll_top_line
+                        >= view
+                            .total_line_count
+                            .saturating_sub(u64::from(view.visible_line_count))
+            }) && state
+                .view_state
+                .values()
+                .all(|view| view.selection_state.is_none());
             if back_at_bottom {
                 self.exit_copy_mode().await?;
             }

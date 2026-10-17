@@ -6,7 +6,7 @@ use std::fs;
 use embers_client::{
     ConfigDiscoveryOptions, ConfigManager, ConfiguredClient, FakeTransport, KeyEvent, MouseButton,
     MouseEvent, MouseEventKind, MouseModifiers, MuxClient, PresentationModel, SelectionKind,
-    SelectionPoint,
+    SelectionPoint, SelectionState,
 };
 use embers_core::{
     BufferId, CursorPosition, CursorShape, CursorState, NodeId, RequestId, Size, SnapshotLine,
@@ -896,13 +896,19 @@ async fn a_copy_mode_binding_of_the_leader_key_shadows_leader_bindings() {
     assert_eq!(cursor(&client), (5, 0));
 }
 
-#[tokio::test]
-async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
-    let transport = FakeTransport::default();
-    let (config, _tempdir) = manager_from_source("");
+/// A split with the left pane focused, showing the bottom of `LINES` like
+/// `copy_state`, and the right pane following its output. Returns the client
+/// and the content origins of the left and right panes.
+fn split_copy_client(
+    transport: &FakeTransport,
+) -> (
+    ConfiguredClient<FakeTransport>,
+    TempDir,
+    (u16, u16),
+    (u16, u16),
+) {
+    let (config, tempdir) = manager_from_source("");
     let mut client = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
-    // The left pane is focused and shows the bottom of `LINES`; the right
-    // pane follows its output.
     let mut state = root_split_state();
     state.sessions.get_mut(&SESSION_ID).unwrap().focused_leaf_id = Some(ROOT_SPLIT_LEFT_LEAF_ID);
     let single = copy_state();
@@ -923,8 +929,16 @@ async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
             leaf.content_rect.origin.y as u16,
         )
     };
-    let (left_x, left_y) = origin(ROOT_SPLIT_LEFT_LEAF_ID);
-    let (right_x, right_y) = origin(ROOT_SPLIT_RIGHT_LEAF_ID);
+    let left = origin(ROOT_SPLIT_LEFT_LEAF_ID);
+    let right = origin(ROOT_SPLIT_RIGHT_LEAF_ID);
+    (client, tempdir, left, right)
+}
+
+#[tokio::test]
+async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir, (left_x, left_y), (right_x, right_y)) =
+        split_copy_client(&transport);
 
     push_slice(&transport, 3);
     send_mouse(&mut client, mouse(left_x, left_y, MouseEventKind::WheelUp)).await;
@@ -943,4 +957,42 @@ async fn the_wheel_over_another_pane_leaves_copy_mode_alone() {
         .unwrap();
     assert!(left.copy_cursor.is_some());
     assert_eq!(left.scroll_top_line, 3);
+}
+
+#[tokio::test]
+async fn scrolling_to_the_bottom_keeps_a_selection_in_another_pane() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir, (left_x, left_y), _) = split_copy_client(&transport);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(left_x, left_y, MouseEventKind::WheelUp)).await;
+    // As after moving focus to the right pane in copy mode and pressing `v`.
+    let selection = SelectionState {
+        kind: SelectionKind::Character,
+        anchor: SelectionPoint { line: 0, column: 0 },
+        cursor: SelectionPoint { line: 0, column: 4 },
+    };
+    client
+        .client_mut()
+        .state_mut()
+        .view_state_mut(ROOT_SPLIT_RIGHT_LEAF_ID)
+        .unwrap()
+        .selection_state = Some(selection.clone());
+
+    push_slice(&transport, 6);
+    send_mouse(
+        &mut client,
+        mouse(left_x, left_y, MouseEventKind::WheelDown),
+    )
+    .await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(
+        client
+            .client()
+            .state()
+            .view_state(ROOT_SPLIT_RIGHT_LEAF_ID)
+            .unwrap()
+            .selection_state,
+        Some(selection)
+    );
 }
