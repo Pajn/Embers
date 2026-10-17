@@ -46,10 +46,11 @@ bind("normal", "<leader><C-a>", action.send_keys_current("<C-a>"));
 // ---------------------------------------------------------------------------
 // Mouse, copy mode and hints
 // ---------------------------------------------------------------------------
-// mouse on is the built-in default: click to focus, wheel scrolling, drag to
-// select and copy, dragging split dividers. mode-keys vi is the built-in copy
-// mode table, where v, C-v and y already do begin-selection,
-// rectangle-toggle and copy-selection-and-cancel.
+// mouse on is the built-in default: click to focus, wheel scrolling (which
+// enters copy mode, as tmux's copy-mode -e), drag to select and copy, dragging
+// split dividers. mode-keys vi is the built-in copy mode table, where v, C-v
+// and y already do begin-selection, rectangle-toggle and
+// copy-selection-and-cancel.
 set_status_keys("vi");               // status-keys vi
 bind("normal", "<leader>[", action.enter_copy_mode());
 

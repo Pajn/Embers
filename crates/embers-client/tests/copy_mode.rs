@@ -789,6 +789,53 @@ async fn drags_go_to_programs_that_requested_the_mouse() {
 }
 
 #[tokio::test]
+async fn scrolling_back_enters_copy_mode_and_scrolling_to_the_bottom_leaves_it() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    // The cursor starts at the program's cursor and stays on screen.
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!((cursor(&client), top(&client)), ((6, 0), 3));
+    press(&mut client, chars("k")).await;
+    assert_eq!(cursor(&client), (5, 0));
+
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+    assert_eq!(client.current_mode(), "normal");
+    let view = client.client().state().view_state(NODE).unwrap();
+    assert!(view.copy_cursor.is_none());
+    assert!(view.follow_output);
+}
+
+#[tokio::test]
+async fn scrolling_to_the_bottom_keeps_a_selection() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+    let (x, y) = content_origin(&client);
+
+    push_slice(&transport, 3);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelUp)).await;
+    press(&mut client, chars("v")).await;
+    push_slice(&transport, 6);
+    send_mouse(&mut client, mouse(x, y, MouseEventKind::WheelDown)).await;
+    assert_eq!(client.current_mode(), "select");
+}
+
+#[tokio::test]
+async fn page_up_enters_copy_mode_with_the_cursor_on_screen() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, "");
+
+    push_slice(&transport, 2);
+    press(&mut client, vec![KeyEvent::PageUp]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!((cursor(&client), top(&client)), ((5, 0), 2));
+}
+
+#[tokio::test]
 async fn paragraph_motions_move_between_blank_lines() {
     let transport = FakeTransport::default();
     let (mut client, _tempdir) = copy_client(&transport, ENTER_COPY);

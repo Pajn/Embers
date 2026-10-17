@@ -879,6 +879,9 @@ where
                         MouseEventKind::WheelDown => WHEEL_SCROLL_LINES as i64,
                         _ => 0,
                     };
+                    if delta < 0 && target_leaf.focused {
+                        self.enter_copy_mode_by_scrolling(target_leaf.node_id);
+                    }
                     return self.scroll_view_by(target_leaf.node_id, delta).await;
                 }
                 Ok(())
@@ -1985,6 +1988,7 @@ where
             Action::LastPane => self.focus_last_pane(session_id).await,
             Action::ScrollLineUp => {
                 let leaf = self.focused_leaf(presentation)?;
+                self.enter_copy_mode_by_scrolling(leaf.node_id);
                 self.scroll_view_by(leaf.node_id, -1).await
             }
             Action::ScrollLineDown => {
@@ -1993,6 +1997,7 @@ where
             }
             Action::ScrollPageUp => {
                 let leaf = self.focused_leaf(presentation)?;
+                self.enter_copy_mode_by_scrolling(leaf.node_id);
                 let page = self
                     .client
                     .state()
@@ -2013,6 +2018,7 @@ where
             }
             Action::ScrollToTop => {
                 let leaf = self.focused_leaf(presentation)?;
+                self.enter_copy_mode_by_scrolling(leaf.node_id);
                 self.set_view_scroll_top(leaf.node_id, 0).await
             }
             Action::ScrollToBottom | Action::FollowOutput => {
@@ -3617,7 +3623,37 @@ where
             current.saturating_add(delta)
         };
         let next = next.max(0) as u64;
-        self.set_view_scroll_top(node_id, next).await
+        self.set_view_scroll_top(node_id, next).await?;
+        if delta.is_positive() && self.copy.exit_at_bottom {
+            let back_at_bottom = self
+                .client
+                .state()
+                .view_state(node_id)
+                .is_some_and(|state| {
+                    state.selection_state.is_none()
+                        && state.scroll_top_line
+                            >= state
+                                .total_line_count
+                                .saturating_sub(u64::from(state.visible_line_count))
+                });
+            if back_at_bottom {
+                self.exit_copy_mode().await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Scrolling the focused pane back in `normal` mode enters copy mode with
+    /// the cursor at the program's cursor; the scroll then drags it along to
+    /// stay on screen. Scrolling down to the bottom again leaves copy mode.
+    fn enter_copy_mode_by_scrolling(&mut self, node_id: NodeId) {
+        if self.input_state.current_mode() != NORMAL_MODE {
+            return;
+        }
+        if self.ensure_copy_cursor(node_id) {
+            self.enter_copy_input_mode();
+            self.copy.exit_at_bottom = true;
+        }
     }
 
     async fn set_view_scroll_top(&mut self, node_id: NodeId, scroll_top_line: u64) -> Result<()> {
@@ -4938,6 +4974,7 @@ where
         }
         self.copy.clear_pending();
         self.copy.mouse = None;
+        self.copy.exit_at_bottom = false;
         Ok(())
     }
 

@@ -15,12 +15,16 @@ Copies go to the host terminal's clipboard as OSC 52, so the terminal must allow
   ```
 
 - Drag with the mouse (see [Mouse](#mouse)).
-- While the view is scrolled back in `normal` mode (with `PageUp` or the mouse wheel), `v`, `V` and
-  `<C-v>` start a selection, which also enters copy mode.
+- Scroll the focused pane back: `PageUp`, the mouse wheel, or any `scroll_line_up()`,
+  `scroll_page_up()` or `scroll_to_top()` binding in `normal` mode. Scrolling down to the bottom
+  again leaves copy mode, unless a selection is active. This is tmux's `copy-mode -e`, which its
+  wheel and `PageUp` bindings use.
 
 Entering copy mode freezes the pane's view, so new output does not move it, and puts the cursor
-where the program's cursor is. `q`, `<C-c>` or `<Esc>` (with no selection) leaves copy mode. This
-drops the cursor, the selection and any search highlights, and the view follows output again.
+where the program's cursor is. When copy mode starts by scrolling, the scroll then moves the cursor
+to stay on screen, so it lands on the bottom row. `q`, `<C-c>` or `<Esc>` (with no selection) leaves
+copy mode. This drops the cursor, the selection and any search highlights, and the view follows
+output again.
 
 Copy mode does not start on the alternate screen (full-screen programs such as vim or less), which
 has no scrollback.
@@ -101,7 +105,9 @@ With the default `mouse.set_select(true)`, in a pane whose program has not asked
 
 If the program has requested mouse reporting (vim with `mouse=a`, for example), presses, drags and
 releases go to the program as before. The mouse wheel scrolls as before. In copy mode, scrolling
-with the wheel keeps the view frozen even at the bottom and moves the cursor to stay on screen.
+with the wheel moves the cursor to stay on screen. Scrolling the focused pane back with the wheel
+enters copy mode (see [Entering and leaving](#entering-and-leaving)); the wheel over another pane
+only scrolls its view.
 
 ## Customising
 

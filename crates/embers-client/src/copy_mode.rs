@@ -687,6 +687,9 @@ pub(crate) struct CopyModeState {
     pub text: Option<CapturedText>,
     pub clicks: ClickTracker,
     pub mouse: Option<MouseSelection>,
+    /// Copy mode began by scrolling back, so scrolling to the bottom again
+    /// leaves it, as tmux's `copy-mode -e` does.
+    pub exit_at_bottom: bool,
 }
 
 impl CopyModeState {
