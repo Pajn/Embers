@@ -77,6 +77,9 @@ pub(crate) struct KeeperSettings {
     pub env: BTreeMap<String, OsString>,
 }
 
+/// Reports an end a runtime held back (see `Inner::held`).
+type HeldEnd = Box<dyn FnOnce() + Send>;
+
 pub(crate) struct BufferRuntimes {
     inner: Arc<Inner>,
 }
@@ -94,6 +97,10 @@ struct Inner {
     /// Buffers whose runtimes the server is shutting down: however they end
     /// now, their programs may still run for the next server.
     shutting_down: StdMutex<BTreeSet<BufferId>>,
+    /// Buffers whose keepers are being taken up again: an end their runtime
+    /// reports meanwhile waits here until it is known whether the keeper is
+    /// taken up, and is dropped if it is not.
+    held: StdMutex<BTreeMap<BufferId, Option<HeldEnd>>>,
     /// Buffers interrupted on a host, by host, each with its id there, until
     /// they are taken up again or released.
     waiting_for_host: StdMutex<BTreeMap<String, BTreeMap<BufferId, BufferId>>>,
@@ -131,6 +138,7 @@ impl BufferRuntimes {
                 awaiting_save: StdMutex::default(),
                 exited_early: StdMutex::default(),
                 shutting_down: StdMutex::default(),
+                held: StdMutex::default(),
                 waiting_for_host: StdMutex::default(),
                 reaching: StdMutex::default(),
                 stopping: watch::Sender::new(false),
@@ -410,11 +418,24 @@ impl Inner {
                 on_ended(buffer_id, end);
                 return;
             };
-            let (end, lost_host) = inner.ended(buffer_id, end);
-            // The server records the interrupt before the host is tried again.
-            on_ended(buffer_id, end);
-            if let Some(host) = lost_host {
-                Self::reach_host(&inner, host, RECONNECT_FIRST_DELAY);
+            let on_ended = on_ended.clone();
+            let reporting = inner.clone();
+            let report = move || {
+                let (end, lost_host) = reporting.ended(buffer_id, end);
+                // The server records the interrupt before the host is tried
+                // again.
+                on_ended(buffer_id, end);
+                if let Some(host) = lost_host {
+                    Self::reach_host(&reporting, host, RECONNECT_FIRST_DELAY);
+                }
+            };
+            let mut held = lock(&inner.held);
+            match held.get_mut(&buffer_id) {
+                Some(waiting) => *waiting = Some(Box::new(report)),
+                None => {
+                    drop(held);
+                    report();
+                }
             }
         });
         Ok(callbacks)
@@ -465,7 +486,24 @@ impl Inner {
         (end, lost_host)
     }
 
+    /// Take up the keeper of `buffer_id` listening on `socket_path`. Its
+    /// status poller starts as it is attached, and reports a connection that
+    /// breaks as an exit; a keeper that is not taken up reports nothing.
     async fn restore_keeper(
+        self: &Arc<Self>,
+        buffer_id: BufferId,
+        socket_path: PathBuf,
+    ) -> Restored {
+        lock(&self.held).insert(buffer_id, None);
+        let restored = self.take_up_keeper(buffer_id, socket_path).await;
+        let report = lock(&self.held).remove(&buffer_id).flatten();
+        if let (Restored::Running(_), Some(report)) = (&restored, report) {
+            report();
+        }
+        restored
+    }
+
+    async fn take_up_keeper(
         self: &Arc<Self>,
         buffer_id: BufferId,
         socket_path: PathBuf,
@@ -963,6 +1001,31 @@ mod tests {
         assert_eq!(
             inner.ended(BufferId(8), RuntimeEnd::Exited(Some(0))),
             (RuntimeEnd::Exited(Some(0)), None)
+        );
+    }
+
+    #[test]
+    fn an_end_reported_while_a_keeper_is_taken_up_waits_to_be_told_it_was() {
+        let (runtimes, mut ended, _dir) = new_runtimes();
+        let inner = &runtimes.inner;
+        let callbacks = inner.runtime_callbacks().expect("callbacks");
+
+        // A keeper that is not taken up reports nothing.
+        lock(&inner.held).insert(BufferId(10), None);
+        (callbacks.on_ended)(BufferId(10), RuntimeEnd::Exited(None));
+        assert!(ended.try_recv().is_err());
+        drop(lock(&inner.held).remove(&BufferId(10)));
+        assert!(ended.try_recv().is_err());
+
+        // One that is reports its end once it was.
+        lock(&inner.held).insert(BufferId(11), None);
+        (callbacks.on_ended)(BufferId(11), RuntimeEnd::Exited(Some(3)));
+        assert!(ended.try_recv().is_err());
+        let report = lock(&inner.held).remove(&BufferId(11)).flatten();
+        report.expect("the end waited")();
+        assert_eq!(
+            ended.try_recv().ok(),
+            Some((BufferId(11), RuntimeEnd::Exited(Some(3))))
         );
     }
 
