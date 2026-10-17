@@ -787,3 +787,22 @@ async fn drags_go_to_programs_that_requested_the_mouse() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn paragraph_motions_move_between_blank_lines() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(&transport, ENTER_COPY);
+    enter_copy(&mut client).await;
+
+    push_capture(&transport);
+    press(&mut client, chars("}")).await;
+    assert_eq!(cursor(&client), (8, 0));
+    press(&mut client, chars("}")).await;
+    assert_eq!(cursor(&client), (9, 5));
+    press(&mut client, chars("{")).await;
+    assert_eq!(cursor(&client), (8, 0));
+
+    push_slice(&transport, 0);
+    press(&mut client, chars("{")).await;
+    assert_eq!((cursor(&client), top(&client)), ((0, 0), 0));
+}

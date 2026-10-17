@@ -37,6 +37,7 @@ These keys work in `copy` mode and in `select` mode. `select` is copy mode with 
 | `0` / `<Home>`, `^`, `$` / `<End>` | line start, first non-blank, last character | `copy_start_of_line()`, `copy_back_to_indentation()`, `copy_end_of_line()` |
 | `gg`, `G` | first line of history, last line | `copy_history_top()`, `copy_history_bottom()` |
 | `H` `M` `L` | top, middle and bottom row of the view | `copy_top_line()`, `copy_middle_line()`, `copy_bottom_line()` |
+| `{` `}` | previous or next paragraph | `copy_previous_paragraph()`, `copy_next_paragraph()` |
 | `<C-u>` `<C-d>` | half a page up or down | `copy_halfpage_up()`, `copy_halfpage_down()` |
 | `<C-b>` `<C-f>`, `<PageUp>` `<PageDown>` | a page up or down | `copy_page_up()`, `copy_page_down()` |
 | `<C-y>` `<C-e>` | scroll a line, keeping the cursor on screen | `scroll_line_up()`, `scroll_line_down()` |
@@ -71,6 +72,13 @@ ASCII punctuation other than `_`. This is tmux's default `word-separators` and, 
 same as vim's default `iskeyword`. Letters, digits, `_` and all non-ASCII characters are word
 characters. An empty line counts as a word for `w` and `b`, as in vim. `W`, `B` and `E` split on
 whitespace only.
+
+### Paragraphs
+
+`{` and `}` move to the blank line before or after a paragraph, as in vim: from a blank line they
+first skip the blank lines next to it. Without another blank line, `{` stops at the start of history
+and `}` at the last character of the last line. A line of only spaces counts as blank, because
+terminal rows are often padded with them.
 
 ### Search
 
