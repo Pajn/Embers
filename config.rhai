@@ -50,7 +50,7 @@ bind("normal", "<leader><C-a>", action.send_keys_current("<C-a>"));
 // enters copy mode, as tmux's copy-mode -e), drag to select and copy, dragging
 // split dividers. mode-keys vi is the built-in copy mode table, where v, C-v
 // and y already do begin-selection, rectangle-toggle and
-// copy-selection-and-cancel.
+// copy-selection-and-cancel. <leader> bindings also work in copy mode.
 set_status_keys("vi");               // status-keys vi
 bind("normal", "<leader>[", action.enter_copy_mode());
 

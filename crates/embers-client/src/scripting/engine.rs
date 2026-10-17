@@ -11,8 +11,8 @@ use rhai::{
 use crate::config::ConfigOrigin;
 use crate::config::LoadedConfigSource;
 use crate::input::{
-    BindingSpec, FallbackPolicy, KeySequence, ModeSpec, builtin_modes, expand_leader,
-    parse_key_sequence,
+    BindingSpec, COPY_MODE, FallbackPolicy, KeySequence, KeyToken, ModeSpec, NORMAL_MODE,
+    SELECT_MODE, builtin_modes, expand_leader, parse_key_sequence,
 };
 
 use super::error::ScriptError;
@@ -286,6 +286,7 @@ impl RegistrationState {
         modes.extend(self.custom_modes);
 
         let mut bindings = BTreeMap::<String, Vec<BindingSpec<Vec<Action>>>>::new();
+        let mut unbound = Vec::<(String, KeySequence)>::new();
         for operation in self.binding_ops {
             match operation {
                 BindingOperation::Bind(pending) => {
@@ -349,9 +350,15 @@ impl RegistrationState {
                     if let Some(mode_bindings) = bindings.get_mut(&pending.mode) {
                         mode_bindings.retain(|binding| binding.sequence != sequence);
                     }
+                    unbound.push((pending.mode, sequence));
                 }
             }
         }
+        inherit_leader_bindings(
+            &mut bindings,
+            self.leader.as_deref().unwrap_or(&[]),
+            &unbound,
+        );
 
         for mode_name in self.mode_hooks.keys() {
             if !modes.contains_key(mode_name) {
@@ -388,6 +395,52 @@ impl RegistrationState {
             status_keys: self.status_keys,
             status_line: self.status_line,
         })
+    }
+}
+
+/// Give copy and select mode the leader bindings of normal mode, as tmux's
+/// prefix table works in copy mode. Each leaves copy mode before running, so
+/// that keys typed afterwards reach the program again, wherever focus went.
+/// A mode keeps its own binding for the same keys, and one it binds or
+/// unbinds as a prefix of them (the leader key itself, say) shadows them.
+fn inherit_leader_bindings(
+    bindings: &mut BTreeMap<String, Vec<BindingSpec<Vec<Action>>>>,
+    leader: &[KeyToken],
+    unbound: &[(String, KeySequence)],
+) {
+    if leader.is_empty() {
+        return;
+    }
+    let leader_bindings = bindings
+        .get(NORMAL_MODE)
+        .map(|normal| {
+            normal
+                .iter()
+                .filter(|binding| binding.sequence.starts_with(leader))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for mode in [COPY_MODE, SELECT_MODE] {
+        let mode_bindings = bindings.entry(mode.to_owned()).or_default();
+        for binding in &leader_bindings {
+            let shadowed = mode_bindings.iter().any(|own| {
+                own.sequence.starts_with(&binding.sequence)
+                    || binding.sequence.starts_with(&own.sequence)
+            }) || unbound.iter().any(|(unbound_mode, sequence)| {
+                unbound_mode == mode && binding.sequence.starts_with(sequence)
+            });
+            if shadowed {
+                continue;
+            }
+            let mut target = vec![Action::ExitCopyMode];
+            target.extend(binding.target.iter().cloned());
+            mode_bindings.push(BindingSpec {
+                notation: binding.notation.clone(),
+                sequence: binding.sequence.clone(),
+                target,
+            });
+        }
     }
 }
 

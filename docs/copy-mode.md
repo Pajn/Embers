@@ -109,6 +109,15 @@ with the wheel moves the cursor to stay on screen. Scrolling the focused pane ba
 enters copy mode (see [Entering and leaving](#entering-and-leaving)); the wheel over another pane
 only scrolls its view.
 
+## Leader bindings
+
+`normal` mode bindings that start with the leader also work in `copy` and `select` mode, as tmux's
+prefix table does in copy mode. Each leaves copy mode before it runs, so `<leader>'` switching
+session, say, leaves you typing into the program as usual. A binding of the same keys in `copy` or
+`select` mode takes precedence, and so does a binding of the leader key itself there: with
+`set_leader("<C-b>")`, copy mode's `<C-b>` stays a page up. `unbind` in either mode removes an
+inherited binding, or all of them when given the leader key.
+
 ## Customising
 
 `copy` and `select` are ordinary binding tables. Bind them from Rhai the way tmux uses

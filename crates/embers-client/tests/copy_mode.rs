@@ -853,3 +853,45 @@ async fn paragraph_motions_move_between_blank_lines() {
     press(&mut client, chars("{")).await;
     assert_eq!((cursor(&client), top(&client)), ((0, 0), 0));
 }
+
+#[tokio::test]
+async fn leader_bindings_leave_copy_mode_and_run() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(
+        &transport,
+        r#"
+            set_leader("<C-a>");
+            bind("normal", "<C-x>", action.enter_copy_mode());
+            bind("normal", "<leader>:", action.command_prompt());
+        "#,
+    );
+    enter_copy(&mut client).await;
+    press(&mut client, chars("v")).await;
+
+    press(&mut client, vec![KeyEvent::Ctrl('a'), KeyEvent::Char(':')]).await;
+    assert_eq!(client.current_mode(), "prompt");
+    let view = client.client().state().view_state(NODE).unwrap();
+    assert!(view.copy_cursor.is_none());
+    assert!(view.selection_state.is_none());
+    assert!(view.follow_output);
+}
+
+#[tokio::test]
+async fn a_copy_mode_binding_of_the_leader_key_shadows_leader_bindings() {
+    let transport = FakeTransport::default();
+    let (mut client, _tempdir) = copy_client(
+        &transport,
+        r#"
+            set_leader("<C-a>");
+            bind("normal", "<C-x>", action.enter_copy_mode());
+            bind("normal", "<leader>:", action.command_prompt());
+            bind("copy", "<C-a>", action.copy_cursor_up());
+        "#,
+    );
+    enter_copy(&mut client).await;
+
+    push_slice(&transport, 5);
+    press(&mut client, vec![KeyEvent::Ctrl('a'), KeyEvent::Char(':')]).await;
+    assert_eq!(client.current_mode(), "copy");
+    assert_eq!(cursor(&client), (5, 0));
+}
