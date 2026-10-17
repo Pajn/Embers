@@ -1,11 +1,19 @@
-//! Hosts for tests: [`HostConnector`] adapters that reach a host over a
-//! stream the test controls instead of a command.
+//! Hosts for tests: a [`HostConnector`] that reaches a host over a stream the
+//! test controls instead of a command, and a host whose answers the test
+//! scripts.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use embers_core::{MuxError, Result};
+use embers_core::{MuxError, RequestId, Result};
+use embers_protocol::{
+    ClientMessage, FrameType, HelloResponse, PROTOCOL_VERSION, RawFrame, SOFTWARE_VERSION,
+    ServerEnvelope, ServerEvent, ServerResponse, decode_client_message, encode_server_envelope,
+    read_frame, write_frame,
+};
+use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::task::AbortHandle;
 
@@ -83,5 +91,82 @@ impl HostConnector for SocketHosts {
             let (reader, writer) = tokio::io::split(ours);
             Upstream::over(format!("{host}'s socket"), reader, writer).await
         })
+    }
+}
+
+/// The far end of a host connection, played by a test: it reads what the
+/// connection sends and answers only what, and when, the test says.
+pub(crate) struct ScriptedHost {
+    reader: ReadHalf<DuplexStream>,
+    writer: WriteHalf<DuplexStream>,
+}
+
+impl ScriptedHost {
+    /// A connection to a scripted host, its version check answered.
+    pub(crate) async fn connect(host: &str) -> (Upstream, Self) {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(ours);
+        let (their_reader, their_writer) = tokio::io::split(theirs);
+        let mut scripted = Self {
+            reader: their_reader,
+            writer: their_writer,
+        };
+        let (upstream, ()) = tokio::join!(Upstream::over(host, reader, writer), async {
+            let Some(ClientMessage::Hello(hello)) = scripted.next_request().await else {
+                panic!("a connection starts with its version check");
+            };
+            scripted
+                .respond(ServerResponse::Hello(HelloResponse {
+                    request_id: hello.request_id,
+                    protocol_version: PROTOCOL_VERSION,
+                    software_version: SOFTWARE_VERSION.to_owned(),
+                }))
+                .await;
+        });
+        (upstream.expect("version check"), scripted)
+    }
+
+    /// The next request the connection sends, or `None` once it closed.
+    pub(crate) async fn next_request(&mut self) -> Option<ClientMessage> {
+        let frame = read_frame(&mut self.reader).await.expect("read a frame")?;
+        Some(decode_client_message(&frame.payload).expect("decode a request"))
+    }
+
+    /// The next request, unless none comes within `wait`.
+    pub(crate) async fn request_within(&mut self, wait: Duration) -> Option<ClientMessage> {
+        tokio::time::timeout(wait, self.next_request())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) async fn respond(&mut self, response: ServerResponse) {
+        let request_id = response.request_id().unwrap_or(RequestId(0));
+        self.write(
+            FrameType::Response,
+            request_id,
+            ServerEnvelope::Response(response),
+        )
+        .await;
+    }
+
+    pub(crate) async fn send_event(&mut self, event: ServerEvent) {
+        self.write(FrameType::Event, RequestId(0), ServerEnvelope::Event(event))
+            .await;
+    }
+
+    async fn write(
+        &mut self,
+        frame_type: FrameType,
+        request_id: RequestId,
+        envelope: ServerEnvelope,
+    ) {
+        let payload = encode_server_envelope(&envelope).expect("encode");
+        write_frame(
+            &mut self.writer,
+            &RawFrame::new(frame_type, request_id, payload),
+        )
+        .await
+        .expect("write a frame");
     }
 }

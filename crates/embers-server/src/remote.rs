@@ -851,12 +851,170 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    use embers_core::RequestId;
-    use embers_protocol::{ClientMessage, PingRequest, ServerResponse};
+    use std::time::Duration;
+
+    use embers_core::{BufferId, ErrorCode, RequestId, WireError};
+    use embers_protocol::{
+        BufferRequest, ClientMessage, ErrorResponse, OkResponse, PingRequest, PingResponse,
+        RenderInvalidatedEvent, ServerEvent, ServerResponse,
+    };
     use tempfile::tempdir;
 
-    use super::{RemoteHosts, options_delta, validate_host};
-    use crate::testing_hosts::SocketHosts;
+    use super::{
+        HostConnection, MAX_REQUESTS_IN_FLIGHT, RemoteHosts, options_delta, validate_host,
+    };
+    use crate::testing_hosts::{ScriptedHost, SocketHosts};
+
+    /// Long enough for a request the connection would send to reach the
+    /// scripted host.
+    const QUIET: Duration = Duration::from_millis(200);
+
+    async fn scripted() -> (HostConnection, ScriptedHost) {
+        let (upstream, host) = ScriptedHost::connect("devbox").await;
+        (HostConnection::serve("devbox", upstream), host)
+    }
+
+    fn ping(id: u64) -> ClientMessage {
+        ClientMessage::Ping(PingRequest {
+            request_id: RequestId(id),
+            payload: format!("ping {id}"),
+        })
+    }
+
+    fn pong(request: ClientMessage) -> ServerResponse {
+        let ClientMessage::Ping(ping) = request else {
+            panic!("expected a ping, got {request:?}");
+        };
+        ServerResponse::Pong(PingResponse {
+            request_id: ping.request_id,
+            payload: ping.payload,
+        })
+    }
+
+    #[tokio::test]
+    async fn answers_reach_their_requests_in_whatever_order_they_come() {
+        let (connection, mut host) = scripted().await;
+        let first = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        let second = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(2)).await }
+        });
+        let a = host.next_request().await.expect("a request");
+        let b = host.next_request().await.expect("another request");
+
+        host.respond(pong(b)).await;
+        host.respond(pong(a)).await;
+
+        for (request, id) in [(first, 1), (second, 2)] {
+            match request.await.expect("request task") {
+                Ok(ServerResponse::Pong(pong)) => assert_eq!(pong.payload, format!("ping {id}")),
+                other => panic!("expected the pong for ping {id}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn losing_the_host_fails_the_requests_in_flight_and_ends_the_watches() {
+        let (connection, mut host) = scripted().await;
+        let watching = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.watch(BufferId(5)).await }
+        });
+        let watch = host.next_request().await.expect("the watch request");
+        host.respond(ServerResponse::Ok(OkResponse {
+            request_id: watch.request_id(),
+        }))
+        .await;
+        let mut watched = watching.await.expect("watch task").expect("watch");
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        host.next_request().await.expect("the ping");
+
+        drop(host);
+
+        assert!(pending.await.expect("request task").is_err());
+        assert_eq!(watched.changes.recv().await, None);
+        assert!(!connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_no_request_ends_the_connection() {
+        let (connection, mut host) = scripted().await;
+        let pending = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.request(ping(1)).await }
+        });
+        host.next_request().await.expect("the ping");
+
+        // A server answers a request it cannot read without its id, so the
+        // connection cannot tell which request failed.
+        host.respond(ServerResponse::Error(ErrorResponse {
+            request_id: None,
+            error: WireError::new(ErrorCode::ProtocolViolation, "unreadable request"),
+        }))
+        .await;
+
+        assert!(pending.await.expect("request task").is_err());
+        assert!(!connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn requests_wait_while_the_most_are_in_flight() {
+        let (connection, mut host) = scripted().await;
+        let requests: Vec<_> = (0..=MAX_REQUESTS_IN_FLIGHT as u64)
+            .map(|id| {
+                let connection = connection.clone();
+                tokio::spawn(async move { connection.request(ping(id + 1)).await })
+            })
+            .collect();
+        let mut received = Vec::new();
+        for _ in 0..MAX_REQUESTS_IN_FLIGHT {
+            received.push(host.next_request().await.expect("a request in flight"));
+        }
+
+        assert!(host.request_within(QUIET).await.is_none());
+        host.respond(pong(received.remove(0))).await;
+        received.push(host.next_request().await.expect("the request that waited"));
+        for request in received {
+            host.respond(pong(request)).await;
+        }
+        for request in requests {
+            assert!(request.await.expect("request task").is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_from_before_watching_still_reports_its_buffers_changing() {
+        let (connection, mut host) = scripted().await;
+        let watching = tokio::spawn({
+            let connection = connection.clone();
+            async move { connection.watch(BufferId(5)).await }
+        });
+        let Some(ClientMessage::Buffer(BufferRequest::Watch { request_id, .. })) =
+            host.next_request().await
+        else {
+            panic!("expected a watch request");
+        };
+
+        host.respond(ServerResponse::Error(ErrorResponse {
+            request_id: Some(request_id),
+            error: WireError::new(ErrorCode::InvalidRequest, "unknown buffer request"),
+        }))
+        .await;
+        let mut watched = watching.await.expect("watch task").expect("watch anyway");
+        host.send_event(ServerEvent::RenderInvalidated(RenderInvalidatedEvent {
+            buffer_id: BufferId(5),
+        }))
+        .await;
+
+        assert_eq!(watched.changes.recv().await, Some(()));
+        assert!(connection.is_open());
+    }
     use crate::{Server, ServerConfig};
 
     #[tokio::test]
