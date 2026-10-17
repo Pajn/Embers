@@ -7,7 +7,7 @@ use embers_core::{MuxError, Result};
 use embers_protocol::{
     ClientMessage, ProtocolClient, ProtocolError, ServerEnvelope, ServerEvent, ServerResponse,
 };
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
@@ -19,18 +19,25 @@ const STDERR_TAIL: usize = 4 * 1024;
 /// the rest of its standard error, before reporting what it has.
 const EXIT_WAIT: Duration = Duration::from_secs(2);
 
-/// A connection from this server to another embers server, through a command
-/// whose standard input and output reach it, such as `ssh HOST embers proxy`.
+/// A connection from this server to another embers server: through a command
+/// whose standard input and output reach it, such as `ssh HOST embers proxy`,
+/// or over any stream that does.
 ///
 /// The connection speaks the protocol as any client does, version check
-/// included. The command runs as long as the connection, and is killed when
-/// the connection is dropped.
+/// included. A command runs as long as the connection, and is killed when the
+/// connection is dropped.
 pub struct Upstream {
-    command: Vec<String>,
+    /// What the connection goes through, for its errors.
+    through: String,
     client: ProtocolClient,
+    process: Option<Process>,
+    queued_events: VecDeque<ServerEvent>,
+}
+
+/// The command a connection runs through.
+struct Process {
     child: Child,
     stderr: StderrTail,
-    queued_events: VecDeque<ServerEvent>,
 }
 
 impl Upstream {
@@ -55,11 +62,39 @@ impl Upstream {
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = StderrTail::collect(child.stderr.take().expect("stderr is piped"));
 
+        Self::start(
+            format!("`{}`", command.join(" ")),
+            ProtocolClient::from_split(stdout, stdin),
+            Some(Process { child, stderr }),
+        )
+        .await
+    }
+
+    /// Check that the server reading what goes to `writer`, and writing what
+    /// comes from `reader`, speaks this server's protocol. `through` names
+    /// the stream in errors.
+    pub async fn over<R, W>(through: impl Into<String>, reader: R, writer: W) -> Result<Self>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::start(
+            through.into(),
+            ProtocolClient::from_split(reader, writer),
+            None,
+        )
+        .await
+    }
+
+    async fn start(
+        through: String,
+        client: ProtocolClient,
+        process: Option<Process>,
+    ) -> Result<Self> {
         let mut upstream = Self {
-            command: command.to_vec(),
-            client: ProtocolClient::from_split(stdout, stdin),
-            child,
-            stderr,
+            through,
+            client,
+            process,
             queued_events: VecDeque::new(),
         };
         match upstream.client.handshake().await {
@@ -146,25 +181,23 @@ impl Upstream {
     /// `error`, with what the command said about it if it exited: its status
     /// and the end of its standard error.
     async fn failure(&mut self, error: ProtocolError) -> MuxError {
-        let status = tokio::time::timeout(EXIT_WAIT, self.child.wait())
+        let Some(process) = &mut self.process else {
+            return MuxError::transport(format!("{}: {error}", self.through));
+        };
+        let status = tokio::time::timeout(EXIT_WAIT, process.child.wait())
             .await
             .ok()
             .and_then(|status| status.ok());
         let Some(status) = status else {
-            return MuxError::transport(format!("`{}`: {error}", self.command.join(" ")));
+            return MuxError::transport(format!("{}: {error}", self.through));
         };
-        let stderr = self.stderr.finish().await;
-        MuxError::transport(describe_exit(&self.command, status, &error, &stderr))
+        let stderr = process.stderr.finish().await;
+        MuxError::transport(describe_exit(&self.through, status, &error, &stderr))
     }
 }
 
-fn describe_exit(
-    command: &[String],
-    status: ExitStatus,
-    error: &ProtocolError,
-    stderr: &str,
-) -> String {
-    let mut message = format!("`{}` exited ({status})", command.join(" "));
+fn describe_exit(command: &str, status: ExitStatus, error: &ProtocolError, stderr: &str) -> String {
+    let mut message = format!("{command} exited ({status})");
     let stderr = stderr.trim();
     if stderr.is_empty() {
         message.push_str(&format!(": {error}"));

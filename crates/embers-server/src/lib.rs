@@ -15,6 +15,8 @@ mod runtime_handle;
 mod runtimes;
 mod server;
 mod terminal_backend;
+#[cfg(test)]
+mod testing_hosts;
 mod upstream;
 
 pub use buffer_runtime::{

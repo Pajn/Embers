@@ -43,7 +43,7 @@ use crate::persist::{
 use crate::protocol::{
     buffer_location, buffer_record, floating_record, session_record, session_snapshot,
 };
-use crate::remote::validate_host;
+use crate::remote::{CommandConnector, validate_host};
 use crate::restore::{default_shell, plan_restore};
 use crate::runtimes::{BufferRuntimes, Callbacks, KeeperSettings, Restored, StartRequest, Started};
 use crate::{
@@ -195,7 +195,7 @@ impl Server {
                 runtime_dir: self.config.runtime_dir.clone(),
                 env: self.config.buffer_env.clone(),
             },
-            self.config.remote_command.clone(),
+            Arc::new(CommandConnector::new(self.config.remote_command.clone())),
         );
         runtime.hold_saves_while =
             std::env::var_os(HOLD_WORKSPACE_SAVES_ENV_VAR).map(PathBuf::from);
@@ -587,7 +587,9 @@ impl Runtime {
                     runtime_dir,
                     env: buffer_env,
                 },
-                DEFAULT_REMOTE_COMMAND.map(str::to_owned).to_vec(),
+                Arc::new(CommandConnector::new(
+                    DEFAULT_REMOTE_COMMAND.map(str::to_owned).to_vec(),
+                )),
             ),
             workspace_path,
             limits,

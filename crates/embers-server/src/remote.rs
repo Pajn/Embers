@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -24,23 +26,62 @@ use crate::buffer_runtime::{
 };
 use crate::config::REMOTE_HOST_PLACEHOLDER;
 
+/// Reaches other hosts' embers servers: the seam between the host
+/// connections and how their bytes travel.
+pub(crate) trait HostConnector: Send + Sync {
+    /// A connection to `host`'s server, its protocol version checked.
+    fn connect<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Upstream>>;
+}
+
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Reaches a host by running a command whose standard input and output reach
+/// its server, such as `ssh HOST embers proxy`.
+pub(crate) struct CommandConnector {
+    command: Vec<String>,
+}
+
+impl CommandConnector {
+    /// Run `command`, with [`REMOTE_HOST_PLACEHOLDER`] replaced by the host.
+    pub(crate) fn new(command: Vec<String>) -> Self {
+        Self { command }
+    }
+}
+
+impl HostConnector for CommandConnector {
+    fn connect<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Upstream>> {
+        let command = self
+            .command
+            .iter()
+            .map(|part| part.replace(REMOTE_HOST_PLACEHOLDER, host))
+            .collect::<Vec<_>>();
+        Box::pin(async move { Upstream::connect(&command).await })
+    }
+}
+
 /// The connections to other hosts' embers servers, one per host, opened when a
 /// buffer first needs one.
-#[derive(Debug)]
 pub(crate) struct RemoteHosts {
-    command: Vec<String>,
+    connector: Arc<dyn HostConnector>,
     hosts: Mutex<HashMap<String, HostConnection>>,
     /// Whether some client here forwards kitty graphics queries to a terminal
     /// that answers them, as each connection tells its host.
     host_graphics: AtomicBool,
 }
 
+impl std::fmt::Debug for RemoteHosts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteHosts")
+            .finish_non_exhaustive()
+    }
+}
+
 impl RemoteHosts {
-    /// Hosts reached by running `command`, with
-    /// [`REMOTE_HOST_PLACEHOLDER`] replaced by the host.
-    pub(crate) fn new(command: Vec<String>) -> Self {
+    /// Hosts reached through `connector`.
+    pub(crate) fn new(connector: Arc<dyn HostConnector>) -> Self {
         Self {
-            command,
+            connector,
             hosts: Mutex::new(HashMap::new()),
             host_graphics: AtomicBool::new(false),
         }
@@ -58,12 +99,7 @@ impl RemoteHosts {
         {
             return Ok(connection.clone());
         }
-        let command = self
-            .command
-            .iter()
-            .map(|part| part.replace(REMOTE_HOST_PLACEHOLDER, host))
-            .collect::<Vec<_>>();
-        let mut upstream = Upstream::connect(&command).await?;
+        let mut upstream = self.connector.connect(host).await?;
         // Every buffer's output is reported to every subscriber, detached
         // buffers included; the connection passes on those of its buffers.
         let subscribe = ClientMessage::Subscribe(SubscribeRequest {
@@ -162,7 +198,8 @@ struct Watched {
 }
 
 /// One host's server, shared by every buffer running there. A task owns the
-/// connection, sending requests one at a time and passing on what the server
+/// connection, sending requests as they come, up to
+/// [`MAX_REQUESTS_IN_FLIGHT`] unanswered, and passing on what the server
 /// reports about each buffer to that buffer's runtime.
 #[derive(Clone, Debug)]
 pub(crate) struct HostConnection {
@@ -812,8 +849,74 @@ fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
-    use super::{options_delta, validate_host};
+    use embers_core::RequestId;
+    use embers_protocol::{ClientMessage, PingRequest, ServerResponse};
+    use tempfile::tempdir;
+
+    use super::{RemoteHosts, options_delta, validate_host};
+    use crate::testing_hosts::SocketHosts;
+    use crate::{Server, ServerConfig};
+
+    #[tokio::test]
+    async fn a_host_is_reached_over_any_stream_to_its_server() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        let hosts = RemoteHosts::new(Arc::new(sockets));
+
+        let connection = hosts.connect("devbox").await.expect("reach devbox");
+        let response = connection
+            .request(ClientMessage::Ping(PingRequest {
+                request_id: RequestId(1),
+                payload: "hello".to_owned(),
+            }))
+            .await
+            .expect("ping devbox");
+
+        assert!(matches!(response, ServerResponse::Pong(pong) if pong.payload == "hello"));
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
+
+    #[tokio::test]
+    async fn a_lost_host_is_reached_again_on_a_new_connection() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        let hosts = RemoteHosts::new(Arc::new(sockets.clone()));
+        let lost = hosts.connect("devbox").await.expect("reach devbox");
+
+        sockets.cut("devbox");
+        let ping = ClientMessage::Ping(PingRequest {
+            request_id: RequestId(2),
+            payload: "anyone?".to_owned(),
+        });
+        assert!(lost.request(ping.clone()).await.is_err());
+        assert!(!lost.is_open());
+        assert!(hosts.connect("devbox").await.is_err());
+
+        sockets.restore("devbox");
+        let found = hosts.connect("devbox").await.expect("reach devbox again");
+        assert!(found.request(ping).await.is_ok());
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
+    }
 
     #[test]
     fn option_changes_on_the_host_are_reported_once() {

@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::buffer_runtime::{BufferRuntimeCallbacks, BufferRuntimeStatus, RuntimeEnd};
 use crate::config::BUFFER_ENV_VAR;
 use crate::model::Placement;
-use crate::remote::{HostConnection, RemoteHosts};
+use crate::remote::{HostConnection, HostConnector, RemoteHosts};
 use crate::runtime_dir::{keeper_socket_path, prepare_keeper_socket_dir};
 use crate::runtime_handle::BufferRuntimeHandle;
 
@@ -120,12 +120,12 @@ impl std::fmt::Debug for BufferRuntimes {
 
 impl BufferRuntimes {
     /// Runtimes whose keepers follow `keepers`, and whose hosts are reached
-    /// by running `remote_command` (see [`RemoteHosts::new`]).
-    pub(crate) fn new(keepers: KeeperSettings, remote_command: Vec<String>) -> Self {
+    /// through `hosts`.
+    pub(crate) fn new(keepers: KeeperSettings, hosts: Arc<dyn HostConnector>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 keepers,
-                hosts: RemoteHosts::new(remote_command),
+                hosts: RemoteHosts::new(hosts),
                 callbacks: OnceLock::new(),
                 running: StdMutex::default(),
                 awaiting_save: StdMutex::default(),
@@ -729,6 +729,7 @@ mod tests {
     use super::{BufferRuntimes, Callbacks, KeeperSettings, Restored, StartRequest, Started, lock};
     use crate::buffer_runtime::{BufferRuntimeCallbacks, RuntimeEnd};
     use crate::model::Placement;
+    use crate::remote::CommandConnector;
 
     /// Runtimes whose keepers live in a fresh directory, and the ends they
     /// report.
@@ -746,7 +747,7 @@ mod tests {
                     .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
                     .collect(),
             },
-            Vec::new(),
+            Arc::new(CommandConnector::new(Vec::new())),
         );
         let (ends, ended) = mpsc::unbounded_channel();
         runtimes.set_callbacks(|| Callbacks {
@@ -925,7 +926,7 @@ mod tests {
                 runtime_dir: dir.path().join("runtime"),
                 env: BTreeMap::new(),
             },
-            Vec::new(),
+            Arc::new(CommandConnector::new(Vec::new())),
         );
         let command = ["/bin/true".to_owned()];
 
