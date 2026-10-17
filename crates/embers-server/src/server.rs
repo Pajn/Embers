@@ -828,10 +828,13 @@ impl Runtime {
                 // Interrupted until its host is reached again, in the
                 // background (see `BufferRuntimes::restore`).
                 Placement::Remote { .. } => {
-                    if !matches!(buffer.state, BufferState::Exited(_)) {
-                        let mut state = self.state.lock().await;
-                        let _ = state.mark_buffer_interrupted(buffer.id, None);
+                    // An exited buffer has nothing on its host to take up.
+                    if matches!(buffer.state, BufferState::Exited(_)) {
+                        continue;
                     }
+                    let mut state = self.state.lock().await;
+                    let _ = state.mark_buffer_interrupted(buffer.id, None);
+                    drop(state);
                     placements.push((buffer.id, buffer.placement().clone()));
                 }
                 Placement::Local {

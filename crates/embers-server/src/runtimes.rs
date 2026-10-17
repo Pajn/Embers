@@ -505,6 +505,9 @@ impl Inner {
                     %error,
                     "failed to restore buffer runtime"
                 );
+                // Its poller runs already, and would report the broken
+                // connection as an exit.
+                self.stop_unregistered(buffer_id, runtime).await;
                 return Restored::Gone;
             }
         };
