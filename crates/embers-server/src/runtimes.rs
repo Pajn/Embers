@@ -343,7 +343,7 @@ impl BufferRuntimes {
                 debug!(%buffer_id, %error, "failed to tell keeper about host graphics");
             }
         }
-        self.inner.hosts.set_host_graphics(enabled).await;
+        self.inner.hosts.set_host_graphics(enabled);
     }
 
     /// Stop following every runtime, as the server shuts down. Each buffer

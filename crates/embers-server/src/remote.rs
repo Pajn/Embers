@@ -13,7 +13,7 @@ use embers_protocol::{
     BufferRequest, ClientMessage, ClientRequest, InputRequest, ServerEnvelope, ServerEvent,
     ServerResponse, SubscribeRequest,
 };
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::debug;
 
@@ -69,10 +69,9 @@ pub(crate) struct RemoteHosts {
     /// are reached meanwhile.
     connecting: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Whether some client here forwards kitty graphics queries to a terminal
-    /// that answers them, as every open connection told its host. Held while
-    /// they are told, and while a new connection joins them, so none misses a
-    /// change.
-    host_graphics: Mutex<bool>,
+    /// that answers them. Every connection follows it, telling its host of
+    /// each change itself.
+    host_graphics: watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for RemoteHosts {
@@ -90,7 +89,7 @@ impl RemoteHosts {
             connector,
             open: StdMutex::default(),
             connecting: StdMutex::default(),
-            host_graphics: Mutex::new(false),
+            host_graphics: watch::Sender::new(false),
         }
     }
 
@@ -105,6 +104,12 @@ impl RemoteHosts {
             .entry(host.to_owned())
             .or_default()
             .clone();
+        // Dropped after the gate is released, even when this is cancelled.
+        let _gone = GateCleanup {
+            gates: &self.connecting,
+            host,
+            gate: &gate,
+        };
         let _connecting = gate.lock().await;
         // Made by whoever held the gate before.
         if let Some(connection) = self.open_connection(host) {
@@ -118,15 +123,8 @@ impl RemoteHosts {
             session_id: None,
         });
         expect_ok(host, upstream.request(&subscribe).await?)?;
-        let connection = HostConnection::serve(host, upstream);
-        let host_graphics = self.host_graphics.lock().await;
-        // Like any client's, the setting is the connection's, so a new one
-        // starts out without it.
-        if *host_graphics {
-            tell_host_graphics(&connection, true).await?;
-        }
+        let connection = HostConnection::serve(host, upstream, self.host_graphics.subscribe());
         lock(&self.open).insert(host.to_owned(), connection.clone());
-        drop(host_graphics);
         Ok(connection)
     }
 
@@ -139,32 +137,31 @@ impl RemoteHosts {
 
     /// Tell every host whether some client here forwards kitty graphics
     /// queries to a terminal that answers them, so its buffers hold their own
-    /// replies to such a query until the terminal's arrives. Hosts reached
-    /// later are told when they are.
-    pub(crate) async fn set_host_graphics(&self, enabled: bool) {
-        let mut host_graphics = self.host_graphics.lock().await;
-        *host_graphics = enabled;
-        let connections: Vec<_> = lock(&self.open)
-            .values()
-            .filter(|connection| connection.is_open())
-            .cloned()
-            .collect();
-        for connection in connections {
-            if let Err(error) = tell_host_graphics(&connection, enabled).await {
-                debug!(host = %connection.host(), %error, "failed to tell host about host graphics");
-            }
-        }
+    /// replies to such a query until the terminal's arrives. Each connection
+    /// tells its host, and hosts reached later are told when they are; none
+    /// is waited for.
+    pub(crate) fn set_host_graphics(&self, enabled: bool) {
+        self.host_graphics.send_replace(enabled);
     }
 }
 
-async fn tell_host_graphics(connection: &HostConnection, enabled: bool) -> Result<()> {
-    connection
-        .request(ClientMessage::Client(ClientRequest::SetHostGraphics {
-            request_id: new_request_id(),
-            enabled,
-        }))
-        .await
-        .map(drop)
+/// Removes a host's gate once no connection attempt holds or waits for it,
+/// so a host given once, or only cancelled attempts, leaves nothing behind.
+struct GateCleanup<'a> {
+    gates: &'a StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    host: &'a str,
+    gate: &'a Arc<Mutex<()>>,
+}
+
+impl Drop for GateCleanup<'_> {
+    fn drop(&mut self) {
+        let mut gates = lock(self.gates);
+        // The map's reference and this attempt's: any other is an attempt
+        // waiting for the gate, which takes it from the map under this lock.
+        if Arc::strong_count(self.gate) == 2 {
+            gates.remove(self.host);
+        }
+    }
 }
 
 /// A host name is passed to the remote command as one argument, which SSH
@@ -233,9 +230,15 @@ pub(crate) struct HostConnection {
 }
 
 impl HostConnection {
-    fn serve(host: &str, upstream: Upstream) -> Self {
+    /// Serve `upstream`, telling the host whatever `host_graphics` says.
+    fn serve(host: &str, upstream: Upstream, host_graphics: watch::Receiver<bool>) -> Self {
         let (commands, receiver) = mpsc::channel(64);
-        tokio::spawn(serve_host(host.to_owned(), upstream, receiver));
+        tokio::spawn(serve_host(
+            host.to_owned(),
+            upstream,
+            receiver,
+            host_graphics,
+        ));
         Self {
             host: host.into(),
             commands,
@@ -329,14 +332,45 @@ async fn serve_host(
     host: String,
     mut upstream: Upstream,
     mut commands: mpsc::Receiver<HostCommand>,
+    mut host_graphics: watch::Receiver<bool>,
 ) {
     let mut watchers = HashMap::<BufferId, Watcher>::new();
+    // Like any client's, the setting is the connection's, so a new one starts
+    // out without it. Only the latest value is sent, and its answer is not
+    // waited for, so a host that does not answer holds up nothing else.
+    let mut told_host_graphics = false;
+    let mut following_host_graphics = true;
+    host_graphics.mark_changed();
     // Requests sent and not yet answered, by id. Requests go out as they
     // come rather than one round trip at a time, so a slow link costs one
     // round trip for a burst of requests, not one each.
     let mut in_flight = HashMap::<RequestId, oneshot::Sender<Result<ServerResponse>>>::new();
     loop {
         tokio::select! {
+            changed = host_graphics.changed(),
+                if following_host_graphics && in_flight.len() < MAX_REQUESTS_IN_FLIGHT =>
+            {
+                if changed.is_err() {
+                    following_host_graphics = false;
+                    continue;
+                }
+                let enabled = *host_graphics.borrow_and_update();
+                if enabled == told_host_graphics {
+                    continue;
+                }
+                let message = ClientMessage::Client(ClientRequest::SetHostGraphics {
+                    request_id: new_request_id(),
+                    enabled,
+                });
+                if let Err(error) = upstream.send(&message).await {
+                    debug!(%host, %error, "connection to host failed");
+                    break;
+                }
+                // Nobody waits for the answer, and a host that predates the
+                // setting refusing it changes nothing.
+                in_flight.insert(message.request_id(), oneshot::channel().0);
+                told_host_graphics = enabled;
+            }
             command = commands.recv(), if in_flight.len() < MAX_REQUESTS_IN_FLIGHT => match command {
                 None => break,
                 Some(HostCommand::Request { message, reply }) => {
@@ -880,8 +914,8 @@ mod tests {
 
     use embers_core::{BufferId, ErrorCode, RequestId, WireError};
     use embers_protocol::{
-        BufferRequest, ClientMessage, ErrorResponse, OkResponse, PingRequest, PingResponse,
-        RenderInvalidatedEvent, ServerEvent, ServerResponse,
+        BufferRequest, ClientMessage, ClientRequest, ErrorResponse, OkResponse, PingRequest,
+        PingResponse, RenderInvalidatedEvent, ServerEvent, ServerResponse,
     };
     use tempfile::tempdir;
 
@@ -896,7 +930,67 @@ mod tests {
 
     async fn scripted() -> (HostConnection, ScriptedHost) {
         let (upstream, host) = ScriptedHost::connect("devbox").await;
-        (HostConnection::serve("devbox", upstream), host)
+        let host_graphics = tokio::sync::watch::channel(false).1;
+        (
+            HostConnection::serve("devbox", upstream, host_graphics),
+            host,
+        )
+    }
+
+    fn host_graphics_told(request: Option<ClientMessage>) -> bool {
+        match request {
+            Some(ClientMessage::Client(ClientRequest::SetHostGraphics { enabled, .. })) => enabled,
+            other => panic!("expected the host graphics setting, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_connection_tells_its_host_each_graphics_change_without_waiting_for_answers() {
+        let (upstream, mut host) = ScriptedHost::connect("devbox").await;
+        let (host_graphics, following) = tokio::sync::watch::channel(true);
+        let connection = HostConnection::serve("devbox", upstream, following);
+
+        // A new connection starts out without it, so it is told at once.
+        assert!(host_graphics_told(host.next_request().await));
+        // The host answers nothing, and the changes are told anyway.
+        host_graphics.send_replace(false);
+        assert!(!host_graphics_told(host.next_request().await));
+        host_graphics.send_replace(true);
+        assert!(host_graphics_told(host.next_request().await));
+        // Telling it again what it was told last sends nothing.
+        host_graphics.send_replace(true);
+        assert!(host.request_within(QUIET).await.is_none());
+        assert!(connection.is_open());
+    }
+
+    #[tokio::test]
+    async fn a_host_leaves_no_gate_behind_once_its_attempts_are_done_or_cancelled() {
+        let dir = tempdir().expect("tempdir");
+        let socket = dir.path().join("devbox.sock");
+        let server = Server::new(ServerConfig::new(socket.clone()))
+            .start()
+            .await
+            .expect("start the host's server");
+        let sockets = SocketHosts::default();
+        sockets.add("devbox", socket);
+        sockets.silence("stuck");
+        let hosts = Arc::new(RemoteHosts::new(Arc::new(sockets)));
+
+        hosts.connect("devbox").await.expect("reach devbox");
+        let stuck = tokio::spawn({
+            let hosts = hosts.clone();
+            async move { hosts.connect("stuck").await.map(drop) }
+        });
+        tokio::time::sleep(QUIET).await;
+        assert!(super::lock(&hosts.connecting).contains_key("stuck"));
+        stuck.abort();
+        let _ = stuck.await;
+
+        assert!(super::lock(&hosts.connecting).is_empty());
+        server
+            .shutdown()
+            .await
+            .expect("shut down the host's server");
     }
 
     fn ping(id: u64) -> ClientMessage {
