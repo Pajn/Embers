@@ -32,6 +32,10 @@ struct SocketHostsInner {
     sockets: HashMap<String, PathBuf>,
     /// Hosts that cannot be reached now.
     down: Vec<String>,
+    /// Hosts that never answer.
+    silent: Vec<String>,
+    /// How many connections each host was asked for.
+    attempts: HashMap<String, usize>,
     relays: HashMap<String, Vec<AbortHandle>>,
 }
 
@@ -51,6 +55,16 @@ impl SocketHosts {
         }
     }
 
+    /// Make `host` never answer, as when a connection hangs.
+    pub(crate) fn silence(&self, host: &str) {
+        self.lock().silent.push(host.to_owned());
+    }
+
+    /// How many connections `host` was asked for.
+    pub(crate) fn attempts(&self, host: &str) -> usize {
+        self.lock().attempts.get(host).copied().unwrap_or(0)
+    }
+
     /// Let `host` be reached again.
     pub(crate) fn restore(&self, host: &str) {
         self.lock().down.retain(|down| down != host);
@@ -66,16 +80,20 @@ impl SocketHosts {
 impl HostConnector for SocketHosts {
     fn connect<'a>(&'a self, host: &'a str) -> BoxFuture<'a, Result<Upstream>> {
         Box::pin(async move {
-            let socket =
-                {
-                    let inner = self.lock();
-                    if inner.down.iter().any(|down| down == host) {
-                        return Err(MuxError::transport(format!("{host} cannot be reached")));
-                    }
-                    inner.sockets.get(host).cloned().ok_or_else(|| {
-                        MuxError::transport(format!("no server is known for {host}"))
-                    })?
-                };
+            let (silent, socket) = {
+                let mut inner = self.lock();
+                *inner.attempts.entry(host.to_owned()).or_default() += 1;
+                let silent = inner.silent.iter().any(|silent| silent == host);
+                if inner.down.iter().any(|down| down == host) {
+                    return Err(MuxError::transport(format!("{host} cannot be reached")));
+                }
+                (silent, inner.sockets.get(host).cloned())
+            };
+            if silent {
+                return std::future::pending().await;
+            }
+            let socket = socket
+                .ok_or_else(|| MuxError::transport(format!("no server is known for {host}")))?;
             let mut server = UnixStream::connect(&socket)
                 .await
                 .map_err(|error| MuxError::transport(format!("{host}: {error}")))?;
