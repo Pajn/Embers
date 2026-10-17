@@ -726,10 +726,18 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc;
 
+    use embers_core::RequestId;
+    use embers_protocol::{
+        BufferRecordState, BufferRequest, ClientMessage, KillServerRequest, ProtocolClient,
+        ServerResponse,
+    };
+
     use super::{BufferRuntimes, Callbacks, KeeperSettings, Restored, StartRequest, Started, lock};
-    use crate::buffer_runtime::{BufferRuntimeCallbacks, RuntimeEnd};
+    use crate::buffer_runtime::{BufferRuntimeCallbacks, BufferRuntimeStatus, RuntimeEnd};
     use crate::model::Placement;
-    use crate::remote::CommandConnector;
+    use crate::remote::{CommandConnector, HostConnector};
+    use crate::testing_hosts::SocketHosts;
+    use crate::{Server, ServerConfig, ServerHandle};
 
     /// Runtimes whose keepers live in a fresh directory, and the ends they
     /// report.
@@ -738,31 +746,256 @@ mod tests {
         mpsc::UnboundedReceiver<(BufferId, RuntimeEnd)>,
         TempDir,
     ) {
-        let dir = tempdir().expect("tempdir");
-        let runtimes = BufferRuntimes::new(
-            KeeperSettings {
-                server_socket: dir.path().join("mux.sock"),
-                runtime_dir: dir.path().join("runtime"),
-                env: std::env::vars_os()
-                    .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
-                    .collect(),
-            },
-            Arc::new(CommandConnector::new(Vec::new())),
+        let reached = Reaching::new(Arc::new(CommandConnector::new(Vec::new())));
+        (reached.runtimes, reached.ended, reached.dir)
+    }
+
+    /// Runtimes reaching hosts through a connector, and what they report.
+    struct Reaching {
+        runtimes: BufferRuntimes,
+        ended: mpsc::UnboundedReceiver<(BufferId, RuntimeEnd)>,
+        taken_up: mpsc::UnboundedReceiver<(BufferId, Option<BufferRuntimeStatus>)>,
+        dir: TempDir,
+    }
+
+    impl Reaching {
+        fn new(hosts: Arc<dyn HostConnector>) -> Self {
+            let dir = tempdir().expect("tempdir");
+            let runtimes = BufferRuntimes::new(
+                KeeperSettings {
+                    server_socket: dir.path().join("mux.sock"),
+                    runtime_dir: dir.path().join("runtime"),
+                    env: std::env::vars_os()
+                        .filter_map(|(key, value)| Some((key.into_string().ok()?, value)))
+                        .collect(),
+                },
+                hosts,
+            );
+            let (ends, ended) = mpsc::unbounded_channel();
+            let (took_up, taken_up) = mpsc::unbounded_channel();
+            runtimes.set_callbacks(|| Callbacks {
+                runtime: Arc::new(move || {
+                    let ends = ends.clone();
+                    BufferRuntimeCallbacks {
+                        on_ended: Arc::new(move |buffer_id, end| {
+                            let _ = ends.send((buffer_id, end));
+                        }),
+                        ..BufferRuntimeCallbacks::default()
+                    }
+                }),
+                taken_up: Arc::new(move |buffer_id, status| {
+                    let _ = took_up.send((buffer_id, status));
+                }),
+            });
+            Self {
+                runtimes,
+                ended,
+                taken_up,
+                dir,
+            }
+        }
+    }
+
+    /// An embers server playing a host.
+    struct Host {
+        handle: ServerHandle,
+        socket: std::path::PathBuf,
+        _dir: TempDir,
+    }
+
+    impl Host {
+        async fn start(hosts: &SocketHosts, name: &str) -> Self {
+            let dir = tempdir().expect("tempdir");
+            let socket = dir.path().join("host.sock");
+            let handle = Server::new(ServerConfig::new(socket.clone()))
+                .start()
+                .await
+                .expect("start the host's server");
+            hosts.add(name, socket.clone());
+            Self {
+                handle,
+                socket,
+                _dir: dir,
+            }
+        }
+
+        async fn buffer_state(&self, buffer_id: BufferId) -> Option<BufferRecordState> {
+            let mut client = ProtocolClient::connect(&self.socket)
+                .await
+                .expect("connect to the host");
+            match client
+                .request(&ClientMessage::Buffer(BufferRequest::Get {
+                    request_id: RequestId(1),
+                    buffer_id,
+                }))
+                .await
+                .expect("ask the host")
+            {
+                ServerResponse::Buffer(response) => Some(response.buffer.state),
+                _ => None,
+            }
+        }
+
+        /// Stop the host's server along with its programs.
+        async fn kill(self) {
+            let mut client = ProtocolClient::connect(&self.socket)
+                .await
+                .expect("connect to the host");
+            let _ = client
+                .request(&ClientMessage::KillServer(KillServerRequest {
+                    request_id: RequestId(2),
+                }))
+                .await;
+            self.handle.shutdown().await.expect("shut down the host");
+        }
+    }
+
+    async fn start_on(runtimes: &BufferRuntimes, buffer_id: BufferId, host: &str) -> BufferId {
+        let command = ["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()];
+        let started = runtimes
+            .start(
+                buffer_id,
+                StartRequest {
+                    command: &command,
+                    cwd: None,
+                    env: &BTreeMap::new(),
+                    size: PtySize::new(80, 24),
+                    title: "test",
+                    host: Some(host),
+                },
+            )
+            .await
+            .expect("start on the host");
+        match started.placement {
+            Placement::Remote {
+                buffer_id: Some(remote_id),
+                ..
+            } => remote_id,
+            other => panic!("expected a buffer on {host}, got {other:?}"),
+        }
+    }
+
+    fn on_host(host: &str, remote_id: BufferId) -> Placement {
+        Placement::Remote {
+            host: host.to_owned(),
+            buffer_id: Some(remote_id),
+        }
+    }
+
+    /// What is reported within the first retry and a margin.
+    async fn within_a_retry<T>(receiver: &mut mpsc::UnboundedReceiver<T>) -> Option<T> {
+        tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    #[tokio::test]
+    async fn a_buffer_runs_on_its_host_as_a_buffer_of_the_hosts_server() {
+        let hosts = SocketHosts::default();
+        let host = Host::start(&hosts, "devbox").await;
+        let reaching = Reaching::new(Arc::new(hosts));
+
+        let remote_id = start_on(&reaching.runtimes, BufferId(1), "devbox").await;
+
+        assert_eq!(
+            host.buffer_state(remote_id).await,
+            Some(BufferRecordState::Running)
         );
-        let (ends, ended) = mpsc::unbounded_channel();
-        runtimes.set_callbacks(|| Callbacks {
-            runtime: Arc::new(move || {
-                let ends = ends.clone();
-                BufferRuntimeCallbacks {
-                    on_ended: Arc::new(move |buffer_id, end| {
-                        let _ = ends.send((buffer_id, end));
-                    }),
-                    ..BufferRuntimeCallbacks::default()
-                }
-            }),
-            taken_up: Arc::new(|_, _| {}),
-        });
-        (runtimes, ended, dir)
+        assert!(reaching.runtimes.get(BufferId(1)).is_some());
+        reaching.runtimes.shut_down(true).await;
+        host.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_lost_host_interrupts_its_buffers_until_it_is_reached_again() {
+        let hosts = SocketHosts::default();
+        let host = Host::start(&hosts, "devbox").await;
+        let mut reaching = Reaching::new(Arc::new(hosts.clone()));
+        start_on(&reaching.runtimes, BufferId(1), "devbox").await;
+
+        hosts.cut("devbox");
+        assert_eq!(
+            next_end(&mut reaching.ended).await,
+            (BufferId(1), RuntimeEnd::Interrupted)
+        );
+        assert!(reaching.runtimes.get(BufferId(1)).is_none());
+
+        hosts.restore("devbox");
+        let (buffer_id, status) = within_a_retry(&mut reaching.taken_up)
+            .await
+            .expect("taken up once the host can be reached");
+        assert_eq!(buffer_id, BufferId(1));
+        assert!(status.is_some_and(|status| status.running));
+        assert!(reaching.runtimes.get(BufferId(1)).is_some());
+        reaching.runtimes.shut_down(true).await;
+        host.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_restarted_server_takes_up_its_buffers_on_hosts_in_the_background() {
+        let hosts = SocketHosts::default();
+        let host = Host::start(&hosts, "devbox").await;
+        let before = Reaching::new(Arc::new(hosts.clone()));
+        let remote_id = start_on(&before.runtimes, BufferId(1), "devbox").await;
+        before.runtimes.shut_down(false).await;
+
+        let mut after = Reaching::new(Arc::new(hosts));
+        let restored = after
+            .runtimes
+            .restore(vec![(BufferId(1), on_host("devbox", remote_id))])
+            .await;
+
+        assert!(restored.is_empty());
+        let (buffer_id, _) = within_a_retry(&mut after.taken_up)
+            .await
+            .expect("taken up in the background");
+        assert_eq!(buffer_id, BufferId(1));
+        after.runtimes.shut_down(true).await;
+        host.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_buffer_gone_from_its_host_has_exited() {
+        let hosts = SocketHosts::default();
+        let host = Host::start(&hosts, "devbox").await;
+        let mut reaching = Reaching::new(Arc::new(hosts));
+
+        reaching
+            .runtimes
+            .restore(vec![(BufferId(1), on_host("devbox", BufferId(999)))])
+            .await;
+
+        assert_eq!(
+            next_end(&mut reaching.ended).await,
+            (BufferId(1), RuntimeEnd::Exited(None))
+        );
+        assert!(reaching.taken_up.try_recv().is_err());
+        reaching.runtimes.shut_down(true).await;
+        host.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_released_buffer_is_not_taken_up_when_its_host_returns() {
+        let hosts = SocketHosts::default();
+        let host = Host::start(&hosts, "devbox").await;
+        let before = Reaching::new(Arc::new(hosts.clone()));
+        let remote_id = start_on(&before.runtimes, BufferId(1), "devbox").await;
+        before.runtimes.shut_down(false).await;
+        hosts.cut("devbox");
+
+        let mut after = Reaching::new(Arc::new(hosts.clone()));
+        after
+            .runtimes
+            .restore(vec![(BufferId(1), on_host("devbox", remote_id))])
+            .await;
+        after.runtimes.release(BufferId(1)).await;
+        hosts.restore("devbox");
+
+        assert!(within_a_retry(&mut after.taken_up).await.is_none());
+        assert!(after.runtimes.get(BufferId(1)).is_none());
+        after.runtimes.shut_down(true).await;
+        host.kill().await;
     }
 
     async fn start(runtimes: &BufferRuntimes, buffer_id: BufferId, script: &str) -> Started {
