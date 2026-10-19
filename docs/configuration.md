@@ -250,6 +250,12 @@ for tab in ctx.tabs() {
 }
 ```
 
+Dragging a tab moves it: hold the left button on a tab and drag it over
+another tab of the same bar, and it takes that tab's place, as
+`action.move_node_before` and `action.move_node_after` would move it. A tab
+only moves within its own bar, so a window cannot be dragged into nested tabs
+or out of them.
+
 Untagged segments, such as the session name, do nothing when clicked. While
 status content is drawn over the bar, the bar cannot be seen, and clicks on
 its row select nothing.

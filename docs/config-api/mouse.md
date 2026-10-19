@@ -19,8 +19,9 @@ Description
 
 <div group="set_click_focus" id="set_click_focus-Description" class="tabcontent"  style="display: block;" >
 Toggle focus-on-click behavior: a left click on a pane focuses it, and
-one on a tab in a tab bar selects it. A formatter's segments select the
-tab they are tagged with (`ui.segment`'s `tab` option).
+one on a tab in a tab bar selects it. Dragging a tab along its bar
+moves it. A formatter's segments select the tab they are tagged with
+(`ui.segment`'s `tab` option).
 
 </div>
 
