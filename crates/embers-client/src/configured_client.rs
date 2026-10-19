@@ -116,6 +116,15 @@ struct DividerDrag {
     index: usize,
 }
 
+/// A tab being dragged along its bar: where it is now, and the column the
+/// pointer was last at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TabDrag {
+    tabs_node_id: NodeId,
+    index: usize,
+    column: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedTreeBuffer {
     Existing(BufferId),
@@ -172,6 +181,9 @@ pub struct ConfiguredClient<T> {
     /// The divider being dragged with the mouse, from the press on it until
     /// the button is released.
     divider_drag: Option<DividerDrag>,
+    /// The tab being dragged with the mouse, from the press on it until the
+    /// button is released.
+    tab_drag: Option<TabDrag>,
     terminal_output: VecDeque<Vec<u8>>,
     /// Passthrough writes from panes, oldest first, waiting for the next frame.
     pending_passthrough: Vec<(BufferId, PassthroughWrite)>,
@@ -225,6 +237,7 @@ where
             hints_node: None,
             copy: CopyModeState::default(),
             divider_drag: None,
+            tab_drag: None,
             terminal_output: VecDeque::new(),
             pending_passthrough: Vec::new(),
             pending_passthrough_bytes: 0,
@@ -816,6 +829,12 @@ where
         {
             return Ok(());
         }
+        if self
+            .handle_tab_drag(session_id, viewport, &presentation, point, event.kind)
+            .await?
+        {
+            return Ok(());
+        }
         // A drag selection stays with the pane it started in, wherever the
         // pointer goes.
         if self.copy.mouse.is_some()
@@ -829,12 +848,17 @@ where
                 .await;
         }
         // A left press on a tab selects it, like a click on a window in
-        // tmux's status line.
+        // tmux's status line, and starts dragging it.
         if settings.click_focus
             && event.kind == MouseEventKind::Press(MouseButton::Left)
             && let Some((tabs_node_id, index)) =
                 self.clicked_tab(session_id, viewport, &presentation, point)
         {
+            self.tab_drag = Some(TabDrag {
+                tabs_node_id,
+                index,
+                column: point.x,
+            });
             return self
                 .execute_actions(
                     Some(session_id),
@@ -2844,6 +2868,90 @@ where
             }
             MouseEventKind::Release(_) => Ok(self.divider_drag.take().is_some()),
             _ => Ok(false),
+        }
+    }
+
+    /// Claim the drags and release that follow a press on a tab: the tab
+    /// moves to wherever the pointer passes over another tab of the same bar.
+    /// It moves only the way the pointer is going, so a tab wider than the
+    /// one dragged past it does not swap back while the pointer is still on
+    /// it. Returns whether the event was claimed.
+    async fn handle_tab_drag(
+        &mut self,
+        session_id: SessionId,
+        viewport: Size,
+        presentation: &PresentationModel,
+        point: Point,
+        kind: MouseEventKind,
+    ) -> Result<bool> {
+        let Some(mut drag) = self.tab_drag else {
+            return Ok(false);
+        };
+        match kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let moving_right = point.x > drag.column;
+                let moving_left = point.x < drag.column;
+                drag.column = point.x;
+                self.tab_drag = Some(drag);
+                let Some((tabs_node_id, target)) =
+                    self.clicked_tab(session_id, viewport, presentation, point)
+                else {
+                    return Ok(true);
+                };
+                if tabs_node_id != drag.tabs_node_id
+                    || !(target > drag.index && moving_right || target < drag.index && moving_left)
+                {
+                    return Ok(true);
+                }
+                let Some(tabs) = self
+                    .client
+                    .state()
+                    .nodes
+                    .get(&tabs_node_id)
+                    .and_then(|node| node.tabs.as_ref())
+                else {
+                    self.tab_drag = None;
+                    return Ok(true);
+                };
+                let (Some(dragged), Some(sibling)) =
+                    (tabs.tabs.get(drag.index), tabs.tabs.get(target))
+                else {
+                    self.tab_drag = None;
+                    return Ok(true);
+                };
+                let (node_id, sibling_node_id) = (dragged.child_id, sibling.child_id);
+                let request_id = self.client.next_request_id();
+                let request = if target < drag.index {
+                    NodeRequest::MoveNodeBefore {
+                        request_id,
+                        node_id,
+                        sibling_node_id,
+                    }
+                } else {
+                    NodeRequest::MoveNodeAfter {
+                        request_id,
+                        node_id,
+                        sibling_node_id,
+                    }
+                };
+                self.tab_drag = Some(TabDrag {
+                    index: target,
+                    ..drag
+                });
+                self.client
+                    .request_message(ClientMessage::Node(request))
+                    .await?;
+                self.client.resync_session(session_id).await?;
+                Ok(true)
+            }
+            MouseEventKind::Release(_) => {
+                self.tab_drag = None;
+                Ok(true)
+            }
+            _ => {
+                self.tab_drag = None;
+                Ok(false)
+            }
         }
     }
 

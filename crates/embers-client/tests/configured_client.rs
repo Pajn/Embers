@@ -22,8 +22,8 @@ use embers_protocol::{
 use tempfile::tempdir;
 
 use crate::support::{
-    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, LEFT_LEAF_ID, NESTED_TABS_ID, ROOT_TABS_ID, SESSION_ID,
-    demo_state, root_focus_state,
+    FOCUSED_BUFFER_ID, FOCUSED_LEAF_ID, HIDDEN_ROOT_LEAF_ID, LEFT_LEAF_ID, NESTED_TABS_ID,
+    ROOT_SPLIT_ID, ROOT_TABS_ID, SESSION_ID, demo_state, root_focus_state,
 };
 
 const SECOND_SESSION_ID: SessionId = SessionId(2);
@@ -778,6 +778,116 @@ async fn clicking_a_tab_in_the_default_tab_bars_selects_it() {
     click(&mut configured, (name + 1, row)).await;
     click(&mut configured, (TAB_BAR_VIEWPORT.width - 1, row)).await;
     assert!(configured.notifications().is_empty());
+}
+
+/// Send a left-button `kind` at `(column, row)` to `configured`.
+async fn mouse<T: embers_client::Transport>(
+    configured: &mut ConfiguredClient<T>,
+    (column, row): (u16, u16),
+    kind: MouseEventKind,
+) {
+    configured
+        .handle_mouse(
+            SESSION_ID,
+            TAB_BAR_VIEWPORT,
+            MouseEvent {
+                row,
+                column,
+                modifiers: MouseModifiers::default(),
+                kind,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dragging_a_tab_over_another_moves_it_there() {
+    let transport = ScriptedTransport::default();
+    let (config, _tempdir) = manager_from_source(r#"tabbar.set_position("bottom");"#);
+    let mut configured = ConfiguredClient::new(MuxClient::new(transport.clone()), config);
+    *configured.client_mut().state_mut() = demo_state();
+    let shell = find_in_frame(&mut configured, "shell").await;
+    let workspace = find_in_frame(&mut configured, "workspace").await;
+    let build = find_in_frame(&mut configured, "build").await;
+
+    // The press selects the tab it lands on, as a click does.
+    expect_select_tab(&transport, 1, ROOT_TABS_ID, 0);
+    mouse(
+        &mut configured,
+        shell,
+        MouseEventKind::Press(MouseButton::Left),
+    )
+    .await;
+    transport.assert_exhausted().unwrap();
+
+    // Dragging onto the next tab moves the dragged one after it.
+    let mut moved = demo_state();
+    let tabs = moved
+        .nodes
+        .get_mut(&ROOT_TABS_ID)
+        .and_then(|node| node.tabs.as_mut())
+        .unwrap();
+    tabs.tabs.swap(0, 1);
+    tabs.active = 1;
+    transport.push_exchange(
+        ClientMessage::Node(NodeRequest::MoveNodeAfter {
+            request_id: RequestId(3),
+            node_id: HIDDEN_ROOT_LEAF_ID,
+            sibling_node_id: ROOT_SPLIT_ID,
+        }),
+        ServerResponse::Ok(OkResponse {
+            request_id: RequestId(3),
+        }),
+    );
+    transport.push_exchange(
+        ClientMessage::Session(SessionRequest::Get {
+            request_id: RequestId(4),
+            session_id: SESSION_ID,
+        }),
+        ServerResponse::SessionSnapshot(SessionSnapshotResponse {
+            request_id: RequestId(4),
+            snapshot: session_snapshot_from_state(&moved, SESSION_ID),
+        }),
+    );
+    mouse(
+        &mut configured,
+        workspace,
+        MouseEventKind::Drag(MouseButton::Left),
+    )
+    .await;
+    transport.assert_exhausted().unwrap();
+    assert!(
+        find_in_frame(&mut configured, "workspace").await.0
+            < find_in_frame(&mut configured, "shell").await.0
+    );
+
+    // The wider tab now under the pointer stays put while the pointer keeps
+    // going the same way, and tabs of another bar are not drop targets: the
+    // transport has no exchange for either.
+    mouse(
+        &mut configured,
+        (workspace.0 + 1, workspace.1),
+        MouseEventKind::Drag(MouseButton::Left),
+    )
+    .await;
+    mouse(
+        &mut configured,
+        build,
+        MouseEventKind::Drag(MouseButton::Left),
+    )
+    .await;
+    mouse(
+        &mut configured,
+        build,
+        MouseEventKind::Release(Some(MouseButton::Left)),
+    )
+    .await;
+    assert!(
+        configured.notifications().is_empty(),
+        "{:?}",
+        configured.notifications()
+    );
 }
 
 const TAGGED_FORMATTER: &str = r#"

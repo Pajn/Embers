@@ -1435,8 +1435,9 @@ mod mouse_registration_api {
     use super::*;
 
     /// Toggle focus-on-click behavior: a left click on a pane focuses it, and
-    /// one on a tab in a tab bar selects it. A formatter's segments select the
-    /// tab they are tagged with (`ui.segment`'s `tab` option).
+    /// one on a tab in a tab bar selects it. Dragging a tab along its bar
+    /// moves it. A formatter's segments select the tab they are tagged with
+    /// (`ui.segment`'s `tab` option).
     ///
     /// # rhai-autodocs:index:22
     #[rhai_fn(return_raw, name = "set_click_focus")]
